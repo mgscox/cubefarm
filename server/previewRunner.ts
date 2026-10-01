@@ -59,6 +59,8 @@ export function previewEnv(extra: Record<string, string>, port: number, tmp: str
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v === undefined || /^(ANTHROPIC_|CLAUDE|SWARM_)/i.test(k)) continue;
+    // npm run exports the office's policy; npm ci rejects it as an env override. Read the floor's npmrc/package policy.
+    if (/^npm_config_allow_scripts$/i.test(k)) continue;
     env[k] = v;
   }
   env.BROWSER = 'none'; // dev servers that open a browser tab on start shouldn't
