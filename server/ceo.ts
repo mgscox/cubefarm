@@ -1,7 +1,7 @@
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { blockers, holdUps, setDependsOn } from '../shared/issues.ts';
-import type { CeoJobKind } from '../shared/types.ts';
+import { blockers, holdUps, issueSpecialty, setDependsOn } from '../shared/issues.ts';
+import type { AgentView, CeoJobKind, IssueInfo } from '../shared/types.ts';
 
 // The CEO: a Claude Code session in the lobby that runs the company instead of writing code.
 // It studies each floor's repo, shapes the team (hire / let-go proposals the manager approves),
@@ -34,6 +34,59 @@ export interface OfficeHandlers {
   proposeLetGo(a: { agent_id: string; reason: string }): string;
   fileIssue(a: { floor: number; title: string; body: string; specialty?: string }): Promise<string>;
   routeIssue(a: { floor: number; number: number; specialty?: string; depends_on?: number[] }): Promise<string>;
+  startIssue(a: StartIssueRequest): Promise<string>;
+}
+
+export interface StartIssueRequest {
+  floor: number;
+  number: number;
+  agent?: string;
+  note?: string;
+}
+
+/** Prefer a match, then leave specialists with more ready/open work free, then use desk order. */
+export function pickDeveloper<A extends { specialty: string; desk: number }>(devs: A[], suits: (a: A) => boolean, ready: string[], open: string[]): A | undefined {
+  const rank = (a: A) => {
+    const s = a.specialty.toLowerCase();
+    return [suits(a) ? 0 : 1, ready.filter((w) => w === s).length, open.filter((w) => w === s).length, a.desk];
+  };
+  return devs.map((a) => ({ a, r: rank(a) }))
+    .sort((x, y) => x.r[0] - y.r[0] || x.r[1] - y.r[1] || x.r[2] - y.r[2] || x.r[3] - y.r[3])[0]?.a;
+}
+
+type StartAgent = Pick<AgentView, 'id' | 'name' | 'repoId' | 'role' | 'status' | 'specialty' | 'desk'>;
+
+/** CEO preflight; assign still enforces its own guards and reserves the developer synchronously. */
+export function planStartIssue<A extends StartAgent>(x: StartIssueRequest, context: {
+  repoId: string;
+  issues: Pick<IssueInfo, 'number' | 'title' | 'body' | 'labels'>[];
+  agents: A[];
+  available: A[];
+  ready: string[];
+  inProgress: boolean;
+  usagePaused: boolean;
+}) {
+  const issue = context.issues.find((i) => i.number === x.number);
+  if (!issue) throw new Error(`Issue #${x.number} is not open on floor ${x.floor}.`);
+  const waits = blockers(issue.body, new Set(context.issues.map((i) => i.number)));
+  if (waits.length) throw new Error(`#${x.number} waits on open ${waits.map((n) => `#${n}`).join(', ')}.`);
+  if (context.inProgress) throw new Error(`#${x.number} is already in progress or has an open PR.`);
+  if (context.usagePaused) throw new Error('Usage is paused; wait for the usage limit to reset.');
+  let agent: A | undefined;
+  if (x.agent !== undefined) {
+    const ref = x.agent.trim().toLowerCase();
+    agent = context.agents.find((a) => a.id === x.agent) ?? context.agents.find((a) => a.repoId === context.repoId && a.name.toLowerCase() === ref)
+      ?? context.agents.find((a) => a.name.toLowerCase() === ref);
+    if (!agent) throw new Error(`No agent "${x.agent}". Use the ids from company_status.`);
+    if (agent.role !== 'dev') throw new Error(`${agent.name} is ${agent.role === 'qa' ? 'a QA tester' : 'the CEO'}; give issues to developers.`);
+    if (agent.repoId !== context.repoId) throw new Error(`${agent.name} is not on floor ${x.floor}.`);
+    if (agent.status === 'preparing' || agent.status === 'working') throw new Error(`${agent.name} is busy; wait for them to finish.`);
+  } else {
+    const want = issueSpecialty(issue.labels);
+    agent = pickDeveloper(context.available, (a) => a.specialty.toLowerCase() === want, context.ready, context.issues.map((i) => issueSpecialty(i.labels)));
+    if (!agent) throw new Error(`No free developer on floor ${x.floor}.`);
+  }
+  return { agent, issue };
 }
 
 export interface OfficeTools {
@@ -144,6 +197,17 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
       },
       (a) => run(() => h.routeIssue(a)),
     ),
+    tool(
+      'start_issue',
+      'Start a specific open issue when the manager asks, even with auto-assign off. Choose a developer by id or name, or let the office prefer a free specialist. Does not change auto-assign.',
+      {
+        floor: z.number().int(),
+        number: z.number().int().positive(),
+        agent: z.string().optional().describe('Developer id or name on this floor; omit to choose automatically'),
+        note: z.string().max(1000).optional().describe('Instructions passed to the developer'),
+      },
+      (a) => run(() => h.startIssue(a)),
+    ),
   ];
   const server = createSdkMcpServer({ name: 'office', version: '1.0.0', tools: defs });
   return {
@@ -189,6 +253,7 @@ export function ceoSystemPrompt(o: {
     '',
     'Rules:',
     '- Every floor keeps at least one QA tester.',
+    '- Use start_issue when the manager asks for an issue to be started; never bypass auto-assign OFF on your own initiative.',
     '- Titles are specific ("Three.js graphics engineer", not "Developer"). A specialty is a short lowercase slug ("graphics", "gameplay", "frontend", "backend", "content", "a11y", "devops"). Only route an issue to a specialty that someone on the floor has, or that you are proposing to hire.',
     '- Before proposing a hire, check the floor and the pending proposals for someone who already covers it. If the manager declined a similar proposal (recentDecisions), do not propose it again unless something has changed, and say what.',
     `- ${o.hiring === 'auto' ? 'Hiring is on auto: proposals within the team cap are approved immediately, so be deliberate.' : 'The manager approves every hire, so explain each reason in a sentence or two they can decide on.'}`,

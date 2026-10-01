@@ -859,6 +859,12 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
     async chat(text: string) {
       const s = await status();
       await think('Reading your message.');
+      const start = text.match(/\bstart\s+#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))(?:\s+with\s+([^.;\n]+))?/i);
+      if (start) {
+        const floor = start[2] ? Number(start[2]) : s.floors.find((f) => f.repo.toLowerCase() === start[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === start[3].toLowerCase())?.floor;
+        if (floor === undefined) return `Refused: No floor for "${start[3]}".`;
+        return use('start_issue', { floor, number: Number(start[1]), ...(start[4] ? { agent: start[4].trim() } : {}) });
+      }
       const people = s.floors.reduce((n, f) => n + f.team.length, 0);
       const issues = s.floors.reduce((n, f) => n + f.backlog.length, 0);
       const pending = s.pendingProposals.length;

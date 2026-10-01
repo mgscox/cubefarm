@@ -6,7 +6,7 @@ import type { Backend } from './backend.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
-import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, planRoute, specialtyLabel, specialtySlug, type CeoJob, type OfficeTools } from './ceo.ts';
+import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, specialtyLabel, specialtySlug, type CeoJob, type OfficeTools, type StartIssueRequest } from './ceo.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
@@ -384,6 +384,7 @@ export class Swarm {
       proposeLetGo: (a) => this.proposeLetGo(a),
       fileIssue: (a) => this.fileIssue(a),
       routeIssue: (a) => this.routeIssue(a),
+      startIssue: (a) => this.startIssue(a),
     });
   }
   private ceoIssues = new IssueCap(MAX_ISSUES_PER_JOB); // issues filed during the current CEO job
@@ -2213,13 +2214,7 @@ export class Swarm {
     if (devs.length <= 1) return devs[0];
     const ready = this.readyIssues(repo).map((r) => r.want);
     const open = this.repoRt.get(repo.id)!.issues.map((i) => issueSpecialty(i.labels));
-    const rank = (a: PersistedAgent) => {
-      const s = a.specialty.toLowerCase();
-      return [suits(a) ? 0 : 1, ready.filter((w) => w === s).length, open.filter((w) => w === s).length, a.desk];
-    };
-    return devs
-      .map((a) => ({ a, r: rank(a) }))
-      .sort((x, y) => x.r[0] - y.r[0] || x.r[1] - y.r[1] || x.r[2] - y.r[2] || x.r[3] - y.r[3])[0].a;
+    return pickDeveloper(devs, suits, ready, open);
   }
 
   /**
@@ -3135,6 +3130,21 @@ export class Swarm {
     const n = await this.backend.createIssue(repo.fullName, title, body, slug ? [specialtyLabel(slug)] : []);
     this.ceoIssues.record(repo.id);
     return `Filed #${n} on floor ${repo.floor}: ${title}${slug ? ` (routed to ${slug})` : ''}.`;
+  }
+
+  private async startIssue(x: StartIssueRequest) {
+    const repo = this.floorRepo(x.floor);
+    const { agent, issue } = planStartIssue(x, {
+      repoId: repo.id,
+      issues: this.repoRt.get(repo.id)?.issues ?? [],
+      agents: this.state.agents,
+      available: this.available(repo, 'dev'),
+      ready: this.readyIssues(repo).map((r) => r.want),
+      inProgress: this.issueTaken(repo, x.number),
+      usagePaused: this.limited(),
+    });
+    await this.assign(agent.id, issue.number, x.note);
+    return `${agent.name} started #${issue.number} ${issue.title} on floor ${repo.floor}.`;
   }
 
   /** Change an open issue's specialty and/or dependencies (see planRoute for what is refused). */
