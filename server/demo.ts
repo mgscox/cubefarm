@@ -6,6 +6,7 @@ import type { PreviewBackend } from './previewRunner.ts';
 import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
 import { CLIS } from './clis.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
+import { READY_FOR_HUMAN } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR } from './config.ts';
 import { takeLastUpdate, underLauncher, type OfficeHost } from './officeUpdate.ts';
@@ -47,9 +48,9 @@ function runChecks(pr: PullInfo, fail = Math.random() < 0.2) {
   }, 12_000 + Math.random() * 10_000);
 }
 
-function seed(fullName: string, description: string, titles: [string, string][]) {
+function seed(fullName: string, description: string, titles: [string, string, string[]?][]) {
   const r: FakeRepo = { fullName, description, issues: [], pulls: [], nextNumber: 1 };
-  for (const [title, body] of titles) r.issues.push(issue(r.nextNumber++, title, body, fullName));
+  for (const [title, body, labels] of titles) r.issues.push(issue(r.nextNumber++, title, body, fullName, labels));
   repos.set(fullName, r);
 }
 
@@ -60,6 +61,8 @@ seed('demo-co/pixel-todo', 'A cheerful todo app', [
   ['Empty state illustration', 'Show a friendly illustration when the list is empty.'],
   ['Keyboard shortcuts', 'N for new todo, / to search, ? for help.'],
   ['Fix: completed count off by one', 'The footer shows one more completed item than there is.'],
+  // Needs a person: the office never hands it out, however many developers are free.
+  ['Register the app in the App Store', 'Needs the company account and a signed agreement.', [READY_FOR_HUMAN]],
 ]);
 seed('demo-co/weather-api', 'Tiny weather REST API', [
   ['Add /forecast endpoint', 'Return a 5-day forecast for a city.'],
@@ -847,7 +850,9 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
       // An issue nobody routed while the floor has a specialist: re-route it rather than file a duplicate.
       for (const f of s.floors) {
         const specialist = f.team.find((a) => a.role === 'dev' && a.specialty);
-        const unrouted = (f.backlog as { number: number; specialty: string | null; inProgress: boolean }[]).find((i) => !i.specialty && !i.inProgress);
+        const unrouted = (f.backlog as { number: number; specialty: string | null; inProgress: boolean; readyForHuman?: boolean }[]).find(
+          (i) => !i.specialty && !i.inProgress && !i.readyForHuman,
+        );
         if (!specialist || !unrouted) continue;
         const out = await use('route_issue', { floor: f.floor, number: unrouted.number, specialty: specialist.specialty });
         if (!out.startsWith('Refused')) return `Floor ${f.floor}: #${unrouted.number} had no specialty, so I routed it to ${specialist.specialty}, ${specialist.name}'s lane.`;

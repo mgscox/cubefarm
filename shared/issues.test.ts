@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { blockers, holdUps, issueSpecialty, setDependsOn } from './issues.ts';
+import { blockers, forHuman, holdUps, issueSpecialty, READY_FOR_HUMAN, schedulable, setDependsOn } from './issues.ts';
 
 const open = (...n: number[]) => new Set(n);
 
@@ -118,5 +118,25 @@ describe('setDependsOn', () => {
     const body = 'Context\r\n\r\n- [ ] one\r\n- [ ] two\r\n\r\n---\r\n_Filed by Morgan_';
     expect(setDependsOn(body, [])).toBe(body.replace(/\r\n/g, '\n'));
     expect(blockers(setDependsOn(body, [7]), open(7))).toEqual([7]);
+  });
+});
+
+describe('ready-for-human', () => {
+  it('reserves an issue for a person in any letter case', () => {
+    expect(forHuman([READY_FOR_HUMAN])).toBe(true);
+    expect(forHuman(['swarm:server', 'Ready-For-Human'])).toBe(true);
+    expect(forHuman(['READY-FOR-HUMAN'])).toBe(true);
+    expect(forHuman(['ready-for-humans', 'not-ready-for-human', 'swarm:server'])).toBe(false);
+  });
+
+  it('keeps reserved, skipped and parked issues off the schedule', () => {
+    expect(schedulable(['swarm:server'])).toBe(true);
+    expect(schedulable([])).toBe(true);
+    for (const l of ['ready-for-human', 'Ready-for-Human', 'swarm:skip', 'WONTFIX', 'question']) expect(schedulable([l])).toBe(false);
+  });
+
+  it('is not a specialty', () => {
+    expect(issueSpecialty([READY_FOR_HUMAN, 'swarm:ui'])).toBe('ui');
+    expect(issueSpecialty([READY_FOR_HUMAN])).toBe('');
   });
 });
