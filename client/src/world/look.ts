@@ -6,9 +6,31 @@ import { create } from 'zustand';
 // the lock is taken, with high-DPI or high-polling mice, and when a busy page coalesces events).
 // One 600 px spike is past the pitch clamp and snaps the view straight up or down, so every
 // delta goes through filterLookDelta before it turns the camera.
+//
+// Pointer-lock deltas don't grow with the display: a 1440p or 4K monitor needs far more mouse
+// travel to sweep it than a 1080p one, so a fixed turn per pixel felt sluggish on big screens.
+// Deltas are measured against the screen's resolution instead (lookScale), and the spike
+// thresholds scale with it so real flicks on a big screen aren't mistaken for spikes.
 
-/** Radians per pixel of mouse movement at 1× sensitivity. */
+/** Radians per pixel of mouse movement at 1× sensitivity on the reference screen. */
 export const LOOK_RADIANS_PER_PX = 0.0022;
+/** The screen size (shorter side, CSS px) LOOK_RADIANS_PER_PX is tuned for. */
+export const REFERENCE_SCREEN_PX = 1080;
+/** Bounds on the resolution scale: smaller screens keep the reference speed, huge ones don't run away. */
+export const SCALE_MIN = 1;
+export const SCALE_MAX = 2.5;
+
+/** How much a pixel of mouse movement counts on a screen of this size (CSS px) compared with the reference. */
+export function lookScale(screenWidth: number, screenHeight: number): number {
+  const side = Math.min(screenWidth, screenHeight);
+  if (!Number.isFinite(side) || side <= 0) return 1;
+  return Math.min(SCALE_MAX, Math.max(SCALE_MIN, side / REFERENCE_SCREEN_PX));
+}
+
+/** Radians to turn per pixel of mouse movement. */
+export function lookRadiansPerPx(sensitivity: number, scale: number): number {
+  return LOOK_RADIANS_PER_PX * sensitivity * scale;
+}
 
 /** Events ignored after the pointer lock is (re)acquired; the first ones are often garbage. */
 export const SKIP_AFTER_LOCK = 3;
@@ -26,6 +48,8 @@ export const CONFIRM_FRACTION = 0.25;
 const AVG_ALPHA = 0.2;
 
 export interface LookFilter {
+  /** The screen's lookScale; the pixel thresholds below are multiplied by it. */
+  scale: number;
   /** Events still to ignore after the lock was acquired. */
   skip: number;
   /** Running average of |movement| over accepted events. */
@@ -38,12 +62,13 @@ export interface LookFilter {
   skipped: number;
 }
 
-export function createLookFilter(): LookFilter {
-  return { skip: SKIP_AFTER_LOCK, avg: 0, pending: null, dropped: 0, skipped: 0 };
+export function createLookFilter(scale = 1): LookFilter {
+  return { scale, skip: SKIP_AFTER_LOCK, avg: 0, pending: null, dropped: 0, skipped: 0 };
 }
 
-/** Call when the pointer lock is (re)acquired or lost. Keeps the diagnostic counters. */
-export function resetLookFilter(f: LookFilter) {
+/** Call when the pointer lock is (re)acquired or lost, with the current screen's lookScale. Keeps the diagnostic counters. */
+export function resetLookFilter(f: LookFilter, scale = f.scale) {
+  f.scale = scale;
   f.skip = SKIP_AFTER_LOCK;
   f.avg = 0;
   f.pending = null;
@@ -70,7 +95,7 @@ export function filterLookDelta(f: LookFilter, dx: number, dy: number, t: number
     f.skipped++;
     return null;
   }
-  const m = size(dx, dy);
+  const m = size(dx, dy) / f.scale;
   if (m > MAX_PX) {
     f.dropped++;
     return null;
@@ -79,14 +104,14 @@ export function filterLookDelta(f: LookFilter, dx: number, dy: number, t: number
   const held = f.pending;
   f.pending = null;
   if (held) {
-    if (t - held.t <= CONFIRM_MS && m >= size(held.dx, held.dy) * CONFIRM_FRACTION) {
+    if (t - held.t <= CONFIRM_MS && size(dx, dy) >= size(held.dx, held.dy) * CONFIRM_FRACTION) {
       accept(f, held.dx, held.dy);
       return accept(f, held.dx + dx, held.dy + dy);
     }
     f.dropped++;
   }
 
-  const suspicious = m > SPIKE_PX || (m >= RATIO_MIN_PX && m > SPIKE_RATIO * f.avg);
+  const suspicious = m > SPIKE_PX || (m >= RATIO_MIN_PX && size(dx, dy) > SPIKE_RATIO * f.avg);
   if (suspicious) {
     f.pending = { dx, dy, t };
     return null;

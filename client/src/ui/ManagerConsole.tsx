@@ -8,7 +8,7 @@ import { canPostpone, canUpdateNow, drainDeadline, officeUpdateText } from '../o
 import { confirmDialog } from './Confirm';
 import { IssueForm } from './KanbanView';
 import { LiveTerminal } from './LiveTerminal';
-import { Panel } from './Overlays';
+import { MouseSettings, Panel } from './Overlays';
 import { Resume } from './Phone';
 import { ProjectPicker } from './ProjectPicker';
 import { StatusPill } from './TerminalView';
@@ -775,6 +775,9 @@ function SettingsTab() {
             🧭 Replay the tour
           </button>
         </div>
+        <h3>🖱️ Mouse</h3>
+        <MouseSettings />
+        <p className="muted small">Saved in this browser. Turning speed already allows for big, high-resolution screens; use the slider to fine-tune it.</p>
         <h3>ℹ️ Environment</h3>
         <div className="small">
           GitHub: <b>{user ?? 'not signed in'}</b>

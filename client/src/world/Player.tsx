@@ -5,7 +5,7 @@ import { loadView, pendingRequests, saveView, unreadMessages, useStore, type Foc
 import { api } from '../api';
 import { EYE_HEIGHT, SPAWN, collide, type Rect } from './layout';
 import { interactables } from './interact';
-import { LOOK_RADIANS_PER_PX, createLookFilter, filterLookDelta, resetLookFilter, useLookPrefs } from './look';
+import { createLookFilter, filterLookDelta, lookRadiansPerPx, lookScale, resetLookFilter, useLookPrefs } from './look';
 import { confirmDialog, isConfirmOpen } from '../ui/Confirm';
 import { footstepsFollow, getAudioPrefs, toggleMute } from '../ui/sfx';
 import { dropHeld, startCharge, throwHeld, walk } from './toys/hands';
@@ -45,8 +45,11 @@ function lockPointer(el: HTMLCanvasElement, options?: PointerLockOptions): Promi
   }
 }
 
-/** Spike counters, readable from the console as __swarmLook. */
-const lookDiag = { dropped: 0, skipped: 0 };
+/** The look scale for the screen the window is on now (it can move between monitors). */
+const screenLookScale = () => lookScale(window.screen.width, window.screen.height);
+
+/** Spike counters and the screen's look scale, readable from the console as __swarmLook. */
+const lookDiag = { dropped: 0, skipped: 0, scale: 1 };
 (window as unknown as Record<string, unknown>).__swarmLook = lookDiag;
 
 export function runFocusAction(focus: Focus, via: 'key' | 'click' = 'key') {
@@ -102,7 +105,7 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
   const ray = useMemo(() => new THREE.Raycaster(), []);
   const center = useMemo(() => new THREE.Vector2(0, 0), []);
   const frame = useRef(0);
-  const lookFilter = useMemo(createLookFilter, []);
+  const lookFilter = useMemo(() => createLookFilter(screenLookScale()), []);
 
   // Arrive at the elevator whenever the floor changes; after a page reload, return to the remembered spot.
   const restored = useRef(false);
@@ -150,7 +153,8 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
       e.preventDefault();
     };
     const onLockChange = () => {
-      resetLookFilter(lookFilter);
+      resetLookFilter(lookFilter, screenLookScale());
+      lookDiag.scale = lookFilter.scale;
       const locked = document.pointerLockElement === gl.domElement;
       if (!locked) dropHeld(); // Esc: you've stepped away, so let go rather than leave it hanging in the air
       useStore.getState().setLocked(locked);
@@ -162,7 +166,7 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
       lookDiag.skipped = lookFilter.skipped;
       if (!d) return;
       const { sensitivity, invertY } = useLookPrefs.getState();
-      const k = LOOK_RADIANS_PER_PX * sensitivity;
+      const k = lookRadiansPerPx(sensitivity, lookFilter.scale);
       look.current.yaw -= d[0] * k;
       look.current.pitch = Math.max(-1.35, Math.min(1.35, look.current.pitch - d[1] * k * (invertY ? -1 : 1)));
     };
