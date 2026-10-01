@@ -243,6 +243,8 @@ export function describeOfficeTool(action: string, input: Record<string, unknown
       return `👋 propose_let_go ${String(input.agent_id ?? '')}`;
     case 'file_issue':
       return `📝 file_issue "${clip(String(input.title ?? ''), 70)}"${floor}${input.specialty ? ` · ${input.specialty}` : ''}`;
+    case 'start_issue':
+      return `▶ start_issue #${String(input.number ?? '?')}${floor}${input.agent ? ` · ${input.agent}` : ''}`;
     case 'route_issue':
       return `🔀 route_issue #${String(input.number ?? '?')}${floor}${input.specialty !== undefined ? ` · ${input.specialty || 'no specialty'}` : ''}${Array.isArray(input.depends_on) ? ` · depends on ${input.depends_on.map((n) => `#${n}`).join(', ') || 'nothing'}` : ''}`;
   }

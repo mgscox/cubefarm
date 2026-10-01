@@ -1,7 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
-import { createOfficeTools, IssueCap, jobLabel, planRoute, specialtyLabel, specialtySlug, type CeoJob, type RouteRequest } from './ceo.ts';
+import { createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, specialtyLabel, specialtySlug, type CeoJob, type RouteRequest, type OfficeHandlers } from './ceo.ts';
 
 describe('specialtySlug', () => {
   it('turns a specialty into a lowercase slug', () => {
@@ -68,7 +68,7 @@ describe('jobLabel', () => {
 // The CEO only sees the office tools if the whole list converts to JSON Schema: one schema the SDK can't handle
 // (z.record did this) empties tools/list, and the CEO silently loses every tool.
 describe('office tools', () => {
-  const connect = async () => {
+  const connect = async (startIssue: OfficeHandlers['startIssue'] = async () => 'started') => {
     const floors: unknown[] = [];
     const office = createOfficeTools({
       companyStatus: () => '{}',
@@ -79,6 +79,7 @@ describe('office tools', () => {
       proposeLetGo: () => '',
       fileIssue: async () => '',
       routeIssue: async () => '',
+      startIssue,
     });
     const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
     await office.server.instance.connect(serverSide);
@@ -90,7 +91,23 @@ describe('office tools', () => {
   it('lists every tool the CEO relies on', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'propose_hire', 'propose_let_go', 'route_issue', 'set_floor_profile', 'update_job']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'propose_hire', 'propose_let_go', 'route_issue', 'set_floor_profile', 'start_issue', 'update_job']);
+  });
+
+  it('passes validated start arguments and returns refusal text instead of crashing', async () => {
+    const requests: unknown[] = [];
+    const { client } = await connect(async (a) => {
+      requests.push(a);
+      throw new Error('All 2 session slots are busy.');
+    });
+    const args = { floor: 1, number: 4, agent: 'Ada', note: 'Keep it small' };
+    const result = await client.callTool({ name: 'start_issue', arguments: args });
+    expect(requests).toEqual([args]);
+    expect(result).toMatchObject({ isError: true, content: [{ type: 'text', text: 'Refused: All 2 session slots are busy.' }] });
+    for (const invalid of [{ ...args, number: 0 }, { ...args, floor: 1.5 }, { ...args, note: 'x'.repeat(1001) }]) {
+      expect(await client.callTool({ name: 'start_issue', arguments: invalid })).toMatchObject({ isError: true });
+    }
+    expect(requests).toHaveLength(1);
   });
 
   it('still takes preview_env as a map of strings', async () => {
@@ -187,5 +204,59 @@ describe('IssueCap', () => {
     cap.record('a/b');
     expect(cap.total).toBe(3);
     expect([...cap.repos]).toEqual(['a/b', 'c/d']);
+  });
+});
+
+
+describe('planStartIssue', () => {
+  const dev = { id: 'ada', name: 'Ada', repoId: 'r1', role: 'dev' as const, status: 'idle' as const, specialty: 'server', desk: 1 };
+  const other = { ...dev, id: 'bob', name: 'Bob', specialty: 'frontend', desk: 0 };
+  const context = {
+    repoId: 'r1',
+    issues: [{ number: 4, title: 'Start issues', body: '', labels: ['swarm:server'] }],
+    agents: [other, dev], available: [other, dev], ready: ['server'], inProgress: false, usagePaused: false,
+  };
+  const request = { floor: 1, number: 4 };
+
+  it('prefers a matching free specialist and falls back to any free developer', () => {
+    expect(planStartIssue(request, context).agent.id).toBe('ada');
+    expect(planStartIssue(request, { ...context, available: [other] }).agent.id).toBe('bob');
+  });
+
+  it('uses the scheduler order: match, ready load, open load, then desk', () => {
+    expect(pickDeveloper([other, dev], () => false, ['frontend'], [])?.id).toBe('ada');
+    expect(pickDeveloper([other, dev], () => false, [], ['frontend'])?.id).toBe('ada');
+    expect(pickDeveloper([dev, other], () => false, [], [])?.id).toBe('bob');
+  });
+
+  it('accepts an explicit id or case-insensitive name over specialty preference', () => {
+    for (const agent of ['bob', ' BOB ']) expect(planStartIssue({ ...request, agent }, context).agent.id).toBe('bob');
+  });
+
+  it.each([
+    [{ role: 'qa' as const }, 'Ada is a QA tester; give issues to developers.'],
+    [{ role: 'ceo' as const }, 'Ada is the CEO; give issues to developers.'],
+    [{ status: 'working' as const }, 'Ada is busy; wait for them to finish.'],
+    [{ status: 'preparing' as const }, 'Ada is busy; wait for them to finish.'],
+    [{ repoId: 'r2' }, 'Ada is not on floor 1.'],
+  ])('refuses an unsuitable explicit agent: %j', (patch, message) => {
+    expect(() => planStartIssue({ ...request, agent: 'ada' }, { ...context, agents: [{ ...dev, ...patch }] })).toThrow(message);
+  });
+
+  it('refuses an unknown agent and an empty free developer pool', () => {
+    expect(() => planStartIssue({ ...request, agent: 'nobody' }, context)).toThrow('No agent "nobody".');
+    expect(() => planStartIssue(request, { ...context, available: [] })).toThrow('No free developer on floor 1.');
+  });
+
+  it('refuses dependencies that are still open, but permits closed dependencies', () => {
+    const issues = [{ ...context.issues[0], body: 'Depends on #3' }];
+    expect(() => planStartIssue(request, { ...context, issues: [...issues, { ...issues[0], number: 3, body: '' }] })).toThrow('#4 waits on open #3.');
+    expect(planStartIssue(request, { ...context, issues }).issue.number).toBe(4);
+  });
+
+  it('refuses issues that are not open, already taken, or usage paused', () => {
+    expect(() => planStartIssue({ ...request, number: 99 }, context)).toThrow('Issue #99 is not open on floor 1.');
+    expect(() => planStartIssue(request, { ...context, inProgress: true })).toThrow('#4 is already in progress or has an open PR.');
+    expect(() => planStartIssue(request, { ...context, usagePaused: true })).toThrow('Usage is paused; wait for the usage limit to reset.');
   });
 });
