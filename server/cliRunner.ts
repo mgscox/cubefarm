@@ -10,6 +10,7 @@ import { adoptPty, discardPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper
 import {
   clip,
   describeTool,
+  playwrightAction,
   newScreenshots,
   resultText,
   screenshotFile,
@@ -460,7 +461,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
           toolNames.set(String(b.tool_use_id ?? ''), name);
           log([{ kind: 'tool', tool: name, text: `⏺ ${describeTool(opts.cwd, name, input)}` }, ...(name === 'TodoWrite' ? todoLines(input) : [])]);
           cb.tool(name);
-          if (name === 'mcp__playwright__browser_navigate' && typeof input.url === 'string') cb.browserUrl(input.url);
+          if (playwrightAction(name) === 'navigate' && typeof input.url === 'string') cb.browserUrl(input.url);
         }
         return ALLOW;
       }
@@ -471,9 +472,9 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         const out = toolOutput(b.tool_response);
         // Codex's unnamed screenshots are collected from the browser's folder (its hooks may not be trusted yet).
         if (cli === 'claude') for (const img of out.images) cb.screenshot(Buffer.from(img.data, 'base64'), img.mime);
-        const saved = name === 'mcp__playwright__browser_take_screenshot' && !out.images.length ? screenshotFile(opts.cwd, out.text) : null;
+        const saved = playwrightAction(name) === 'take_screenshot' && !out.images.length ? screenshotFile(opts.cwd, out.text) : null;
         if (saved) cb.screenshot(saved.data, saved.mime);
-        if (name.startsWith('mcp__playwright__')) {
+        if (playwrightAction(name) !== null) {
           const url = out.text.match(/Page URL:\s*(\S+)/);
           if (url) cb.browserUrl(url[1]);
         }

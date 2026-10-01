@@ -3,7 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { CODEX_HOOK_EVENTS, codexHookCommand, hookReviewKey, interruptions, launchArgs, oneAtATime, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
-import { describeTool, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
+import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
 
@@ -117,6 +117,25 @@ describe('launchArgs', () => {
     expect(resumed[0]).toBe('resume');
     expect(resumed.slice(-2)).toEqual(['thread-1', '--looks like a flag']);
     expect(resumed).toContain('--dangerously-bypass-approvals-and-sandbox');
+  });
+
+  it.each([undefined, 'thread-1'])("keeps Codex's office browser separate from an inherited playwright server (resume %s)", (resumeId) => {
+    const browser = { command: 'npx', args: ['-y', '@playwright/mcp@latest', '--output-dir', 'browser output'] };
+    const { args } = launchArgs('codex', ctx({ browser, resumeId }));
+    const servers = args.filter((arg) => arg.startsWith('mcp_servers.'));
+    // Codex merges server tables: command/args under the user's HTTP `playwright` would retain its URL.
+    expect(servers).toEqual([
+      'mcp_servers.cubefarm_playwright={command="npx",args=["-y","@playwright/mcp@latest","--output-dir","browser output"]}',
+    ]);
+    expect(launchArgs('codex', ctx({ resumeId })).args.some((arg) => arg.startsWith('mcp_servers.'))).toBe(false);
+  });
+
+  it.each(['playwright', 'cubefarm_playwright'])('describes browser tools from the %s server', (server) => {
+    expect(describeTool('/repo', `mcp__${server}__browser_navigate`, { url: 'http://localhost:5200' })).toBe('🌐 navigate http://localhost:5200');
+    expect(describeTool('/repo', `mcp__${server}__browser_snapshot`, {})).toBe('🌐 snapshot');
+    expect(playwrightAction(`mcp__${server}__browser_navigate`)).toBe('navigate');
+    expect(playwrightAction(`mcp__${server}__browser_take_screenshot`)).toBe('take_screenshot');
+    expect(playwrightAction('mcp__other__browser_navigate')).toBeNull();
   });
 
   it("gives Codex the office's hooks, with the office's address in its environment", () => {
