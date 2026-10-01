@@ -6,6 +6,19 @@ export function issueSpecialty(labels: string[]) {
   return l ? l.slice(6).toLowerCase() : '';
 }
 
+/** The label the manager puts on issues that need a person (hardware, live servers, accounts, sign-off). */
+export const READY_FOR_HUMAN = 'ready-for-human';
+
+/** Whether an issue is reserved for a human: agents never get it, whatever its letter case. */
+export function forHuman(labels: string[]) {
+  return labels.some((l) => l.toLowerCase() === READY_FOR_HUMAN);
+}
+
+/** Whether the office may hand an issue to an agent at all (not swarm:skip, wontfix, question or ready-for-human). */
+export function schedulable(labels: string[]) {
+  return !forHuman(labels) && !labels.some((l) => /^(swarm:skip|wontfix|question)$/i.test(l));
+}
+
 /** Open issues this issue waits for, from "Depends on #3" / "Blocked by #4, #5" in its body. */
 export function blockers(body: string, open: Set<number>) {
   const out = new Set<number>();

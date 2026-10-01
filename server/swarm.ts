@@ -14,7 +14,7 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { isCli } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { blockers, holdUps, issueSpecialty } from '../shared/issues.ts';
+import { blockers, forHuman, holdUps, issueSpecialty, READY_FOR_HUMAN, schedulable } from '../shared/issues.ts';
 import { effectiveModel } from '../shared/models.ts';
 import { CEO_ID } from '../shared/types.ts';
 import type {
@@ -1440,6 +1440,9 @@ export class Swarm {
     this.ensureSlot();
     const issue = this.repoRt.get(repo.id)?.issues.find((i) => i.number === issueNumber);
     if (!issue) throw new HttpError(404, `Issue #${issueNumber} is not open on ${repo.fullName}`);
+    if (forHuman(issue.labels)) {
+      throw new HttpError(409, `#${issueNumber} is labelled ${READY_FOR_HUMAN}: an agent can't complete it. Remove the label to hand it to a developer.`);
+    }
     const holder = this.state.agents.find((x) => x.id !== a.id && x.repoId === repo.id && x.issueNumber === issueNumber && BUSY.includes(x.status));
     if (holder) throw new HttpError(409, `${holder.name} is already working on #${issueNumber}`);
     void this.runTask(a, repo, issue, note);
@@ -2196,7 +2199,7 @@ export class Swarm {
     return issues
       .filter(
         (i) =>
-          !i.labels.some((l) => /^(swarm:skip|wontfix|question)$/i.test(l)) &&
+          schedulable(i.labels) &&
           !this.issueTaken(repo, i.number) &&
           blockers(i.body, open).length === 0 &&
           (this.issueFailures.get(`${repo.id}#${i.number}`) ?? 0) < MAX_ISSUE_FAILURES,
@@ -2946,6 +2949,7 @@ export class Swarm {
             specialty: issueSpecialty(i.labels) || null,
             waitsFor: blockers(i.body, open),
             inProgress: this.issueTaken(r, i.number),
+            ...(forHuman(i.labels) && { readyForHuman: true }),
           })),
           pullRequests: rt.pulls
             .filter((p) => p.state === 'OPEN')
