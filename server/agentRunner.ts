@@ -178,6 +178,12 @@ export function tidyPaths(cwd: string, text: string): string {
   return out;
 }
 
+/** Browser action from either the manager's Playwright server or the office's Codex server. */
+export function playwrightAction(name: string): string | null {
+  const match = name.match(/^mcp__(?:cubefarm_)?playwright__(.+)$/);
+  return match ? match[1].replace(/^browser_/, '') : null;
+}
+
 export function describeTool(cwd: string, name: string, input: Record<string, unknown>): string {
   switch (name) {
     case 'Bash':
@@ -211,8 +217,8 @@ export function describeTool(cwd: string, name: string, input: Record<string, un
       return `Edit ${clip(files.join(', ') || 'files', 200)}`;
     }
   }
-  if (name.startsWith('mcp__playwright__')) {
-    const action = name.replace('mcp__playwright__browser_', '').replace('mcp__playwright__', '');
+  const action = playwrightAction(name);
+  if (action !== null) {
     const detail = input.url ?? input.element ?? input.text ?? '';
     return `🌐 ${action}${detail ? ` ${clip(String(detail), 120)}` : ''}`;
   }

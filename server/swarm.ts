@@ -1536,7 +1536,7 @@ export class Swarm {
       '2. Implement the change with focused commits and clear messages.',
       "3. Run the project's existing tests, linters and build (if any) and fix what you broke. Install dependencies first if needed.",
       repo.browserTesting
-        ? `4. If the project has a web UI, start its dev server in the background on port ${this.port(a)} (reserved for you, so you don't collide with teammates), then check your change with the Playwright browser tools (mcp__playwright__browser_navigate, browser_snapshot, browser_click, browser_take_screenshot). Stop the dev server when you're done.`
+        ? `4. If the project has a web UI, start its dev server in the background on port ${this.port(a)} (reserved for you, so you don't collide with teammates), then check your change with the Playwright browser tools (browser_navigate, browser_snapshot, browser_click, browser_take_screenshot). Stop the dev server when you're done.`
         : '4. Verify the behaviour you changed as directly as you can.',
       `5. Push: ${push}`,
       fixing
