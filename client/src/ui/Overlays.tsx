@@ -74,7 +74,8 @@ export function SoundControls() {
   );
 }
 
-function MouseSettings() {
+/** Mouse look sensitivity, invert Y and re-grab; saved in this browser (help and the console's Settings tab). */
+export function MouseSettings() {
   const { sensitivity, invertY, grabOnClose, set } = useLookPrefs();
   return (
     <div className="mouse-settings">
