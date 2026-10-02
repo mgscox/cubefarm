@@ -276,6 +276,27 @@ describe('CEO rerun_qa', () => {
     handle.stop();
   });
 
+  it.each([
+    ['Why is #13 stuck on pixel-todo?', 'PR #13 on floor 1 is needs-human. QA said: Session failed. QA sessions failed 2 times. It needs your call: fix it by hand, close it, or rerun QA.'],
+    ['Why is #14 stuck on floor 99?', 'Refused: There is no floor 99.'],
+    ['Why is #8 stuck on missing-repo?', 'Refused: No floor for "missing-repo".'],
+    ['Why is #8 stuck?', "I can't find an open PR #8 on floor 1."],
+  ])('lets the fake CEO answer "%s"', async (message, reply) => {
+    Object.assign(s.state.qa[0], { retests: 0 });
+    const finished = vi.fn();
+    const callbacks: SessionCallbacks = {
+      log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished,
+    };
+    const options: SessionOptions = {
+      role: 'ceo', cwd: '', prompt: `Manager asks:\n${message}`,
+      systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools(),
+    };
+    const handle = createDemoBackend().startSession(options, callbacks);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: reply }));
+    handle.stop();
+  });
+
   it.each(['testing', 'fixing'] as const)('refuses a PR that is already %s with 409', async (status) => {
     s.state.qa[0].status = status;
     await expect(swarm.sendToQa(repo.id, 13)).rejects.toMatchObject({ status: 409 });

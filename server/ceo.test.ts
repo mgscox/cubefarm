@@ -2,7 +2,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
 import { createOfficeTools, IssueCap, jobLabel, mergeableState, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type PrQaState, type RouteRequest, type OfficeHandlers } from './ceo.ts';
-import { stuckAnswer } from './demo.ts';
+import { stuckAnswer, stuckTarget } from './demo.ts';
+import type { PullInfo } from '../shared/types.ts';
 
 describe('specialtySlug', () => {
   it('turns a specialty into a lowercase slug', () => {
@@ -284,7 +285,7 @@ describe('planStartIssue', () => {
 });
 
 describe('company_status pull requests', () => {
-  const pull = { number: 14, title: 'Chase late invoices', checks: 'passing' as const, headSha: 'abcdef1234567', mergeable: 'MERGEABLE', mergeState: 'CLEAN' };
+  const pull = { number: 14, title: 'Chase late invoices', checks: 'passing' as PullInfo['checks'], headSha: 'abcdef1234567', mergeable: 'MERGEABLE', mergeState: 'CLEAN' };
   const qa = (o: Partial<PrQaState> = {}): PrQaState => ({
     status: 'passed', round: 1, retests: 0, summary: 'All good', checks: [{ name: 'Build', result: 'pass', details: '' }], commentUrl: 'https://gh/c/1',
     mergeNote: null, testedSha: 'abcdef1234567', sessionFailures: 0, fixReason: null, devAgentId: 'a1', ...o,
@@ -335,5 +336,25 @@ describe('company_status pull requests', () => {
     const v = view({ mergeable: 'CONFLICTING' }, qa({ status: 'failed', round: 2, summary: 'Toolbar overflows.', checks: [{ name: 'Mobile', result: 'fail', details: '' }] }));
     expect(stuckAnswer(3, v)).toBe('PR #14 on floor 3 is failed (round 2). QA said: Toolbar overflows. Failed QA checks: Mobile. It conflicts with the default branch. Ada should resolve the conflicts.');
     expect(stuckAnswer(3, view({}, qa()))).toBe('PR #14 on floor 3 is passed. Nothing is holding it up.');
+  });
+
+  it('lets the demo CEO explain waiting checks, testing and exhausted rounds', () => {
+    expect(stuckAnswer(3, view({ checks: 'pending' }, qa({ mergeNote: 'waiting for checks: CI' })))).toBe(
+      "PR #14 on floor 3 is passed. GitHub's checks are still running. Auto-merge: waiting for checks: CI.",
+    );
+    expect(stuckAnswer(3, view({}, qa({ status: 'testing', round: 2 })))).toBe('PR #14 on floor 3 is testing (round 2). QA is testing it now.');
+    expect(stuckAnswer(3, view({}))).toBe('PR #14 on floor 3 is not tested. QA has not tested it yet.');
+    const out = view({}, qa({ status: 'needs-human', round: 3, summary: 'Still broken', checks: [] }));
+    expect(stuckAnswer(3, out)).toBe('PR #14 on floor 3 is needs-human (round 3). QA said: Still broken. It needs your call: fix it by hand, close it, or rerun QA.');
+  });
+
+  it('routes the demo CEO to the floor or repository asked about', () => {
+    const floors = [{ floor: 1, repo: 'demo-co/pixel-todo' }, { floor: 2, repo: 'demo-co/weather-api' }];
+    expect(stuckTarget('Why is #14 stuck on floor 2?', floors)).toEqual({ number: 14, floors: [2] });
+    expect(stuckTarget('why is #14 stuck on weather-api?', floors)).toEqual({ number: 14, floors: [2] });
+    expect(stuckTarget('Why is #14 stuck?', floors)).toEqual({ number: 14, floors: [1, 2] });
+    expect(stuckTarget('Why is #14 stuck on floor 99?', floors)).toEqual({ refused: 'There is no floor 99.' });
+    expect(stuckTarget('Why is #8 stuck on missing-repo?', floors)).toEqual({ refused: 'No floor for "missing-repo".' });
+    expect(stuckTarget('Start #14 on floor 2', floors)).toBeNull();
   });
 });
