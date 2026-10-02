@@ -35,6 +35,7 @@ export interface OfficeHandlers {
   fileIssue(a: { floor: number; title: string; body: string; specialty?: string }): Promise<string>;
   routeIssue(a: { floor: number; number: number; specialty?: string; depends_on?: number[] }): Promise<string>;
   startIssue(a: StartIssueRequest): Promise<string>;
+  rerunQa(a: { floor: number; number: number; note?: string }): Promise<string>;
 }
 
 export interface StartIssueRequest {
@@ -208,6 +209,16 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
       },
       (a) => run(() => h.startIssue(a)),
     ),
+    tool(
+      'rerun_qa',
+      'Send an open pull request back to QA when the manager asks (e.g. after QA sessions failed and it is needs-human). Starts a fresh round.',
+      {
+        floor: z.number().int(),
+        number: z.number().int().positive().describe('The pull request number'),
+        note: z.string().max(1000).optional().describe('Instructions passed to the QA tester for this round'),
+      },
+      (a) => run(() => h.rerunQa(a)),
+    ),
   ];
   const server = createSdkMcpServer({ name: 'office', version: '1.0.0', tools: defs });
   return {
@@ -254,6 +265,7 @@ export function ceoSystemPrompt(o: {
     'Rules:',
     '- Every floor keeps at least one QA tester.',
     '- Use start_issue when the manager asks for an issue to be started; never bypass auto-assign OFF on your own initiative.',
+    '- Use rerun_qa only when the manager asks for a PR to be re-tested.',
     '- Titles are specific ("Three.js graphics engineer", not "Developer"). A specialty is a short lowercase slug ("graphics", "gameplay", "frontend", "backend", "content", "a11y", "devops"). Only route an issue to a specialty that someone on the floor has, or that you are proposing to hire.',
     '- Before proposing a hire, check the floor and the pending proposals for someone who already covers it. If the manager declined a similar proposal (recentDecisions), do not propose it again unless something has changed, and say what.',
     `- ${o.hiring === 'auto' ? 'Hiring is on auto: proposals within the team cap are approved immediately, so be deliberate.' : 'The manager approves every hire, so explain each reason in a sentence or two they can decide on.'}`,

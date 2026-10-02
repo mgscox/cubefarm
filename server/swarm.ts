@@ -387,6 +387,7 @@ export class Swarm {
       fileIssue: (a) => this.fileIssue(a),
       routeIssue: (a) => this.routeIssue(a),
       startIssue: (a) => this.startIssue(a),
+      rerunQa: (a) => this.rerunQa(a),
     });
   }
   private ceoIssues = new IssueCap(MAX_ISSUES_PER_JOB); // issues filed during the current CEO job
@@ -682,6 +683,7 @@ export class Swarm {
       checks: q.checks,
       commentUrl: q.commentUrl,
       mergeNote: q.mergeNote,
+      rerunNote: q.rerunNote,
       updatedAt: q.updatedAt,
     };
   }
@@ -1907,6 +1909,7 @@ export class Swarm {
       `Please QA pull request #${pr.number}: ${pr.title}`,
       `URL: ${pr.url}`,
       `Author: ${dev ? `${dev.name} (developer agent)` : 'a teammate'} · QA round ${rec.round}`,
+      rec.rerunNote?.round === rec.round ? `Note from the manager: ${rec.rerunNote.text}` : '',
       rec.fixReason === 'conflict'
         ? `\nQA passed it before, but since then the branch was updated with ${repo.defaultBranch} to resolve merge conflicts. Re-check everything, especially where this change meets the newly merged work.`
         : rec.fixReason === 'checks'
@@ -3154,6 +3157,14 @@ export class Swarm {
     });
     await this.assign(agent.id, issue.number, x.note);
     return `${agent.name} started #${issue.number} ${issue.title} on floor ${repo.floor}.`;
+  }
+
+  private async rerunQa(x: { floor: number; number: number; note?: string }) {
+    const repo = this.floorRepo(x.floor);
+    await this.sendToQa(repo.id, x.number);
+    const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number)!;
+    this.setQa(rec, { rerunNote: x.note ? { round: rec.round, text: x.note } : undefined });
+    return `PR #${x.number} on floor ${repo.floor} is queued for QA (round ${rec.round}).`;
   }
 
   /** Change an open issue's specialty and/or dependencies (see planRoute for what is refused). */

@@ -864,6 +864,12 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
     async chat(text: string) {
       const s = await status();
       await think('Reading your message.');
+      const rerun = text.match(/\b(?:rerun\s+qa|re-test|retest)\s+(?:on\s+)?(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))(?:\s+with\s+([^;\n]+))?/i);
+      if (rerun) {
+        const floor = rerun[2] ? Number(rerun[2]) : s.floors.find((f) => f.repo.toLowerCase() === rerun[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === rerun[3].toLowerCase())?.floor;
+        if (floor === undefined) return `Refused: No floor for "${rerun[3]}".`;
+        return use('rerun_qa', { floor, number: Number(rerun[1]), ...(rerun[4] ? { note: rerun[4].trim() } : {}) });
+      }
       const start = text.match(/\bstart\s+#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))(?:\s+with\s+([^.;\n]+))?/i);
       if (start) {
         const floor = start[2] ? Number(start[2]) : s.floors.find((f) => f.repo.toLowerCase() === start[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === start[3].toLowerCase())?.floor;

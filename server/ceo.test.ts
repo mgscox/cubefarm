@@ -68,7 +68,7 @@ describe('jobLabel', () => {
 // The CEO only sees the office tools if the whole list converts to JSON Schema: one schema the SDK can't handle
 // (z.record did this) empties tools/list, and the CEO silently loses every tool.
 describe('office tools', () => {
-  const connect = async (startIssue: OfficeHandlers['startIssue'] = async () => 'started') => {
+  const connect = async (startIssue: OfficeHandlers['startIssue'] = async () => 'started', rerunQa: OfficeHandlers['rerunQa'] = async () => 'queued') => {
     const floors: unknown[] = [];
     const office = createOfficeTools({
       companyStatus: () => '{}',
@@ -80,6 +80,7 @@ describe('office tools', () => {
       fileIssue: async () => '',
       routeIssue: async () => '',
       startIssue,
+      rerunQa,
     });
     const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
     await office.server.instance.connect(serverSide);
@@ -91,7 +92,27 @@ describe('office tools', () => {
   it('lists every tool the CEO relies on', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'propose_hire', 'propose_let_go', 'route_issue', 'set_floor_profile', 'start_issue', 'update_job']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'propose_hire', 'propose_let_go', 'rerun_qa', 'route_issue', 'set_floor_profile', 'start_issue', 'update_job']);
+  });
+
+  it('validates rerun arguments and returns handler errors as tool errors', async () => {
+    const requests: unknown[] = [];
+    const { client } = await connect(undefined, async (a) => {
+      requests.push(a);
+      if (a.number === 14) throw new Error('PR #14 is already testing');
+      return 'PR #13 on floor 8 is queued for QA (round 2).';
+    });
+    const args = { floor: 8, number: 13, note: 'Check the recovery path' };
+    expect(await client.callTool({ name: 'rerun_qa', arguments: args })).toMatchObject({
+      content: [{ type: 'text', text: 'PR #13 on floor 8 is queued for QA (round 2).' }],
+    });
+    for (const invalid of [{ floor: 8 }, { ...args, number: 13.5 }, { ...args, floor: 8.5 }, { ...args, number: 0 }, { ...args, note: 'x'.repeat(1001) }]) {
+      expect(await client.callTool({ name: 'rerun_qa', arguments: invalid })).toMatchObject({ isError: true });
+    }
+    expect(requests).toEqual([args]);
+    expect(await client.callTool({ name: 'rerun_qa', arguments: { floor: 8, number: 14 } })).toMatchObject({
+      isError: true, content: [{ type: 'text', text: 'Refused: PR #14 is already testing' }],
+    });
   });
 
   it('passes validated start arguments and returns refusal text instead of crashing', async () => {
