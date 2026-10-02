@@ -38,12 +38,12 @@ const fakeSha = () => crypto.randomBytes(20).toString('hex');
 
 /** Fake CI: checks run for a while after every push, and now and then one fails so the fix loop shows. */
 function runChecks(pr: PullInfo, fail = Math.random() < 0.2) {
-  Object.assign(pr, { checks: 'pending', pendingChecks: ['CI / build', 'Vercel'], failedChecks: [] });
+  Object.assign(pr, { checks: 'pending', pendingChecks: ['CI', 'Vercel'], failedChecks: [] });
   setTimeout(() => {
     Object.assign(pr, {
       checks: fail ? 'failing' : 'passing',
       pendingChecks: [],
-      failedChecks: fail ? [{ name: 'CI / build', url: `${pr.url}/checks` }] : [],
+      failedChecks: fail ? [{ name: 'CI', url: `${pr.url.split('/pull/')[0]}/actions/runs/${pr.number}` }] : [],
     });
   }, 12_000 + Math.random() * 10_000);
 }

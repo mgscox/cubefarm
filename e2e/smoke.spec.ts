@@ -155,18 +155,25 @@ test("the manager's console opens with E at its desk and closes with Esc", async
   await expect(phoneButton(page)).toBeVisible();
 });
 
-test('repository refresh distinguishes unavailable checks, stale data, failure and recovery', async ({ page }, testInfo) => {
-  let phase: 'checks' | 'stale' | 'failed' | 'success' = 'checks';
+test('repository refresh distinguishes unavailable checks, REST fallback, stale data, failure and recovery', async ({ page }, testInfo) => {
+  let phase: 'checks' | 'fallback' | 'stale' | 'failed' | 'success' = 'checks';
   const diagnostic = 'GraphQL: Resource not accessible by personal access token (repository.pullRequests.nodes.0.statusCheckRollup.contexts.nodes.0)';
+  const fallbackNote = 'Check rollup access denied; REST fallback in use (GitHub Actions and commit statuses).';
   const decorate = (repo: RepoView) => {
     repo.folderSync = 'in sync';
     repo.syncing = false;
     repo.syncError = undefined;
+    repo.pulls = [{
+      number: 12, title: 'Fallback checks', url: `https://github.com/${repo.fullName}/pull/12`, headRefName: 'swarm/12',
+      state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', reviewDecision: null, closesIssues: [],
+      createdAt: '2026-10-01', mergedAt: null, additions: 1, deletions: 0, headSha: 'abc', mergeState: 'CLEAN',
+      checks: phase === 'checks' ? 'unavailable' : 'passing', failedChecks: [], pendingChecks: [],
+    }];
     repo.refresh = {
       status: phase === 'failed' ? 'failed' : phase === 'success' ? 'success' : 'partial',
       issues: { at: 1_800_000_000_000, error: phase === 'failed' ? 'HTTP 401: Bad credentials' : undefined },
       pulls: { at: 1_800_000_000_000, error: phase === 'stale' ? 'network timeout' : phase === 'failed' ? 'HTTP 401: Bad credentials' : undefined },
-      checksError: phase === 'checks' ? diagnostic : undefined,
+      checksError: phase === 'checks' ? diagnostic : phase === 'fallback' ? fallbackNote : undefined,
     };
   };
   // Exercise both the initial snapshot and subsequent repo events without credentials or real GitHub traffic.
@@ -192,7 +199,7 @@ test('repository refresh distinguishes unavailable checks, stale data, failure a
   const card = page.locator('.floor-card').first();
   await expect(card.getByText('GitHub: partially refreshed')).toBeVisible();
   await expect(card.getByRole('alert')).toHaveCount(1);
-  await expect(card.getByRole('alert')).toContainText('gh auth login --web');
+  await expect(card.getByRole('alert')).toContainText('automatic merging is blocked for those PRs');
   await expect(card.getByText(/Local Git: in sync/)).toBeVisible();
   await expect(card.locator('pre')).toBeHidden();
   await card.getByText('GitHub refresh diagnostics').click();
@@ -200,11 +207,19 @@ test('repository refresh distinguishes unavailable checks, stale data, failure a
   await card.getByText('GitHub refresh diagnostics').click();
   await card.screenshot({ path: testInfo.outputPath('checks-unavailable.png') });
 
+  phase = 'fallback';
+  await card.getByRole('button', { name: 'Refresh GitHub' }).click();
+  await expect(card.getByRole('alert')).toHaveText('PR checks are read through GitHub Actions and commit statuses.');
+  await card.getByText('GitHub refresh diagnostics').click();
+  await expect(card.locator('pre')).toHaveText(fallbackNote);
+  await card.getByText('GitHub refresh diagnostics').click();
+  await card.screenshot({ path: testInfo.outputPath('checks-rest-fallback.png') });
+
   phase = 'stale';
   await card.getByRole('button', { name: 'Refresh GitHub' }).click();
   await expect(card.getByText(/PRs:.*stale · last refreshed/)).toBeVisible();
   await expect(card.getByText(/Issues:.*open · refreshed/)).toBeVisible();
-  await expect(card.getByText(/Checks unavailable/)).toBeHidden();
+  await expect(card.getByText(/Some PR checks could not be read/)).toBeHidden();
   phase = 'failed';
   await card.getByRole('button', { name: 'Refresh GitHub' }).click();
   await expect(card.getByText('GitHub: refresh failed')).toBeVisible();
