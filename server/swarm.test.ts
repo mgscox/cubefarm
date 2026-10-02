@@ -432,6 +432,53 @@ describe('a developer session that ends without a PR after pushing commits', () 
     expect(ada().status).toBe('stopped');
   });
 
+  describe('during a usage pause', () => {
+    beforeEach(() => {
+      vi.mocked(f.schedule).mockRestore();
+      vi.spyOn(f, 'maybeHeartbeat').mockImplementation(() => {});
+      vi.spyOn(f, 'startCeoWork').mockImplementation(() => {});
+      vi.spyOn(f, 'officeUpdateTick').mockReturnValue(false);
+    });
+    const pause = () => sessions[0].cb.limited?.(Date.now() + 60_000);
+    const pauseEnds = () => {
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      f.schedule();
+    };
+
+    it('holds the retry when the limit is hit during the desk clean-up, then starts it once', async () => {
+      let cleaned!: () => void;
+      vi.spyOn(backend, 'releaseDesk').mockReturnValue(new Promise<void>((r) => (cleaned = r)));
+      sessions[0].cb.finished(cut);
+      await vi.waitFor(() => expect(ahead).toHaveBeenCalled());
+      pause();
+      cleaned();
+      await vi.advanceTimersByTimeAsync(50);
+      f.schedule();
+      expect(sessions).toHaveLength(1);
+      expect(ada()).toMatchObject({ status: 'error', task: 'issue', issueNumber: 66 }); // not left 'working' with no session
+      pauseEnds();
+      expect(sessions).toHaveLength(2);
+      expect(sessions[1].opts.cwd).toBe(backend.deskDir(repo.fullName, 'ada-a1'));
+      expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
+      f.schedule();
+      expect(sessions).toHaveLength(2);
+    });
+
+    it('holds the retry of a session that ends while paused, then resumes that session', async () => {
+      ada().sessionId = 'thread-1';
+      pause();
+      sessions[0].cb.finished({ ...cut, ok: true, errors: [] });
+      await vi.advanceTimersByTimeAsync(50);
+      f.schedule();
+      expect(sessions).toHaveLength(1);
+      expect(ada()).toMatchObject({ status: 'done', task: 'issue', issueNumber: 66 });
+      pauseEnds();
+      expect(sessions).toHaveLength(2);
+      expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
+      expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
+    });
+  });
+
   it('fails as before when nothing was pushed', async () => {
     ahead.mockRejectedValue(new Error('gh api failed: HTTP 404'));
     expect(await end(cut)).toBe(false);
