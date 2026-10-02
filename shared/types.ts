@@ -41,11 +41,23 @@ export interface PullInfo {
   mergedAt: string | null;
   additions: number;
   deletions: number;
-  checks: 'pending' | 'passing' | 'failing' | 'none';
+  checks: 'pending' | 'passing' | 'failing' | 'none' | 'unavailable';
   headSha: string;
   mergeState: string; // GitHub's mergeStateStatus: CLEAN | BEHIND | BLOCKED | DIRTY | UNSTABLE | DRAFT | UNKNOWN …
   failedChecks: { name: string; url: string | null }[];
   pendingChecks: string[];
+}
+
+export interface PullRefresh {
+  pulls: PullInfo[];
+  checksError?: string; // diagnostic details from optional check enrichment
+}
+
+export interface RepoRefresh {
+  status: 'success' | 'partial' | 'failed';
+  issues: { at: number | null; error?: string };
+  pulls: { at: number | null; error?: string };
+  checksError?: string;
 }
 
 export interface RepoView {
@@ -72,6 +84,8 @@ export interface RepoView {
   pulls: PullInfo[]; // open + recently merged PRs
   lastSync: number | null;
   syncError?: string;
+  refresh?: RepoRefresh;
+  syncing?: boolean;
   previewConfig: PreviewConfig;
   preview: PreviewView;
 }

@@ -1,5 +1,5 @@
-import { gh, ghJson } from './exec.ts';
-import type { GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
+import { CommandError, gh, ghJson } from './exec.ts';
+import type { GhRepoSummary, IssueInfo, PullInfo, PullRefresh } from '../shared/types.ts';
 
 // All GitHub access goes through the gh CLI so it reuses the user's existing `gh auth login`.
 
@@ -64,11 +64,11 @@ interface RawPull {
   headRefOid: string;
   mergeStateStatus: string;
   // check runs (GitHub Actions…) carry name/status/conclusion/detailsUrl; commit statuses (Vercel…) carry context/state/targetUrl
-  statusCheckRollup: { name?: string; context?: string; status?: string; conclusion?: string; state?: string; detailsUrl?: string; targetUrl?: string }[] | null;
+  statusCheckRollup?: { name?: string; context?: string; status?: string; conclusion?: string; state?: string; detailsUrl?: string; targetUrl?: string }[] | null;
 }
 
 const PR_FIELDS =
-  'number,title,url,headRefName,headRefOid,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions,statusCheckRollup';
+  'number,title,url,headRefName,headRefOid,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions';
 
 type Check = NonNullable<RawPull['statusCheckRollup']>[number];
 const BAD = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'];
@@ -106,12 +106,28 @@ function toPull(p: RawPull): PullInfo {
   };
 }
 
-export async function listPulls(fullName: string): Promise<PullInfo[]> {
-  const [open, merged] = await Promise.all([
-    ghJson<RawPull[]>(['pr', 'list', '-R', fullName, '--state', 'open', '--limit', '50', '--json', PR_FIELDS]),
-    ghJson<RawPull[]>(['pr', 'list', '-R', fullName, '--state', 'merged', '--limit', '8', '--json', PR_FIELDS]),
-  ]);
-  return [...open, ...merged].map(toPull);
+/** Only access denials located inside check rollups qualify; mixed GraphQL failures must remain errors. */
+export function isCheckAccessError(error: unknown): boolean {
+  if (!(error instanceof CommandError)) return false;
+  const errors = error.stderr.trim().replace(/^gh:\s*/, '').replace(/^GraphQL:\s*/, '').split(/,\s*(?=Resource)|\r?\n/);
+  return errors.length > 0 && errors.every((line) =>
+    /^(?:GraphQL:\s*)?Resource not accessible by (?:personal access token|integration)\s*\([\w.]*statusCheckRollup[\w.]*\)$/.test(line.trim()));
+}
+
+export async function listPulls(fullName: string, query: (args: string[]) => Promise<RawPull[]> = ghJson): Promise<PullRefresh> {
+  const list = async (state: string, limit: string): Promise<PullRefresh> => {
+    const args = ['pr', 'list', '-R', fullName, '--state', state, '--limit', limit, '--json'];
+    try {
+      const raw = await query([...args, `${PR_FIELDS},statusCheckRollup`]);
+      return { pulls: raw.map(toPull) };
+    } catch (error) {
+      if (!isCheckAccessError(error)) throw error;
+      const raw = await query([...args, PR_FIELDS]);
+      return { pulls: raw.map((p) => ({ ...toPull(p), checks: 'unavailable', failedChecks: [], pendingChecks: [] })), checksError: (error as Error).message };
+    }
+  };
+  const [open, merged] = await Promise.all([list('open', '50'), list('merged', '8')]);
+  return { pulls: [...open.pulls, ...merged.pulls], checksError: [open.checksError, merged.checksError].filter(Boolean).join('\n') || undefined };
 }
 
 // swarm:<specialty> labels route issues to specialists. gh refuses unknown labels, so they're created on first use.

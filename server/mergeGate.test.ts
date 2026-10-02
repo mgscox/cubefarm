@@ -25,6 +25,30 @@ const record = (r: Partial<MergeRecord> = {}): MergeRecord => ({
 });
 
 describe('mergeStep', () => {
+  describe('unavailable checks', () => {
+    it.each(['CLEAN', 'BEHIND'])('waits without merging or updating when merge state is %s', (mergeState) => {
+      expect(mergeStep(pull({ checks: 'unavailable', mergeState }), record(), NOW, base)).toMatchObject({ do: 'wait', note: expect.stringContaining('checks unavailable'), set: { pendingSince: null } });
+    });
+
+    it('still sends new commits back to QA, even when they also conflict', () => {
+      expect(mergeStep(pull({ checks: 'unavailable', headSha: 'new456' }), record(), NOW, base)).toEqual({ do: 'requeue', set: {} });
+      expect(mergeStep(pull({ checks: 'unavailable', headSha: 'new456', mergeable: 'CONFLICTING', mergeState: 'DIRTY' }), record(), NOW, base)).toEqual({ do: 'requeue', set: {} });
+    });
+
+    it.each([{ mergeable: 'CONFLICTING' }, { mergeState: 'DIRTY' }])('still sends conflicts back to a developer: %j', (conflict) => {
+      expect(mergeStep(pull({ checks: 'unavailable', ...conflict }), record(), NOW, base)).toMatchObject({ do: 'send-back', reason: 'conflict', set: {} });
+    });
+
+    it('preserves the passed-commit backfill while clearing the pending-check clock', () => {
+      expect(mergeStep(pull({ checks: 'unavailable' }), record({ passedSha: null, pendingSince: NOW - 5_000 }), NOW, base)).toMatchObject({ do: 'wait', set: { passedSha: 'abc123', pendingSince: null } });
+    });
+
+    it('fetches unknown mergeability, then waits if checks remain unavailable', () => {
+      const pr = pull({ checks: 'unavailable', mergeState: 'UNKNOWN' });
+      expect(mergeStep(pr, record(), NOW, base)).toEqual({ do: 'details', set: {} });
+      expect(mergeStep(pr, record(), NOW, { ...base, detailed: true })).toMatchObject({ do: 'wait', note: expect.stringContaining('checks unavailable') });
+    });
+  });
   it('merges a clean, green PR at the commit QA passed', () => {
     expect(mergeStep(pull(), record(), NOW, base)).toEqual({ do: 'merge', set: { pendingSince: null } });
     expect(mergeStep(pull({ checks: 'none' }), record(), NOW, base).do).toBe('merge');

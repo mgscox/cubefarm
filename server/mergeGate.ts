@@ -44,6 +44,10 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
   if (pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY') {
     return { do: 'send-back', reason: 'conflict', instructions: `It conflicts with ${opts.base}.`, needsHuman, set };
   }
+  if (pr.checks === 'unavailable') {
+    set.pendingSince = null;
+    return { do: 'wait', note: 'checks unavailable: restore GitHub check access before merging', set };
+  }
   if (pr.checks === 'failing') {
     const instructions = pr.failedChecks.map((c) => `- ${c.name}${c.url ? `: ${c.url}` : ''}`).join('\n');
     return { do: 'send-back', reason: 'checks', instructions, needsHuman, set };
