@@ -924,6 +924,12 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
     async chat(text: string) {
       const s = await status();
       await think('Reading your message.');
+      const park = text.match(/\bpark\s+(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))\s+(?:because|with|reason)\s+([^;\n]+)/i);
+      if (park) {
+        const floor = park[2] ? Number(park[2]) : s.floors.find((f) => f.repo.toLowerCase() === park[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === park[3].toLowerCase())?.floor;
+        if (floor === undefined) return `Refused: No floor for "${park[3]}".`;
+        return use('park_pr', { floor, number: Number(park[1]), reason: park[4].trim() });
+      }
       const sendBack = text.match(/\bsend\s+(?:back\s+)?(?:PR\s*)?#(\d+)\s+(?:back\s+)?to\s+(?:dev|developer)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))(?:\s+with\s+([^;\n]+))?/i);
       if (sendBack) {
         const floor = sendBack[2] ? Number(sendBack[2]) : s.floors.find((f) => f.repo.toLowerCase() === sendBack[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === sendBack[3].toLowerCase())?.floor;

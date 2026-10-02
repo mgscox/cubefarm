@@ -38,6 +38,13 @@ export interface OfficeHandlers {
   startIssue(a: StartIssueRequest): Promise<string>;
   rerunQa(a: { floor: number; number: number; note?: string }): Promise<string>;
   sendBackToDev(a: DevFixRequest): Promise<string>;
+  parkPr(a: ParkPrRequest): Promise<string>;
+}
+
+export interface ParkPrRequest {
+  floor: number;
+  number: number;
+  reason: string;
 }
 
 export interface DevFixRequest {
@@ -289,6 +296,16 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
       (a) => run(() => h.sendBackToDev(a)),
     ),
     tool(
+      'park_pr',
+      'Comment and close a placeholder or blocked PR, keeping its branch for reuse. Returns its issue to the backlog. Wait until QA or a live fix session finishes.',
+      {
+        floor: z.number().int(),
+        number: z.number().int().positive().describe('The pull request number'),
+        reason: z.string().trim().min(1).max(1000).describe('Short reason posted as a PR comment'),
+      },
+      (a) => run(() => h.parkPr(a)),
+    ),
+    tool(
       'rerun_qa',
       'Re-test an open PR when the manager asks. First check it has new commits since the last QA; otherwise send it to a developer for fixes. Starts a fresh round.',
       {
@@ -345,6 +362,7 @@ export function ceoSystemPrompt(o: {
     '- Every floor keeps at least one QA tester.',
     '- Use start_issue when the manager asks for an issue to be started; never bypass auto-assign OFF on your own initiative.',
     '- Use send_back_to_dev on your own initiative for needs-human PRs with clear fixes (real QA defects, conflicts or failing checks); report the handoff to the manager afterwards.',
+    '- Use park_pr on your own initiative only for placeholder/blocked PRs that cannot pass QA until another issue merges; report it to the manager afterwards.',
     '- Use rerun_qa only when the manager asks for a PR to be re-tested. First check it has new commits since the last QA; otherwise it needs a developer for fixes.',
     '- Titles are specific ("Three.js graphics engineer", not "Developer"). A specialty is a short lowercase slug ("graphics", "gameplay", "frontend", "backend", "content", "a11y", "devops"). Only route an issue to a specialty that someone on the floor has, or that you are proposing to hire.',
     '- Before proposing a hire, check the floor and the pending proposals for someone who already covers it. If the manager declined a similar proposal (recentDecisions), do not propose it again unless something has changed, and say what.',

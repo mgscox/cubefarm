@@ -75,6 +75,13 @@ export interface RequestedStart {
   restartPending: boolean;
 }
 
+/** A closed placeholder PR whose branch can be reused when its issue becomes ready. */
+export interface ParkedBranch {
+  issueNumber: number;
+  prNumber: number;
+  branch: string;
+}
+
 export interface RepoView {
   id: string; // "owner/name"
   fullName: string;
@@ -85,6 +92,7 @@ export interface RepoView {
   color: string; // accent color for the floor
   autoAssign: boolean;
   requestedStarts: RequestedStart[];
+  parkedBranches: ParkedBranch[];
   autoMerge: boolean; // PRs merge themselves once QA passes and GitHub's checks are green
   folderSync: string | null; // how the floor's main checkout stands against GitHub: "in sync", "updated to abc1234", "2 behind: local changes" …
   browserTesting: boolean;

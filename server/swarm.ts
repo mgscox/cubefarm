@@ -6,7 +6,8 @@ import type { Backend } from './backend.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
-import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type OfficeTools, type StartIssueRequest } from './ceo.ts';
+import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type OfficeTools, type ParkPrRequest, type StartIssueRequest } from './ceo.ts';
+import { checkParkPr } from './parkPr.ts';
 import { planDevFix, type FixReason } from './fixPlan.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
@@ -39,6 +40,7 @@ import type {
   PreviewView,
   ProjectFolderView,
   PullInfo,
+  ParkedBranch,
   QaCheck,
   QaView,
   RepoView,
@@ -60,6 +62,7 @@ interface PersistedRepo {
   color: string;
   autoAssign: boolean;
   requestedStarts: RequestedStart[];
+  parkedBranches: ParkedBranch[];
   autoMerge: boolean; // PRs merge themselves once QA passes and GitHub's checks are green
   browserTesting: boolean;
   links: string[]; // other connected repos this floor's agents may read
@@ -188,6 +191,7 @@ interface RepoRuntime {
   lastMergedAt: string | null; // newest merge seen: a newer one means the folder needs a sync
   folderSync: string | null;
   merging: boolean;
+  parking?: boolean;
 }
 
 interface QaReport {
@@ -405,6 +409,7 @@ export class Swarm {
       startIssue: (a) => this.startIssue(a),
       rerunQa: (a) => this.rerunQa(a),
       sendBackToDev: (a) => this.sendBackToDev(a),
+      parkPr: (a) => this.parkPr(a),
     });
   }
   private ceoIssues = new IssueCap(MAX_ISSUES_PER_JOB); // issues filed during the current CEO job
@@ -455,6 +460,7 @@ export class Swarm {
           ...r,
           autoMerge: r.autoMerge ?? true,
           requestedStarts: r.requestedStarts ?? [],
+          parkedBranches: r.parkedBranches ?? [],
           links: r.links ?? [],
           mission: r.mission ?? '',
           summary: r.summary ?? '',
@@ -635,6 +641,7 @@ export class Swarm {
       color: r.color,
       autoAssign: r.autoAssign,
       requestedStarts: r.requestedStarts,
+      parkedBranches: r.parkedBranches ?? [],
       autoMerge: r.autoMerge,
       folderSync: rt.folderSync,
       browserTesting: r.browserTesting,
@@ -898,6 +905,7 @@ export class Swarm {
       color: FLOOR_COLORS[(floor - 1) % FLOOR_COLORS.length],
       autoAssign: !!opts.autoAssign,
       requestedStarts: [],
+      parkedBranches: [],
       autoMerge: true,
       browserTesting: true,
       links: [],
@@ -1032,7 +1040,7 @@ export class Swarm {
    */
   private async advanceMerges(repo: PersistedRepo) {
     const rt = this.repoRt.get(repo.id);
-    if (!rt || !repo.autoMerge || rt.merging || rt.syncing || rt.refresh?.pulls.error) return;
+    if (!rt || !repo.autoMerge || rt.merging || rt.syncing || rt.parking || rt.refresh?.pulls.error) return;
     rt.merging = true;
     let merged = false;
     try {
@@ -1205,7 +1213,7 @@ export class Swarm {
   async syncRepo(id: string) {
     const repo = this.state.repos.find((r) => r.id === id);
     const rt = this.repoRt.get(id);
-    if (!repo || !rt || rt.syncing) return;
+    if (!repo || !rt || rt.syncing || rt.parking) return;
     rt.syncing = true;
     this.emitRepo(repo);
     try {
@@ -1498,6 +1506,7 @@ export class Swarm {
   private async assignIssue(agentId: string, issueNumber: number, note: string | undefined, explicit: boolean) {
     const a = this.agent(agentId);
     const repo = this.repo(a.repoId);
+    if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
     if (a.role === 'qa') throw new HttpError(400, `${a.name} is a QA tester; they test pull requests rather than issues.`);
     if (a.role === 'ceo') throw new HttpError(400, `${a.name} runs the company; give issues to the developers.`);
     if (BUSY.includes(a.status)) throw new HttpError(409, `${a.name} is already working on #${a.issueNumber}`);
@@ -1683,6 +1692,7 @@ export class Swarm {
       '',
       issue.body?.trim() || '(The issue has no description.)',
       note ? `\nNote from the manager: ${note}` : '',
+      ...(repo.parkedBranches ?? []).filter((p) => p.issueNumber === issue.number).map((p) => `Parked PR #${p.prNumber}: reuse work from remote branch ${p.branch} if useful (fetch it before making changes).`),
     ]
       .filter(Boolean)
       .join('\n');
@@ -1962,6 +1972,7 @@ export class Swarm {
   /** Manager's "send to QA" for any open PR (including ones opened by people). */
   async sendToQa(repoId: string, prNumber: number) {
     const repo = this.repo(repoId);
+    if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
     const pr = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === prNumber && p.state === 'OPEN');
     if (!pr) throw new HttpError(404, `PR #${prNumber} is not open on ${repo.fullName}`);
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === prNumber);
@@ -2391,6 +2402,7 @@ export class Swarm {
    * holds up the floor. A failed PR goes back to its author when they're free, and otherwise to any free developer.
    */
   private startPipelineWork(repo: PersistedRepo): boolean {
+    if (this.repoRt.get(repo.id)?.parking) return false;
     const devs = this.available(repo, 'dev');
     const testers = this.available(repo, 'qa');
     const waiting = (status: QaRecord['status']) => this.state.qa.filter((q) => q.repoId === repo.id && q.status === status).sort((x, y) => x.updatedAt - y.updatedAt);
@@ -2429,6 +2441,7 @@ export class Swarm {
    * free developer is least needed elsewhere, so nobody sits idle while there is work that can start.
    */
   private startIssueWork(repo: PersistedRepo): boolean {
+    if (this.repoRt.get(repo.id)?.parking) return false;
     const rt = this.repoRt.get(repo.id)!;
     const requests = retainRequestedStarts(repo.requestedStarts, rt.issues, rt.pulls);
     if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests);
@@ -3346,6 +3359,56 @@ export class Swarm {
     return `PR #${x.number} on floor ${repo.floor} is queued for QA (round ${rec.round}).`;
   }
 
+  /** Close a placeholder PR while retaining its branch and releasing its issue. */
+  async parkPr(x: ParkPrRequest) {
+    const reason = x.reason?.trim();
+    if (!reason || reason.length > 1000) throw new HttpError(400, 'Give a short parking reason (1–1000 characters)');
+    const repo = this.floorRepo(x.floor);
+    const rt = this.repoRt.get(repo.id)!;
+    const pull = rt.pulls.find((p) => p.number === x.number && p.state === 'OPEN');
+    if (!pull) throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
+    const record = () => this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number);
+    const linkedAgents = () => this.state.agents.filter((a) => a.repoId === repo.id && (
+      a.prNumber === x.number || a.branch === pull.headRefName ||
+      (a.task !== 'qa' && a.issueNumber != null && (pull.closesIssues.includes(a.issueNumber) ||
+        a.issueNumber === record()?.issueNumber || pull.headRefName.startsWith(`swarm/issue-${a.issueNumber}-`)))
+    ));
+    const preflight = (reserved = false) => checkParkPr(x.number, repo.fullName, {
+      merging: rt.merging, syncing: rt.syncing, parking: !reserved && !!rt.parking, status: record()?.status,
+      busy: linkedAgents().some((a) => BUSY.includes(a.status) || !!this.agentRt.get(a.id)?.session),
+    });
+    preflight();
+    // Reserve the floor before any await: no scheduler, refresh or other handoff can race the close.
+    rt.parking = true;
+    try {
+      const pr = await this.backend.prDetails(repo.fullName, x.number);
+      if (pr.state !== 'OPEN') throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
+      preflight(true);
+      const issues = new Set([...pr.closesIssues, ...(record()?.issueNumber ? [record()!.issueNumber!] : []),
+        ...linkedAgents().filter((a) => a.task !== 'qa' && a.issueNumber != null).map((a) => a.issueNumber!)]);
+      const branchIssue = pr.headRefName.match(/^swarm\/issue-(\d+)-/);
+      if (branchIssue) issues.add(Number(branchIssue[1]));
+      await this.backend.commentPull(repo.fullName, x.number, reason);
+      preflight(true);
+      await this.backend.closePull(repo.fullName, x.number); // closePull never deletes the branch.
+      pull.state = 'CLOSED';
+      repo.parkedBranches = [...(repo.parkedBranches ?? []).filter((p) => p.prNumber !== x.number),
+        ...[...issues].map((issueNumber) => ({ issueNumber, prNumber: x.number, branch: pr.headRefName }))];
+      this.state.qa = this.state.qa.filter((q) => q.repoId !== repo.id || q.prNumber !== x.number);
+      this.broadcast({ type: 'qaRemoved', repoId: repo.id, prNumber: x.number });
+      for (const a of linkedAgents()) this.clearTask(a);
+      repo.requestedStarts = repo.requestedStarts.filter((r) => !issues.has(r.issueNumber));
+      for (const n of issues) this.issueFailures.delete(`${repo.id}#${n}`);
+      this.emitRepo(repo);
+      this.save();
+      this.postMessage('office', `${this.state.agents.find((a) => a.id === CEO_ID)?.name ?? 'Joi'} parked PR #${x.number}: ${reason}`);
+      return `PR #${x.number} on floor ${repo.floor} is parked; branch ${pr.headRefName} was kept and its issue is back in the backlog.`;
+    } finally {
+      rt.parking = false;
+      setTimeout(() => this.schedule(), 200);
+    }
+  }
+
   /** CEO handoff into the normal fix pipeline, even on floors with auto-assign off. */
   async sendBackToDev(x: DevFixRequest) {
     const repo = this.floorRepo(x.floor);
@@ -3353,6 +3416,7 @@ export class Swarm {
     const pull = rt.pulls.find((p) => p.number === x.number && p.state === 'OPEN');
     if (!pull) throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
     const getRecord = () => {
+      if (rt.parking) throw new HttpError(409, 'Wait until PR parking finishes');
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number);
       if (!rec || !['needs-human', 'failed', 'passed'].includes(rec.status)) throw new HttpError(409, `PR #${x.number} is ${rec?.status ?? 'not in QA'}; wait until QA or its fix finishes`);
       if (rt.merging) throw new HttpError(409, `A merge is in progress on ${repo.fullName}; try again once it finishes`);
