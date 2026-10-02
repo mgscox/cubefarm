@@ -3377,30 +3377,30 @@ export class Swarm {
     const pull = rt.pulls.find((p) => p.number === x.number && p.state === 'OPEN');
     if (!pull) throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
     const record = () => this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number);
-    const linkedAgents = () => this.state.agents.filter((a) => a.repoId === repo.id && (
-      a.prNumber === x.number || a.branch === pull.headRefName ||
-      (a.task !== 'qa' && a.issueNumber != null && (pull.closesIssues.includes(a.issueNumber) ||
-        a.issueNumber === record()?.issueNumber || pull.headRefName.startsWith(`swarm/issue-${a.issueNumber}-`)))
+    const linkedAgents = (pr: Pick<PrDetails, 'headRefName' | 'closesIssues'>) => this.state.agents.filter((a) => a.repoId === repo.id && (
+      a.prNumber === x.number || a.branch === pr.headRefName ||
+      (a.task !== 'qa' && a.issueNumber != null && (pr.closesIssues.includes(a.issueNumber) ||
+        a.issueNumber === record()?.issueNumber || pr.headRefName.startsWith(`swarm/issue-${a.issueNumber}-`)))
     ));
-    const preflight = (reserved = false) => checkParkPr(x.number, repo.fullName, {
+    const preflight = (pr: Pick<PrDetails, 'headRefName' | 'closesIssues'>, reserved = false) => checkParkPr(x.number, repo.fullName, {
       merging: rt.merging, syncing: rt.syncing, parking: !reserved && !!rt.parking, status: record()?.status,
-      busy: linkedAgents().some((a) => BUSY.includes(a.status) || !!this.agentRt.get(a.id)?.session),
+      busy: linkedAgents(pr).some((a) => BUSY.includes(a.status) || !!this.agentRt.get(a.id)?.session),
     });
-    preflight();
+    preflight(pull);
     // Reserve the floor before any await: no scheduler, refresh or other handoff can race the close.
     rt.parking = true;
     try {
       const pr = await this.backend.prDetails(repo.fullName, x.number);
       if (pr.state !== 'OPEN') throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
-      preflight(true);
-      const agents = linkedAgents();
+      preflight(pr, true);
+      const agents = linkedAgents(pr);
       const issueNumber = record()?.issueNumber;
       const issues = new Set([...pr.closesIssues, ...(issueNumber ? [issueNumber] : []),
         ...agents.filter((a) => a.task !== 'qa' && a.issueNumber != null).map((a) => a.issueNumber!)]);
       const branchIssue = pr.headRefName.match(/^swarm\/issue-(\d+)-/);
       if (branchIssue) issues.add(Number(branchIssue[1]));
       await this.backend.commentPull(repo.fullName, x.number, reason);
-      preflight(true);
+      preflight(pr, true);
       await this.backend.closePull(repo.fullName, x.number); // closePull never deletes the branch.
       pull.state = 'CLOSED';
       repo.parkedBranches = [...(repo.parkedBranches ?? []).filter((p) => p.prNumber !== x.number),

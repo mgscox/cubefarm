@@ -388,6 +388,47 @@ describe('CEO park_pr', () => {
     expect(repo.parkedBranches).toEqual([{ issueNumber: 67, prNumber: 13, branch: 'placeholder/custom-branch' }]);
   });
 
+  it('releases a completed holder linked only through fresh closing references', async () => {
+    s.state.qa = [];
+    pull.headRefName = 'placeholder/custom-branch';
+    pull.closesIssues = [];
+    Object.assign(s.state.agents[0], { prNumber: null, branch: null });
+    s.backend.prDetails = async () => ({ ...pull, closesIssues: [67], body: '', isCrossRepository: false });
+    repo.requestedStarts = [{ issueNumber: 67, preferredAgentId: 'a1', restartPending: true }];
+
+    await swarm.parkPr(args);
+
+    expect(s.backend.commentPull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, args.reason);
+    expect(s.backend.closePull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13);
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null, issueNumber: null, prNumber: null });
+    expect(repo.requestedStarts).toEqual([]);
+    expect(repo.parkedBranches).toEqual([{ issueNumber: 67, prNumber: 13, branch: pull.headRefName }]);
+    const floor = JSON.parse(s.companyStatus()).floors[0];
+    expect(floor.pullRequests).toEqual([]);
+    const parkedIssue = floor.backlog.find((i: { number: number }) => i.number === 67);
+    expect(parkedIssue).toMatchObject({ waitsFor: [66] });
+    expect(parkedIssue.inProgress).toBeUndefined();
+    expect(ready()).not.toContain(67);
+  });
+
+  it('refuses a live holder linked only through fresh closing references before GitHub mutations', async () => {
+    s.state.qa = [];
+    pull.headRefName = 'placeholder/custom-branch';
+    pull.closesIssues = [];
+    Object.assign(s.state.agents[0], { status: 'working', prNumber: null, branch: null });
+    Object.assign(s.agentRt.get('a1')!, { session: {} });
+    s.backend.prDetails = async () => ({ ...pull, closesIssues: [67], body: '', isCrossRepository: false });
+
+    await expect(swarm.parkPr(args)).rejects.toMatchObject({ status: 409 });
+
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.closePull).not.toHaveBeenCalled();
+    expect(pull.state).toBe('OPEN');
+    expect(s.state.agents[0]).toMatchObject({ status: 'working', task: 'issue', issueNumber: 67 });
+    expect(repo.parkedBranches).toEqual([]);
+    expect(s.repoRt.get(repo.id)).toMatchObject({ parking: false });
+  });
+
   it.each(['testing', 'busy', 'live-session', 'merging', 'syncing'] as const)('refuses %s with 409 and no GitHub mutations', async (condition) => {
     if (condition === 'testing') s.state.qa[0].status = 'testing';
     if (condition === 'busy') s.state.agents[0].status = 'preparing';
