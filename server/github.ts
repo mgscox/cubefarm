@@ -260,6 +260,11 @@ export async function prForBranch(fullName: string, branch: string): Promise<{ n
   return list[0] ?? null;
 }
 
+/** How many commits a branch has on GitHub that the base branch doesn't (throws when the branch isn't there). */
+export async function branchAhead(fullName: string, base: string, branch: string): Promise<number> {
+  return Number(await gh(['api', `repos/${fullName}/compare/${base}...${branch}?per_page=1`, '--jq', '.ahead_by'])) || 0;
+}
+
 // ---------- QA support ----------
 
 export interface PrDetails {

@@ -1779,10 +1779,14 @@ export class Swarm {
       }
     }
 
+    // Work pushed without a PR (the CLI was cut off, or skipped the last step) isn't dropped: see finishPushedWork.
+    const ahead = !a.prNumber && a.branch && !result.interrupted ? await this.backend.branchAhead(repo.fullName, repo.defaultBranch, a.branch).catch(() => 0) : 0;
     if (a.prNumber) this.cancelRequestedStart(a);
-    if (a.status === 'stopped') return; // the manager already logged the stop
+    if (a.status === 'stopped' || this.agentRt.get(a.id)?.session) return; // the manager already logged the stop, or sent a follow-up meanwhile
+    if (ahead > 0 && !this.limited() && this.finishPushedWork(a, repo, result, ahead)) return;
     if (!result.ok) {
       this.issueFailed(repo, a.issueNumber);
+      if (ahead > 0) this.postMessage('office', `⚠️ ${a.name}'s session on #${a.issueNumber} (${repo.fullName}) failed without a pull request. Its branch ${a.branch} has ${this.commits(ahead)} on GitHub.`);
       return this.fail(a, result, `#${a.issueNumber}`);
     }
     this.issueFailures.delete(`${repo.id}#${a.issueNumber}`);
@@ -1793,29 +1797,58 @@ export class Swarm {
       this.appendLog(a, [{ kind: 'system', text: `📨 Handed PR #${a.prNumber} to QA.` }]);
       this.toast('success', `${a.name} opened PR #${a.prNumber} for #${a.issueNumber}; it's off to QA`);
     } else {
-      this.noPullRequest(a, repo);
+      this.noPullRequest(a, repo, ahead);
     }
+  }
+
+  private commits(n: number) {
+    return `${n} pushed commit${n === 1 ? '' : 's'}`;
+  }
+
+  /**
+   * An issue session ended without a PR although its branch has commits on GitHub: its CLI was cut off mid-task (or
+   * skipped the last step). Once per issue the developer gets another session on the same desk and branch, resuming
+   * the old one when there is one, to verify that work and open the PR. False when it already had that chance.
+   */
+  private finishPushedWork(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, ahead: number): boolean {
+    const key = `${repo.id}#${a.issueNumber}`;
+    if (this.nudged.has(key) || !a.branch) return false;
+    this.nudged.add(key);
+    const why = result.ok ? 'ended without opening a pull request' : `was cut off before it opened a pull request (${(result.errors[0] ?? 'it failed').replace(/\.$/, '')})`;
+    this.appendLog(a, [{ kind: 'system', text: `↻ The session ${why}, but ${a.branch} has ${this.commits(ahead)}. Starting one more to finish it.` }]);
+    const cwd = this.backend.deskDir(repo.fullName, this.agentSlug(a));
+    const prompt = [
+      `Your last session on GitHub issue #${a.issueNumber} (${a.issueTitle}) ${why}. Its branch ${a.branch} has ${this.commits(ahead)} ahead of ${repo.defaultBranch}, and this worktree may hold more.`,
+      `Check git status and git log origin/${repo.defaultBranch}..HEAD, finish what is left (run the checks), push, and open the PR with "Closes #${a.issueNumber}" in its body. If the issue can't be done, open a draft PR that explains why.`,
+    ].join('\n');
+    Object.assign(a, { startedAt: Date.now(), endedAt: null, lastError: null });
+    this.startAgentSession(a, repo, cwd, prompt, this.buildSystemAppend(a, repo, cwd, a.branch), a.sessionId ?? undefined);
+    return true;
   }
 
   /**
    * An issue session ended without a PR, which would leave the issue "taken" with nobody on it. The same developer,
    * who has the context and the worktree, is asked once to finish; after that the issue goes back on the board.
    */
-  private noPullRequest(a: PersistedAgent, repo: PersistedRepo) {
+  private noPullRequest(a: PersistedAgent, repo: PersistedRepo, ahead: number) {
     const key = `${repo.id}#${a.issueNumber}`;
-    if (this.nudged.has(key)) return this.releaseIssue(a, repo);
+    if (this.nudged.has(key)) return this.releaseIssue(a, repo, ahead);
     this.nudged.add(key);
     // message() starts the session before its first await, so the scheduler can't hand this developer other work first.
     void this.message(
       a.id,
       `You finished without opening a pull request for #${a.issueNumber}. Finish the remaining steps now: commit, push your branch and open the PR with "Closes #${a.issueNumber}". If the issue can't be done, open a draft PR that explains why.`,
-    ).catch(() => this.releaseIssue(a, repo));
+    ).catch(() => this.releaseIssue(a, repo, ahead));
   }
 
-  private releaseIssue(a: PersistedAgent, repo: PersistedRepo) {
+  private releaseIssue(a: PersistedAgent, repo: PersistedRepo, ahead: number) {
     const n = a.issueNumber;
+    const branch = a.branch;
     this.clearTask(a);
-    this.postMessage('office', `⚠️ ${a.name} finished #${n} on ${repo.fullName} without opening a pull request, so it's back on the board for anyone.`);
+    this.postMessage(
+      'office',
+      `⚠️ ${a.name} finished #${n} on ${repo.fullName} without opening a pull request, so it's back on the board for anyone.${ahead > 0 ? ` Its branch ${branch} has ${this.commits(ahead)} to pick up from.` : ''}`,
+    );
   }
 
   // ---------- QA ----------

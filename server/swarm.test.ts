@@ -343,3 +343,70 @@ describe('ready-for-human issues', () => {
     ]);
   });
 });
+
+describe('a developer session that ends without a PR after pushing commits', () => {
+  type Backend = ReturnType<typeof createDemoBackend>;
+  type Fake = Internals & { syncRepo(id: string): Promise<void>; buildSystemAppend(...args: unknown[]): string; state: { messages: { text: string }[] } };
+  let sessions: { opts: SessionOptions; cb: SessionCallbacks }[];
+  let ahead: Mock<Backend['branchAhead']>;
+  let f: Fake;
+  let backend: Backend;
+  const ada = () => s.state.agents[0];
+  const cut = { ok: false, text: '', errors: ['Codex was stopped (SIGTERM) before finishing.'], costUsd: 0, turns: 0 };
+  /** The office follows a session, and the CLI behind it ends with this result. */
+  const end = async (result: typeof cut) => {
+    const n = sessions.length;
+    sessions[n - 1].cb.finished(result);
+    await vi.waitFor(() => expect(ada().status).not.toBe('working'), { timeout: 500 }).catch(() => undefined);
+    return sessions.length > n;
+  };
+
+  beforeEach(() => {
+    f = s as unknown as Fake;
+    backend = (s as unknown as { backend: Backend }).backend;
+    Object.assign(repo, { defaultBranch: 'main', links: [], browserTesting: false });
+    Object.assign(ada(), { model: '', effort: '', cli: '', task: 'issue', issueNumber: 66, issueTitle: 'Issue 66', branch: 'swarm/issue-66-ada', sessionId: null, prNumber: null, startedAt: Date.now(), turns: 0, costUsd: 0 });
+    sessions = [];
+    vi.spyOn(backend, 'startSession').mockImplementation((opts, cb) => {
+      sessions.push({ opts, cb });
+      return { send: () => undefined, stop: () => undefined };
+    });
+    ahead = vi.spyOn(backend, 'branchAhead').mockResolvedValue(3);
+    vi.spyOn(backend, 'prForBranch').mockResolvedValue(null);
+    vi.spyOn(f, 'syncRepo').mockResolvedValue();
+    vi.spyOn(f, 'buildSystemAppend').mockReturnValue('');
+    s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+  });
+
+  it('is retried once on the same desk and branch, then reported with its branch', async () => {
+    expect(await end(cut)).toBe(true);
+    expect(ahead).toHaveBeenCalledWith('demo-co/pixel-todo', 'main', 'swarm/issue-66-ada');
+    expect(ada()).toMatchObject({ status: 'working', task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada' });
+    const retry = sessions[1].opts;
+    expect(retry.cwd).toBe(backend.deskDir(repo.fullName, 'ada-a1')); // the desk as it was left: not prepared (reset) again
+    expect(retry.resumeSessionId).toBeUndefined(); // Codex never said which thread it was on
+    expect(retry.prompt).toContain('swarm/issue-66-ada has 3 pushed commits ahead of main');
+    expect(retry.prompt).toContain('SIGTERM');
+
+    // The retry is cut off too: no third session, and the office says where the work is.
+    expect(await end(cut)).toBe(false);
+    expect(ada()).toMatchObject({ status: 'error', lastError: cut.errors[0] });
+    expect(f.state.messages.at(-1)?.text).toContain('Its branch swarm/issue-66-ada has 3 pushed commits on GitHub');
+  });
+
+  it('resumes the session it has, and names the branch when the issue goes back on the board', async () => {
+    ada().sessionId = 'thread-1';
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(true);
+    expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
+    expect(sessions[1].opts.prompt).toContain('ended without opening a pull request');
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(false);
+    expect(ada()).toMatchObject({ status: 'idle', task: null });
+    expect(f.state.messages.at(-1)?.text).toContain('Its branch swarm/issue-66-ada has 3 pushed commits to pick up from.');
+  });
+
+  it('fails as before when nothing was pushed', async () => {
+    ahead.mockRejectedValue(new Error('gh api failed: HTTP 404'));
+    expect(await end(cut)).toBe(false);
+    expect(ada()).toMatchObject({ status: 'error', branch: 'swarm/issue-66-ada' });
+  });
+});
