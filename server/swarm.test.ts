@@ -503,7 +503,14 @@ describe('ready-for-human issues', () => {
 
 describe('a developer session that ends without a PR after pushing commits', () => {
   type Backend = ReturnType<typeof createDemoBackend>;
-  type Fake = Internals & { syncRepo(id: string): Promise<void>; buildSystemAppend(...args: unknown[]): string; state: { messages: { text: string }[] } };
+  type Fake = Internals & {
+    syncRepo(id: string): Promise<void>;
+    buildSystemAppend(...args: unknown[]): string;
+    issueTaken(repo: Repo, n: number): boolean;
+    pausedUntil: number;
+    nudged: Set<string>;
+    state: { messages: { text: string }[]; settings: { sessionLimit: number } };
+  };
   let sessions: { opts: SessionOptions; cb: SessionCallbacks }[];
   let ahead: Mock<Backend['branchAhead']>;
   let f: Fake;
@@ -633,6 +640,40 @@ describe('a developer session that ends without a PR after pushing commits', () 
       expect(sessions).toHaveLength(2);
       expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
       expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
+    });
+
+    it('waits for a free session slot like any other start', async () => {
+      f.state.settings.sessionLimit = 1;
+      pause();
+      sessions[0].cb.finished(cut);
+      await vi.advanceTimersByTimeAsync(50);
+      const barbara = { ...ada(), id: 'a2', name: 'Barbara', desk: 1, status: 'working', issueNumber: 67, heldRetry: null };
+      f.state.agents.push(barbara);
+      pauseEnds();
+      expect(sessions).toHaveLength(1); // Barbara has the only slot
+      expect(ada()).toMatchObject({ status: 'error', heldRetry: { issueNumber: 66, ahead: 3 } });
+      expect(f.issueTaken(repo, 66)).toBe(true);
+      barbara.status = 'done';
+      f.schedule();
+      expect(sessions).toHaveLength(2);
+      expect(ada()).toMatchObject({ status: 'working', heldRetry: null });
+    });
+
+    it('survives an office restart', async () => {
+      ada().sessionId = 'thread-1';
+      pause();
+      sessions[0].cb.finished({ ...cut, ok: true, errors: [] });
+      await vi.advanceTimersByTimeAsync(50);
+      // Only the state file survives: the pause and the nudges were in memory.
+      f.state = JSON.parse(JSON.stringify(f.state)) as Fake['state'];
+      Object.assign(f, { pausedUntil: 0, nudged: new Set() });
+      expect(ada()).toMatchObject({ status: 'done', task: 'issue', issueNumber: 66, heldRetry: { issueNumber: 66, ahead: 3 } });
+      expect(f.issueTaken(repo, 66)).toBe(true);
+      f.schedule();
+      expect(sessions).toHaveLength(2);
+      expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
+      expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
+      expect(ada().heldRetry).toBeNull();
     });
   });
 
