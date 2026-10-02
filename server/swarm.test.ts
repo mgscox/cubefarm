@@ -3,23 +3,29 @@ import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
 import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ServerEvent } from '../shared/types.ts';
 import type { OfficeTools } from './ceo.ts';
-import type { SessionOptions, SessionCallbacks } from './agentRunner.ts';
+import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRunner.ts';
 
 // A Swarm that is never init()ed: no state file, scheduler timers or real sessions.
 
 type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => Promise<void>;
 type Repo = { id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; preview: { command: null; env: object } };
+type Backend = ReturnType<typeof createDemoBackend>;
+type QaRec = QaView & { sessionFailures: number; retests?: number; testedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
 interface Internals {
-  backend: { demo: boolean };
-  state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: (QaView & { sessionFailures: number })[] };
+  backend: Backend;
+  state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[] };
   repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string }>;
-  agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null }>;
+  agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null; shots?: unknown[] }>;
+  pausedUntil: number;
   readyIssues(repo: Repo): { issue: IssueInfo }[];
   startIssueWork(repo: Repo): boolean;
   companyStatus(): string;
   officeTools(): OfficeTools;
   startPipelineWork(repo: Repo): boolean;
   runQa(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
+  runFix(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
+  onQaFinished(agent: unknown, repo: Repo, result: SessionResult): Promise<void>;
+  onFixFinished(agent: unknown, repo: Repo, result: SessionResult): void;
   broadcast(event: ServerEvent): void;
   save(): void;
   schedule(): void;
@@ -341,5 +347,141 @@ describe('ready-for-human issues', () => {
       expect.objectContaining({ number: 1, readyForHuman: true }),
       expect.not.objectContaining({ readyForHuman: expect.anything() }),
     ]);
+  });
+});
+
+describe('QA rounds', () => {
+  const pull: PullInfo = {
+    number: 13, title: 'Chaser', url: '', headRefName: 'swarm/13', state: 'OPEN',
+    isDraft: false, closesIssues: [], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'sha-1',
+    reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
+    mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+  };
+  const result = (ok: boolean, structured?: unknown): SessionResult => ({ ok, text: '', costUsd: 0, turns: 1, errors: ok ? [] : ['Claude Code exited with code 1'], structured });
+  const failReport = { verdict: 'fail', summary: 'Still broken', checks: [{ name: 'Chaser', result: 'fail', details: 'never catches up' }] };
+  const addAgent = (id: string, name: string, role: string, desk: number) => {
+    const a: Record<string, unknown> = { id, name, repoId: repo.id, role, specialty: '', status: 'idle', task: null, issueNumber: null, desk, endedAt: null };
+    s.state.agents.push(a);
+    s.agentRt.set(id, { log: [], pending: [], terminal: null, shots: [] });
+    return a;
+  };
+  let ada: Record<string, unknown>;
+  let rec: QaRec;
+  let runFix: Mock;
+
+  beforeEach(() => {
+    ada = s.state.agents[0];
+    s.agentRt.get('a1')!.shots = [];
+    s.repoRt.get(repo.id)!.pulls = [pull];
+    rec = {
+      repoId: repo.id, prNumber: 13, status: 'failed', round: 2, sessionFailures: 0, retests: 0, testedSha: 'sha-0', failedSha: 'sha-0', fixCrashes: [],
+      devAgentId: 'a1', qaAgentId: 'q1', summary: 'Broken', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0,
+    };
+    s.state.qa.push(rec);
+    runFix = vi.spyOn(s, 'runFix').mockResolvedValue() as Mock;
+  });
+
+  const qaFails = async (tester: Record<string, unknown>) => {
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    rec.status = 'testing';
+    rec.testedSha = 'sha-1';
+    await s.onQaFinished(tester, repo, result(true, failReport));
+  };
+  const fixCrashes = (dev: Record<string, unknown>) => {
+    Object.assign(dev, { status: 'working', task: 'fix', prNumber: 13 });
+    rec.status = 'fixing';
+    rec.devAgentId = dev.id as string;
+    s.onFixFinished(dev, repo, result(false));
+  };
+
+  it("doesn't spend QA's budget on a manager re-run: a fail after it goes back to the developer", async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    const comment = vi.spyOn(s.backend, 'commentPull');
+    await swarm.sendToQa(repo.id, 13);
+    expect(rec).toMatchObject({ status: 'queued', round: 3, retests: 1 });
+    await qaFails(tester);
+    expect(rec).toMatchObject({ status: 'failed', failedSha: 'sha-1' });
+    expect(comment.mock.calls[0][2]).toContain('sent back to the developer for fixes');
+  });
+
+  it('still hands a PR to a human after three QA rounds of its own fail', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    const comment = vi.spyOn(s.backend, 'commentPull');
+    rec.round = 3;
+    await qaFails(tester);
+    expect(rec.status).toBe('needs-human');
+    expect(comment.mock.calls[0][2]).toContain('needs a human decision');
+  });
+
+  describe('re-testing an unchanged commit', () => {
+    let session: Mock;
+    beforeEach(() => {
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, body: '', isCrossRepository: false });
+      vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
+      session = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {}) as Mock;
+    });
+
+    it('sends it straight to a developer with the last findings instead of starting a QA session', async () => {
+      const tester = addAgent('q2', 'Marple', 'qa', 1);
+      rec.failedSha = 'sha-1'; // QA failed the current head; the fix crashed before pushing anything
+      await swarm.sendToQa(repo.id, 13);
+      await s.runQa(tester, repo, rec);
+      expect(session).not.toHaveBeenCalled();
+      expect(rec).toMatchObject({ status: 'failed', qaAgentId: 'q1', summary: 'Broken' });
+      expect(tester).toMatchObject({ status: 'idle', task: null });
+      expect(s.agentRt.get('q2')!.log).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining('no new commits since QA failed it') })]));
+      expect(s.startPipelineWork(repo)).toBe(true);
+      expect(runFix).toHaveBeenCalledWith(ada, repo, rec);
+    });
+
+    it('tests a commit QA has not failed', async () => {
+      const tester = addAgent('q2', 'Marple', 'qa', 1);
+      rec.status = 'queued';
+      await s.runQa(tester, repo, rec);
+      expect(session).toHaveBeenCalledOnce();
+      expect(rec).toMatchObject({ status: 'testing', testedSha: 'sha-1' });
+    });
+  });
+
+  describe('a crashed fix', () => {
+    it('goes to another developer next, and to a human once they crash too', () => {
+      const barbara = addAgent('a2', 'Barbara', 'dev', 1);
+      fixCrashes(ada);
+      expect(rec).toMatchObject({ status: 'failed', fixCrashes: ['a1'] });
+      ada.status = 'idle'; // free again, but it crashed on this PR
+      Object.assign(barbara, { status: 'working' });
+      expect(s.startPipelineWork(repo)).toBe(false); // waits for someone who hasn't crashed on it
+      barbara.status = 'idle';
+      expect(s.startPipelineWork(repo)).toBe(true);
+      expect(runFix).toHaveBeenCalledExactlyOnceWith(barbara, repo, rec);
+      fixCrashes(barbara);
+      expect(rec).toMatchObject({ status: 'needs-human', fixCrashes: ['a1', 'a2'] });
+    });
+
+    it('is retried by the only developer on the floor, then needs a human', () => {
+      fixCrashes(ada);
+      expect(rec.status).toBe('failed');
+      ada.status = 'idle';
+      expect(s.startPipelineWork(repo)).toBe(true);
+      expect(runFix).toHaveBeenCalledWith(ada, repo, rec);
+      fixCrashes(ada);
+      expect(rec).toMatchObject({ status: 'needs-human', fixCrashes: ['a1', 'a1'] });
+    });
+
+    it("doesn't count a stop for Claude's usage limit", () => {
+      s.pausedUntil = Date.now() + 60_000;
+      fixCrashes(ada);
+      fixCrashes(ada);
+      expect(rec).toMatchObject({ status: 'failed', fixCrashes: [] });
+    });
+
+    it('starts a fresh count once a fix is pushed', () => {
+      addAgent('a2', 'Barbara', 'dev', 1);
+      fixCrashes(ada);
+      Object.assign(ada, { status: 'working', task: 'fix', prNumber: 13 });
+      rec.status = 'fixing';
+      s.onFixFinished(ada, repo, result(true));
+      expect(rec).toMatchObject({ status: 'queued', round: 3, fixCrashes: [] });
+    });
   });
 });
