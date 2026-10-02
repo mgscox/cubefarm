@@ -1703,10 +1703,12 @@ export class Swarm {
   ) {
     const rt = this.agentRt.get(a.id)!;
     this.nextGeneration(a);
+    const generation = rt.generation;
     a.status = 'working';
     const how = this.sessionRuntime(a, resumeSessionId);
     this.emitAgent(a);
-    rt.session = this.backend.startSession(
+    let session: SessionHandle | undefined; // undefined while startSession runs, should a runner finish synchronously
+    session = rt.session = this.backend.startSession(
       {
         cwd,
         prompt,
@@ -1752,15 +1754,20 @@ export class Swarm {
         },
         limited: (at) => this.pauseForLimit(at),
         usageWarning: (info) => this.paceForWarning(info),
-        finished: (result) => void this.onFinished(a, repo, result),
+        finished: (result) => void this.onFinished(a, repo, result, generation, session),
       },
     );
   }
 
-  private async onFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult) {
+  /** `generation`: the agent's when this session started. A session that ends after its task was cleared or replaced changes nothing. */
+  private async onFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, generation: number | undefined, session: SessionHandle | undefined) {
     const rt = this.agentRt.get(a.id);
     if (!rt || !this.state.agents.includes(a)) return; // fired
     if (this.officeUpdate.handedOver) return; // stopped for the office's update: recovered like after a restart
+    if (rt.generation !== generation) {
+      if (session && rt.session === session) rt.session = null; // cleared after a Stop, with no session since
+      return;
+    }
     rt.session = null;
     rt.currentTool = null;
     a.endedAt = Date.now();
@@ -1772,7 +1779,7 @@ export class Swarm {
 
     if (a.task === 'qa') await this.onQaFinished(a, repo, result);
     else if (a.task === 'fix') this.onFixFinished(a, repo, result);
-    else await this.onIssueFinished(a, repo, result, released);
+    else await this.onIssueFinished(a, repo, result, released, generation);
 
     this.emitAgent(a);
     this.save();
@@ -1792,9 +1799,8 @@ export class Swarm {
   }
 
   /** `released`: the clean-up of the desk the session just left, which a session started on that desk must wait for. */
-  private async onIssueFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, released: Promise<void>) {
+  private async onIssueFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, released: Promise<void>, generation: number | undefined) {
     // Every await below can outlive this task: the manager may clear it, assign another or send a follow-up meanwhile.
-    const generation = this.agentRt.get(a.id)?.generation;
     const gone = () => !this.state.agents.includes(a) || this.officeUpdate.handedOver || this.agentRt.get(a.id)?.generation !== generation;
     const escaped = repo.fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const m = result.text.match(new RegExp(`https://github\\.com/${escaped}/pull/(\\d+)`, 'i'));

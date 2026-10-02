@@ -713,6 +713,44 @@ describe('a developer session that ends without a PR after pushing commits', () 
     });
   });
 
+  describe("when a stopped session's end arrives after the manager took over", () => {
+    const late = { ...cut, costUsd: 2, turns: 5 };
+    const rt = () => f.agentRt.get('a1') as unknown as { session: unknown };
+
+    it('Stop then Clear desk: changes nothing', async () => {
+      swarm.stopAgent('a1');
+      swarm.resetAgent('a1');
+      const release = vi.spyOn(backend, 'releaseDesk');
+      sessions[0].cb.finished(late);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(release).not.toHaveBeenCalled();
+      expect(ahead).not.toHaveBeenCalled();
+      expect(sessions).toHaveLength(1);
+      expect(ada()).toMatchObject({ status: 'idle', task: null, issueNumber: null, lastError: null, costUsd: 0, turns: 0, endedAt: null });
+      expect(rt().session).toBeNull(); // the stopped session's handle doesn't linger
+    });
+
+    it('Stop then Assign another issue: the new task and its session are left alone', async () => {
+      s.runTask = (Swarm.prototype as unknown as { runTask: RunTask }).runTask;
+      Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready' });
+      setIssues(issue(66), issue(67));
+      swarm.stopAgent('a1');
+      await swarm.assign('a1', 67);
+      await vi.advanceTimersByTimeAsync(1000); // the demo desk takes 900ms to prepare
+      expect(sessions).toHaveLength(2);
+      const replacement = rt().session;
+      expect(replacement).not.toBeNull();
+      const release = vi.spyOn(backend, 'releaseDesk');
+      sessions[0].cb.finished(late);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(release).not.toHaveBeenCalled();
+      expect(ahead).not.toHaveBeenCalled();
+      expect(sessions).toHaveLength(2);
+      expect(rt().session).toBe(replacement);
+      expect(ada()).toMatchObject({ status: 'working', task: 'issue', issueNumber: 67, branch: 'swarm/issue-67-ada', lastError: null, costUsd: 0, turns: 0, endedAt: null });
+    });
+  });
+
   it('fails as before when nothing was pushed', async () => {
     ahead.mockRejectedValue(new Error('gh api failed: HTTP 404'));
     expect(await end(cut)).toBe(false);
