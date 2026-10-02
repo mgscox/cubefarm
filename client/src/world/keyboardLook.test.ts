@@ -12,7 +12,7 @@ describe('keyboard camera rotation', () => {
 
   it.each([
     ['KeyQ', 1.5, 0],
-    ['KeyR', -1.5, 0],
+    ['KeyE', -1.5, 0],
     ['KeyZ', 0, -1.35],
     ['KeyX', 0, 1.35],
   ])('%s turns in the requested direction', (key, yaw, pitch) => {
@@ -20,7 +20,8 @@ describe('keyboard camera rotation', () => {
   });
 
   it('cancels opposing keys and ignores movement keys', () => {
-    expect(turned(level, ['KeyQ', 'KeyR', 'KeyZ', 'KeyX', 'KeyW'], 1)).toEqual(level);
+    expect(turned(level, ['KeyQ', 'KeyE', 'KeyZ', 'KeyX', 'KeyW'], 1)).toEqual(level);
+    expect(turned(level, ['KeyR'], 1)).toEqual(level);
     expect(turned(level, [], 1)).toEqual(level);
   });
 
