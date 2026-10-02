@@ -766,7 +766,7 @@ export function stuckAnswer(floor: number, p: Partial<DemoPull> & { number: numb
   if (p.failedChecks?.length) why.push(`Failed QA checks: ${p.failedChecks.join(', ')}.`);
   if (p.mergeable === 'conflicting') why.push('It conflicts with the default branch.');
   if (p.mergeable === 'unknown') why.push("GitHub hasn't said yet whether it merges cleanly.");
-  if (p.checks === 'failing') why.push("GitHub's checks are failing.");
+  if (p.checks === 'failing') why.push(`GitHub's checks are failing${p.ciFailedChecks?.length ? `: ${p.ciFailedChecks.join(', ')}` : ''}.`);
   if (p.checks === 'pending') why.push("GitHub's checks are still running.");
   if (p.checks === 'unavailable') why.push("The office can't read GitHub's checks.");
   if (p.merge) why.push(`Auto-merge: ${p.merge}.`);
@@ -918,6 +918,12 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
     async chat(text: string) {
       const s = await status();
       await think('Reading your message.');
+      const sendBack = text.match(/\bsend\s+(?:back\s+)?(?:PR\s*)?#(\d+)\s+(?:back\s+)?to\s+(?:dev|developer)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))(?:\s+with\s+([^;\n]+))?/i);
+      if (sendBack) {
+        const floor = sendBack[2] ? Number(sendBack[2]) : s.floors.find((f) => f.repo.toLowerCase() === sendBack[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === sendBack[3].toLowerCase())?.floor;
+        if (floor === undefined) return `Refused: No floor for "${sendBack[3]}".`;
+        return use('send_back_to_dev', { floor, number: Number(sendBack[1]), ...(sendBack[4] ? { note: sendBack[4].trim().slice(0, 1500) } : {}) });
+      }
       const rerun = text.match(/\b(?:rerun\s+qa|re-test|retest)\s+(?:on\s+)?(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))(?:\s+with\s+([^;\n]+))?/i);
       if (rerun) {
         const floor = rerun[2] ? Number(rerun[2]) : s.floors.find((f) => f.repo.toLowerCase() === rerun[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === rerun[3].toLowerCase())?.floor;

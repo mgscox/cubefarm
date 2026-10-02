@@ -70,7 +70,7 @@ describe('jobLabel', () => {
 // The CEO only sees the office tools if the whole list converts to JSON Schema: one schema the SDK can't handle
 // (z.record did this) empties tools/list, and the CEO silently loses every tool.
 describe('office tools', () => {
-  const connect = async (startIssue: OfficeHandlers['startIssue'] = async () => 'started', rerunQa: OfficeHandlers['rerunQa'] = async () => 'queued') => {
+  const connect = async (startIssue: OfficeHandlers['startIssue'] = async () => 'started', rerunQa: OfficeHandlers['rerunQa'] = async () => 'queued', sendBackToDev: OfficeHandlers['sendBackToDev'] = async () => 'sent back') => {
     const floors: unknown[] = [];
     const office = createOfficeTools({
       companyStatus: () => '{}',
@@ -83,6 +83,7 @@ describe('office tools', () => {
       routeIssue: async () => '',
       startIssue,
       rerunQa,
+      sendBackToDev,
     });
     const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
     await office.server.instance.connect(serverSide);
@@ -94,7 +95,23 @@ describe('office tools', () => {
   it('lists every tool the CEO relies on', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'propose_hire', 'propose_let_go', 'rerun_qa', 'route_issue', 'set_floor_profile', 'start_issue', 'update_job']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'propose_hire', 'propose_let_go', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+  });
+
+  it('validates developer handoffs and surfaces actionable refusals', async () => {
+    const requests: unknown[] = [];
+    const { client } = await connect(undefined, undefined, async (a) => {
+      requests.push(a);
+      if (a.number === 14) throw new Error('PR #14 is already fixing');
+      return 'sent back';
+    });
+    const args = { floor: 1, number: 13, agent: 'Ada', note: 'Fix recovery', reason: 'qa' };
+    expect(await client.callTool({ name: 'send_back_to_dev', arguments: args })).toMatchObject({ content: [{ text: 'sent back' }] });
+    for (const invalid of [{ floor: 1 }, { ...args, floor: 1.5 }, { ...args, number: 0 }, { ...args, reason: 'unknown' }, { ...args, note: 'x'.repeat(1501) }]) {
+      expect(await client.callTool({ name: 'send_back_to_dev', arguments: invalid })).toMatchObject({ isError: true });
+    }
+    expect(requests).toEqual([args]);
+    expect(await client.callTool({ name: 'send_back_to_dev', arguments: { floor: 1, number: 14 } })).toMatchObject({ isError: true, content: [{ text: 'Refused: PR #14 is already fixing' }] });
   });
 
   it('validates rerun arguments and returns handler errors as tool errors', async () => {
@@ -285,7 +302,7 @@ describe('planStartIssue', () => {
 });
 
 describe('company_status pull requests', () => {
-  const pull = { number: 14, title: 'Chase late invoices', checks: 'passing' as PullInfo['checks'], headSha: 'abcdef1234567', mergeable: 'MERGEABLE', mergeState: 'CLEAN' };
+  const pull = { number: 14, title: 'Chase late invoices', checks: 'passing' as PullInfo['checks'], headSha: 'abcdef1234567', mergeable: 'MERGEABLE', mergeState: 'CLEAN', failedChecks: [] as PullInfo['failedChecks'] };
   const qa = (o: Partial<PrQaState> = {}): PrQaState => ({
     status: 'passed', round: 1, retests: 0, summary: 'All good', checks: [{ name: 'Build', result: 'pass', details: '' }], commentUrl: 'https://gh/c/1',
     mergeNote: null, testedSha: 'abcdef1234567', sessionFailures: 0, fixReason: null, devAgentId: 'a1', ...o,
@@ -295,14 +312,14 @@ describe('company_status pull requests', () => {
 
   it('says why a needs-human PR is stuck', () => {
     const v = view(
-      { mergeable: 'CONFLICTING', mergeState: 'DIRTY', headSha: '9999999aaaa' },
+      { mergeable: 'CONFLICTING', mergeState: 'DIRTY', headSha: '9999999aaaa', checks: 'failing', failedChecks: [{ name: 'CI / test', url: null }] },
       qa({
         status: 'needs-human', round: 4, retests: 1, summary: 'x'.repeat(600), fixReason: 'qa', sessionFailures: 1,
         checks: [{ name: 'Build', result: 'pass', details: '' }, { name: 'Mobile layout', result: 'fail', details: '' }, { name: 'Console', result: 'fail', details: '' }],
       }),
     );
     expect(v).toMatchObject({
-      qa: 'needs-human (round 4)', mergeable: 'conflicting', developer: 'Ada', failedChecks: ['Mobile layout', 'Console'],
+      qa: 'needs-human (round 4)', mergeable: 'conflicting', ciFailedChecks: ['CI / test'], developer: 'Ada', failedChecks: ['Mobile layout', 'Console'],
       qaCommentUrl: 'https://gh/c/1', fixReason: 'qa', sessionFailures: 1, qaRoundsLeft: 0,
       testedSha: 'abcdef1', headSha: '9999999', newCommitsSinceQa: true,
     });
@@ -344,6 +361,7 @@ describe('company_status pull requests', () => {
     );
     expect(stuckAnswer(3, view({}, qa({ status: 'testing', round: 2 })))).toBe('PR #14 on floor 3 is testing (round 2). QA is testing it now.');
     expect(stuckAnswer(3, view({}))).toBe('PR #14 on floor 3 is not tested. QA has not tested it yet.');
+    expect(stuckAnswer(3, view({ checks: 'failing', failedChecks: [{ name: 'CI / test', url: null }] }, qa()))).toBe("PR #14 on floor 3 is passed. GitHub's checks are failing: CI / test.");
     const out = view({}, qa({ status: 'needs-human', round: 3, summary: 'Still broken', checks: [] }));
     expect(stuckAnswer(3, out)).toBe('PR #14 on floor 3 is needs-human (round 3). QA said: Still broken. It needs your call: fix it by hand, close it, or rerun QA.');
   });

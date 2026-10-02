@@ -108,7 +108,7 @@ function Help() {
           <kbd>W</kbd>
           <kbd>A</kbd>
           <kbd>S</kbd>
-          <kbd>D</kbd> walk · <kbd>Shift</kbd> run · mouse to look · <kbd>Q</kbd>/<kbd>R</kbd> turn left/right · <kbd>Z</kbd>/<kbd>X</kbd> look down/up · <kbd>E</kbd> or left click interacts with whatever the crosshair is on (the first click only grabs the mouse) · <kbd>Esc</kbd> frees the mouse. Closing a panel or changing floor grabs it again.
+          <kbd>D</kbd> walk · <kbd>Shift</kbd> run · mouse to look · <kbd>Q</kbd>/<kbd>E</kbd> turn left/right · <kbd>Z</kbd>/<kbd>X</kbd> look down/up · <kbd>E</kbd> or left click interacts with whatever the crosshair is on (the first click only grabs the mouse) · <kbd>Esc</kbd> frees the mouse. Closing a panel or changing floor grabs it again.
         </p>
         <MouseSettings />
         <h3>Balls</h3>
