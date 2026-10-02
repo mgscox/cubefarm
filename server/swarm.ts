@@ -6,7 +6,7 @@ import type { Backend } from './backend.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
-import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type OfficeTools, type StartIssueRequest } from './ceo.ts';
+import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type OfficeTools, type StartIssueRequest } from './ceo.ts';
 import { planDevFix, type FixReason } from './fixPlan.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
@@ -384,7 +384,7 @@ export class Swarm {
    */
   private officeTools(): OfficeTools {
     return createOfficeTools({
-      companyStatus: () => this.companyStatus(),
+      companyStatus: (a) => this.companyStatus(a),
       agentDetail: (a) => this.agentDetail(a),
       setFloorProfile: (a) => this.setFloorProfile(a),
       updateJob: (a) => this.updateJob(a),
@@ -2977,16 +2977,21 @@ export class Swarm {
     return !BUSY.includes(a.status) ? null : a.task === 'qa' ? `testing PR #${a.prNumber}` : a.task === 'fix' ? `fixing PR #${a.prNumber}` : `issue #${a.issueNumber}`;
   }
 
-  private companyStatus() {
+  private companyStatus(x: { floor?: number; verbose?: boolean } = {}) {
     const s = this.state.settings;
     const doing = (a: PersistedAgent) => this.agentDoing(a);
+    // Every call costs the CEO context: by default leave out what rarely changes (QA briefs, previews, long text).
+    const full = x.verbose === true || x.floor !== undefined;
+    const only = x.floor !== undefined ? this.floorRepo(x.floor) : null;
     // Keep the status compact, but make the cut visible so the CEO knows to read agent_detail before rewriting.
     const jobDescription = (brief: string) => {
       if (brief.length <= 400) return brief;
       const mark = `… (truncated, ${brief.length} chars; see agent_detail)`;
       return brief.slice(0, 400 - mark.length).trimEnd() + mark;
     };
+    const agentName = (id: string) => this.state.agents.find((a) => a.id === id)?.name ?? null;
     const floors = [...this.state.repos]
+      .filter((r) => !only || r === only)
       .sort((x, y) => x.floor - y.floor)
       .map((r) => {
         const rt = this.repoRt.get(r.id)!;
@@ -2998,8 +3003,10 @@ export class Swarm {
           clone: rt.cloneStatus === 'ready' ? this.backend.mainDir(r.fullName) : `(not available: clone ${rt.cloneStatus})`,
           brief: r.mission || null,
           profile: r.summary || null,
-          qaBrief: r.qaBrief || null,
-          preview: { command: r.preview.command, env: r.preview.env, status: this.previews.view(r).status },
+          ...(full && {
+            qaBrief: r.qaBrief || null,
+            preview: { command: r.preview.command, env: r.preview.env, status: this.previews.view(r).status },
+          }),
           autoAssign: r.autoAssign,
           autoMerge: r.autoMerge,
           folderSync: rt.folderSync,
@@ -3019,27 +3026,26 @@ export class Swarm {
               title: a.title || (a.role === 'qa' ? 'QA tester' : 'Developer'),
               specialty: a.specialty || null,
               status: a.status,
-              doing: doing(a),
+              ...(doing(a) && { doing: doing(a) }),
               hiredBy: a.hiredBy,
-              jobDescription: a.brief ? jobDescription(a.brief) : null,
+              ...(full && { jobDescription: a.brief ? jobDescription(a.brief) : null }),
             })),
-          backlog: rt.issues.map((i) => ({
-            number: i.number,
-            title: i.title,
-            specialty: issueSpecialty(i.labels) || null,
-            waitsFor: blockers(i.body, open),
-            inProgress: this.issueTaken(r, i.number),
-            ...(forHuman(i.labels) && { readyForHuman: true }),
-          })),
+          // Only what sets an issue apart, so a long backlog stays short.
+          backlog: rt.issues.map((i) => {
+            const waitsFor = blockers(i.body, open);
+            return {
+              number: i.number,
+              title: i.title,
+              specialty: issueSpecialty(i.labels) || null,
+              ...(waitsFor.length && { waitsFor }),
+              ...(this.issueTaken(r, i.number) && { inProgress: true }),
+              ...(forHuman(i.labels) && { readyForHuman: true }),
+            };
+          }),
           pullRequests: rt.pulls
             .filter((p) => p.state === 'OPEN')
-            .map((p) => {
-              const q = this.state.qa.find((x) => x.repoId === r.id && x.prNumber === p.number);
-              return { number: p.number, title: p.title, qa: q ? `${q.status}${q.round > 1 ? ` (round ${q.round})` : ''}` : 'not tested', merge: q?.mergeNote ?? null, checks: p.checks,
-                headSha: p.headSha, testedSha: q?.testedSha ?? null, mergeable: p.mergeable,
-                qaSummary: q?.summary ?? null, qaFailedChecks: q?.checks.filter((c) => c.result === 'fail') ?? [], failedChecks: p.failedChecks };
-            }),
-          mergedRecently: rt.pulls.filter((p) => p.state === 'MERGED').map((p) => `#${p.number} ${p.title}`),
+            .map((p) => prStatusView(p, this.state.qa.find((x) => x.repoId === r.id && x.prNumber === p.number), { maxQaRounds: MAX_QA_ROUNDS, agentName })),
+          mergedRecently: rt.pulls.filter((p) => p.state === 'MERGED').slice(0, full ? undefined : 5).map((p) => `#${p.number} ${p.title}`),
         };
       });
     const req = (r: HireRequestView) => ({
@@ -3050,7 +3056,7 @@ export class Swarm {
       name: r.name,
       title: r.title,
       specialty: r.specialty || null,
-      reason: r.reason,
+      reason: full || r.status === 'pending' || r.reason.length <= 160 ? r.reason : `${r.reason.slice(0, 159).trimEnd()}…`,
       status: r.status,
       managerNote: r.note || null,
     });
@@ -3065,12 +3071,11 @@ export class Swarm {
           usage: usageLabel(this.usageNow(), Date.now()),
           deskLimits: { dev: MAX_DESKS.dev, qa: MAX_DESKS.qa },
         },
+        ...(!full && { shortened: 'QA briefs, previews, job descriptions and long reasons are left out: pass floor or verbose for them.' }),
         floors,
         pendingProposals: this.state.requests.filter((r) => r.status === 'pending').map(req),
         recentDecisions: this.state.requests.filter((r) => r.status !== 'pending').slice(-10).map(req),
       },
-      null,
-      1,
     );
   }
 

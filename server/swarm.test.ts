@@ -19,7 +19,7 @@ interface Internals {
   pausedUntil: number;
   readyIssues(repo: Repo): { issue: IssueInfo }[];
   startIssueWork(repo: Repo): boolean;
-  companyStatus(): string;
+  companyStatus(a?: { floor?: number; verbose?: boolean }): string;
   officeTools(): OfficeTools;
   startPipelineWork(repo: Repo): boolean;
   runQa(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
@@ -277,6 +277,27 @@ describe('CEO rerun_qa', () => {
     handle.stop();
   });
 
+  it.each([
+    ['Why is #13 stuck on pixel-todo?', 'PR #13 on floor 1 is needs-human. QA said: Session failed. QA sessions failed 2 times. It needs your call: fix it by hand, close it, or rerun QA.'],
+    ['Why is #14 stuck on floor 99?', 'Refused: There is no floor 99.'],
+    ['Why is #8 stuck on missing-repo?', 'Refused: No floor for "missing-repo".'],
+    ['Why is #8 stuck?', "I can't find an open PR #8 on floor 1."],
+  ])('lets the fake CEO answer "%s"', async (message, reply) => {
+    Object.assign(s.state.qa[0], { retests: 0 });
+    const finished = vi.fn();
+    const callbacks: SessionCallbacks = {
+      log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished,
+    };
+    const options: SessionOptions = {
+      role: 'ceo', cwd: '', prompt: `Manager asks:\n${message}`,
+      systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools(),
+    };
+    const handle = createDemoBackend().startSession(options, callbacks);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: reply }));
+    handle.stop();
+  });
+
   it.each(['testing', 'fixing'] as const)('refuses a PR that is already %s with 409', async (status) => {
     s.state.qa[0].status = status;
     await expect(swarm.sendToQa(repo.id, 13)).rejects.toMatchObject({ status: 409 });
@@ -477,6 +498,54 @@ describe('ready-for-human issues', () => {
       expect.objectContaining({ number: 1, readyForHuman: true }),
       expect.not.objectContaining({ readyForHuman: expect.anything() }),
     ]);
+  });
+});
+
+describe('company_status size', () => {
+  const pr = (number: number): PullInfo => ({
+    number, title: `Pull request ${number} with a reasonably long descriptive title`, url: '', headRefName: `swarm/${number}`, state: 'OPEN',
+    isDraft: false, closesIssues: [], checks: 'passing', mergeable: 'CONFLICTING', headSha: 'f'.repeat(40),
+    reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0, mergeState: 'DIRTY', failedChecks: [], pendingChecks: [],
+  });
+  beforeEach(() => {
+    // A little bigger than the live office: 8 floors of 4 people with long job descriptions and QA briefs, a backlog and a stuck PR each.
+    s.state.repos.length = 0;
+    s.state.agents = s.state.agents.filter((a) => a.role === 'ceo');
+    for (let f = 1; f <= 8; f++) {
+      const r = { ...repo, id: `r${f}`, floor: f, fullName: `demo-co/project-${f}`, qaBrief: 'Check '.repeat(300), summary: 'A web app', mission: 'Build it. '.repeat(20), preview: { command: 'npm run dev -- --port {port}', env: {} } } as unknown as Repo;
+      s.state.repos.push(r);
+      for (let d = 0; d < 4; d++) {
+        s.state.agents.push({ id: `a${f}-${d}`, name: `Dev ${f}-${d}`, repoId: r.id, role: d < 3 ? 'dev' : 'qa', specialty: 'frontend', status: 'idle', desk: d, brief: 'Owns the frontend. '.repeat(100), hiredBy: 'ceo' });
+      }
+      s.repoRt.set(r.id, { issues: Array.from({ length: 10 }, (_, i) => ({ ...issue(i + 1, ['swarm:frontend']), title: `Issue ${i + 1}: a typical title of about fifty chars` })), pulls: [pr(100), pr(101)] });
+      for (const n of [100, 101]) {
+        s.state.qa.push({
+          repoId: r.id, prNumber: n, status: n === 100 ? 'needs-human' : 'passed', round: 3, retests: 0, sessionFailures: 0, testedSha: 'e'.repeat(40), fixReason: 'qa',
+          devAgentId: `a${f}-0`, qaAgentId: null, summary: 'The toolbar overflows on phones. '.repeat(30), commentUrl: 'https://github.com/x/y/pull/1#c',
+          checks: [{ name: 'Mobile layout', result: 'fail', details: 'long details '.repeat(20) }], mergeNote: null, updatedAt: 0,
+        } as Internals['state']['qa'][number]);
+      }
+    }
+  });
+
+  it('stays well under the CEO tool-result limit by default', () => {
+    const out = s.companyStatus();
+    expect(out.length).toBeLessThan(25_000);
+    const status = JSON.parse(out);
+    expect(status.floors).toHaveLength(8);
+    expect(status.floors[0]).not.toHaveProperty('qaBrief');
+    expect(status.floors[0].team[0]).not.toHaveProperty('jobDescription');
+    expect(status.floors[0].pullRequests[0]).toMatchObject({ mergeable: 'conflicting', failedChecks: ['Mobile layout'], qaRoundsLeft: 0, newCommitsSinceQa: true });
+  });
+
+  it('returns one floor in full, or every floor with verbose', () => {
+    const one = JSON.parse(s.companyStatus({ floor: 3 }));
+    expect(one.floors).toHaveLength(1);
+    expect(one.floors[0]).toMatchObject({ floor: 3, qaBrief: expect.stringContaining('Check'), preview: expect.objectContaining({ command: 'npm run dev -- --port {port}' }) });
+    expect(one.floors[0].team[0].jobDescription).toMatch(/^Owns the frontend\..*see agent_detail\)$/);
+    const all = JSON.parse(s.companyStatus({ verbose: true }));
+    expect(all.floors.every((f: { qaBrief?: string }) => f.qaBrief)).toBe(true);
+    expect(() => s.companyStatus({ floor: 9 })).toThrow(/no floor 9/);
   });
 });
 

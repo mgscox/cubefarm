@@ -1,7 +1,9 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
-import { createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, specialtyLabel, specialtySlug, type CeoJob, type RouteRequest, type OfficeHandlers } from './ceo.ts';
+import { createOfficeTools, IssueCap, jobLabel, mergeableState, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type PrQaState, type RouteRequest, type OfficeHandlers } from './ceo.ts';
+import { stuckAnswer, stuckTarget } from './demo.ts';
+import type { PullInfo } from '../shared/types.ts';
 
 describe('specialtySlug', () => {
   it('turns a specialty into a lowercase slug', () => {
@@ -296,5 +298,81 @@ describe('planStartIssue', () => {
     expect(() => planStartIssue({ ...request, number: 99 }, context)).toThrow('Issue #99 is not open on floor 1.');
     expect(() => planStartIssue(request, { ...context, inProgress: true })).toThrow('#4 is already in progress or has an open PR.');
     expect(() => planStartIssue(request, { ...context, usagePaused: true })).toThrow('Usage is paused; wait for the usage limit to reset.');
+  });
+});
+
+describe('company_status pull requests', () => {
+  const pull = { number: 14, title: 'Chase late invoices', checks: 'passing' as PullInfo['checks'], headSha: 'abcdef1234567', mergeable: 'MERGEABLE', mergeState: 'CLEAN', failedChecks: [] as PullInfo['failedChecks'] };
+  const qa = (o: Partial<PrQaState> = {}): PrQaState => ({
+    status: 'passed', round: 1, retests: 0, summary: 'All good', checks: [{ name: 'Build', result: 'pass', details: '' }], commentUrl: 'https://gh/c/1',
+    mergeNote: null, testedSha: 'abcdef1234567', sessionFailures: 0, fixReason: null, devAgentId: 'a1', ...o,
+  });
+  const view = (p: Partial<typeof pull>, q?: PrQaState) => prStatusView({ ...pull, ...p }, q, { maxQaRounds: 3, agentName: (id) => (id === 'a1' ? 'Ada' : null) });
+  const FAILURE = ['qaSummary', 'failedChecks', 'qaCommentUrl', 'fixReason', 'sessionFailures', 'qaRoundsLeft'];
+
+  it('says why a needs-human PR is stuck', () => {
+    const v = view(
+      { mergeable: 'CONFLICTING', mergeState: 'DIRTY', headSha: '9999999aaaa', checks: 'failing', failedChecks: [{ name: 'CI / test', url: null }] },
+      qa({
+        status: 'needs-human', round: 4, retests: 1, summary: 'x'.repeat(600), fixReason: 'qa', sessionFailures: 1,
+        checks: [{ name: 'Build', result: 'pass', details: '' }, { name: 'Mobile layout', result: 'fail', details: '' }, { name: 'Console', result: 'fail', details: '' }],
+      }),
+    );
+    expect(v).toMatchObject({
+      qa: 'needs-human (round 4)', mergeable: 'conflicting', ciFailedChecks: ['CI / test'], developer: 'Ada', failedChecks: ['Mobile layout', 'Console'],
+      qaCommentUrl: 'https://gh/c/1', fixReason: 'qa', sessionFailures: 1, qaRoundsLeft: 0,
+      testedSha: 'abcdef1', headSha: '9999999', newCommitsSinceQa: true,
+    });
+    expect(v.qaSummary).toHaveLength(400);
+  });
+
+  it('counts rounds left without the retests', () => {
+    expect(view({}, qa({ status: 'failed', round: 2, retests: 1 })).qaRoundsLeft).toBe(2);
+  });
+
+  it('shows none of the failure fields for a passed PR', () => {
+    const v = view({}, qa({ mergeNote: 'waiting for checks: CI' }));
+    expect(v).toEqual({
+      number: 14, title: 'Chase late invoices', qa: 'passed', checks: 'passing', mergeable: 'clean', merge: 'waiting for checks: CI',
+      developer: 'Ada', testedSha: 'abcdef1', headSha: 'abcdef1', newCommitsSinceQa: false,
+    });
+    for (const k of FAILURE) expect(v).not.toHaveProperty(k);
+  });
+
+  it('keeps an untested PR to the basics', () => {
+    expect(view({ mergeable: 'UNKNOWN', mergeState: 'UNKNOWN' })).toEqual({ number: 14, title: 'Chase late invoices', qa: 'not tested', checks: 'passing', mergeable: 'unknown' });
+  });
+
+  it("reads GitHub's mergeable state", () => {
+    expect(mergeableState({ mergeable: 'MERGEABLE', mergeState: 'BEHIND' })).toBe('clean');
+    expect(mergeableState({ mergeable: 'UNKNOWN', mergeState: 'DIRTY' })).toBe('conflicting');
+    expect(mergeableState({ mergeable: 'UNKNOWN', mergeState: 'UNKNOWN' })).toBe('unknown');
+  });
+
+  it('lets the demo CEO explain a stuck PR', () => {
+    const v = view({ mergeable: 'CONFLICTING' }, qa({ status: 'failed', round: 2, summary: 'Toolbar overflows.', checks: [{ name: 'Mobile', result: 'fail', details: '' }] }));
+    expect(stuckAnswer(3, v)).toBe('PR #14 on floor 3 is failed (round 2). QA said: Toolbar overflows. Failed QA checks: Mobile. It conflicts with the default branch. Ada should resolve the conflicts.');
+    expect(stuckAnswer(3, view({}, qa()))).toBe('PR #14 on floor 3 is passed. Nothing is holding it up.');
+  });
+
+  it('lets the demo CEO explain waiting checks, testing and exhausted rounds', () => {
+    expect(stuckAnswer(3, view({ checks: 'pending' }, qa({ mergeNote: 'waiting for checks: CI' })))).toBe(
+      "PR #14 on floor 3 is passed. GitHub's checks are still running. Auto-merge: waiting for checks: CI.",
+    );
+    expect(stuckAnswer(3, view({}, qa({ status: 'testing', round: 2 })))).toBe('PR #14 on floor 3 is testing (round 2). QA is testing it now.');
+    expect(stuckAnswer(3, view({}))).toBe('PR #14 on floor 3 is not tested. QA has not tested it yet.');
+    expect(stuckAnswer(3, view({ checks: 'failing', failedChecks: [{ name: 'CI / test', url: null }] }, qa()))).toBe("PR #14 on floor 3 is passed. GitHub's checks are failing: CI / test.");
+    const out = view({}, qa({ status: 'needs-human', round: 3, summary: 'Still broken', checks: [] }));
+    expect(stuckAnswer(3, out)).toBe('PR #14 on floor 3 is needs-human (round 3). QA said: Still broken. It needs your call: fix it by hand, close it, or rerun QA.');
+  });
+
+  it('routes the demo CEO to the floor or repository asked about', () => {
+    const floors = [{ floor: 1, repo: 'demo-co/pixel-todo' }, { floor: 2, repo: 'demo-co/weather-api' }];
+    expect(stuckTarget('Why is #14 stuck on floor 2?', floors)).toEqual({ number: 14, floors: [2] });
+    expect(stuckTarget('why is #14 stuck on weather-api?', floors)).toEqual({ number: 14, floors: [2] });
+    expect(stuckTarget('Why is #14 stuck?', floors)).toEqual({ number: 14, floors: [1, 2] });
+    expect(stuckTarget('Why is #14 stuck on floor 99?', floors)).toEqual({ refused: 'There is no floor 99.' });
+    expect(stuckTarget('Why is #8 stuck on missing-repo?', floors)).toEqual({ refused: 'No floor for "missing-repo".' });
+    expect(stuckTarget('Start #14 on floor 2', floors)).toBeNull();
   });
 });
