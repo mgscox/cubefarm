@@ -47,6 +47,8 @@ interface Held {
   backlog: string[];
   bytes: number;
   exit: number | null;
+  /** The signal that stopped it, if one did. */
+  signal?: number;
   /** The office stopped it: nobody needs to hear how it ended. */
   killed: boolean;
 }
@@ -96,10 +98,11 @@ function start(m: Extract<ToHost, { op: 'spawn' }>) {
     h.bytes += data.length;
     while (h.bytes > BACKLOG_BYTES && h.backlog.length > 1) h.bytes -= h.backlog.shift()!.length;
   });
-  proc.onExit(({ exitCode }) => {
+  proc.onExit(({ exitCode, signal }) => {
     h.exit = exitCode;
+    h.signal = signal || undefined;
     quietly(() => proc.kill()); // on Windows the terminal's console host (conhost.exe) outlives the CLI until then
-    if (h.attached && office) send({ op: 'exit', id: m.id, code: exitCode });
+    if (h.attached && office) send({ op: 'exit', id: m.id, code: exitCode, signal: h.signal });
     if ((h.attached && office) || h.killed) held.delete(m.id);
   });
 }
@@ -112,7 +115,7 @@ function attach(id: string) {
   h.backlog = [];
   h.bytes = 0;
   if (h.exit !== null) {
-    send({ op: 'exit', id, code: h.exit });
+    send({ op: 'exit', id, code: h.exit, signal: h.signal });
     held.delete(id);
   }
 }

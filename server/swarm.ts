@@ -101,8 +101,17 @@ interface PersistedAgent {
   turns: number;
   sessionId: string | null;
   sessionCli: AgentCli | null; // the CLI whose session sessionId is: only it can resume it
+  /** The one more session an issue that ended without a PR gets, held over Claude's usage pause: see holdRetry. */
+  heldRetry?: HeldRetry | null;
   lastError: string | null;
   logTail: LogLine[];
+}
+
+/** What a held retry runs: finishPushedWork when `ahead` commits were pushed (it says `why`), else the finish-your-PR nudge. */
+interface HeldRetry {
+  issueNumber: number | null;
+  ahead: number;
+  why: string;
 }
 
 /** A pull request's trip through QA. */
@@ -163,6 +172,7 @@ interface AgentRuntime {
   screenshot: { data: Buffer; mime: string; at: number } | null;
   shots: Shot[]; // every screenshot of the current session (QA evidence)
   terminal: AgentTerminal | null; // their terminal, once they've run in the terminal runtime
+  generation?: number; // bumped by every new task, cleared task and session: see nextGeneration
 }
 
 interface RepoRuntime {
@@ -837,8 +847,15 @@ export class Swarm {
     return `${slugify(a.name)}-${a.id.slice(0, 4)}`;
   }
 
+  /** The agent's task or session changes: a session end still being handled for the old one must not act on it. */
+  private nextGeneration(a: PersistedAgent) {
+    const rt = this.agentRt.get(a.id);
+    if (rt) rt.generation = (rt.generation ?? 0) + 1;
+  }
+
   private clearTask(a: PersistedAgent) {
-    Object.assign(a, { status: 'idle', task: null, issueNumber: null, issueTitle: null, branch: null, prNumber: null, prUrl: null, lastError: null });
+    this.nextGeneration(a);
+    Object.assign(a, { status: 'idle', task: null, issueNumber: null, issueTitle: null, branch: null, prNumber: null, prUrl: null, lastError: null, heldRetry: null });
     this.emitAgent(a);
   }
 
@@ -1463,7 +1480,7 @@ export class Swarm {
   }
 
   private issueTaken(repo: PersistedRepo, n: number) {
-    if (this.state.agents.some((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && a.issueNumber === n && a.status !== 'idle' && a.status !== 'error')) return true;
+    if (this.state.agents.some((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && a.issueNumber === n && (a.heldRetry || (a.status !== 'idle' && a.status !== 'error')))) return true;
     const pulls = this.repoRt.get(repo.id)?.pulls ?? [];
     return pulls.some((p) => p.state === 'OPEN' && (p.closesIssues.includes(n) || p.headRefName.startsWith(`swarm/issue-${n}-`)));
   }
@@ -1606,6 +1623,7 @@ export class Swarm {
 
   private beginTask(a: PersistedAgent, patch: Partial<PersistedAgent>, banner: string, preparing: string) {
     const rt = this.agentRt.get(a.id)!;
+    this.nextGeneration(a);
     Object.assign(a, {
       status: 'preparing' as AgentStatus,
       startedAt: Date.now(),
@@ -1613,6 +1631,7 @@ export class Swarm {
       costUsd: 0,
       turns: 0,
       lastError: null,
+      heldRetry: null,
       ...patch,
     });
     rt.screenshot = null;
@@ -1683,10 +1702,13 @@ export class Swarm {
     mode: 'typed' | 'reattach' | null = null,
   ) {
     const rt = this.agentRt.get(a.id)!;
+    this.nextGeneration(a);
+    const generation = rt.generation;
     a.status = 'working';
     const how = this.sessionRuntime(a, resumeSessionId);
     this.emitAgent(a);
-    rt.session = this.backend.startSession(
+    let session: SessionHandle | undefined; // undefined while startSession runs, should a runner finish synchronously
+    session = rt.session = this.backend.startSession(
       {
         cwd,
         prompt,
@@ -1732,27 +1754,32 @@ export class Swarm {
         },
         limited: (at) => this.pauseForLimit(at),
         usageWarning: (info) => this.paceForWarning(info),
-        finished: (result) => void this.onFinished(a, repo, result),
+        finished: (result) => void this.onFinished(a, repo, result, generation, session),
       },
     );
   }
 
-  private async onFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult) {
+  /** `generation`: the agent's when this session started. A session that ends after its task was cleared or replaced changes nothing. */
+  private async onFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, generation: number | undefined, session: SessionHandle | undefined) {
     const rt = this.agentRt.get(a.id);
     if (!rt || !this.state.agents.includes(a)) return; // fired
     if (this.officeUpdate.handedOver) return; // stopped for the office's update: recovered like after a restart
+    if (rt.generation !== generation) {
+      if (session && rt.session === session) rt.session = null; // cleared after a Stop, with no session since
+      return;
+    }
     rt.session = null;
     rt.currentTool = null;
     a.endedAt = Date.now();
     a.costUsd += result.costUsd;
     a.turns += result.turns;
     // Dev servers the agent forgot to stop would otherwise keep its port and lock its desk folder.
-    void this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
+    const released = this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
     if (result.interrupted) this.interrupted(a);
 
     if (a.task === 'qa') await this.onQaFinished(a, repo, result);
     else if (a.task === 'fix') this.onFixFinished(a, repo, result);
-    else await this.onIssueFinished(a, repo, result);
+    else await this.onIssueFinished(a, repo, result, released, generation);
 
     this.emitAgent(a);
     this.save();
@@ -1771,7 +1798,10 @@ export class Swarm {
     this.toast('error', `${a.name} hit a problem on ${what}: ${a.lastError.slice(0, 120)}`);
   }
 
-  private async onIssueFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult) {
+  /** `released`: the clean-up of the desk the session just left, which a session started on that desk must wait for. */
+  private async onIssueFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, released: Promise<void>, generation: number | undefined) {
+    // Every await below can outlive this task: the manager may clear it, assign another or send a follow-up meanwhile.
+    const gone = () => !this.state.agents.includes(a) || this.officeUpdate.handedOver || this.agentRt.get(a.id)?.generation !== generation;
     const escaped = repo.fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const m = result.text.match(new RegExp(`https://github\\.com/${escaped}/pull/(\\d+)`, 'i'));
     if (m) {
@@ -1779,17 +1809,31 @@ export class Swarm {
       a.prUrl = m[0];
     } else if (a.branch) {
       const pr = await this.backend.prForBranch(repo.fullName, a.branch).catch(() => null);
+      if (gone()) return;
       if (pr) {
         a.prNumber = pr.number;
         a.prUrl = pr.url;
       }
     }
 
+    // Work pushed without a PR (the CLI was cut off, or skipped the last step) isn't dropped: see finishPushedWork.
+    const ahead = !a.prNumber && a.branch && !result.interrupted ? await this.backend.branchAhead(repo.fullName, repo.defaultBranch, a.branch).catch(() => 0) : 0;
+    if (gone()) return;
     if (a.prNumber) this.cancelRequestedStart(a);
-    if (a.status === 'stopped') return; // the manager already logged the stop
+    // One more session on this desk (pushed work, or a nudge to open the PR) waits for the desk's clean-up, which kills what runs there.
+    const retry = !a.prNumber && !this.nudged.has(`${repo.id}#${a.issueNumber}`) && (ahead > 0 || result.ok);
+    if (retry) await released;
+    if (gone()) return; // fired, cleared, reassigned, or stopped for the office's update
+    if (a.status === 'stopped' || this.agentRt.get(a.id)?.session) return; // the manager already logged the stop, or sent a follow-up meanwhile
+    const why = result.ok ? 'ended without opening a pull request' : `was cut off before it opened a pull request (${(result.errors[0] ?? 'it failed').replace(/\.$/, '')})`;
+    if (retry && ahead > 0 && !this.limited()) return this.finishPushedWork(a, repo, why, ahead);
+    const later = retry && this.limited(); // the retry waits for the usage pause to end: see runHeldRetries
     if (!result.ok) {
       this.issueFailed(repo, a.issueNumber);
-      return this.fail(a, result, `#${a.issueNumber}`);
+      this.fail(a, result, `#${a.issueNumber}`);
+      if (later) return this.holdRetry(a, why, ahead);
+      if (ahead > 0) this.postMessage('office', `⚠️ ${a.name}'s session on #${a.issueNumber} (${repo.fullName}) failed without a pull request. Its branch ${a.branch} has ${this.commits(ahead)} on GitHub.`);
+      return;
     }
     this.issueFailures.delete(`${repo.id}#${a.issueNumber}`);
     a.status = 'done';
@@ -1798,8 +1842,54 @@ export class Swarm {
       this.queueQa(repo, a.prNumber, a, a.issueNumber);
       this.appendLog(a, [{ kind: 'system', text: `📨 Handed PR #${a.prNumber} to QA.` }]);
       this.toast('success', `${a.name} opened PR #${a.prNumber} for #${a.issueNumber}; it's off to QA`);
+    } else if (later) {
+      this.holdRetry(a, why, ahead);
     } else {
-      this.noPullRequest(a, repo);
+      this.noPullRequest(a, repo, ahead);
+    }
+  }
+
+  private commits(n: number) {
+    return `${n} pushed commit${n === 1 ? '' : 's'}`;
+  }
+
+  /**
+   * An issue session ended without a PR although its branch has commits on GitHub: its CLI was cut off mid-task (or
+   * skipped the last step). Once per issue the developer gets another session on the same desk and branch, resuming
+   * the old one when there is one, to verify that work and open the PR. (Only called with commits ahead, so with a branch.)
+   */
+  private finishPushedWork(a: PersistedAgent, repo: PersistedRepo, why: string, ahead: number) {
+    this.nudged.add(`${repo.id}#${a.issueNumber}`);
+    this.appendLog(a, [{ kind: 'system', text: `↻ The session ${why}, but ${a.branch} has ${this.commits(ahead)}. Starting one more to finish it.` }]);
+    const cwd = this.backend.deskDir(repo.fullName, this.agentSlug(a));
+    const prompt = [
+      `Your last session on GitHub issue #${a.issueNumber} (${a.issueTitle}) ${why}. Its branch ${a.branch} has ${this.commits(ahead)} ahead of ${repo.defaultBranch}, and this worktree may hold more.`,
+      `Check git status and git log origin/${repo.defaultBranch}..HEAD, finish what is left (run the checks), push, and open the PR with "Closes #${a.issueNumber}" in its body. If the issue can't be done, open a draft PR that explains why.`,
+    ].join('\n');
+    Object.assign(a, { startedAt: Date.now(), endedAt: null, lastError: null });
+    this.startAgentSession(a, repo, cwd, prompt, this.buildSystemAppend(a, repo, cwd, a.branch!), a.sessionId ?? undefined);
+  }
+
+  /** A retry that would start during Claude's usage pause: the developer keeps the issue (in the state file too) and gets it once the pause ends. */
+  private holdRetry(a: PersistedAgent, why: string, ahead: number) {
+    a.heldRetry = { issueNumber: a.issueNumber, ahead, why };
+    this.appendLog(a, [{ kind: 'system', text: `⏸ No pull request yet${ahead > 0 ? `, but ${a.branch} has ${this.commits(ahead)}` : ''}. They get one more session to finish it once Claude's usage pause ends.` }]);
+  }
+
+  /** Held retries, outside a usage pause: each still applies only if its developer is free and on that issue, and takes a session slot like any start. */
+  private runHeldRetries() {
+    for (const a of this.state.agents) {
+      const held = a.heldRetry;
+      if (!held) continue;
+      const repo = this.state.repos.find((r) => r.id === a.repoId);
+      if (!repo || a.task !== 'issue' || a.issueNumber !== held.issueNumber || a.prNumber || BUSY.includes(a.status) || this.agentRt.get(a.id)?.session) {
+        a.heldRetry = null;
+        continue;
+      }
+      if (this.slotsFull()) return;
+      a.heldRetry = null;
+      if (held.ahead > 0) this.finishPushedWork(a, repo, held.why, held.ahead);
+      else this.noPullRequest(a, repo, 0);
     }
   }
 
@@ -1807,21 +1897,25 @@ export class Swarm {
    * An issue session ended without a PR, which would leave the issue "taken" with nobody on it. The same developer,
    * who has the context and the worktree, is asked once to finish; after that the issue goes back on the board.
    */
-  private noPullRequest(a: PersistedAgent, repo: PersistedRepo) {
+  private noPullRequest(a: PersistedAgent, repo: PersistedRepo, ahead: number) {
     const key = `${repo.id}#${a.issueNumber}`;
-    if (this.nudged.has(key)) return this.releaseIssue(a, repo);
+    if (this.nudged.has(key)) return this.releaseIssue(a, repo, ahead);
     this.nudged.add(key);
     // message() starts the session before its first await, so the scheduler can't hand this developer other work first.
     void this.message(
       a.id,
       `You finished without opening a pull request for #${a.issueNumber}. Finish the remaining steps now: commit, push your branch and open the PR with "Closes #${a.issueNumber}". If the issue can't be done, open a draft PR that explains why.`,
-    ).catch(() => this.releaseIssue(a, repo));
+    ).catch(() => this.releaseIssue(a, repo, ahead));
   }
 
-  private releaseIssue(a: PersistedAgent, repo: PersistedRepo) {
+  private releaseIssue(a: PersistedAgent, repo: PersistedRepo, ahead: number) {
     const n = a.issueNumber;
+    const branch = a.branch;
     this.clearTask(a);
-    this.postMessage('office', `⚠️ ${a.name} finished #${n} on ${repo.fullName} without opening a pull request, so it's back on the board for anyone.`);
+    this.postMessage(
+      'office',
+      `⚠️ ${a.name} finished #${n} on ${repo.fullName} without opening a pull request, so it's back on the board for anyone.${ahead > 0 ? ` Its branch ${branch} has ${this.commits(ahead)} to pick up from.` : ''}`,
+    );
   }
 
   // ---------- QA ----------
@@ -2252,7 +2346,7 @@ export class Swarm {
   private available(repo: PersistedRepo, role: AgentRole) {
     const now = Date.now();
     return this.state.agents
-      .filter((a) => a.repoId === repo.id && a.role === role && (FREE.includes(a.status) || (a.status === 'error' && now - (a.endedAt ?? 0) >= ERROR_COOLDOWN_MS)))
+      .filter((a) => a.repoId === repo.id && a.role === role && !a.heldRetry && (FREE.includes(a.status) || (a.status === 'error' && now - (a.endedAt ?? 0) >= ERROR_COOLDOWN_MS)))
       .sort((x, y) => x.desk - y.desk);
   }
 
@@ -2428,6 +2522,7 @@ export class Swarm {
     this.tickUsage();
     if (this.officeUpdateTick()) return; // draining for the office's own update
     if (this.limited()) return;
+    this.runHeldRetries();
     // Management first: the CEO's jobs are short and shape everyone else's work.
     this.maybeHeartbeat();
     this.startCeoWork();

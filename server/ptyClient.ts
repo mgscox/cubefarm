@@ -28,7 +28,8 @@ export interface Pty {
   /** Kept with the terminal, for the office that picks it up after a restart. */
   setMeta(meta: unknown): void;
   onData(cb: (data: string) => void): void;
-  onExit(cb: (code: number) => void): void;
+  /** signal: what stopped it, if a signal did (its code is then 0). */
+  onExit(cb: (code: number, signal?: number) => void): void;
 }
 
 export interface PtyOptions {
@@ -53,7 +54,7 @@ const send = (m: Parameters<typeof encode>[0]) => {
 class RemotePty implements Pty {
   pid = 0;
   private dataFns: ((data: string) => void)[] = [];
-  private exitFns: ((code: number) => void)[] = [];
+  private exitFns: ((code: number, signal?: number) => void)[] = [];
   private done = false;
   constructor(readonly id: string) {
     remote.set(id, this);
@@ -73,17 +74,17 @@ class RemotePty implements Pty {
   onData(cb: (data: string) => void) {
     this.dataFns.push(cb);
   }
-  onExit(cb: (code: number) => void) {
+  onExit(cb: (code: number, signal?: number) => void) {
     this.exitFns.push(cb);
   }
   data(data: string) {
     for (const fn of this.dataFns) fn(data);
   }
-  exit(code: number) {
+  exit(code: number, signal?: number) {
     if (this.done) return;
     this.done = true;
     remote.delete(this.id);
-    for (const fn of this.exitFns) fn(code);
+    for (const fn of this.exitFns) fn(code, signal);
   }
 }
 
@@ -100,7 +101,7 @@ function onMessage(m: FromHost) {
     case 'data':
       return remote.get(m.id)?.data(m.data);
     case 'exit':
-      return remote.get(m.id)?.exit(m.code);
+      return remote.get(m.id)?.exit(m.code, m.signal);
     case 'hook':
       void Promise.resolve()
         .then(() => hookHandler(m.token, m.body))
@@ -235,7 +236,7 @@ export function spawnPty(file: string, args: string[], o: PtyOptions, meta: unkn
     kill: () => killTree(p),
     setMeta: () => undefined,
     onData: (cb) => void p.onData(cb),
-    onExit: (cb) => void p.onExit(({ exitCode }) => cb(exitCode)),
+    onExit: (cb) => void p.onExit(({ exitCode, signal }) => cb(exitCode, signal || undefined)),
   };
 }
 

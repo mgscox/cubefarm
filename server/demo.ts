@@ -464,6 +464,7 @@ export function createDemoBackend(): Backend {
       if (pr) pr.state = 'CLOSED';
     },
     prForBranch: async () => null,
+    branchAhead: async () => 0, // the fake sessions always open their PR
     prDetails: async (fullName, number) => {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
       if (!pr) throw new Error(`Unknown PR #${number}`);

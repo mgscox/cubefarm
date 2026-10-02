@@ -501,6 +501,263 @@ describe('ready-for-human issues', () => {
   });
 });
 
+describe('a developer session that ends without a PR after pushing commits', () => {
+  type Backend = ReturnType<typeof createDemoBackend>;
+  type Fake = Internals & {
+    syncRepo(id: string): Promise<void>;
+    buildSystemAppend(...args: unknown[]): string;
+    issueTaken(repo: Repo, n: number): boolean;
+    pausedUntil: number;
+    nudged: Set<string>;
+    state: { messages: { text: string }[]; settings: { sessionLimit: number } };
+  };
+  let sessions: { opts: SessionOptions; cb: SessionCallbacks }[];
+  let ahead: Mock<Backend['branchAhead']>;
+  let f: Fake;
+  let backend: Backend;
+  const ada = () => s.state.agents[0];
+  const cut = { ok: false, text: '', errors: ['Codex was stopped (SIGTERM) before finishing.'], costUsd: 0, turns: 0 };
+  /** The office follows a session, and the CLI behind it ends with this result. */
+  const end = async (result: typeof cut) => {
+    const n = sessions.length;
+    sessions[n - 1].cb.finished(result);
+    await vi.waitFor(() => expect(ada().status).not.toBe('working'), { timeout: 500 }).catch(() => undefined);
+    return sessions.length > n;
+  };
+
+  beforeEach(() => {
+    f = s as unknown as Fake;
+    backend = (s as unknown as { backend: Backend }).backend;
+    Object.assign(repo, { defaultBranch: 'main', links: [], browserTesting: false });
+    Object.assign(ada(), { model: '', effort: '', cli: '', task: 'issue', issueNumber: 66, issueTitle: 'Issue 66', branch: 'swarm/issue-66-ada', sessionId: null, prNumber: null, startedAt: Date.now(), turns: 0, costUsd: 0 });
+    sessions = [];
+    vi.spyOn(backend, 'startSession').mockImplementation((opts, cb) => {
+      sessions.push({ opts, cb });
+      return { send: () => undefined, stop: () => undefined };
+    });
+    ahead = vi.spyOn(backend, 'branchAhead').mockResolvedValue(3);
+    vi.spyOn(backend, 'prForBranch').mockResolvedValue(null);
+    vi.spyOn(f, 'syncRepo').mockResolvedValue();
+    vi.spyOn(f, 'buildSystemAppend').mockReturnValue('');
+    s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+  });
+
+  it('is retried once on the same desk and branch, then reported with its branch', async () => {
+    expect(await end(cut)).toBe(true);
+    expect(ahead).toHaveBeenCalledWith('demo-co/pixel-todo', 'main', 'swarm/issue-66-ada');
+    expect(ada()).toMatchObject({ status: 'working', task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada' });
+    const retry = sessions[1].opts;
+    expect(retry.cwd).toBe(backend.deskDir(repo.fullName, 'ada-a1')); // the desk as it was left: not prepared (reset) again
+    expect(retry.resumeSessionId).toBeUndefined(); // Codex never said which thread it was on
+    expect(retry.prompt).toContain('swarm/issue-66-ada has 3 pushed commits ahead of main');
+    expect(retry.prompt).toContain('SIGTERM');
+
+    // The retry is cut off too: no third session, and the office says where the work is.
+    expect(await end(cut)).toBe(false);
+    expect(ada()).toMatchObject({ status: 'error', lastError: cut.errors[0] });
+    expect(f.state.messages.at(-1)?.text).toContain('Its branch swarm/issue-66-ada has 3 pushed commits on GitHub');
+  });
+
+  it('resumes the session it has, and names the branch when the issue goes back on the board', async () => {
+    ada().sessionId = 'thread-1';
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(true);
+    expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
+    expect(sessions[1].opts.prompt).toContain('ended without opening a pull request');
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(false);
+    expect(ada()).toMatchObject({ status: 'idle', task: null });
+    expect(f.state.messages.at(-1)?.text).toContain('Its branch swarm/issue-66-ada has 3 pushed commits to pick up from.');
+  });
+
+  it('starts the retry only once the desk it left is cleaned up', async () => {
+    let cleaned!: () => void;
+    const release = vi.spyOn(backend, 'releaseDesk').mockReturnValue(new Promise<void>((r) => (cleaned = r)));
+    sessions[0].cb.finished(cut);
+    await vi.waitFor(() => expect(ahead).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(50);
+    expect(release).toHaveBeenCalledWith('demo-co/pixel-todo', 'ada-a1', expect.any(Number));
+    expect(sessions).toHaveLength(1); // the clean-up could otherwise kill the new CLI's processes
+    cleaned();
+    await vi.waitFor(() => expect(sessions).toHaveLength(2));
+    expect(sessions[1].opts.cwd).toBe(backend.deskDir(repo.fullName, 'ada-a1'));
+    expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada');
+    await vi.advanceTimersByTimeAsync(50);
+    expect(sessions).toHaveLength(2);
+  });
+
+  it('starts no retry when the manager stops them during the clean-up', async () => {
+    let cleaned!: () => void;
+    vi.spyOn(backend, 'releaseDesk').mockReturnValue(new Promise<void>((r) => (cleaned = r)));
+    sessions[0].cb.finished(cut);
+    await vi.waitFor(() => expect(ahead).toHaveBeenCalled());
+    swarm.stopAgent(String(ada().id));
+    cleaned();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(sessions).toHaveLength(1);
+    expect(ada().status).toBe('stopped');
+  });
+
+  describe('during a usage pause', () => {
+    beforeEach(() => {
+      vi.mocked(f.schedule).mockRestore();
+      vi.spyOn(f, 'maybeHeartbeat').mockImplementation(() => {});
+      vi.spyOn(f, 'startCeoWork').mockImplementation(() => {});
+      vi.spyOn(f, 'officeUpdateTick').mockReturnValue(false);
+    });
+    const pause = () => sessions[0].cb.limited?.(Date.now() + 60_000);
+    const pauseEnds = () => {
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      f.schedule();
+    };
+
+    it('holds the retry when the limit is hit during the desk clean-up, then starts it once', async () => {
+      let cleaned!: () => void;
+      vi.spyOn(backend, 'releaseDesk').mockReturnValue(new Promise<void>((r) => (cleaned = r)));
+      sessions[0].cb.finished(cut);
+      await vi.waitFor(() => expect(ahead).toHaveBeenCalled());
+      pause();
+      cleaned();
+      await vi.advanceTimersByTimeAsync(50);
+      f.schedule();
+      expect(sessions).toHaveLength(1);
+      expect(ada()).toMatchObject({ status: 'error', task: 'issue', issueNumber: 66 }); // not left 'working' with no session
+      pauseEnds();
+      expect(sessions).toHaveLength(2);
+      expect(sessions[1].opts.cwd).toBe(backend.deskDir(repo.fullName, 'ada-a1'));
+      expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
+      f.schedule();
+      expect(sessions).toHaveLength(2);
+    });
+
+    it('holds the retry of a session that ends while paused, then resumes that session', async () => {
+      ada().sessionId = 'thread-1';
+      pause();
+      sessions[0].cb.finished({ ...cut, ok: true, errors: [] });
+      await vi.advanceTimersByTimeAsync(50);
+      f.schedule();
+      expect(sessions).toHaveLength(1);
+      expect(ada()).toMatchObject({ status: 'done', task: 'issue', issueNumber: 66 });
+      pauseEnds();
+      expect(sessions).toHaveLength(2);
+      expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
+      expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
+    });
+
+    it('waits for a free session slot like any other start', async () => {
+      f.state.settings.sessionLimit = 1;
+      pause();
+      sessions[0].cb.finished(cut);
+      await vi.advanceTimersByTimeAsync(50);
+      const barbara = { ...ada(), id: 'a2', name: 'Barbara', desk: 1, status: 'working', issueNumber: 67, heldRetry: null };
+      f.state.agents.push(barbara);
+      pauseEnds();
+      expect(sessions).toHaveLength(1); // Barbara has the only slot
+      expect(ada()).toMatchObject({ status: 'error', heldRetry: { issueNumber: 66, ahead: 3 } });
+      expect(f.issueTaken(repo, 66)).toBe(true);
+      barbara.status = 'done';
+      f.schedule();
+      expect(sessions).toHaveLength(2);
+      expect(ada()).toMatchObject({ status: 'working', heldRetry: null });
+    });
+
+    it('survives an office restart', async () => {
+      ada().sessionId = 'thread-1';
+      pause();
+      sessions[0].cb.finished({ ...cut, ok: true, errors: [] });
+      await vi.advanceTimersByTimeAsync(50);
+      // Only the state file survives: the pause and the nudges were in memory.
+      f.state = JSON.parse(JSON.stringify(f.state)) as Fake['state'];
+      Object.assign(f, { pausedUntil: 0, nudged: new Set() });
+      expect(ada()).toMatchObject({ status: 'done', task: 'issue', issueNumber: 66, heldRetry: { issueNumber: 66, ahead: 3 } });
+      expect(f.issueTaken(repo, 66)).toBe(true);
+      f.schedule();
+      expect(sessions).toHaveLength(2);
+      expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
+      expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
+      expect(ada().heldRetry).toBeNull();
+    });
+  });
+
+  describe('when the manager takes over during the desk clean-up', () => {
+    let cleaned!: () => void;
+    beforeEach(() => {
+      const cleanup = new Promise<void>((r) => (cleaned = r));
+      vi.spyOn(backend, 'releaseDesk').mockReturnValue(cleanup);
+    });
+    const stopDuringCleanup = async () => {
+      sessions[0].cb.finished(cut);
+      await vi.waitFor(() => expect(ahead).toHaveBeenCalled());
+      swarm.stopAgent('a1');
+    };
+
+    it('Stop then Clear desk: the old session starts no retry', async () => {
+      await stopDuringCleanup();
+      swarm.resetAgent('a1');
+      cleaned();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sessions).toHaveLength(1);
+      expect(ada()).toMatchObject({ status: 'idle', task: null, issueNumber: null, branch: null, heldRetry: null, lastError: null });
+    });
+
+    it('Stop then Assign another issue: the old session leaves the new task alone', async () => {
+      s.runTask = (Swarm.prototype as unknown as { runTask: RunTask }).runTask; // the real one: prepares the desk and starts the session
+      Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready' });
+      setIssues(issue(66), issue(67));
+      await stopDuringCleanup();
+      await swarm.assign('a1', 67);
+      cleaned();
+      await vi.advanceTimersByTimeAsync(1000); // the demo desk takes 900ms to prepare
+      expect(sessions).toHaveLength(2);
+      expect(sessions[1].opts.prompt).toContain('Please resolve GitHub issue #67');
+      expect(sessions[1].opts.prompt).not.toContain('#66');
+      expect(ada()).toMatchObject({ status: 'working', task: 'issue', issueNumber: 67, branch: 'swarm/issue-67-ada', prNumber: null, heldRetry: null, lastError: null });
+    });
+  });
+
+  describe("when a stopped session's end arrives after the manager took over", () => {
+    const late = { ...cut, costUsd: 2, turns: 5 };
+    const rt = () => f.agentRt.get('a1') as unknown as { session: unknown };
+
+    it('Stop then Clear desk: changes nothing', async () => {
+      swarm.stopAgent('a1');
+      swarm.resetAgent('a1');
+      const release = vi.spyOn(backend, 'releaseDesk');
+      sessions[0].cb.finished(late);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(release).not.toHaveBeenCalled();
+      expect(ahead).not.toHaveBeenCalled();
+      expect(sessions).toHaveLength(1);
+      expect(ada()).toMatchObject({ status: 'idle', task: null, issueNumber: null, lastError: null, costUsd: 0, turns: 0, endedAt: null });
+      expect(rt().session).toBeNull(); // the stopped session's handle doesn't linger
+    });
+
+    it('Stop then Assign another issue: the new task and its session are left alone', async () => {
+      s.runTask = (Swarm.prototype as unknown as { runTask: RunTask }).runTask;
+      Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready' });
+      setIssues(issue(66), issue(67));
+      swarm.stopAgent('a1');
+      await swarm.assign('a1', 67);
+      await vi.advanceTimersByTimeAsync(1000); // the demo desk takes 900ms to prepare
+      expect(sessions).toHaveLength(2);
+      const replacement = rt().session;
+      expect(replacement).not.toBeNull();
+      const release = vi.spyOn(backend, 'releaseDesk');
+      sessions[0].cb.finished(late);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(release).not.toHaveBeenCalled();
+      expect(ahead).not.toHaveBeenCalled();
+      expect(sessions).toHaveLength(2);
+      expect(rt().session).toBe(replacement);
+      expect(ada()).toMatchObject({ status: 'working', task: 'issue', issueNumber: 67, branch: 'swarm/issue-67-ada', lastError: null, costUsd: 0, turns: 0, endedAt: null });
+    });
+  });
+
+  it('fails as before when nothing was pushed', async () => {
+    ahead.mockRejectedValue(new Error('gh api failed: HTTP 404'));
+    expect(await end(cut)).toBe(false);
+    expect(ada()).toMatchObject({ status: 'error', branch: 'swarm/issue-66-ada' });
+  });
+});
+
 describe('company_status size', () => {
   const pr = (number: number): PullInfo => ({
     number, title: `Pull request ${number} with a reasonably long descriptive title`, url: '', headRefName: `swarm/${number}`, state: 'OPEN',

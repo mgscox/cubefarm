@@ -6,7 +6,7 @@ import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { HOME_DIR } from './config.ts';
 import { projectEnv } from './projectEnv.ts';
-import { cliLabel, CODEX_HOOK_SOURCE, codexThread, codexTurnThread, commandFor, hookReviewKey, interruptions, isCli, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE, trustKey } from './clis.ts';
+import { cliExit, cliLabel, CODEX_HOOK_SOURCE, codexThread, codexTurnThread, commandFor, hookReviewKey, interruptions, isCli, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE, trustKey } from './clis.ts';
 import { adoptPty, discardPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, startKeeper, terminalsAvailable, type Pty } from './ptyClient.ts';
 import {
   clip,
@@ -174,7 +174,7 @@ interface LiveCli {
   /** Browser screenshots already passed on (Codex and OpenCode: collected from the browser's output folder). */
   shots: Set<string>;
   /** The office session driving it; null while it waits at its prompt. */
-  session: { hook(b: Record<string, unknown>): Record<string, unknown>; exited(code: number): void } | null;
+  session: { hook(b: Record<string, unknown>): Record<string, unknown>; exited(code: number, signal?: number): void } | null;
   idleTimer?: NodeJS.Timeout;
 }
 const lives = new Map<AgentTerminal, LiveCli>();
@@ -234,10 +234,10 @@ function wire(l: LiveCli, office?: OfficeTools) {
   p.onData((data) => {
     if (lives.get(l.term) === l) l.term.write(data);
   });
-  p.onExit((code) => {
+  p.onExit((code, signal) => {
     l.proc = null;
     if (lives.get(l.term) !== l) return; // already replaced or closed
-    if (l.session) l.session.exited(code);
+    if (l.session) l.session.exited(code, signal);
     else endLive(l); // quit while waiting at its prompt
   });
 }
@@ -352,6 +352,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let lastText = '';
   let turnError: string | null = null; // the turn failed (OpenCode reports errors separately from going idle)
   let begun = false; // the CLI took its first prompt
+  let working = true; // a prompt is in hand and its turn hasn't ended (a new CLI starts on the one it's launched with)
   let finishTimer: NodeJS.Timeout | undefined;
   let bootTimer: NodeJS.Timeout | undefined;
   let screenTimer: NodeJS.Timeout | undefined;
@@ -399,12 +400,14 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   /** A turn ended: finished, unless the CLI picks up another prompt within the grace period. */
   const turnEnded = (text: string) => {
     lastText = text;
+    working = false;
     cb.tool(null);
     clearTimeout(finishTimer);
     finishTimer = setTimeout(() => finish({ ok: !turnError, text: lastText, errors: turnError ? [turnError] : [] }, true), FINISH_GRACE_MS);
   };
   const busy = () => {
     begun = true;
+    working = true;
     clearTimeout(finishTimer);
   };
 
@@ -561,10 +564,10 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     return {};
   };
 
-  /** The CLI quit on its own: /exit typed in the terminal, a crash, or it couldn't start (not signed in, bad flag…). */
-  const exited = (exitCode: number) => {
-    const ok = exitCode === 0 && (lastText !== '' || (cli !== 'claude' && Date.now() - started > 20_000));
-    finish({ ok, text: lastText, errors: ok ? [] : [`${label} exited${exitCode ? ` with code ${exitCode}` : ''} before finishing.`] });
+  /** The CLI quit on its own: /exit typed in the terminal, a crash, a signal, or it couldn't start (not signed in, bad flag…). */
+  const exited = (code: number, signal?: number) => {
+    const { ok, error } = cliExit(cli, { code, signal, working, lastText, ranMs: Date.now() - started });
+    finish({ ok, text: lastText, errors: error ? [error] : [] });
   };
 
   const handle: SessionHandle = {
