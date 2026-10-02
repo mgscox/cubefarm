@@ -15,6 +15,7 @@ export function planDevFix(qa: Pick<QaView, 'status' | 'round' | 'summary' | 'ch
       conflict ? `Also run git fetch origin and git merge origin/${defaultBranch}, resolve conflicts while preserving both changes, and fix the QA findings above.` : '',
     ].filter(Boolean).join('\n'),
     sessionFailures: 0,
+    fixCrashes: [],
     retests: qa.round,
     passedSha: null,
     mergeFixes: 0,

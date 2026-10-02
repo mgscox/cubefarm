@@ -7,7 +7,7 @@ const pr = { mergeable: 'MERGEABLE', mergeState: 'CLEAN', failedChecks: [{ name:
 describe('CEO fix plan', () => {
   it('preserves findings and resets budgets without rewinding report rounds', () => {
     const plan = planDevFix(qa, pr, 'main', 'Keep the task');
-    expect(plan).toMatchObject({ fixReason: 'qa', retests: 7, sessionFailures: 0, passedSha: null, mergeFixes: 0 });
+    expect(plan).toMatchObject({ fixReason: 'qa', retests: 7, sessionFailures: 0, fixCrashes: [], passedSha: null, mergeFixes: 0 });
     expect(plan.fixInstructions).toContain('Recovery loses work');
     expect(plan.fixInstructions).toContain('Recovery: Missing task');
     expect(plan.fixInstructions).toContain('GitHub check failed: Build');
