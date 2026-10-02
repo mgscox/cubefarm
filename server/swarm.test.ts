@@ -377,6 +377,17 @@ describe('CEO park_pr', () => {
     expect(repo.parkedBranches).toEqual([{ issueNumber: 67, prNumber: 13, branch: pull.headRefName }]);
   });
 
+  it('releases a holder linked only through the QA issue number', async () => {
+    pull.headRefName = 'placeholder/custom-branch';
+    pull.closesIssues = [];
+    Object.assign(s.state.agents[0], { prNumber: null, branch: null });
+    await swarm.parkPr(args);
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', issueNumber: null });
+    const backlog = JSON.parse(s.companyStatus()).floors[0].backlog;
+    expect(backlog.find((i: { number: number }) => i.number === 67).inProgress).toBeUndefined();
+    expect(repo.parkedBranches).toEqual([{ issueNumber: 67, prNumber: 13, branch: 'placeholder/custom-branch' }]);
+  });
+
   it.each(['testing', 'busy', 'live-session', 'merging', 'syncing'] as const)('refuses %s with 409 and no GitHub mutations', async (condition) => {
     if (condition === 'testing') s.state.qa[0].status = 'testing';
     if (condition === 'busy') s.state.agents[0].status = 'preparing';
@@ -405,6 +416,9 @@ describe('CEO park_pr', () => {
       expect(s.startPipelineWork(repo)).toBe(false);
       expect(s.startIssueWork(repo)).toBe(false);
       await expect(swarm.sendToQa(repo.id, 13)).rejects.toMatchObject({ status: 409 });
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toMatchObject({ status: 409 });
+      await expect(swarm.closePull(repo.id, 13)).rejects.toMatchObject({ status: 409 });
+      await expect(swarm.message('a1', 'Continue')).rejects.toMatchObject({ status: 409 });
       await expect(swarm.sendBackToDev({ floor: 1, number: 13 })).rejects.toMatchObject({ status: 409 });
       await expect(swarm.parkPr(args)).rejects.toMatchObject({ status: 409 });
       throw new Error('GitHub unavailable');
@@ -413,6 +427,16 @@ describe('CEO park_pr', () => {
     expect(s.state.qa).toHaveLength(1);
     expect(pull.state).toBe('OPEN');
     s.backend.commentPull = vi.fn(async () => 'ok');
+    await swarm.parkPr(args);
+    expect(pull.state).toBe('CLOSED');
+  });
+
+  it('refuses while a manual merge is in progress and releases its merge flag on failure', async () => {
+    s.backend.mergePull = vi.fn(async () => {
+      await expect(swarm.parkPr(args)).rejects.toMatchObject({ status: 409 });
+      throw new Error('Merge failed');
+    });
+    await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('Merge failed');
     await swarm.parkPr(args);
     expect(pull.state).toBe('CLOSED');
   });

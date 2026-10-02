@@ -1289,14 +1289,22 @@ export class Swarm {
 
   async mergePull(repoId: string, number: number, method: 'squash' | 'merge' | 'rebase' = 'squash') {
     const repo = this.repo(repoId);
-    await this.backend.mergePull(repo.fullName, number, method);
-    this.toast('success', `Merged PR #${number} into ${repo.defaultBranch}`);
-    await this.syncRepo(repo.id);
-    setTimeout(() => this.schedule(), 200);
+    const rt = this.repoRt.get(repo.id)!;
+    if (rt.parking || rt.merging) throw new HttpError(409, `Wait until PR parking or merging finishes on ${repo.fullName}`);
+    rt.merging = true;
+    try {
+      await this.backend.mergePull(repo.fullName, number, method);
+      this.toast('success', `Merged PR #${number} into ${repo.defaultBranch}`);
+      await this.syncRepo(repo.id);
+      setTimeout(() => this.schedule(), 200);
+    } finally {
+      rt.merging = false;
+    }
   }
 
   async closePull(repoId: string, number: number) {
     const repo = this.repo(repoId);
+    if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
     await this.backend.closePull(repo.fullName, number);
     await this.syncRepo(repo.id);
   }
@@ -2287,6 +2295,7 @@ export class Swarm {
     const a = this.agent(id);
     if (a.role === 'ceo') return this.messageCeo(text);
     const repo = this.repo(a.repoId);
+    if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
     if (!text.trim()) throw new HttpError(400, 'Empty message');
     const rt = this.agentRt.get(id)!;
     if (rt.session) {
@@ -3384,8 +3393,10 @@ export class Swarm {
       const pr = await this.backend.prDetails(repo.fullName, x.number);
       if (pr.state !== 'OPEN') throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
       preflight(true);
-      const issues = new Set([...pr.closesIssues, ...(record()?.issueNumber ? [record()!.issueNumber!] : []),
-        ...linkedAgents().filter((a) => a.task !== 'qa' && a.issueNumber != null).map((a) => a.issueNumber!)]);
+      const agents = linkedAgents();
+      const issueNumber = record()?.issueNumber;
+      const issues = new Set([...pr.closesIssues, ...(issueNumber ? [issueNumber] : []),
+        ...agents.filter((a) => a.task !== 'qa' && a.issueNumber != null).map((a) => a.issueNumber!)]);
       const branchIssue = pr.headRefName.match(/^swarm\/issue-(\d+)-/);
       if (branchIssue) issues.add(Number(branchIssue[1]));
       await this.backend.commentPull(repo.fullName, x.number, reason);
@@ -3396,7 +3407,7 @@ export class Swarm {
         ...[...issues].map((issueNumber) => ({ issueNumber, prNumber: x.number, branch: pr.headRefName }))];
       this.state.qa = this.state.qa.filter((q) => q.repoId !== repo.id || q.prNumber !== x.number);
       this.broadcast({ type: 'qaRemoved', repoId: repo.id, prNumber: x.number });
-      for (const a of linkedAgents()) this.clearTask(a);
+      for (const a of agents) this.clearTask(a);
       repo.requestedStarts = repo.requestedStarts.filter((r) => !issues.has(r.issueNumber));
       for (const n of issues) this.issueFailures.delete(`${repo.id}#${n}`);
       this.emitRepo(repo);
