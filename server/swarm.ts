@@ -17,7 +17,7 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { isCli } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { blockers, forHuman, holdUps, issueSpecialty, READY_FOR_HUMAN, schedulable } from '../shared/issues.ts';
+import { issueBlockers, forHuman, holdUps, issueSpecialty, READY_FOR_HUMAN, schedulable } from '../shared/issues.ts';
 import { effectiveModel } from '../shared/models.ts';
 import { CEO_ID } from '../shared/types.ts';
 import type {
@@ -2367,7 +2367,7 @@ export class Swarm {
         (i) =>
           schedulable(i.labels) &&
           !this.issueTaken(repo, i.number) &&
-          blockers(i.body, open).length === 0 &&
+          issueBlockers(i, open).length === 0 &&
           (this.issueFailures.get(`${repo.id}#${i.number}`) ?? 0) < MAX_ISSUE_FAILURES,
       )
       .map((issue) => ({ issue, want: issueSpecialty(issue.labels), ...weight.get(issue.number)! }))
@@ -3109,7 +3109,7 @@ export class Swarm {
             developers: this.state.agents.filter((a) => a.repoId === r.id && a.role === 'dev').length,
             developersFree: this.available(r, 'dev').length,
             issuesReadyToStart: this.readyIssues(r).length,
-            issuesWaitingOnOthers: rt.issues.filter((i) => blockers(i.body, open).length > 0).length,
+            issuesWaitingOnOthers: rt.issues.filter((i) => issueBlockers(i, open).length > 0).length,
             longestDependencyChain: Math.max(0, ...[...holdUps(rt.issues).values()].map((w) => w.chain)),
           },
           team: this.state.agents
@@ -3127,7 +3127,7 @@ export class Swarm {
             })),
           // Only what sets an issue apart, so a long backlog stays short.
           backlog: rt.issues.map((i) => {
-            const waitsFor = blockers(i.body, open);
+            const waitsFor = issueBlockers(i, open);
             return {
               number: i.number,
               title: i.title,

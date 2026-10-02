@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { CEO_ID, type AgentView, type CeoInfo, type CliView, type HireRequestView, type LogLine, type OfficeUpdateView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
-import { blockers } from '../../shared/issues';
+import { issueBlockers } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
 export type Agent = Omit<AgentView, 'log'>;
@@ -474,9 +474,9 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
   const backlog: KanbanCard[] = repo.issues
     .filter((i) => !claimed.has(i.number))
     .map((i) => {
-      const waits = blockers(i.body, open);
+      const waits = issueBlockers(i, open);
       const labels = i.labels.map((l) => l.replace(/^swarm:/i, '🎯 ')).slice(0, 2).join(', ');
-      return { key: `i-${i.number}`, number: i.number, title: i.title, url: i.url, note: waits.length ? `⏳ after #${waits.join(', #')}` : labels || undefined };
+      return { key: `i-${i.number}`, number: i.number, title: i.title, url: i.url, note: waits.length ? `⏳ after ${waits.map((n) => typeof n === 'number' ? `#${n}` : n).join(', ')}` : labels || undefined };
     });
 
   const merged: KanbanCard[] = repo.pulls
