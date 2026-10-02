@@ -119,6 +119,21 @@ describe('launchArgs', () => {
     expect(resumed).toContain('--dangerously-bypass-approvals-and-sandbox');
   });
 
+  it.each([undefined, 'thread-1'])('passes the lowercase Codex model ID (resume %s)', (resumeId) => {
+    const { args } = launchArgs('codex', ctx({ model: 'GPT-6-Astra', resumeId }));
+    expect(args.slice(args.indexOf('-m'), args.indexOf('-m') + 2)).toEqual(['-m', 'gpt-6-astra']);
+  });
+
+  it.each([undefined, 'thread-1'])('preserves custom Codex model IDs (resume %s)', (resumeId) => {
+    const { args } = launchArgs('codex', ctx({ model: 'MyProvider/Astra', resumeId }));
+    expect(args.slice(args.indexOf('-m'), args.indexOf('-m') + 2)).toEqual(['-m', 'MyProvider/Astra']);
+  });
+
+  it('preserves the model name for Claude Code', () => {
+    const { args } = launchArgs('claude', ctx({ model: 'GPT-6-Astra' }));
+    expect(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2)).toEqual(['--model', 'GPT-6-Astra']);
+  });
+
   it.each([undefined, 'thread-1'])("keeps Codex's office browser separate from an inherited playwright server (resume %s)", (resumeId) => {
     const browser = { command: 'npx', args: ['-y', '@playwright/mcp@latest', '--output-dir', 'browser output'] };
     const { args } = launchArgs('codex', ctx({ browser, resumeId }));

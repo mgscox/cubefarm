@@ -157,6 +157,7 @@ export interface Launch {
 }
 
 const EFFORT_CODEX: Record<EffortLevel, string> = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'xhigh' };
+const KNOWN_CODEX_MODELS = new Set(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
 
 /** Codex hooks the office listens to: its steps, and Esc interrupting a turn. Turn endings come from notify. */
 export const CODEX_HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Interrupt'];
@@ -199,6 +200,8 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
       return { args, env: { DISABLE_AUTOUPDATER: '1' } }; // the office's own copy: agents mustn't each try to update it
     }
     case 'codex': {
+      // Codex's ChatGPT endpoint needs lowercase model IDs; preserve unknown/custom IDs.
+      const model = KNOWN_CODEX_MODELS.has(ctx.model.toLowerCase()) ? ctx.model.toLowerCase() : ctx.model;
       const toml = (s: string) => JSON.stringify(s); // a JSON string is a valid TOML basic string
       const args = [
         '--no-alt-screen',
@@ -206,7 +209,7 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         `notify=[${[process.execPath, ctx.notify.script, ctx.notify.url].map(toml).join(',')}]`,
         '-c',
         `developer_instructions=${toml(ctx.systemAppend)}`,
-        ...(ctx.model ? ['-m', ctx.model] : []),
+        ...(model ? ['-m', model] : []),
         ...(ctx.effort ? ['-c', `model_reasoning_effort=${toml(EFFORT_CODEX[ctx.effort])}`] : []),
         // Codex merges MCP tables, so the office must not add stdio fields to the manager's HTTP Playwright server.
         ...(ctx.browser ? ['-c', `mcp_servers.cubefarm_playwright={command=${toml(ctx.browser.command)},args=[${ctx.browser.args.map(toml).join(',')}]}`] : []),
