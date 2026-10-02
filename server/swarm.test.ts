@@ -1,18 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
-import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type ServerEvent } from '../shared/types.ts';
+import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ServerEvent } from '../shared/types.ts';
 import type { OfficeTools } from './ceo.ts';
 import type { SessionOptions, SessionCallbacks } from './agentRunner.ts';
 
 // A Swarm that is never init()ed: no state file, scheduler timers or real sessions.
 
-type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo) => Promise<void>;
-type Repo = { id: string; fullName: string; floor: number; autoAssign: boolean; preview: { command: null; env: object } };
+type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => Promise<void>;
+type Repo = { id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; preview: { command: null; env: object } };
 interface Internals {
+  backend: { demo: boolean };
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: (QaView & { sessionFailures: number })[] };
-  repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[] }>;
-  agentRt: Map<string, { log: unknown[]; terminal: null }>;
+  repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string }>;
+  agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null }>;
   readyIssues(repo: Repo): { issue: IssueInfo }[];
   startIssueWork(repo: Repo): boolean;
   companyStatus(): string;
@@ -22,6 +23,10 @@ interface Internals {
   broadcast(event: ServerEvent): void;
   save(): void;
   schedule(): void;
+  recover(agents: Record<string, unknown>[]): void;
+  maybeHeartbeat(): void;
+  startCeoWork(): void;
+  officeUpdateTick(): boolean;
   beginTask(...args: unknown[]): void;
   prepare(...args: unknown[]): Promise<string>;
   startAgentSession(...args: unknown[]): void;
@@ -44,10 +49,10 @@ beforeEach(() => {
   s = swarm as unknown as Internals;
   vi.spyOn(s, 'save').mockImplementation(() => {});
   vi.spyOn(s, 'schedule').mockImplementation(() => {});
-  repo = { id: 'r1', fullName: 'demo-co/pixel-todo', floor: 1, autoAssign: true, preview: { command: null, env: {} } };
+  repo = { id: 'r1', fullName: 'demo-co/pixel-todo', floor: 1, autoAssign: true, requestedStarts: [], preview: { command: null, env: {} } };
   s.state.repos.push(repo);
   s.state.agents.push({ id: 'a1', name: 'Ada', repoId: repo.id, role: 'dev', specialty: '', status: 'idle', task: null, issueNumber: null, desk: 0, endedAt: null });
-  s.agentRt.set('a1', { log: [], terminal: null });
+  s.agentRt.set('a1', { log: [], pending: [], terminal: null });
   s.state.agents.push({ id: CEO_ID, name: 'Joi', repoId: '', role: 'ceo', status: 'idle' });
   s.repoRt.set(repo.id, { issues: [], pulls: [] });
   runTask = vi.fn<RunTask>(async () => {});
@@ -58,6 +63,140 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('explicit issue starts across office restarts', () => {
+  beforeEach(() => {
+    s.backend.demo = false; // Fake backend, but exercise the real missing-session recovery condition.
+    repo.autoAssign = false;
+    Object.assign(s.repoRt.get(repo.id)!, { lastSync: Date.now(), cloneStatus: 'ready' });
+    vi.mocked(s.schedule).mockRestore();
+    vi.spyOn(s, 'maybeHeartbeat').mockImplementation(() => {});
+    vi.spyOn(s, 'startCeoWork').mockImplementation(() => {});
+    vi.spyOn(s, 'officeUpdateTick').mockReturnValue(false);
+    runTask.mockImplementation(async (agent, _repo, issue) => {
+      Object.assign(agent as object, { status: 'preparing', task: 'issue', issueNumber: issue.number, sessionId: null, branch: null });
+    });
+    setIssues(issue(66), issue(67));
+  });
+
+  const restart = () => {
+    // Only JSON state survives the restart; recover sees a stopped, unresumable task.
+    const persisted = JSON.parse(JSON.stringify(s.state)) as Internals['state'];
+    s.state = persisted;
+    repo = persisted.repos[0];
+    const a = persisted.agents[0];
+    a.status = 'stopped';
+    runTask.mockClear();
+    s.recover([a]);
+  };
+
+  it('keeps the issue, preferred desk and manager note while auto-assign remains off', async () => {
+    const events = vi.spyOn(s, 'broadcast');
+    await swarm.assign('a1', 66, 'Finish the recovery fix');
+    expect(repo.requestedStarts).toEqual([{ issueNumber: 66, preferredAgentId: 'a1', note: 'Finish the recovery fix', restartPending: false }]);
+    restart();
+    expect(repo.requestedStarts[0].restartPending).toBe(true);
+    expect(events).toHaveBeenCalledWith({ type: 'repo', repo: expect.objectContaining({ requestedStarts: repo.requestedStarts }) });
+    expect(s.agentRt.get('a1')!.log).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining('Restarting #66 when a desk is free') })]));
+    s.schedule();
+    expect(runTask).toHaveBeenCalledExactlyOnceWith(s.state.agents[0], repo, issue(66), 'Finish the recovery fix');
+    expect(repo.autoAssign).toBe(false);
+    expect(repo.requestedStarts[0].restartPending).toBe(false);
+    // A second restart in preparation also preserves the explicit start.
+    restart();
+    s.schedule();
+    expect(runTask).toHaveBeenCalledExactlyOnceWith(s.state.agents[0], repo, issue(66), 'Finish the recovery fix');
+  });
+
+  it('restarts the real preparing task before any session id is captured', async () => {
+    s.runTask = (Swarm.prototype as unknown as Pick<Internals, 'runTask'>).runTask;
+    runTask = vi.spyOn(s, 'runTask');
+    vi.spyOn(s, 'prepare').mockImplementation(() => new Promise(() => {}));
+    await swarm.assign('a1', 66);
+    expect(s.state.agents[0]).toMatchObject({ status: 'preparing', branch: 'swarm/issue-66-ada', sessionId: null });
+    restart();
+    s.schedule();
+    expect(runTask).toHaveBeenCalledExactlyOnceWith(s.state.agents[0], repo, issue(66), undefined);
+    expect(s.state.agents[0]).toMatchObject({ status: 'preparing', issueNumber: 66, branch: 'swarm/issue-66-ada', sessionId: null });
+  });
+
+  it('also retains explicit starts in demo recovery', async () => {
+    s.backend.demo = true;
+    await swarm.assign('a1', 66);
+    restart();
+    s.schedule();
+    expect(runTask).toHaveBeenCalledExactlyOnceWith(s.state.agents[0], repo, issue(66), undefined);
+  });
+
+  it('waits for a free desk and uses another developer when the preferred one is busy', async () => {
+    await swarm.assign('a1', 66);
+    restart();
+    Object.assign(s.state.agents[0], { status: 'working', task: 'issue', issueNumber: 67 });
+    s.schedule();
+    expect(runTask).not.toHaveBeenCalled();
+    expect(repo.requestedStarts[0].restartPending).toBe(true);
+    const other = { id: 'a2', name: 'Barbara', repoId: repo.id, role: 'dev', specialty: '', status: 'idle', task: null, issueNumber: null, desk: 1 };
+    s.state.agents.push(other);
+    s.agentRt.set('a2', { log: [], pending: [], terminal: null });
+    s.schedule();
+    expect(runTask).toHaveBeenCalledExactlyOnceWith(other, repo, issue(66), undefined);
+  });
+
+  it.each(['closed', 'ready-for-human', 'PR'] as const)('drops a requested start that now has status %s', async (status) => {
+    await swarm.assign('a1', 66);
+    restart();
+    if (status === 'closed') setIssues(issue(67));
+    if (status === 'ready-for-human') setIssues(issue(66, ['Ready-For-Human']), issue(67));
+    if (status === 'PR') s.repoRt.get(repo.id)!.pulls = [{ headRefName: 'swarm/issue-66-ada', closesIssues: [] } as unknown as PullInfo];
+    s.schedule();
+    expect(runTask).not.toHaveBeenCalled();
+    expect(repo.requestedStarts).toEqual([]);
+  });
+
+  it.each(['stop', 'reset', 'stop-pending', 'reset-pending'] as const)('cancels the explicit start on manager %s', async (action) => {
+    await swarm.assign('a1', 66);
+    if (action.endsWith('pending')) restart();
+    if (action.startsWith('stop')) swarm.stopAgent('a1');
+    else {
+      s.state.agents[0].status = 'stopped';
+      swarm.resetAgent('a1');
+    }
+    expect(repo.requestedStarts).toEqual([]);
+    runTask.mockClear();
+    s.schedule();
+    expect(runTask).not.toHaveBeenCalled();
+  });
+
+  it('keeps automatic floors using normal backlog ordering after a restart', async () => {
+    repo.autoAssign = true;
+    await swarm.assign('a1', 66, 'Explicit note');
+    restart();
+    expect(repo.requestedStarts).toEqual([]);
+    setIssues(issue(1), issue(66));
+    s.schedule();
+    expect(runTask).toHaveBeenCalledExactlyOnceWith(s.state.agents[0], repo, issue(1), undefined);
+    expect(repo.requestedStarts).toEqual([]); // automatic starts are not explicit requests
+    expect(s.agentRt.get('a1')!.log).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining('Back to the queue') })]));
+  });
+
+  it('does not start arbitrary backlog work when auto-assign is off', () => {
+    s.schedule();
+    expect(runTask).not.toHaveBeenCalled();
+  });
+
+  it.each(['qa', 'fix'] as const)('keeps %s tasks on the existing pipeline recovery path', (task) => {
+    const a = s.state.agents[0];
+    Object.assign(a, { task, status: 'stopped', issueNumber: 66, sessionId: null, branch: null });
+    s.state.qa.push({
+      repoId: repo.id, prNumber: 13, status: task === 'qa' ? 'testing' : 'fixing', round: 1, sessionFailures: 0,
+      devAgentId: 'a1', qaAgentId: 'a1', summary: '', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0,
+    });
+    s.recover([a]);
+    expect(s.state.qa[0].status).toBe(task === 'qa' ? 'queued' : 'failed');
+    expect(repo.requestedStarts).toEqual([]);
+    expect(a).toMatchObject({ status: 'idle', task: null });
+  });
 });
 
 describe('CEO rerun_qa', () => {
