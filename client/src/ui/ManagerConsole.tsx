@@ -236,7 +236,7 @@ function FloorBrief({ repo }: { repo: RepoView }) {
           Re-study
         </button>
       </div>
-      <textarea value={mission} onChange={(e) => setMission(e.target.value)} rows={2} placeholder="Brief: what should this floor build next? The CEO turns it into issues and a team." />
+      <textarea value={mission} onChange={(e) => setMission(e.target.value)} rows={2} autoCorrect="off" autoCapitalize="off" spellCheck={false} placeholder="Brief: what should this floor build next? The CEO turns it into issues and a team." />
       <div className="row">
         <button className="btn btn-small" disabled={mission === repo.mission} onClick={() => void attempt(() => api.updateRepo(repo.id, { mission }))}>
           Save brief
@@ -349,7 +349,7 @@ function CeoTab() {
               void attempt(() => api.messageCeo(t));
             }}
           >
-            <input value={text} onChange={(e) => setText(e.target.value)} placeholder={`Message ${ceo.name} (or press P anywhere for your phone)…`} />
+            <input value={text} onChange={(e) => setText(e.target.value)} autoCorrect="off" autoCapitalize="off" spellCheck={false} placeholder={`Message ${ceo.name} (or press P anywhere for your phone)…`} />
             <button className="btn" disabled={!text.trim()}>
               Send
             </button>

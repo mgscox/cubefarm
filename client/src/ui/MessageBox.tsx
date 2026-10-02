@@ -23,6 +23,10 @@ export function MessageBox({ value, onChange, className, onKeyDown, ...rest }: P
 
   return (
     <textarea
+      // Messages are full of repo names and identifiers ("cubefarm" isn't "cuneiform"); callers may turn these back on.
+      autoCorrect="off"
+      autoCapitalize="off"
+      spellCheck={false}
       {...rest}
       ref={ref}
       rows={1}
