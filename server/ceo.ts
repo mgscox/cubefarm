@@ -1,7 +1,8 @@
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { blockers, holdUps, issueSpecialty, setDependsOn } from '../shared/issues.ts';
-import type { AgentView, CeoJobKind, IssueInfo } from '../shared/types.ts';
+import type { AgentView, CeoJobKind, IssueInfo, PullInfo, QaView } from '../shared/types.ts';
+import type { FixReason } from './fixPlan.ts';
 
 // The CEO: a Claude Code session in the lobby that runs the company instead of writing code.
 // It studies each floor's repo, shapes the team (hire / let-go proposals the manager approves),
@@ -17,7 +18,7 @@ export interface CeoJob {
 
 /** What the CEO's tools do. Implemented by the swarm; errors are returned to the CEO as tool errors. */
 export interface OfficeHandlers {
-  companyStatus(): string;
+  companyStatus(a?: { floor?: number; verbose?: boolean }): string;
   agentDetail(a: { agent_id: string }): string;
   setFloorProfile(a: { floor: number; summary?: string; qa_brief?: string; preview_command?: string; preview_env?: Record<string, string> }): string;
   updateJob(a: { agent_id: string; title?: string; specialty?: string; job_description?: string }): string;
@@ -36,6 +37,15 @@ export interface OfficeHandlers {
   routeIssue(a: { floor: number; number: number; specialty?: string; depends_on?: number[] }): Promise<string>;
   startIssue(a: StartIssueRequest): Promise<string>;
   rerunQa(a: { floor: number; number: number; note?: string }): Promise<string>;
+  sendBackToDev(a: DevFixRequest): Promise<string>;
+}
+
+export interface DevFixRequest {
+  floor: number;
+  number: number;
+  agent?: string;
+  note?: string;
+  reason?: FixReason;
 }
 
 export interface StartIssueRequest {
@@ -90,6 +100,60 @@ export function planStartIssue<A extends StartAgent>(x: StartIssueRequest, conte
   return { agent, issue };
 }
 
+/** The QA record fields the CEO's PR view reads. */
+export interface PrQaState {
+  status: QaView['status'];
+  round: number;
+  retests: number;
+  summary: string | null;
+  checks: QaView['checks'];
+  commentUrl: string | null;
+  mergeNote: string | null;
+  testedSha: string | null;
+  sessionFailures: number;
+  fixReason: FixReason | null;
+  devAgentId: string | null;
+}
+
+const FAILED_QA = new Set<QaView['status']>(['failed', 'fixing', 'needs-human']);
+const short = (sha: string | null | undefined) => (sha ? sha.slice(0, 7) : null);
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+
+/** GitHub's mergeable / mergeStateStatus, as one word the CEO can act on. */
+export function mergeableState(p: Pick<PullInfo, 'mergeable' | 'mergeState'>): 'clean' | 'conflicting' | 'unknown' {
+  if (p.mergeable === 'CONFLICTING' || p.mergeState === 'DIRTY') return 'conflicting';
+  return p.mergeable === 'MERGEABLE' ? 'clean' : 'unknown';
+}
+
+/** One open PR in company_status: compact, with why it is stuck only when QA failed it. */
+export function prStatusView(
+  p: Pick<PullInfo, 'number' | 'title' | 'checks' | 'headSha' | 'mergeable' | 'mergeState' | 'failedChecks'>,
+  q: PrQaState | undefined,
+  o: { maxQaRounds: number; agentName: (id: string) => string | null },
+) {
+  const tested = q?.testedSha ?? null;
+  return {
+    number: p.number,
+    title: p.title,
+    qa: q ? `${q.status}${q.round > 1 ? ` (round ${q.round})` : ''}` : 'not tested',
+    checks: p.checks,
+    ...(p.failedChecks.length && { ciFailedChecks: p.failedChecks.map((c) => c.name) }),
+    mergeable: mergeableState(p),
+    ...(q?.mergeNote && { merge: q.mergeNote }),
+    ...(q?.devAgentId && { developer: o.agentName(q.devAgentId) }),
+    ...(tested && { testedSha: short(tested), headSha: short(p.headSha), newCommitsSinceQa: !!p.headSha && tested !== p.headSha }),
+    ...(q &&
+      FAILED_QA.has(q.status) && {
+        qaSummary: q.summary ? clip(q.summary, 400) : null,
+        failedChecks: q.checks.filter((c) => c.result === 'fail').map((c) => c.name),
+        qaCommentUrl: q.commentUrl,
+        fixReason: q.fixReason,
+        sessionFailures: q.sessionFailures,
+        qaRoundsLeft: Math.max(0, o.maxQaRounds - (q.round - q.retests)),
+      }),
+  };
+}
+
 export interface OfficeTools {
   server: McpSdkServerConfigWithInstance;
   /** A fresh MCP server with the same tools, for one request from a CEO running in a terminal (served over HTTP). */
@@ -111,13 +175,16 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
   const defs = [
     tool(
       'company_status',
-      'Everything about the company right now: settings, every floor (repo, clone path, brief, profile, QA brief), its team, backlog, pull requests and QA, pending proposals and recent decisions by the manager. Call this first.',
-      {},
-      () => run(() => h.companyStatus()),
+      "The company right now: settings, every floor (repo, clone path, brief, profile), its team, backlog, open pull requests with why any is stuck (QA findings, conflicts, commits since QA), pending proposals and the manager's recent decisions. Call this first. Pass floor for one floor in full (QA brief, preview, job descriptions); verbose for every floor in full.",
+      {
+        floor: z.number().int().optional().describe('Only this floor, in full'),
+        verbose: z.boolean().optional().describe('Every floor in full, with full decision reasons'),
+      },
+      (a) => run(() => h.companyStatus(a)),
     ),
     tool(
       'agent_detail',
-      "One agent in full: title, specialty, role, status, current task, model and effort, and their complete job description (company_status shortens long ones). Read it before rewriting someone's job description.",
+      "One agent in full: title, specialty, role, status, current task, model and effort, and their complete job description (company_status leaves it out, or shortens it with floor or verbose). Read it before rewriting someone's job description.",
       { agent_id: z.string().describe('An id (or name) from company_status') },
       (a) => run(() => h.agentDetail(a)),
     ),
@@ -210,8 +277,20 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
       (a) => run(() => h.startIssue(a)),
     ),
     tool(
+      'send_back_to_dev',
+      'Hand an open PR back to a developer for clear QA defects, conflicts or failing checks. Resets its QA budget; the same PR is re-tested after the fix. Works with auto-assign off.',
+      {
+        floor: z.number().int(),
+        number: z.number().int().positive().describe('The pull request number'),
+        agent: z.string().optional().describe('Preferred developer id or name on this floor; omit to prefer the original developer'),
+        note: z.string().max(1500).optional().describe('Extra fix instructions'),
+        reason: z.enum(['qa', 'conflict', 'checks', 'other']).optional().describe('Omit to infer from conflicts, QA and checks'),
+      },
+      (a) => run(() => h.sendBackToDev(a)),
+    ),
+    tool(
       'rerun_qa',
-      'Send an open pull request back to QA when the manager asks (e.g. after QA sessions failed and it is needs-human). Starts a fresh round.',
+      'Re-test an open PR when the manager asks. First check it has new commits since the last QA; otherwise send it to a developer for fixes. Starts a fresh round.',
       {
         floor: z.number().int(),
         number: z.number().int().positive().describe('The pull request number'),
@@ -256,7 +335,7 @@ export function ceoSystemPrompt(o: {
     "- Write each floor's QA brief: what QA testers must check for this kind of project (for a 3D game: the canvas renders, controls respond, frame rate is smooth; for a website: links, phone layout, accessibility; for an API: status codes, validation, error cases).",
     '',
     'How you work:',
-    '- Call mcp__office__company_status first. It lists every floor, its clone path, team, backlog, pull requests and your pending proposals.',
+    '- Call mcp__office__company_status first. It lists every floor, its clone path, team, backlog, pull requests (with why any is stuck) and your pending proposals. Pass floor for one floor\'s QA brief, preview and job descriptions.',
     '- Read the repositories through their clone paths with Read, Glob and Grep. They are read-only to you. You cannot run shell commands.',
     `- Keep durable notes about the company in ${o.notesFile}: read it at the start, and update it at the end with decisions and anything worth remembering next time.`,
     '- Change things only through the mcp__office__ tools.',
@@ -265,7 +344,8 @@ export function ceoSystemPrompt(o: {
     'Rules:',
     '- Every floor keeps at least one QA tester.',
     '- Use start_issue when the manager asks for an issue to be started; never bypass auto-assign OFF on your own initiative.',
-    '- Use rerun_qa only when the manager asks for a PR to be re-tested.',
+    '- Use send_back_to_dev on your own initiative for needs-human PRs with clear fixes (real QA defects, conflicts or failing checks); report the handoff to the manager afterwards.',
+    '- Use rerun_qa only when the manager asks for a PR to be re-tested. First check it has new commits since the last QA; otherwise it needs a developer for fixes.',
     '- Titles are specific ("Three.js graphics engineer", not "Developer"). A specialty is a short lowercase slug ("graphics", "gameplay", "frontend", "backend", "content", "a11y", "devops"). Only route an issue to a specialty that someone on the floor has, or that you are proposing to hire.',
     '- Before proposing a hire, check the floor and the pending proposals for someone who already covers it. If the manager declined a similar proposal (recentDecisions), do not propose it again unless something has changed, and say what.',
     `- ${o.hiring === 'auto' ? 'Hiring is on auto: proposals within the team cap are approved immediately, so be deliberate.' : 'The manager approves every hire, so explain each reason in a sentence or two they can decide on.'}`,

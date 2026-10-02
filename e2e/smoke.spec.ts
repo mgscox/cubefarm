@@ -230,13 +230,13 @@ test('repository refresh distinguishes unavailable checks, REST fallback, stale 
   await expect(card.getByText('GitHub refresh diagnostics')).toHaveCount(0);
 });
 
-test('Q/R turn and Z/X pitch without walking, and help pauses keyboard look', async ({ page }) => {
+test('Q/E turn and Z/X pitch without walking, and help pauses keyboard look', async ({ page }) => {
   await enterOffice(page);
   await expect.poll(() => savedView(page)).not.toBeNull();
   const start = (await savedView(page))!;
 
   for (const [key, axis, direction] of [
-    ['q', 'yaw', 1], ['r', 'yaw', -1], ['z', 'pitch', -1], ['x', 'pitch', 1],
+    ['q', 'yaw', 1], ['e', 'yaw', -1], ['z', 'pitch', -1], ['x', 'pitch', 1],
   ] as const) {
     const before = (await savedView(page))!;
     await page.keyboard.down(key);
@@ -265,7 +265,7 @@ test('Q/R turn and Z/X pitch without walking, and help pauses keyboard look', as
   expect(await savedView(page)).toEqual(stopped);
 });
 
-test('a blaster empties, T reloads it, R only turns, and the prompts say T', async ({ page }) => {
+test('a blaster empties, T reloads it, R does nothing, and the prompts say T', async ({ page }) => {
   // Start in the lobby in front of the foam blaster rack, facing the south wall (+Z).
   const spot: SavedView = { floor: 0, x: BLASTER_RACK.lobbyX, z: HALF_D - BLASTER_RACK.d - 1.2, yaw: Math.PI, pitch: -0.2 };
   await page.addInitScript(([key, view]) => localStorage.setItem(key, view), [VIEW_KEY, JSON.stringify(spot)] as const);
@@ -289,7 +289,8 @@ test('a blaster empties, T reloads it, R only turns, and the prompts say T', asy
   const before = (await savedView(page))!;
   await page.keyboard.down('r');
   try {
-    await expect.poll(async () => before.yaw - (await savedView(page))!.yaw).toBeGreaterThan(0.1);
+    await page.waitForTimeout(1200);
+    expect(await savedView(page)).toEqual(before);
   } finally {
     await page.keyboard.up('r');
   }

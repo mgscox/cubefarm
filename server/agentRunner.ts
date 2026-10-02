@@ -231,7 +231,7 @@ export function describeOfficeTool(action: string, input: Record<string, unknown
   const floor = input.floor != null ? ` → floor ${input.floor}` : '';
   switch (action) {
     case 'company_status':
-      return '🏢 company_status';
+      return `🏢 company_status${floor}${input.verbose ? ' (verbose)' : ''}`;
     case 'agent_detail':
       return `🔎 agent_detail ${String(input.agent_id ?? '')}`;
     case 'set_floor_profile':
@@ -248,6 +248,8 @@ export function describeOfficeTool(action: string, input: Record<string, unknown
       return `▶ start_issue #${String(input.number ?? '?')}${floor}${input.agent ? ` · ${input.agent}` : ''}`;
     case 'rerun_qa':
       return `▶ rerun_qa PR #${String(input.number ?? '?')}${input.floor != null ? ` · floor ${input.floor}` : ''}`;
+    case 'send_back_to_dev':
+      return `▶ send_back_to_dev PR #${String(input.number ?? '?')}${input.floor != null ? ` · floor ${input.floor}` : ''}`;
     case 'route_issue':
       return `🔀 route_issue #${String(input.number ?? '?')}${floor}${input.specialty !== undefined ? ` · ${input.specialty || 'no specialty'}` : ''}${Array.isArray(input.depends_on) ? ` · depends on ${input.depends_on.map((n) => `#${n}`).join(', ') || 'nothing'}` : ''}`;
   }
