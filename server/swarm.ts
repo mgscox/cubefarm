@@ -10,6 +10,7 @@ import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, p
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
+import { pickRequestedStart, retainRequestedStarts } from './requestedStarts.ts';
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type LastUpdate } from './officeUpdate.ts';
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
@@ -40,6 +41,7 @@ import type {
   QaCheck,
   QaView,
   RepoView,
+  RequestedStart,
   ServerEvent,
   SwarmSettings,
   WorldSnapshot,
@@ -56,6 +58,7 @@ interface PersistedRepo {
   floor: number;
   color: string;
   autoAssign: boolean;
+  requestedStarts: RequestedStart[];
   autoMerge: boolean; // PRs merge themselves once QA passes and GitHub's checks are green
   browserTesting: boolean;
   links: string[]; // other connected repos this floor's agents may read
@@ -437,6 +440,7 @@ export class Swarm {
         repos: (loaded.repos ?? []).map((r) => ({
           ...r,
           autoMerge: r.autoMerge ?? true,
+          requestedStarts: r.requestedStarts ?? [],
           links: r.links ?? [],
           mission: r.mission ?? '',
           summary: r.summary ?? '',
@@ -581,7 +585,12 @@ export class Swarm {
   private recover(agents: PersistedAgent[]) {
     for (const a of agents) {
       if (a.task === 'qa' || this.backend.demo || !a.sessionId || !a.branch) {
-        this.appendLog(a, [{ kind: 'system', text: '↺ The office server restarted. Starting over from the queue.' }]);
+        const repo = this.state.repos.find((r) => r.id === a.repoId);
+        const request = a.task === 'issue' ? repo?.requestedStarts.find((r) => r.issueNumber === a.issueNumber) : undefined;
+        const restart = request && repo && !repo.autoAssign;
+        if (restart) this.setRequestedStarts(repo, repo.requestedStarts.map((r) => r === request ? { ...r, restartPending: true } : r));
+        else if (request && repo) this.setRequestedStarts(repo, repo.requestedStarts.filter((r) => r !== request));
+        this.appendLog(a, [{ kind: 'system', text: `↺ The office server restarted. ${restart ? `Restarting #${a.issueNumber} when a desk is free.` : 'Back to the queue.'}` }]);
         const rec = a.task === 'qa' ? this.state.qa.find((q) => q.qaAgentId === a.id && q.status === 'testing') : undefined;
         if (rec) this.setQa(rec, { status: 'queued' });
         const fix = a.task === 'fix' ? this.state.qa.find((q) => q.devAgentId === a.id && q.status === 'fixing') : undefined;
@@ -609,6 +618,7 @@ export class Swarm {
       floor: r.floor,
       color: r.color,
       autoAssign: r.autoAssign,
+      requestedStarts: r.requestedStarts,
       autoMerge: r.autoMerge,
       folderSync: rt.folderSync,
       browserTesting: r.browserTesting,
@@ -826,6 +836,19 @@ export class Swarm {
     this.emitAgent(a);
   }
 
+  private setRequestedStarts(repo: PersistedRepo, requests: RequestedStart[]) {
+    repo.requestedStarts = requests;
+    this.emitRepo(repo);
+    this.save();
+  }
+
+  private cancelRequestedStart(a: PersistedAgent) {
+    const repo = this.state.repos.find((r) => r.id === a.repoId);
+    if (!repo) return;
+    const requests = repo.requestedStarts.filter((r) => r.issueNumber !== a.issueNumber && !(a.issueNumber == null && r.restartPending && r.preferredAgentId === a.id));
+    if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests);
+  }
+
   // ---------- GitHub / repos ----------
 
   listGithubRepos(owner?: string) {
@@ -851,6 +874,7 @@ export class Swarm {
       floor,
       color: FLOOR_COLORS[(floor - 1) % FLOOR_COLORS.length],
       autoAssign: !!opts.autoAssign,
+      requestedStarts: [],
       autoMerge: true,
       browserTesting: true,
       links: [],
@@ -1165,6 +1189,8 @@ export class Swarm {
       const started = Date.now();
       const [issues, pullResult] = await Promise.allSettled([this.backend.listIssues(repo.fullName), this.backend.listPulls(repo.fullName)]);
       Object.assign(rt, applyRepoRefresh(rt, issues, pullResult, Date.now()));
+      const requests = retainRequestedStarts(repo.requestedStarts, issues.status === 'fulfilled' ? issues.value : null, pullResult.status === 'fulfilled' ? pullResult.value.pulls : null);
+      if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests);
       if (pullResult.status === 'rejected') return;
       const pulls = pullResult.value.pulls;
       rt.fetchedAt = started;
@@ -1389,6 +1415,7 @@ export class Swarm {
 
   stopAgent(id: string) {
     const a = this.agent(id);
+    this.cancelRequestedStart(a);
     if (!BUSY.includes(a.status)) return;
     a.status = 'stopped';
     a.lastError = 'Stopped by manager';
@@ -1409,6 +1436,7 @@ export class Swarm {
   /** The manager pressed Esc in the agent's terminal and the CLI stopped its turn: a Stop that leaves the CLI to them. */
   private interrupted(a: PersistedAgent) {
     if (!BUSY.includes(a.status)) return;
+    this.cancelRequestedStart(a);
     a.status = 'stopped';
     a.lastError = 'Interrupted in the terminal';
     this.appendLog(a, [{ kind: 'manager', text: '■ Interrupted in the terminal. Type there to carry on.' }]);
@@ -1417,6 +1445,7 @@ export class Swarm {
   resetAgent(id: string) {
     const a = this.agent(id);
     if (BUSY.includes(a.status)) throw new HttpError(409, `${a.name} is busy; stop them first`);
+    this.cancelRequestedStart(a);
     for (const q of this.state.qa) {
       if (q.qaAgentId === id && q.status === 'testing') this.setQa(q, { status: 'queued', qaAgentId: null });
       if (q.devAgentId === id && q.status === 'fixing') this.setQa(q, { status: 'failed' });
@@ -1440,6 +1469,10 @@ export class Swarm {
   }
 
   async assign(agentId: string, issueNumber: number, note?: string) {
+    return this.assignIssue(agentId, issueNumber, note, true);
+  }
+
+  private async assignIssue(agentId: string, issueNumber: number, note: string | undefined, explicit: boolean) {
     const a = this.agent(agentId);
     const repo = this.repo(a.repoId);
     if (a.role === 'qa') throw new HttpError(400, `${a.name} is a QA tester; they test pull requests rather than issues.`);
@@ -1453,6 +1486,10 @@ export class Swarm {
     }
     const holder = this.state.agents.find((x) => x.id !== a.id && x.repoId === repo.id && x.issueNumber === issueNumber && BUSY.includes(x.status));
     if (holder) throw new HttpError(409, `${holder.name} is already working on #${issueNumber}`);
+    if (explicit) this.setRequestedStarts(repo, [
+      ...repo.requestedStarts.filter((r) => r.issueNumber !== issueNumber),
+      { issueNumber, preferredAgentId: a.id, note, restartPending: false },
+    ]);
     void this.runTask(a, repo, issue, note);
     return this.agentView(a, false);
   }
@@ -1742,6 +1779,7 @@ export class Swarm {
       }
     }
 
+    if (a.prNumber) this.cancelRequestedStart(a);
     if (a.status === 'stopped') return; // the manager already logged the stop
     if (!result.ok) {
       this.issueFailed(repo, a.issueNumber);
@@ -2261,14 +2299,24 @@ export class Swarm {
   }
 
   /**
-   * Give a free developer the next backlog issue (auto-assign floors only). Returns true if work started.
+   * Restart explicit requests on manual floors, or give a free developer the next auto-assigned backlog issue.
+   * Returns true if work started.
    * Issues that say "Depends on #N" wait until #N is closed; the rest go in readyIssues() order. A swarm:<specialty>
    * label is a preference, not a lock: a free specialist gets first pick, and otherwise the issue goes to whichever
    * free developer is least needed elsewhere, so nobody sits idle while there is work that can start.
    */
   private startIssueWork(repo: PersistedRepo): boolean {
-    if (!repo.autoAssign || !this.mayStart('issue')) return false;
+    const rt = this.repoRt.get(repo.id)!;
+    const requests = retainRequestedStarts(repo.requestedStarts, rt.issues, rt.pulls);
+    if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests);
+    if (!this.mayStart('issue')) return false;
     const free = this.available(repo, 'dev');
+    if (!repo.autoAssign) {
+      const pick = pickRequestedStart(repo.requestedStarts, free, (n) => this.issueTaken(repo, n));
+      if (!pick) return false;
+      void this.assign(pick.agent.id, pick.request.issueNumber, pick.request.note).catch((err) => console.warn('requested start failed', err));
+      return pick.agent.status === 'preparing';
+    }
     const ready = free.length ? this.readyIssues(repo) : [];
     if (ready.length === 0) return false;
     const fits = (a: PersistedAgent, want: string) => a.specialty.toLowerCase() === want;
@@ -2276,7 +2324,7 @@ export class Swarm {
     const pick = ready.find((r) => r.chain === ready[0].chain && free.some((a) => fits(a, r.want))) ?? ready[0];
     const agent = this.pickDev(repo, free, (a) => fits(a, pick.want))!;
     // assign() flips the agent to 'preparing' synchronously, so the next pass sees it as busy.
-    void this.assign(agent.id, pick.issue.number).catch((err) => console.warn('auto-assign failed', err));
+    void this.assignIssue(agent.id, pick.issue.number, undefined, false).catch((err) => console.warn('auto-assign failed', err));
     return agent.status === 'preparing';
   }
 
