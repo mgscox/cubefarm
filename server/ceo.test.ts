@@ -70,7 +70,7 @@ describe('jobLabel', () => {
 // The CEO only sees the office tools if the whole list converts to JSON Schema: one schema the SDK can't handle
 // (z.record did this) empties tools/list, and the CEO silently loses every tool.
 describe('office tools', () => {
-  const connect = async (startIssue: OfficeHandlers['startIssue'] = async () => 'started', rerunQa: OfficeHandlers['rerunQa'] = async () => 'queued', sendBackToDev: OfficeHandlers['sendBackToDev'] = async () => 'sent back') => {
+  const connect = async (startIssue: OfficeHandlers['startIssue'] = async () => 'started', rerunQa: OfficeHandlers['rerunQa'] = async () => 'queued', sendBackToDev: OfficeHandlers['sendBackToDev'] = async () => 'sent back', parkPr: OfficeHandlers['parkPr'] = async () => 'parked') => {
     const floors: unknown[] = [];
     const office = createOfficeTools({
       companyStatus: () => '{}',
@@ -84,6 +84,7 @@ describe('office tools', () => {
       startIssue,
       rerunQa,
       sendBackToDev,
+      parkPr,
     });
     const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
     await office.server.instance.connect(serverSide);
@@ -95,7 +96,23 @@ describe('office tools', () => {
   it('lists every tool the CEO relies on', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'propose_hire', 'propose_let_go', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'park_pr', 'propose_hire', 'propose_let_go', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+  });
+
+  it('validates parking arguments and surfaces actionable refusals', async () => {
+    const requests: unknown[] = [];
+    const { client } = await connect(undefined, undefined, undefined, async (a) => {
+      requests.push(a);
+      if (a.number === 14) throw new Error('PR #14 is mid-QA; wait until it finishes');
+      return 'parked';
+    });
+    const args = { floor: 1, number: 13, reason: 'Waits on #12' };
+    expect(await client.callTool({ name: 'park_pr', arguments: { ...args, reason: '  Waits on #12  ' } })).toMatchObject({ content: [{ text: 'parked' }] });
+    for (const invalid of [{ floor: 1, number: 13 }, { ...args, floor: 1.5 }, { ...args, number: 0 }, { ...args, reason: '  ' }, { ...args, reason: 'x'.repeat(1001) }]) {
+      expect(await client.callTool({ name: 'park_pr', arguments: invalid })).toMatchObject({ isError: true });
+    }
+    expect(requests).toEqual([args]);
+    expect(await client.callTool({ name: 'park_pr', arguments: { ...args, number: 14 } })).toMatchObject({ isError: true, content: [{ text: 'Refused: PR #14 is mid-QA; wait until it finishes' }] });
   });
 
   it('validates developer handoffs and surfaces actionable refusals', async () => {

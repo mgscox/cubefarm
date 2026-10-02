@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
-import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ServerEvent } from '../shared/types.ts';
+import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
 import type { OfficeTools } from './ceo.ts';
 import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRunner.ts';
 
 // A Swarm that is never init()ed: no state file, scheduler timers or real sessions.
 
 type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => Promise<void>;
-type Repo = { id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; preview: { command: null; env: object } };
+type Repo = { id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; parkedBranches?: ParkedBranch[]; preview: { command: null; env: object } };
 type Backend = ReturnType<typeof createDemoBackend>;
-type QaRec = QaView & { sessionFailures: number; retests?: number; testedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
+type QaRec = QaView & { issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
 interface Internals {
   backend: Backend;
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[] };
@@ -38,6 +38,7 @@ interface Internals {
   prepare(...args: unknown[]): Promise<string>;
   startAgentSession(...args: unknown[]): void;
   runTask: RunTask;
+  repoView(repo: Repo): unknown;
 }
 
 const issue = (number: number, labels: string[] = [], body = ''): IssueInfo => ({ number, title: `Issue ${number}`, body, url: '', labels, createdAt: '' });
@@ -314,6 +315,212 @@ describe('CEO rerun_qa', () => {
 
   it('explains unknown floors', async () => {
     expect(await rerun({ floor: 8, number: 13 })).toContain('Refused: There is no floor 8.');
+  });
+});
+
+describe('CEO park_pr', () => {
+  const args = { floor: 1, number: 13, reason: 'Placeholder waits on #66' };
+  let pull: PullInfo;
+  beforeEach(() => {
+    Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
+    setIssues(issue(66), { ...issue(67), nativeBlockers: [{ number: 66, state: 'OPEN' }] });
+    pull = {
+      number: 13, title: 'Blocker record', url: '', headRefName: 'swarm/issue-67-ada', state: 'OPEN',
+      isDraft: true, closesIssues: [67], checks: 'none', mergeable: 'MERGEABLE', headSha: 'sha',
+      reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
+      mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+    };
+    s.repoRt.get(repo.id)!.pulls = [pull];
+    s.backend.prDetails = async () => ({ ...pull, body: '', isCrossRepository: false });
+    vi.spyOn(s.backend, 'commentPull').mockResolvedValue('comment-url');
+    vi.spyOn(s.backend, 'closePull').mockResolvedValue();
+    s.state.qa.push({ repoId: repo.id, prNumber: 13, issueNumber: 67, status: 'needs-human', round: 3, sessionFailures: 2,
+      devAgentId: 'a1', qaAgentId: null, summary: 'Implements none of the issue', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 });
+    Object.assign(s.state.agents[0], { status: 'done', task: 'issue', issueNumber: 67, prNumber: 13, branch: pull.headRefName });
+  });
+
+  it('comments, closes without deleting the branch, removes QA and releases the blocked issue', async () => {
+    const events = vi.spyOn(s, 'broadcast');
+    const message = vi.spyOn(s, 'postMessage');
+    repo.requestedStarts = [{ issueNumber: 67, preferredAgentId: 'a1', restartPending: true }];
+    expect(await s.officeTools().call('park_pr', args)).toContain('branch swarm/issue-67-ada was kept');
+    expect(s.backend.commentPull).toHaveBeenCalledWith(repo.fullName, 13, args.reason);
+    expect(s.backend.closePull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13);
+    expect(vi.mocked(s.backend.commentPull).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(s.backend.closePull).mock.invocationCallOrder[0]);
+    expect(pull).toMatchObject({ state: 'CLOSED', headRefName: 'swarm/issue-67-ada' });
+    expect(s.state.qa).toEqual([]);
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', issueNumber: null, prNumber: null });
+    expect(repo.requestedStarts).toEqual([]);
+    expect(events).toHaveBeenCalledWith({ type: 'qaRemoved', repoId: repo.id, prNumber: 13 });
+    expect(events).toHaveBeenCalledWith({ type: 'repo', repo: expect.objectContaining({ parkedBranches: [{ issueNumber: 67, prNumber: 13, branch: pull.headRefName }] }) });
+    expect(message).toHaveBeenCalledWith('office', 'Joi parked PR #13: Placeholder waits on #66');
+    const floor = JSON.parse(s.companyStatus()).floors[0];
+    expect(floor.pullRequests).toEqual([]);
+    expect(floor.backlog.find((i: { number: number }) => i.number === 67)).toMatchObject({ waitsFor: [66] });
+    expect(floor.backlog.find((i: { number: number }) => i.number === 67).inProgress).toBeUndefined();
+    expect(ready()).not.toContain(67);
+    // The next refresh reports the native blocker closed; only then is the issue ready.
+    setIssues({ ...issue(67), nativeBlockers: [{ number: 66, state: 'CLOSED' }] });
+    expect(ready()).toContain(67);
+  });
+
+  it.each(['queued', 'failed', 'fixing', 'passed', 'needs-human'] as const)('allows %s without a live session', async (status) => {
+    s.state.qa[0].status = status;
+    await swarm.parkPr(args);
+    expect(s.state.qa).toEqual([]);
+  });
+
+  it('allows an open placeholder with no QA record or closing keyword', async () => {
+    s.state.qa = [];
+    pull.closesIssues = [];
+    await swarm.parkPr(args);
+    expect(repo.parkedBranches).toEqual([{ issueNumber: 67, prNumber: 13, branch: pull.headRefName }]);
+  });
+
+  it('releases a holder linked only through the QA issue number', async () => {
+    pull.headRefName = 'placeholder/custom-branch';
+    pull.closesIssues = [];
+    Object.assign(s.state.agents[0], { prNumber: null, branch: null });
+    await swarm.parkPr(args);
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', issueNumber: null });
+    const backlog = JSON.parse(s.companyStatus()).floors[0].backlog;
+    expect(backlog.find((i: { number: number }) => i.number === 67).inProgress).toBeUndefined();
+    expect(repo.parkedBranches).toEqual([{ issueNumber: 67, prNumber: 13, branch: 'placeholder/custom-branch' }]);
+  });
+
+  it('releases a completed holder linked only through fresh closing references', async () => {
+    s.state.qa = [];
+    pull.headRefName = 'placeholder/custom-branch';
+    pull.closesIssues = [];
+    Object.assign(s.state.agents[0], { prNumber: null, branch: null });
+    s.backend.prDetails = async () => ({ ...pull, closesIssues: [67], body: '', isCrossRepository: false });
+    repo.requestedStarts = [{ issueNumber: 67, preferredAgentId: 'a1', restartPending: true }];
+
+    await swarm.parkPr(args);
+
+    expect(s.backend.commentPull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, args.reason);
+    expect(s.backend.closePull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13);
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null, issueNumber: null, prNumber: null });
+    expect(repo.requestedStarts).toEqual([]);
+    expect(repo.parkedBranches).toEqual([{ issueNumber: 67, prNumber: 13, branch: pull.headRefName }]);
+    const floor = JSON.parse(s.companyStatus()).floors[0];
+    expect(floor.pullRequests).toEqual([]);
+    const parkedIssue = floor.backlog.find((i: { number: number }) => i.number === 67);
+    expect(parkedIssue).toMatchObject({ waitsFor: [66] });
+    expect(parkedIssue.inProgress).toBeUndefined();
+    expect(ready()).not.toContain(67);
+  });
+
+  it('refuses a live holder linked only through fresh closing references before GitHub mutations', async () => {
+    s.state.qa = [];
+    pull.headRefName = 'placeholder/custom-branch';
+    pull.closesIssues = [];
+    Object.assign(s.state.agents[0], { status: 'working', prNumber: null, branch: null });
+    Object.assign(s.agentRt.get('a1')!, { session: {} });
+    s.backend.prDetails = async () => ({ ...pull, closesIssues: [67], body: '', isCrossRepository: false });
+
+    await expect(swarm.parkPr(args)).rejects.toMatchObject({ status: 409 });
+
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.closePull).not.toHaveBeenCalled();
+    expect(pull.state).toBe('OPEN');
+    expect(s.state.agents[0]).toMatchObject({ status: 'working', task: 'issue', issueNumber: 67 });
+    expect(repo.parkedBranches).toEqual([]);
+    expect(s.repoRt.get(repo.id)).toMatchObject({ parking: false });
+  });
+
+  it.each(['testing', 'busy', 'live-session', 'merging', 'syncing'] as const)('refuses %s with 409 and no GitHub mutations', async (condition) => {
+    if (condition === 'testing') s.state.qa[0].status = 'testing';
+    if (condition === 'busy') s.state.agents[0].status = 'preparing';
+    if (condition === 'live-session') Object.assign(s.agentRt.get('a1')!, { session: {} });
+    if (condition === 'merging' || condition === 'syncing') Object.assign(s.repoRt.get(repo.id)!, { [condition]: true });
+    await expect(swarm.parkPr(args)).rejects.toMatchObject({ status: 409 });
+    expect(await s.officeTools().call('park_pr', args)).toContain('Refused:');
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.closePull).not.toHaveBeenCalled();
+  });
+
+  it.each(['CLOSED', 'MERGED'] as const)('refuses freshly %s PRs with 404 despite stale cache', async (state) => {
+    s.backend.prDetails = async () => ({ ...pull, state, body: '', isCrossRepository: false });
+    await expect(swarm.parkPr(args)).rejects.toMatchObject({ status: 404 });
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.state.qa).toHaveLength(1);
+  });
+
+  it('refuses unknown PRs and floors', async () => {
+    await expect(swarm.parkPr({ ...args, number: 99 })).rejects.toMatchObject({ status: 404 });
+    expect(await s.officeTools().call('park_pr', { ...args, floor: 99 })).toContain('Refused: There is no floor 99');
+  });
+
+  it('reserves the repo across GitHub awaits and releases the reservation on failure', async () => {
+    s.backend.commentPull = vi.fn(async () => {
+      expect(s.startPipelineWork(repo)).toBe(false);
+      expect(s.startIssueWork(repo)).toBe(false);
+      await expect(swarm.sendToQa(repo.id, 13)).rejects.toMatchObject({ status: 409 });
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toMatchObject({ status: 409 });
+      await expect(swarm.closePull(repo.id, 13)).rejects.toMatchObject({ status: 409 });
+      await expect(swarm.message('a1', 'Continue')).rejects.toMatchObject({ status: 409 });
+      await expect(swarm.sendBackToDev({ floor: 1, number: 13 })).rejects.toMatchObject({ status: 409 });
+      await expect(swarm.parkPr(args)).rejects.toMatchObject({ status: 409 });
+      throw new Error('GitHub unavailable');
+    });
+    await expect(swarm.parkPr(args)).rejects.toThrow('GitHub unavailable');
+    expect(s.state.qa).toHaveLength(1);
+    expect(pull.state).toBe('OPEN');
+    s.backend.commentPull = vi.fn(async () => 'ok');
+    await swarm.parkPr(args);
+    expect(pull.state).toBe('CLOSED');
+  });
+
+  it('refuses while a manual merge is in progress and releases its merge flag on failure', async () => {
+    s.backend.mergePull = vi.fn(async () => {
+      await expect(swarm.parkPr(args)).rejects.toMatchObject({ status: 409 });
+      throw new Error('Merge failed');
+    });
+    await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('Merge failed');
+    await swarm.parkPr(args);
+    expect(pull.state).toBe('CLOSED');
+  });
+
+  it('keeps local state intact when closing fails', async () => {
+    vi.mocked(s.backend.closePull).mockRejectedValueOnce(new Error('Close failed'));
+    await expect(swarm.parkPr(args)).rejects.toThrow('Close failed');
+    expect(s.state.qa).toHaveLength(1);
+    expect(repo.parkedBranches).toEqual([]);
+    expect(pull.state).toBe('OPEN');
+  });
+
+  it('rechecks session guards after reading GitHub', async () => {
+    s.backend.prDetails = async () => {
+      s.state.qa[0].status = 'testing';
+      return { ...pull, body: '', isCrossRepository: false };
+    };
+    await expect(swarm.parkPr(args)).rejects.toMatchObject({ status: 409 });
+    expect(s.backend.closePull).not.toHaveBeenCalled();
+  });
+
+  it('retains the branch hint through JSON persistence and includes it in restarted developer work', async () => {
+    await swarm.parkPr(args);
+    const restored = JSON.parse(JSON.stringify(repo));
+    vi.spyOn(s, 'beginTask').mockImplementation(() => {});
+    vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
+    const session = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    // Restore the real implementation replaced by the scheduling fixture.
+    const actual = new Swarm(s.backend) as unknown as Internals;
+    await actual.runTask.call(s, s.state.agents[0], restored, issue(67));
+    expect(session.mock.calls[0][3]).toContain('reuse work from remote branch swarm/issue-67-ada');
+    expect(s.repoView(restored)).toMatchObject({ parkedBranches: repo.parkedBranches });
+  });
+
+  it('lets the demo CEO park from a manager message', async () => {
+    const finished = vi.fn();
+    const handle = createDemoBackend().startSession({ role: 'ceo', cwd: '', prompt: 'Manager asks:\nPark PR #13 on floor 1 because Placeholder waits on #66',
+      systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools() },
+    { log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: expect.stringContaining('is parked') }));
+    expect(s.state.qa).toEqual([]);
+    handle.stop();
   });
 });
 
