@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { git } from './exec.ts';
+import { projectEnv } from './projectEnv.ts';
 import * as workspace from './workspace.ts';
 
 // A floor's app, run for the preview monitor: checked out in its own worktree (never the floor's main checkout,
@@ -57,10 +58,8 @@ export const fillPlaceholders = (s: string, port: number, tmp: string) => s.repl
  */
 export function previewEnv(extra: Record<string, string>, port: number, tmp: string): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
+  for (const [k, v] of Object.entries(projectEnv(process.env))) {
     if (v === undefined || /^(ANTHROPIC_|CLAUDE|SWARM_)/i.test(k)) continue;
-    // npm run exports the office's policy; npm ci rejects it as an env override. Read the floor's npmrc/package policy.
-    if (/^npm_config_allow_scripts$/i.test(k)) continue;
     env[k] = v;
   }
   env.BROWSER = 'none'; // dev servers that open a browser tab on start shouldn't
