@@ -109,7 +109,7 @@ export function HUD() {
       <div className="hud-bottom">
         {started && !(settings.setupDone && settings.tutorialStep >= 0) && (
           <div className="hud-help">
-            <kbd>WASD</kbd> move · <kbd>Q</kbd>/<kbd>R</kbd> turn · <kbd>Z</kbd>/<kbd>X</kbd> look down/up · <kbd>Shift</kbd> run · <kbd>E</kbd> / <kbd>Click</kbd> interact · <kbd>P</kbd> phone · <kbd>Tab</kbd> workers · <kbd>H</kbd> help · <kbd>Esc</kbd> free mouse
+            <kbd>WASD</kbd> move · <kbd>Q</kbd>/<kbd>E</kbd> turn · <kbd>Z</kbd>/<kbd>X</kbd> look down/up · <kbd>Shift</kbd> run · <kbd>E</kbd> / <kbd>Click</kbd> interact · <kbd>P</kbd> phone · <kbd>Tab</kbd> workers · <kbd>H</kbd> help · <kbd>Esc</kbd> free mouse
           </div>
         )}
         <PhoneButton />
