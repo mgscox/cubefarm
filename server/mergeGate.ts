@@ -36,7 +36,6 @@ export type MergeStep = { set: MergeBookkeeping } & (
  */
 export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { base: string; detailed?: boolean }): MergeStep {
   if (pr.isDraft) return { do: 'wait', note: 'a draft: waiting', set: {} };
-  if (pr.checks === 'unavailable') return { do: 'wait', note: 'checks unavailable: restore GitHub check access before merging', set: { pendingSince: null } };
   if (!opts.detailed && (pr.mergeable === 'UNKNOWN' || pr.mergeState === 'UNKNOWN')) return { do: 'details', set: {} };
   const set: MergeBookkeeping = {};
   if (rec.passedSha == null) set.passedSha = pr.headSha; // signed off before the office tracked commits
@@ -44,6 +43,10 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
   const needsHuman = rec.mergeFixes >= MAX_MERGE_FIXES;
   if (pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY') {
     return { do: 'send-back', reason: 'conflict', instructions: `It conflicts with ${opts.base}.`, needsHuman, set };
+  }
+  if (pr.checks === 'unavailable') {
+    set.pendingSince = null;
+    return { do: 'wait', note: 'checks unavailable: restore GitHub check access before merging', set };
   }
   if (pr.checks === 'failing') {
     const instructions = pr.failedChecks.map((c) => `- ${c.name}${c.url ? `: ${c.url}` : ''}`).join('\n');
