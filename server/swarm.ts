@@ -112,6 +112,8 @@ interface QaRecord extends QaView {
   sessionFailures: number;
   testedSha: string | null; // the head commit QA is testing
   passedSha: string | null; // the head commit QA signed off on: auto-merge merges exactly that
+  failedSha: string | null; // the head commit QA last failed: re-testing it unchanged would fail again
+  fixCrashes: string[]; // developers whose fix session crashed since the last pushed fix, one entry per crash
   fixReason: 'qa' | 'checks' | 'conflict' | null; // why it was last sent back to a developer
   mergeFixes: number; // times it went back for failing checks or conflicts
   retests: number; // QA rounds caused by merge fixes or new commits rather than by QA failing it
@@ -465,6 +467,8 @@ export class Swarm {
           ...q,
           testedSha: q.testedSha ?? null,
           passedSha: q.passedSha ?? null,
+          failedSha: q.failedSha ?? null,
+          fixCrashes: q.fixCrashes ?? [],
           fixReason: q.fixReason ?? null,
           mergeFixes: q.mergeFixes ?? 0,
           retests: q.retests ?? 0,
@@ -1844,6 +1848,8 @@ export class Swarm {
         mergeNote: null,
         testedSha: null,
         passedSha: null,
+        failedSha: null,
+        fixCrashes: [],
         fixReason: null,
         mergeFixes: 0,
         retests: 0,
@@ -1865,8 +1871,9 @@ export class Swarm {
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === prNumber);
     if (rec?.status === 'testing' || rec?.status === 'fixing') throw new HttpError(409, `PR #${prNumber} is already ${rec.status}`);
     if (rec && (rec.status === 'needs-human' || rec.status === 'passed' || rec.status === 'failed')) {
-      // a fresh start: the manager decided it deserves another round
+      // a fresh start: the manager decided it deserves another round, which isn't one of QA's own
       rec.round += 1;
+      rec.retests += 1;
       rec.sessionFailures = 0;
     }
     const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && (a.prNumber === prNumber || a.branch === pr.headRefName));
@@ -1902,6 +1909,7 @@ export class Swarm {
 
   private async runQa(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord) {
     const branch = `qa/pr-${rec.prNumber}-${slugify(a.name)}`;
+    const lastTester = rec.qaAgentId;
     this.setQa(rec, { status: 'testing', qaAgentId: a.id });
     this.beginTask(
       a,
@@ -1917,7 +1925,6 @@ export class Swarm {
       const issueNumber = rec.issueNumber ?? pr.closesIssues[0] ?? null;
       if (issueNumber) issue = await this.backend.issueDetails(repo.fullName, issueNumber).catch(() => null);
       Object.assign(a, { issueTitle: pr.title, prUrl: pr.url });
-      rec.testedSha = pr.headSha;
       this.emitAgent(a);
     } catch (err) {
       a.status = 'error';
@@ -1935,6 +1942,8 @@ export class Swarm {
       this.clearTask(a);
       return;
     }
+    if (rec.failedSha === pr.headSha) return this.skipUnchangedQa(a, rec, lastTester);
+    rec.testedSha = pr.headSha;
 
     const cwd = await this.prepare(a, repo, { pr: rec.prNumber }, branch);
     if (!cwd) {
@@ -2011,6 +2020,7 @@ export class Swarm {
         sessionFailures: 0,
         fixReason: pass ? null : 'qa',
         passedSha: pass ? rec.testedSha : null,
+        failedSha: pass ? null : rec.testedSha,
         mergeNote: null,
         pendingSince: null,
         mergeRetryAt: null,
@@ -2025,6 +2035,15 @@ export class Swarm {
             : `❌ ${a.name} failed PR #${rec.prNumber}; sending it back to the developer`,
       );
     }
+  }
+
+  /** QA already failed this exact commit: send it straight back to a developer with those findings rather than spend a session re-testing it. */
+  private skipUnchangedQa(a: PersistedAgent, rec: QaRecord, lastTester: string | null) {
+    const human = rec.round - rec.retests >= MAX_QA_ROUNDS;
+    this.appendLog(a, [{ kind: 'system', text: `PR #${rec.prNumber} has no new commits since QA failed it; ${human ? 'it needs a human decision' : 'sending it back to a developer with the last findings'}.` }]);
+    this.clearTask(a);
+    this.setQa(rec, { status: human ? 'needs-human' : 'failed', qaAgentId: lastTester });
+    this.toast('info', `PR #${rec.prNumber} is unchanged since QA failed it: ${human ? 'it needs a human' : 'back to a developer, no re-test'}`);
   }
 
   private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[]) {
@@ -2132,22 +2151,25 @@ export class Swarm {
     }
     if (!result.ok) {
       this.fail(a, result, `the fix for PR #${a.prNumber}`);
-      // Someone else gets a go before it lands on the manager.
-      const failures = rec ? rec.sessionFailures + (this.limited() ? 0 : 1) : 0;
-      if (rec) this.setQa(rec, { status: failures >= 2 ? 'needs-human' : 'failed', sessionFailures: failures });
+      if (!rec) return;
+      // Another developer gets a go before it lands on the manager; the usage limit isn't the PR's fault.
+      const crashes = this.limited() ? rec.fixCrashes : [...rec.fixCrashes, a.id];
+      const devs = this.state.agents.filter((x) => x.repoId === repo.id && x.role === 'dev').length;
+      const human = new Set(crashes).size >= 2 || (devs <= 1 && crashes.length >= 2);
+      this.setQa(rec, { status: human ? 'needs-human' : 'failed', fixCrashes: crashes });
       return;
     }
     a.status = 'done';
     if (rec && (rec.fixReason === 'checks' || rec.fixReason === 'conflict')) {
       // Back in line to merge: new commits go through QA again first, a re-run of flaky checks doesn't.
       this.appendLog(a, [{ kind: 'done', text: `✔ PR #${a.prNumber} fixed in ${this.minutes(a)}m. Back in line to merge.` }]);
-      this.setQa(rec, { status: 'passed', devSessionId: a.sessionId ?? rec.devSessionId, mergeNote: 'waiting for fresh checks' });
+      this.setQa(rec, { status: 'passed', devSessionId: a.sessionId ?? rec.devSessionId, mergeNote: 'waiting for fresh checks', fixCrashes: [] });
       this.toast('info', `${a.name} fixed PR #${rec.prNumber}; it merges once it passes again`);
       return;
     }
     this.appendLog(a, [{ kind: 'done', text: `✔ Fix pushed for PR #${a.prNumber} in ${this.minutes(a)}m. Back to QA.` }]);
     if (rec) {
-      this.setQa(rec, { status: 'queued', round: rec.round + 1, devSessionId: a.sessionId ?? rec.devSessionId });
+      this.setQa(rec, { status: 'queued', round: rec.round + 1, devSessionId: a.sessionId ?? rec.devSessionId, fixCrashes: [] });
       this.toast('info', `${a.name} pushed fixes for PR #${rec.prNumber}; QA round ${rec.round} is queued`);
     }
   }
@@ -2290,8 +2312,12 @@ export class Swarm {
     for (const rec of waiting('failed')) {
       const issue = this.repoRt.get(repo.id)!.issues.find((i) => i.number === rec.issueNumber);
       const want = issue ? issueSpecialty(issue.labels) : null;
-      const dev = devs.find((a) => a.id === rec.devAgentId) ?? this.pickDev(repo, devs, (a) => a.specialty.toLowerCase() === want);
-      if (!dev) break;
+      // A fix that crashed waits for a developer who hasn't crashed on it, if the floor has one.
+      const fresh = (a: PersistedAgent) => !rec.fixCrashes.includes(a.id);
+      const freshOnFloor = this.state.agents.some((a) => a.repoId === repo.id && a.role === 'dev' && fresh(a));
+      const pool = freshOnFloor ? devs.filter(fresh) : devs;
+      const dev = pool.find((a) => a.id === rec.devAgentId) ?? this.pickDev(repo, pool, (a) => a.specialty.toLowerCase() === want);
+      if (!dev) continue;
       void this.runFix(dev, repo, rec);
       return true;
     }
