@@ -36,6 +36,44 @@ export interface OfficeHandlers {
   routeIssue(a: { floor: number; number: number; specialty?: string; depends_on?: number[] }): Promise<string>;
   startIssue(a: StartIssueRequest): Promise<string>;
   rerunQa(a: { floor: number; number: number; note?: string }): Promise<string>;
+  sendBackToDev(a: SendBackRequest): Promise<string>;
+}
+
+export type SendBackReason = 'qa' | 'conflict' | 'checks' | 'other';
+
+export interface SendBackRequest {
+  floor: number;
+  number: number;
+  agent?: string;
+  note?: string;
+  reason?: SendBackReason;
+}
+
+/** Why a PR goes back when the CEO doesn't say: conflicts first, then QA's findings, then failing checks. */
+export function sendBackReason(x: { conflict: boolean; qaFailed: boolean; checksFailing: boolean }): SendBackReason {
+  return x.conflict ? 'conflict' : x.qaFailed ? 'qa' : x.checksFailing ? 'checks' : 'other';
+}
+
+/** What the developer is told to fix when the CEO sends a PR back: the last QA findings, failing GitHub checks and the CEO's note. */
+export function sendBackInstructions(x: {
+  round: number;
+  summary: string | null;
+  qaChecks: { name: string; result: string; details: string }[];
+  qaFix: string | null;
+  failedChecks: string[];
+  ceo: string;
+  note?: string;
+}): string {
+  const failed = x.qaChecks.filter((c) => c.result === 'fail');
+  return [
+    x.summary ? `Last QA report (round ${x.round}): ${x.summary}` : '',
+    failed.length ? `Failed QA checks:\n${failed.map((c) => `- ${c.name}: ${c.details}`).join('\n')}` : '',
+    x.qaFix && x.qaFix !== failed.map((c) => `${c.name}: ${c.details}`).join('\n') ? `QA's instructions:\n${x.qaFix}` : '',
+    x.failedChecks.length ? `Failing GitHub checks: ${x.failedChecks.join(', ')}` : '',
+    x.note ? `Note from ${x.ceo}, the CEO: ${x.note}` : '',
+  ]
+    .filter((l) => l !== '')
+    .join('\n\n');
 }
 
 export interface StartIssueRequest {
@@ -219,6 +257,18 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
       },
       (a) => run(() => h.rerunQa(a)),
     ),
+    tool(
+      'send_back_to_dev',
+      'Hand an open pull request (QA needs-human, failed or passed) to a developer to fix: QA findings, merge conflicts or failing checks, plus your note. QA re-tests it afterwards and auto-merge carries on.',
+      {
+        floor: z.number().int(),
+        number: z.number().int().positive().describe('The pull request number'),
+        agent: z.string().optional().describe('Developer id or name on this floor; omit for its author if free, else any free developer, else the next free one'),
+        note: z.string().max(1500).optional().describe('Extra instructions for the developer'),
+        reason: z.enum(['qa', 'conflict', 'checks', 'other']).optional().describe('Omit to work it out: conflict if it does not merge cleanly, else qa if QA failed it'),
+      },
+      (a) => run(() => h.sendBackToDev(a)),
+    ),
   ];
   const server = createSdkMcpServer({ name: 'office', version: '1.0.0', tools: defs });
   return {
@@ -265,7 +315,8 @@ export function ceoSystemPrompt(o: {
     'Rules:',
     '- Every floor keeps at least one QA tester.',
     '- Use start_issue when the manager asks for an issue to be started; never bypass auto-assign OFF on your own initiative.',
-    '- Use rerun_qa only when the manager asks for a PR to be re-tested.',
+    '- Use rerun_qa only when the manager asks for a PR to be re-tested, and only if the PR has new commits since its last QA (newCommitsSinceQa); otherwise it needs a developer, not QA.',
+    '- When a PR needs a human and the fix is clear (QA found real defects, it conflicts, its checks fail), you may send_back_to_dev on your own initiative; tell the manager in your final message.',
     '- Titles are specific ("Three.js graphics engineer", not "Developer"). A specialty is a short lowercase slug ("graphics", "gameplay", "frontend", "backend", "content", "a11y", "devops"). Only route an issue to a specialty that someone on the floor has, or that you are proposing to hire.',
     '- Before proposing a hire, check the floor and the pending proposals for someone who already covers it. If the manager declined a similar proposal (recentDecisions), do not propose it again unless something has changed, and say what.',
     `- ${o.hiring === 'auto' ? 'Hiring is on auto: proposals within the team cap are approved immediately, so be deliberate.' : 'The manager approves every hire, so explain each reason in a sentence or two they can decide on.'}`,
@@ -309,7 +360,7 @@ export function ceoJobPrompt(job: CeoJob, floor: { floor: number; fullName: stri
         'Periodic review of the company. For every floor, look at:',
         '- floors without a profile or QA brief: study them and write one',
         '- backlog against the team (capacity): fewer issues ready to start than free developers, long dependency chains, a specialty with a long queue (fix those with route_issue)',
-        '- pull requests stuck in QA or marked as needing a human',
+        '- pull requests stuck in QA or marked as needing a human (send_back_to_dev when the fix is clear)',
         '- floors with a brief and an empty backlog: plan the next milestone',
         'Propose hires or let-gos only when clearly justified. If nothing needs doing, reply with one short sentence saying so.',
       ].join('\n');

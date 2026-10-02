@@ -6,7 +6,7 @@ import type { Backend } from './backend.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
-import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, specialtyLabel, specialtySlug, type CeoJob, type OfficeTools, type StartIssueRequest } from './ceo.ts';
+import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, specialtyLabel, specialtySlug, type CeoJob, type OfficeTools, type SendBackReason, type SendBackRequest, type StartIssueRequest, sendBackInstructions, sendBackReason } from './ceo.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
@@ -112,12 +112,21 @@ interface QaRecord extends QaView {
   sessionFailures: number;
   testedSha: string | null; // the head commit QA is testing
   passedSha: string | null; // the head commit QA signed off on: auto-merge merges exactly that
-  fixReason: 'qa' | 'checks' | 'conflict' | null; // why it was last sent back to a developer
+  fixReason: SendBackReason | null; // why it was last sent back to a developer
   mergeFixes: number; // times it went back for failing checks or conflicts
   retests: number; // QA rounds caused by merge fixes or new commits rather than by QA failing it
   pendingSince: number | null; // when auto-merge started waiting on its checks
   mergeRetryAt: number | null; // GitHub refused the merge: try again after this
   alerted: boolean; // the manager has been told it's stuck
+  sentBack: SentBack | null; // the CEO handed it to a developer; cleared once QA reports on the fix
+}
+
+/** The CEO's send_back_to_dev, until QA has re-tested the fix. */
+interface SentBack {
+  by: string; // the CEO's name
+  conflict: boolean; // it also conflicts with the base branch: the fix merges it in
+  agentId: string | null; // the developer it should go to
+  qaFix: string | null; // QA's own fix instructions, kept so sending it back again doesn't nest them
 }
 
 /** Choices made when a project moves into the office. */
@@ -391,6 +400,7 @@ export class Swarm {
       routeIssue: (a) => this.routeIssue(a),
       startIssue: (a) => this.startIssue(a),
       rerunQa: (a) => this.rerunQa(a),
+      sendBackToDev: (a) => this.sendBackToDev(a),
     });
   }
   private ceoIssues = new IssueCap(MAX_ISSUES_PER_JOB); // issues filed during the current CEO job
@@ -471,6 +481,7 @@ export class Swarm {
           pendingSince: q.pendingSince ?? null,
           mergeRetryAt: q.mergeRetryAt ?? null,
           alerted: q.alerted ?? false,
+          sentBack: q.sentBack ?? null,
           mergeNote: null,
         })),
         requests: loaded.requests ?? [],
@@ -1850,6 +1861,7 @@ export class Swarm {
         pendingSince: null,
         mergeRetryAt: null,
         alerted: false,
+        sentBack: null,
       };
       this.state.qa.push(rec);
       this.setQa(rec, {});
@@ -1868,6 +1880,7 @@ export class Swarm {
       // a fresh start: the manager decided it deserves another round
       rec.round += 1;
       rec.sessionFailures = 0;
+      rec.sentBack = null;
     }
     const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && (a.prNumber === prNumber || a.branch === pr.headRefName));
     this.queueQa(repo, prNumber, dev ?? null, pr.closesIssues[0] ?? null);
@@ -1948,7 +1961,9 @@ export class Swarm {
       `URL: ${pr.url}`,
       `Author: ${dev ? `${dev.name} (developer agent)` : 'a teammate'} · QA round ${rec.round}`,
       rec.rerunNote?.round === rec.round ? `Note from the manager: ${rec.rerunNote.text}` : '',
-      rec.fixReason === 'conflict'
+      rec.sentBack
+        ? `\nThis is a re-test after ${rec.sentBack.by}, the CEO, sent it back to a developer${rec.sentBack.conflict ? ` (who also merged ${repo.defaultBranch} in to resolve conflicts)` : ''}. What they were asked to fix:\n${rec.fixInstructions ?? ''}\nCheck that first, then re-check everything else.`
+        : rec.fixReason === 'conflict'
         ? `\nQA passed it before, but since then the branch was updated with ${repo.defaultBranch} to resolve merge conflicts. Re-check everything, especially where this change meets the newly merged work.`
         : rec.fixReason === 'checks'
           ? '\nQA passed it before, but since then the developer changed the code to fix failing GitHub checks. Re-check everything.'
@@ -2010,6 +2025,7 @@ export class Swarm {
         fixInstructions: report.fixInstructions ?? report.checks.filter((c) => c.result === 'fail').map((c) => `${c.name}: ${c.details}`).join('\n'),
         sessionFailures: 0,
         fixReason: pass ? null : 'qa',
+        sentBack: null,
         passedSha: pass ? rec.testedSha : null,
         mergeNote: null,
         pendingSince: null,
@@ -2077,7 +2093,9 @@ export class Swarm {
     this.beginTask(
       dev,
       { task: 'fix', issueNumber: rec.issueNumber, issueTitle: pull?.title ?? `PR #${rec.prNumber}`, branch: headRef, prNumber: rec.prNumber, prUrl: pull?.url ?? null },
-      rec.fixReason === 'conflict' ? `Resolving conflicts on PR #${rec.prNumber}` : rec.fixReason === 'checks' ? `Fixing checks on PR #${rec.prNumber}` : `Fixing PR #${rec.prNumber} after QA round ${rec.round}`,
+      rec.sentBack
+        ? `Fixing PR #${rec.prNumber} for ${rec.sentBack.by}`
+        : rec.fixReason === 'conflict' ? `Resolving conflicts on PR #${rec.prNumber}` : rec.fixReason === 'checks' ? `Fixing checks on PR #${rec.prNumber}` : `Fixing PR #${rec.prNumber} after QA round ${rec.round}`,
       `Checking out PR #${rec.prNumber}…`,
     );
     const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, headRef);
@@ -2119,7 +2137,21 @@ export class Swarm {
       'Then reply with a short summary of what you changed. Do not open a new pull request; QA will re-test automatically.',
     ];
     const mergeEnd = 'Then reply with a short summary of what you did. Do not open a new pull request; the office merges it once the checks pass, after another QA round if the code changed.';
-    const prompt = (mergeFix ? [...mergeFix, '', mergeEnd] : qaFix).filter((l) => l !== '').join('\n');
+    const sb = rec.sentBack;
+    const ceoFix = sb && [
+      `${sb.by}, the CEO, sent pull request #${rec.prNumber} (${pull?.url ?? ''}) back to you to fix.${takeover}`,
+      '',
+      `What needs fixing:\n${rec.fixInstructions ?? ''}`,
+      sb.conflict
+        ? `\nIt also conflicts with ${repo.defaultBranch}: git fetch origin && git merge origin/${repo.defaultBranch}, and resolve the conflicts so both this change and the newly merged work keep working. Do this as well as the fixes above.`
+        : '',
+      rec.fixReason === 'checks' ? `\nRead the failing checks' logs with gh pr checks ${rec.prNumber} -R ${repo.fullName} (for GitHub Actions: gh run view <run id> -R ${repo.fullName} --log-failed).` : '',
+      rec.commentUrl ? `\nLast QA report with screenshots: ${rec.commentUrl}` : '',
+      '',
+      `Fix all of this, run the project's checks, and ${push}`,
+      'Then reply with a short summary of what you changed. Do not open a new pull request; QA will re-test automatically.',
+    ];
+    const prompt = (ceoFix || (mergeFix ? [...mergeFix, '', mergeEnd] : qaFix)).filter((l) => l !== '').join('\n');
     const resume = original && rec.devSessionId ? rec.devSessionId : undefined;
     this.startAgentSession(dev, repo, cwd, prompt, this.buildSystemAppend(dev, repo, cwd, headRef, { pr: rec.prNumber, headRef }), resume);
   }
@@ -2138,7 +2170,7 @@ export class Swarm {
       return;
     }
     a.status = 'done';
-    if (rec && (rec.fixReason === 'checks' || rec.fixReason === 'conflict')) {
+    if (rec && !rec.sentBack && (rec.fixReason === 'checks' || rec.fixReason === 'conflict')) {
       // Back in line to merge: new commits go through QA again first, a re-run of flaky checks doesn't.
       this.appendLog(a, [{ kind: 'done', text: `✔ PR #${a.prNumber} fixed in ${this.minutes(a)}m. Back in line to merge.` }]);
       this.setQa(rec, { status: 'passed', devSessionId: a.sessionId ?? rec.devSessionId, mergeNote: 'waiting for fresh checks' });
@@ -2290,7 +2322,8 @@ export class Swarm {
     for (const rec of waiting('failed')) {
       const issue = this.repoRt.get(repo.id)!.issues.find((i) => i.number === rec.issueNumber);
       const want = issue ? issueSpecialty(issue.labels) : null;
-      const dev = devs.find((a) => a.id === rec.devAgentId) ?? this.pickDev(repo, devs, (a) => a.specialty.toLowerCase() === want);
+      const prefer = rec.sentBack?.agentId ?? rec.devAgentId;
+      const dev = devs.find((a) => a.id === prefer) ?? this.pickDev(repo, devs, (a) => a.specialty.toLowerCase() === want);
       if (!dev) break;
       void this.runFix(dev, repo, rec);
       return true;
@@ -3006,7 +3039,11 @@ export class Swarm {
             .filter((p) => p.state === 'OPEN')
             .map((p) => {
               const q = this.state.qa.find((x) => x.repoId === r.id && x.prNumber === p.number);
-              return { number: p.number, title: p.title, qa: q ? `${q.status}${q.round > 1 ? ` (round ${q.round})` : ''}` : 'not tested', merge: q?.mergeNote ?? null, checks: p.checks };
+              return {
+                number: p.number, title: p.title, qa: q ? `${q.status}${q.round > 1 ? ` (round ${q.round})` : ''}` : 'not tested', merge: q?.mergeNote ?? null, checks: p.checks,
+                ...(p.mergeable === 'CONFLICTING' && { conflicts: true }),
+                ...(q?.testedSha && { newCommitsSinceQa: q.testedSha !== p.headSha }),
+              };
             }),
           mergedRecently: rt.pulls.filter((p) => p.state === 'MERGED').map((p) => `#${p.number} ${p.title}`),
         };
@@ -3213,6 +3250,69 @@ export class Swarm {
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number)!;
     this.setQa(rec, { rerunNote: x.note ? { round: rec.round, text: x.note } : undefined });
     return `PR #${x.number} on floor ${repo.floor} is queued for QA (round ${rec.round}).`;
+  }
+
+  /**
+   * The CEO hands an open PR to a developer with fix instructions: QA's findings, conflicts, failing checks and its
+   * note. QA gets a fresh budget of rounds for the fix, so a failed re-test goes back to the developer again.
+   */
+  private async sendBackToDev(x: SendBackRequest) {
+    const repo = this.floorRepo(x.floor);
+    let pr = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === x.number && p.state === 'OPEN');
+    if (!pr) throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
+    const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number);
+    if (!rec) throw new HttpError(409, `PR #${x.number} hasn't been through QA yet; send it to QA first.`);
+    if (rec.status !== 'needs-human' && rec.status !== 'failed' && rec.status !== 'passed') throw new HttpError(409, `PR #${x.number} is ${rec.status}; wait for it to finish.`);
+    let dev: PersistedAgent | undefined;
+    if (x.agent !== undefined) {
+      const ref = x.agent.trim().toLowerCase();
+      dev = this.state.agents.find((a) => a.id === x.agent) ?? this.state.agents.find((a) => a.repoId === repo.id && a.name.toLowerCase() === ref);
+      if (!dev) throw new HttpError(400, `No agent "${x.agent}". Use the ids from company_status.`);
+      if (dev.role !== 'dev' || dev.repoId !== repo.id) throw new HttpError(400, `${dev.name} is not a developer on floor ${repo.floor}.`);
+      if (!this.available(repo, 'dev').includes(dev)) throw new HttpError(409, `${dev.name} is busy; pick someone else or leave agent out.`);
+    }
+    if (pr.mergeable === 'UNKNOWN') {
+      // GitHub works mergeability out lazily: asking about the PR itself gets an answer.
+      const d = await this.backend.prDetails(repo.fullName, pr.number).catch(() => null);
+      if (d) pr = { ...pr, mergeable: d.mergeable };
+    }
+    const conflict = pr.mergeable === 'CONFLICTING';
+    const qaFailed = rec.status !== 'passed' && rec.fixReason === 'qa';
+    const reason = x.reason ?? sendBackReason({ conflict, qaFailed, checksFailing: pr.checks === 'failing' });
+    const qaFix = rec.sentBack ? rec.sentBack.qaFix : qaFailed ? rec.fixInstructions : null;
+    const ceo = this.ceo().name;
+    const fixInstructions = sendBackInstructions({
+      round: rec.round,
+      summary: rec.summary,
+      qaChecks: rec.checks,
+      qaFix,
+      failedChecks: pr.failedChecks.map((c) => c.name),
+      ceo,
+      note: x.note?.trim() || undefined,
+    });
+    if (!fixInstructions && !conflict) throw new HttpError(400, `PR #${x.number} has no QA findings, failing checks or conflicts; say what to fix in note.`);
+    const devs = this.available(repo, 'dev');
+    dev ??= devs.find((a) => a.id === rec.devAgentId) ?? this.pickDev(repo, devs, () => false);
+    this.setQa(rec, {
+      status: 'failed',
+      fixReason: reason,
+      fixInstructions,
+      sentBack: { by: ceo, conflict, agentId: dev?.id ?? null, qaFix },
+      sessionFailures: 0,
+      retests: rec.round, // the fix's QA round counts as QA's first again: round - retests restarts at 1
+      mergeFixes: 0,
+      passedSha: null,
+      mergeNote: null,
+      pendingSince: null,
+      mergeRetryAt: null,
+      alerted: false,
+    });
+    const why = { qa: 'QA found problems', conflict: `it conflicts with ${repo.defaultBranch}`, checks: 'its checks fail', other: x.note ? oneLine(x.note) : 'see the note' }[reason];
+    const also = conflict && reason !== 'conflict' ? ` (and it conflicts with ${repo.defaultBranch})` : '';
+    const who = dev?.name ?? 'the next free developer';
+    this.postMessage('office', `↩️ ${ceo} sent PR #${x.number} on ${repo.fullName} back to ${who}: ${why}${also}.`);
+    setTimeout(() => this.schedule(), 200);
+    return `PR #${x.number} on floor ${repo.floor} goes back to ${who} (${reason}${conflict && reason !== 'conflict' ? ', plus merge conflicts' : ''}). QA re-tests it after the fix.`;
   }
 
   /** Change an open issue's specialty and/or dependencies (see planRoute for what is refused). */

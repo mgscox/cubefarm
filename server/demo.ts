@@ -847,6 +847,13 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
           return `Floor ${f.floor} is overstaffed: ${devs} developers for ${f.backlog.length} open issues. I suggest letting ${idle[idle.length - 1].name} go; it's on your phone.`;
         }
       }
+      // A PR that needs a human after QA: hand it back to a developer rather than to the manager.
+      for (const f of s.floors) {
+        const stuck = (f.pullRequests as { number: number; qa: string }[]).find((p) => p.qa.startsWith('needs-human'));
+        if (!stuck) continue;
+        const out = await use('send_back_to_dev', { floor: f.floor, number: stuck.number });
+        if (!out.startsWith('Refused')) return `Floor ${f.floor}: PR #${stuck.number} needed a human, so I sent it back to a developer. ${out}`;
+      }
       // An issue nobody routed while the floor has a specialist: re-route it rather than file a duplicate.
       for (const f of s.floors) {
         const specialist = f.team.find((a) => a.role === 'dev' && a.specialty);
@@ -869,6 +876,12 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
         const floor = rerun[2] ? Number(rerun[2]) : s.floors.find((f) => f.repo.toLowerCase() === rerun[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === rerun[3].toLowerCase())?.floor;
         if (floor === undefined) return `Refused: No floor for "${rerun[3]}".`;
         return use('rerun_qa', { floor, number: Number(rerun[1]), ...(rerun[4] ? { note: rerun[4].trim() } : {}) });
+      }
+      const back = text.match(/\bsend\s+(?:back\s+)?(?:PR\s*)?#(\d+)\s+(?:back\s+)?on\s+(?:floor\s+(\d+)|([\w./-]+))(?:\s+to\s+([\w-]+))?(?:\s+with\s+([^;\n]+))?/i);
+      if (back) {
+        const floor = back[2] ? Number(back[2]) : s.floors.find((f) => f.repo.toLowerCase() === back[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === back[3].toLowerCase())?.floor;
+        if (floor === undefined) return `Refused: No floor for "${back[3]}".`;
+        return use('send_back_to_dev', { floor, number: Number(back[1]), ...(back[4] ? { agent: back[4] } : {}), ...(back[5] ? { note: back[5].trim() } : {}) });
       }
       const start = text.match(/\bstart\s+#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))(?:\s+with\s+([^.;\n]+))?/i);
       if (start) {

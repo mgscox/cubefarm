@@ -248,6 +248,8 @@ export function describeOfficeTool(action: string, input: Record<string, unknown
       return `▶ start_issue #${String(input.number ?? '?')}${floor}${input.agent ? ` · ${input.agent}` : ''}`;
     case 'rerun_qa':
       return `▶ rerun_qa PR #${String(input.number ?? '?')}${input.floor != null ? ` · floor ${input.floor}` : ''}`;
+    case 'send_back_to_dev':
+      return `↩️ send_back_to_dev PR #${String(input.number ?? '?')}${floor}${input.agent ? ` · ${input.agent}` : ''}${input.reason ? ` · ${input.reason}` : ''}`;
     case 'route_issue':
       return `🔀 route_issue #${String(input.number ?? '?')}${floor}${input.specialty !== undefined ? ` · ${input.specialty || 'no specialty'}` : ''}${Array.isArray(input.depends_on) ? ` · depends on ${input.depends_on.map((n) => `#${n}`).join(', ') || 'nothing'}` : ''}`;
   }

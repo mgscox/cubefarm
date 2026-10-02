@@ -1,7 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
-import { createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, specialtyLabel, specialtySlug, type CeoJob, type RouteRequest, type OfficeHandlers } from './ceo.ts';
+import { createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, sendBackInstructions, sendBackReason, specialtyLabel, specialtySlug, type CeoJob, type RouteRequest, type OfficeHandlers } from './ceo.ts';
 
 describe('specialtySlug', () => {
   it('turns a specialty into a lowercase slug', () => {
@@ -68,7 +68,11 @@ describe('jobLabel', () => {
 // The CEO only sees the office tools if the whole list converts to JSON Schema: one schema the SDK can't handle
 // (z.record did this) empties tools/list, and the CEO silently loses every tool.
 describe('office tools', () => {
-  const connect = async (startIssue: OfficeHandlers['startIssue'] = async () => 'started', rerunQa: OfficeHandlers['rerunQa'] = async () => 'queued') => {
+  const connect = async (
+    startIssue: OfficeHandlers['startIssue'] = async () => 'started',
+    rerunQa: OfficeHandlers['rerunQa'] = async () => 'queued',
+    sendBackToDev: OfficeHandlers['sendBackToDev'] = async () => 'sent back',
+  ) => {
     const floors: unknown[] = [];
     const office = createOfficeTools({
       companyStatus: () => '{}',
@@ -81,6 +85,7 @@ describe('office tools', () => {
       routeIssue: async () => '',
       startIssue,
       rerunQa,
+      sendBackToDev,
     });
     const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
     await office.server.instance.connect(serverSide);
@@ -92,7 +97,21 @@ describe('office tools', () => {
   it('lists every tool the CEO relies on', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'propose_hire', 'propose_let_go', 'rerun_qa', 'route_issue', 'set_floor_profile', 'start_issue', 'update_job']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'propose_hire', 'propose_let_go', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+  });
+
+  it('validates send-back arguments', async () => {
+    const requests: unknown[] = [];
+    const { client } = await connect(undefined, undefined, async (a) => (requests.push(a), 'PR #14 on floor 1 goes back to Ada (qa).'));
+    const args = { floor: 1, number: 14, agent: 'Ada', note: 'Fix the null check', reason: 'qa' };
+    expect(await client.callTool({ name: 'send_back_to_dev', arguments: args })).toMatchObject({
+      content: [{ type: 'text', text: 'PR #14 on floor 1 goes back to Ada (qa).' }],
+    });
+    expect(await client.callTool({ name: 'send_back_to_dev', arguments: { floor: 1, number: 14 } })).not.toMatchObject({ isError: true });
+    for (const invalid of [{ floor: 1 }, { ...args, number: 0 }, { ...args, reason: 'vibes' }, { ...args, note: 'x'.repeat(1501) }]) {
+      expect(await client.callTool({ name: 'send_back_to_dev', arguments: invalid })).toMatchObject({ isError: true });
+    }
+    expect(requests).toEqual([args, { floor: 1, number: 14 }]);
   });
 
   it('validates rerun arguments and returns handler errors as tool errors', async () => {
@@ -279,5 +298,37 @@ describe('planStartIssue', () => {
     expect(() => planStartIssue({ ...request, number: 99 }, context)).toThrow('Issue #99 is not open on floor 1.');
     expect(() => planStartIssue(request, { ...context, inProgress: true })).toThrow('#4 is already in progress or has an open PR.');
     expect(() => planStartIssue(request, { ...context, usagePaused: true })).toThrow('Usage is paused; wait for the usage limit to reset.');
+  });
+});
+
+describe('sendBackReason', () => {
+  it('prefers conflicts, then QA failures, then failing checks', () => {
+    expect(sendBackReason({ conflict: true, qaFailed: true, checksFailing: true })).toBe('conflict');
+    expect(sendBackReason({ conflict: false, qaFailed: true, checksFailing: true })).toBe('qa');
+    expect(sendBackReason({ conflict: false, qaFailed: false, checksFailing: true })).toBe('checks');
+    expect(sendBackReason({ conflict: false, qaFailed: false, checksFailing: false })).toBe('other');
+  });
+});
+
+describe('sendBackInstructions', () => {
+  const base = { round: 3, summary: 'Crashes on empty input.', qaChecks: [{ name: 'Empty input', result: 'fail', details: 'TypeError' }, { name: 'Build', result: 'pass', details: 'ok' }], qaFix: null, failedChecks: [], ceo: 'Joi' };
+
+  it('combines the QA summary, failed checks, GitHub checks and the note', () => {
+    const text = sendBackInstructions({ ...base, qaFix: 'Guard the empty case.', failedChecks: ['ci / test'], note: 'Add a test too.' });
+    expect(text).toBe([
+      'Last QA report (round 3): Crashes on empty input.',
+      'Failed QA checks:\n- Empty input: TypeError',
+      "QA's instructions:\nGuard the empty case.",
+      'Failing GitHub checks: ci / test',
+      'Note from Joi, the CEO: Add a test too.',
+    ].join('\n\n'));
+  });
+
+  it("skips QA's instructions when they only repeat the failed checks", () => {
+    expect(sendBackInstructions({ ...base, qaFix: 'Empty input: TypeError' })).not.toContain("QA's instructions");
+  });
+
+  it('is empty with nothing to say', () => {
+    expect(sendBackInstructions({ ...base, summary: null, qaChecks: [] })).toBe('');
   });
 });

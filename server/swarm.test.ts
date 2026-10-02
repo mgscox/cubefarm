@@ -11,7 +11,7 @@ type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => 
 type Repo = { id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; preview: { command: null; env: object } };
 interface Internals {
   backend: { demo: boolean };
-  state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: (QaView & { sessionFailures: number })[] };
+  state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: (QaView & { sessionFailures: number })[]; messages: { text: string }[] };
   repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string }>;
   agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null }>;
   readyIssues(repo: Repo): { issue: IssueInfo }[];
@@ -286,6 +286,120 @@ describe('CEO rerun_qa', () => {
 
   it('explains unknown floors', async () => {
     expect(await rerun({ floor: 8, number: 13 })).toContain('Refused: There is no floor 8.');
+  });
+});
+
+describe('CEO send_back_to_dev', () => {
+  type Rec = Record<string, unknown>;
+  const rec = () => s.state.qa[0] as unknown as Rec;
+  const sendBack = (args: Record<string, unknown> = { floor: 1, number: 13 }) => s.officeTools().call('send_back_to_dev', args);
+  const pull = (patch: Partial<PullInfo> = {}): PullInfo => ({
+    number: 13, title: 'Recovery', url: 'https://github.com/demo-co/pixel-todo/pull/13', headRefName: 'swarm/13', state: 'OPEN',
+    isDraft: false, closesIssues: [], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'sha',
+    reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
+    mergeState: 'CLEAN', failedChecks: [], pendingChecks: [], ...patch,
+  });
+  /** Let the scheduler hand out the fix and return the developer's prompt. */
+  const fixPrompt = async () => {
+    vi.spyOn(s, 'beginTask').mockImplementation(() => {});
+    vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
+    vi.spyOn(s as unknown as { buildSystemAppend(): string }, 'buildSystemAppend').mockReturnValue('');
+    const session = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    expect(s.startPipelineWork(repo)).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    return { agent: session.mock.calls[0][0] as Rec, prompt: String(session.mock.calls[0][3]) };
+  };
+  beforeEach(() => {
+    Object.assign(repo, { defaultBranch: 'main' });
+    s.repoRt.get(repo.id)!.pulls = [pull()];
+    s.state.qa.push({
+      repoId: repo.id, prNumber: 13, status: 'needs-human', round: 3, sessionFailures: 2,
+      devAgentId: 'a1', qaAgentId: null, summary: 'Crashes on empty input.', checks: [{ name: 'Empty input', result: 'fail', details: 'TypeError' }],
+      commentUrl: null, mergeNote: null, updatedAt: 0,
+      ...{ fixReason: 'qa', fixInstructions: 'Guard the empty case.', retests: 0, mergeFixes: 0, sentBack: null, issueNumber: null, devSessionId: null },
+    } as QaView & { sessionFailures: number });
+  });
+
+  it('gives a needs-human PR to its developer with the QA findings and the note', async () => {
+    expect(await sendBack({ floor: 1, number: 13, note: 'Add a regression test.' })).toBe('PR #13 on floor 1 goes back to Ada (qa). QA re-tests it after the fix.');
+    expect(rec()).toMatchObject({ status: 'failed', fixReason: 'qa', sessionFailures: 0, retests: 3, round: 3 });
+    expect(s.state.messages.at(-1)!.text).toBe('↩️ Joi sent PR #13 on demo-co/pixel-todo back to Ada: QA found problems.');
+    const { agent, prompt } = await fixPrompt();
+    expect(agent.id).toBe('a1');
+    expect(prompt).toContain('Joi, the CEO, sent pull request #13');
+    expect(prompt).toContain('Last QA report (round 3): Crashes on empty input.');
+    expect(prompt).toContain('- Empty input: TypeError');
+    expect(prompt).toContain("QA's instructions:\nGuard the empty case.");
+    expect(prompt).toContain('Note from Joi, the CEO: Add a regression test.');
+    expect(prompt).toContain('git push origin HEAD:swarm/13');
+    expect(prompt).not.toContain('git merge');
+  });
+
+  it('adds the merge instructions when the PR also conflicts', async () => {
+    s.repoRt.get(repo.id)!.pulls = [pull({ mergeable: 'CONFLICTING' })];
+    expect(await sendBack()).toBe('PR #13 on floor 1 goes back to Ada (conflict). QA re-tests it after the fix.');
+    expect(rec()).toMatchObject({ fixReason: 'conflict', sentBack: expect.objectContaining({ conflict: true }) });
+    expect(s.state.messages.at(-1)!.text).toContain('back to Ada: it conflicts with main.');
+    const { prompt } = await fixPrompt();
+    expect(prompt).toContain('git fetch origin && git merge origin/main');
+    expect(prompt).toContain('Crashes on empty input.');
+  });
+
+  it('goes to a named developer, or waits for the next free one', async () => {
+    s.state.agents.push({ id: 'a2', name: 'Linus', repoId: repo.id, role: 'dev', specialty: '', status: 'idle', desk: 1 });
+    expect(await sendBack({ floor: 1, number: 13, agent: 'linus' })).toContain('goes back to Linus');
+    expect((await fixPrompt()).agent.id).toBe('a2');
+    s.state.agents[0].status = 'working';
+    s.state.agents.at(-1)!.status = 'working';
+    rec().status = 'failed';
+    expect(await sendBack({ floor: 1, number: 13, agent: 'Ada' })).toBe('Refused: Ada is busy; pick someone else or leave agent out.');
+    expect(await sendBack()).toContain('goes back to the next free developer');
+  });
+
+  it.each(['testing', 'fixing', 'queued'] as const)('refuses a PR that is %s with 409', async (status) => {
+    rec().status = status;
+    await expect((s as unknown as { sendBackToDev(x: unknown): Promise<string> }).sendBackToDev({ floor: 1, number: 13 })).rejects.toMatchObject({ status: 409 });
+    expect(rec()).toMatchObject({ status, sessionFailures: 2 });
+  });
+
+  it.each(['CLOSED', 'MERGED', null] as const)('refuses a closed or unknown PR (%s) with 404', async (state) => {
+    s.repoRt.get(repo.id)!.pulls = state ? [pull({ state })] : [];
+    await expect((s as unknown as { sendBackToDev(x: unknown): Promise<string> }).sendBackToDev({ floor: 1, number: 13 })).rejects.toMatchObject({ status: 404 });
+    expect(await sendBack()).toBe('Refused: PR #13 is not open on demo-co/pixel-todo');
+    expect(rec()).toMatchObject({ status: 'needs-human' });
+  });
+
+  it('sends a failed re-test back to the developer again instead of to the manager', async () => {
+    const internals = s as unknown as {
+      onFixFinished(a: unknown, repo: Repo, r: unknown): void;
+      onQaFinished(a: unknown, repo: Repo, r: unknown): Promise<void>;
+    };
+    await sendBack({ floor: 1, number: 13, note: 'Guard it.' });
+    const dev = s.state.agents[0];
+    Object.assign(dev, { status: 'working', task: 'fix', prNumber: 13, startedAt: 0, endedAt: 60_000 });
+    internals.onFixFinished(dev, repo, { ok: true, text: 'Fixed', costUsd: 0, turns: 1, errors: [] });
+    expect(rec()).toMatchObject({ status: 'queued', round: 4 });
+    s.state.agents.push({ id: 'q1', name: 'Grace', repoId: repo.id, role: 'qa', status: 'working', task: 'qa', prNumber: 13, desk: 0 });
+    s.agentRt.set('q1', { log: [], pending: [], terminal: null, shots: [] } as never);
+    const report = { verdict: 'fail', summary: 'Still crashes.', checks: [{ name: 'Empty input', result: 'fail', details: 'TypeError' }], commands: [], screenshots: [] };
+    await internals.onQaFinished(s.state.agents.at(-1), repo, { ok: true, text: '', costUsd: 0, turns: 1, errors: [], structured: report });
+    expect(rec()).toMatchObject({ status: 'failed', fixReason: 'qa', sentBack: null, summary: 'Still crashes.' });
+  });
+
+  it('lets the fake CEO send a PR back from a manager message', async () => {
+    const finished = vi.fn();
+    const callbacks: SessionCallbacks = {
+      log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished,
+    };
+    const options: SessionOptions = {
+      role: 'ceo', cwd: '', prompt: 'Manager asks:\nSend PR #13 back on floor 1 with Add a regression test',
+      systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools(),
+    };
+    const handle = createDemoBackend().startSession(options, callbacks);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: 'PR #13 on floor 1 goes back to Ada (qa). QA re-tests it after the fix.' }));
+    expect(String(rec().fixInstructions)).toContain('Note from Joi, the CEO: Add a regression test');
+    handle.stop();
   });
 });
 
