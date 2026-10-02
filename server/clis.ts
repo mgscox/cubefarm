@@ -273,6 +273,19 @@ export function codexThread(action: 'archive' | 'unarchive', id: string, after?:
   });
 }
 
+/**
+ * Which Codex thread a turn ending belongs to. Besides the main thread (the one given the office's prompt), Codex
+ * runs side threads: one that titles the task, and subagents the main thread spawns, which are forks of it, so their
+ * input starts with the same prompt. A subagent (as the notify program found it) never counts; the main thread is
+ * pinned by the hooks if they're trusted, or else by the first turn given a launched prompt. Returns the main thread
+ * from now on, or null when the turn isn't its.
+ */
+export function codexTurnThread(main: string | null, turn: { thread: string; input: string; subagent?: boolean }, launched: string[]): string | null {
+  if (turn.subagent) return null;
+  if (main) return turn.thread === main ? main : null;
+  return launched.some((p) => turn.input.startsWith(p.slice(0, 40))) ? turn.thread : null;
+}
+
 // ---------- prompts the office answers ----------
 
 const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|trust this folder|allow Codex to work in this folder/i;
@@ -333,19 +346,60 @@ process.stdin.on('end', async () => {
 });
 `;
 
-/** Codex's notify program: Codex runs it with a JSON argument when a turn completes. */
+/**
+ * Codex's notify program: Codex runs it with a JSON argument when a turn completes, on any of its threads. Its
+ * payload doesn't say whether the thread is a subagent, so the program looks in the thread's saved session.
+ */
 export const NOTIFY_SOURCE = String.raw`// cubefarm: Codex's notify program. Tells the office a turn is complete.
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const [url, payload] = process.argv.slice(2);
 let event = {};
 try {
   event = JSON.parse(payload ?? '{}');
 } catch {}
+
+// Codex saves each thread as sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl (local date; ids are UUIDv7, so they
+// carry their creation time). Its first line says whether another thread spawned it. Not found: not a subagent.
+function firstLine(file) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(1 << 16);
+    let text = '';
+    for (let n; text.length < 1 << 22 && !text.includes('\n') && (n = fs.readSync(fd, buf, 0, buf.length, null)) > 0; ) text += buf.toString('utf8', 0, n);
+    return text.split('\n')[0];
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+function isSubagent(id) {
+  try {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7/i.test(id)) return false;
+    const born = parseInt(id.slice(0, 8) + id.slice(9, 13), 16);
+    const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+    for (const t of [born, born - 864e5, born + 864e5]) {
+      const d = new Date(t);
+      const dir = path.join(home, 'sessions', String(d.getFullYear()), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0'));
+      let name;
+      try {
+        name = fs.readdirSync(dir).find((f) => f.endsWith('-' + id + '.jsonl'));
+      } catch {}
+      if (!name) continue;
+      const meta = JSON.parse(firstLine(path.join(dir, name))).payload ?? {};
+      return meta.thread_source === 'subagent' || !!meta.parent_thread_id || !!meta.source?.subagent;
+    }
+  } catch {}
+  return false;
+}
+
 if (event.type === 'agent-turn-complete') {
+  const thread = event['thread-id'] ?? null;
   const input = String((event['input-messages'] ?? [])[0] ?? '').slice(0, 300);
   fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ hook_event_name: 'TurnComplete', session_id: event['thread-id'] ?? null, last_assistant_message: event['last-assistant-message'] ?? '', input }),
+    body: JSON.stringify({ hook_event_name: 'TurnComplete', session_id: thread, last_assistant_message: event['last-assistant-message'] ?? '', input, subagent: typeof thread === 'string' && isSubagent(thread) }),
     signal: AbortSignal.timeout(3000),
   }).catch(() => {});
 }

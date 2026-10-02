@@ -6,7 +6,7 @@ import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { HOME_DIR } from './config.ts';
 import { projectEnv } from './projectEnv.ts';
-import { cliLabel, CODEX_HOOK_SOURCE, codexThread, commandFor, hookReviewKey, interruptions, isCli, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE, trustKey } from './clis.ts';
+import { cliLabel, CODEX_HOOK_SOURCE, codexThread, codexTurnThread, commandFor, hookReviewKey, interruptions, isCli, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE, trustKey } from './clis.ts';
 import { adoptPty, discardPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, startKeeper, terminalsAvailable, type Pty } from './ptyClient.ts';
 import {
   clip,
@@ -449,6 +449,11 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     return { statusLine };
   };
 
+  /** Codex's hooks name the thread they come from: the first one that isn't a subagent's is the main thread. */
+  const pinMain = (b: Record<string, unknown>) => {
+    if (cli === 'codex' && !mainThread && typeof b.session_id === 'string' && b.session_id) mainThread = b.session_id;
+  };
+
   const hook = (b: Record<string, unknown>): Record<string, unknown> => {
     const event = String(b.hook_event_name ?? '');
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
@@ -484,8 +489,12 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         cb.tool(null);
         return {};
       }
+      case 'SessionStart': // Codex, once its hooks are trusted: the thread it starts on is the main thread
+        if (!sub) pinMain(b);
+        return {};
       case 'UserPromptSubmit': {
         if (sub) return {};
+        pinMain(b);
         busy();
         const prompt = String(b.prompt ?? '').trim();
         const i = officePrompts.findIndex((p) => p.slice(0, 60) === prompt.slice(0, 60));
@@ -522,11 +531,11 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       // Codex's notify program and the OpenCode plugin
       case 'TurnComplete': {
         const thread = typeof b.session_id === 'string' ? b.session_id : '';
-        if (cli === 'codex' && thread !== mainThread) {
-          // Codex also runs side threads (it titles each task in one): the main thread is the one given our prompt.
-          const input = String(b.input ?? '').trim();
-          if (mainThread || !launched.some((p) => input.startsWith(p.slice(0, 40)))) return {};
-          mainThread = thread;
+        if (cli === 'codex') {
+          // Codex also runs side threads (a title, subagents): only the main thread's turns count.
+          const main = codexTurnThread(mainThread, { thread, input: String(b.input ?? '').trim(), subagent: b.subagent === true }, launched);
+          if (main === null) return {};
+          mainThread = main;
         }
         if (thread) {
           cb.sessionId(thread);
@@ -541,7 +550,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
           log(assistantLines(text));
           cb.turn?.(text);
         }
-        turnEnded(text);
+        turnEnded(cli === 'codex' ? text || lastText : text); // an empty Codex reply keeps what it said last
         return {};
       }
       case 'TurnError':

@@ -1,8 +1,11 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import http from 'node:http';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { CODEX_HOOK_EVENTS, codexHookCommand, hookReviewKey, interruptions, launchArgs, oneAtATime, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, hookReviewKey, interruptions, launchArgs, NOTIFY_SOURCE, oneAtATime, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
@@ -170,6 +173,102 @@ describe('launchArgs', () => {
     const config = (patch: Partial<LaunchContext>) => JSON.parse(launchArgs('opencode', ctx(patch)).env.OPENCODE_CONFIG_CONTENT);
     for (const role of ['dev', 'qa'] as const) expect(config({ role }).permission).toEqual({ edit: 'allow', bash: 'allow', webfetch: 'allow' });
     expect(config({}).autoupdate).toBe(false);
+  });
+});
+
+describe('codexTurnThread', () => {
+  const prompt = 'Please QA pull request #9: Add the whiteboard\nURL: https://github.com/o/r/pull/9';
+  type Turn = { thread: string; input: string; text: string; subagent?: boolean };
+  /** The turn endings a Codex session acts on, as the runner folds them: main thread, and its text so far. */
+  const session = (turns: Turn[], main: string | null = null) => {
+    let lastText = '';
+    const ended: string[] = [];
+    for (const t of turns) {
+      const next = codexTurnThread(main, t, [prompt]);
+      if (next === null) continue;
+      main = next;
+      lastText = t.text || lastText;
+      ended.push(t.thread);
+    }
+    return { main, ended, lastText };
+  };
+
+  it("ignores a subagent that finishes first, though it's a fork given the same prompt", () => {
+    const sub = { thread: 'sub-1', input: prompt, text: 'Spec review: all good', subagent: true };
+    expect(session([sub])).toEqual({ main: null, ended: [], lastText: '' });
+    const report = '{"verdict":"pass"}';
+    expect(session([sub, { thread: 'main', input: prompt, text: report }])).toEqual({ main: 'main', ended: ['main'], lastText: report });
+  });
+
+  it('ignores every other thread once the hooks pinned the main one', () => {
+    const r = session([{ thread: 'sub-1', input: prompt, text: 'Spec review: all good' }, { thread: 'main', input: prompt, text: 'report' }], 'main');
+    expect(r).toEqual({ main: 'main', ended: ['main'], lastText: 'report' });
+  });
+
+  it('ignores the side thread that titles the task, and later turns of other threads', () => {
+    const r = session([
+      { thread: 'title', input: `Write a title for: ${prompt}`, text: 'QA PR #9' },
+      { thread: 'main', input: prompt, text: 'report' },
+      { thread: 'other', input: prompt, text: 'not me' },
+    ]);
+    expect(r).toEqual({ main: 'main', ended: ['main'], lastText: 'report' });
+  });
+
+  it("keeps the main thread's last words when a turn ends without any", () => {
+    const r = session([{ thread: 'main', input: prompt, text: 'report' }, { thread: 'main', input: 'Carry on', text: '' }]);
+    expect(r).toEqual({ main: 'main', ended: ['main', 'main'], lastText: 'report' });
+  });
+});
+
+describe("Codex's notify program", () => {
+  /** A UUIDv7 thread id, born at ms. */
+  const threadId = (ms: number, n: number) => {
+    const t = ms.toString(16).padStart(12, '0');
+    return `${t.slice(0, 8)}-${t.slice(8)}-7${String(n).padStart(3, '0')}-8000-000000000000`;
+  };
+
+  it('tells the office which turn endings come from a subagent, from the session Codex saved', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-codex-'));
+    const born = Date.now();
+    const d = new Date(born);
+    const day = path.join(home, 'sessions', String(d.getFullYear()), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0'));
+    fs.mkdirSync(day, { recursive: true });
+    const main = threadId(born, 1);
+    const sub = threadId(born + 1000, 2);
+    const save = (id: string, meta: object) =>
+      fs.writeFileSync(path.join(day, `rollout-2026-10-02T09-21-12-${id}.jsonl`), `${JSON.stringify({ type: 'session_meta', payload: { id, ...meta, base_instructions: { text: 'x'.repeat(100_000) } } })}\n{"type":"event_msg"}\n`);
+    save(main, { session_id: main, source: 'cli', thread_source: 'user' });
+    save(sub, { session_id: main, parent_thread_id: main, source: { subagent: { thread_spawn: { parent_thread_id: main } } }, thread_source: 'subagent' });
+    const script = path.join(home, 'notify.cjs');
+    fs.writeFileSync(script, NOTIFY_SOURCE);
+
+    const bodies: Record<string, unknown>[] = [];
+    const server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        bodies.push(JSON.parse(body));
+        res.end('{}');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/hooks/t`;
+    const notify = (thread: string) =>
+      promisify(execFile)(process.execPath, [script, url, JSON.stringify({ type: 'agent-turn-complete', 'thread-id': thread, 'input-messages': ['Please QA'], 'last-assistant-message': 'done' })], {
+        env: { ...process.env, CODEX_HOME: home },
+      });
+    try {
+      for (const t of [sub, main, threadId(born, 3)]) await notify(t);
+    } finally {
+      server.close();
+      fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
+    }
+    expect(bodies.map((b) => [b.session_id, b.subagent])).toEqual([
+      [sub, true],
+      [main, false],
+      [threadId(born, 3), false], // not saved (yet): taken as it comes
+    ]);
+    expect(bodies[0]).toMatchObject({ hook_event_name: 'TurnComplete', last_assistant_message: 'done', input: 'Please QA' });
   });
 });
 
