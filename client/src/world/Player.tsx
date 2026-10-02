@@ -228,7 +228,7 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
 
     // movement
     const k = keys.current;
-    if (s.started && !s.travel) look.current = keyboardLook(look.current, k, dt);
+    if (s.started && !s.travel) keyboardLook(look.current, k, dt);
     const fwd = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0);
     const strafe = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
     const speed = k.has('ShiftLeft') || k.has('ShiftRight') ? 6.5 : 3.6;

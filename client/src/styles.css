@@ -697,6 +697,7 @@ input.inline:focus {
   position: absolute;
   bottom: 14px;
   left: 16px;
+  max-width: calc(100% - 220px); /* wrap short of the phone button, bottom right */
   font-size: 0.85rem;
   background: rgba(255, 253, 246, 0.85);
   border-radius: 12px;

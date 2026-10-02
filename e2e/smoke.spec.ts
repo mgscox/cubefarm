@@ -1,5 +1,5 @@
 import { test as base, expect, type Page } from '@playwright/test';
-import { MANAGER_DESK } from '../client/src/world/layout';
+import { BLASTER_RACK, HALF_D, MANAGER_DESK } from '../client/src/world/layout';
 import { colourStats, decodePng } from './png';
 import type { RepoView, ServerEvent } from '../shared/types';
 
@@ -265,6 +265,40 @@ test('Q/R turn and Z/X pitch without walking, and help pauses keyboard look', as
   expect(await savedView(page)).toEqual(stopped);
 });
 
+test('a blaster empties, T reloads it, R only turns, and the prompts say T', async ({ page }) => {
+  // Start in the lobby in front of the foam blaster rack, facing the south wall (+Z).
+  const spot: SavedView = { floor: 0, x: BLASTER_RACK.lobbyX, z: HALF_D - BLASTER_RACK.d - 1.2, yaw: Math.PI, pitch: -0.2 };
+  await page.addInitScript(([key, view]) => localStorage.setItem(key, view), [VIEW_KEY, JSON.stringify(spot)] as const);
+  await enterOffice(page);
+  const ammo = () => page.evaluate(() => {
+    const held = (window as unknown as { __swarmToys: { held: { kind: string; ammo?: number; reloadAt?: number | null } | null } }).__swarmToys.held;
+    return held?.kind === 'blaster' ? { ammo: held.ammo, reloading: held.reloadAt !== null } : null;
+  });
+  await expect(page.getByText('Take a blaster')).toBeVisible();
+  await page.keyboard.press('e');
+  await expect.poll(ammo).toEqual({ ammo: 12, reloading: false });
+  await expect(page.locator('.hud-held')).toContainText('T reload');
+
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press('f');
+    await page.waitForTimeout(300); // four shots a second at most
+  }
+  await expect.poll(ammo).toEqual({ ammo: 0, reloading: false });
+  await expect(page.getByText('Empty: T to reload')).toBeVisible();
+
+  const before = (await savedView(page))!;
+  await page.keyboard.down('r');
+  try {
+    await expect.poll(async () => before.yaw - (await savedView(page))!.yaw).toBeGreaterThan(0.1);
+  } finally {
+    await page.keyboard.up('r');
+  }
+  expect(await ammo()).toEqual({ ammo: 0, reloading: false });
+
+  await page.keyboard.press('t');
+  await expect.poll(ammo).toEqual({ ammo: 12, reloading: false });
+});
+
 test('holding W walks forward', async ({ page }) => {
   await enterOffice(page);
   // The client saves the player's spot about once a second while you're inside.
@@ -286,4 +320,16 @@ test('holding W walks forward', async ({ page }) => {
   const to = (await savedView(page))!;
   expect(to.floor).toBe(from.floor);
   expect(to.yaw).toBeCloseTo(from.yaw); // W walks, it doesn't turn
+});
+
+test('the shortcut bar wraps clear of the phone button at 1024x640', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 640 });
+  await enterOffice(page);
+  // The bar shows once the tour is over. Last in the file, as skipping the tour is saved for the tests after it.
+  await page.getByRole('button', { name: 'Skip tour' }).click();
+  const bar = page.locator('.hud-help');
+  await expect(bar).toContainText('Esc free mouse');
+  const help = (await bar.boundingBox())!;
+  const phone = (await phoneButton(page).boundingBox())!;
+  expect(help.x + help.width).toBeLessThanOrEqual(phone.x);
 });
