@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
+import os from 'node:os';
 import path from 'node:path';
 import { run } from './exec.ts';
 import type { AgentCli, CliView, EffortLevel } from '../shared/types.ts';
@@ -284,6 +285,24 @@ export function codexTurnThread(main: string | null, turn: { thread: string; inp
   if (turn.subagent) return null;
   if (main) return turn.thread === main ? main : null;
   return launched.some((p) => turn.input.startsWith(p.slice(0, 40))) ? turn.thread : null;
+}
+
+/** A signal's name for messages (15 → SIGTERM). */
+const signalName = (n: number) => Object.entries(os.constants.signals).find(([, v]) => v === n)?.[0] ?? `signal ${n}`;
+
+/**
+ * How a session ends when its CLI quits on its own. Only a clean exit once its turn has ended (or, for Codex and
+ * OpenCode, which may not say so, after a while) is finished. A CLI stopped by a signal, or that quits mid-turn, was
+ * cut off: node-pty reports a signalled exit as code 0, and Codex's launcher re-raises the SIGTERM it gets, so code 0
+ * alone doesn't mean it finished.
+ */
+export function cliExit(cli: AgentCli, x: { code: number; signal?: number; working: boolean; lastText: string; ranMs: number }): { ok: boolean; error: string | null } {
+  const label = cliLabel(cli);
+  if (x.signal) return { ok: false, error: `${label} was stopped (${signalName(x.signal)}) before finishing.` };
+  if (x.code !== 0) return { ok: false, error: `${label} exited with code ${x.code} before finishing.` };
+  if (x.working) return { ok: false, error: `${label} exited in the middle of its task.` };
+  if (x.lastText !== '' || (cli !== 'claude' && x.ranMs > 20_000)) return { ok: true, error: null };
+  return { ok: false, error: `${label} exited before finishing.` };
 }
 
 // ---------- prompts the office answers ----------

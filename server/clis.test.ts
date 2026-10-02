@@ -5,7 +5,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, hookReviewKey, interruptions, launchArgs, NOTIFY_SOURCE, oneAtATime, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { cliExit, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, hookReviewKey, interruptions, launchArgs, NOTIFY_SOURCE, oneAtATime, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
@@ -217,6 +217,29 @@ describe('codexTurnThread', () => {
   it("keeps the main thread's last words when a turn ends without any", () => {
     const r = session([{ thread: 'main', input: prompt, text: 'report' }, { thread: 'main', input: 'Carry on', text: '' }]);
     expect(r).toEqual({ main: 'main', ended: ['main', 'main'], lastText: 'report' });
+  });
+});
+
+describe('cliExit', () => {
+  const MIN = 60_000;
+
+  it("doesn't finish a Codex session whose CLI was stopped by SIGTERM mid-task (node-pty reports code 0)", () => {
+    // The live office, 2 Oct: 53 minutes in, hooks untrusted so no turn had ended, "✔ Finished · 0 turns · no PR found".
+    const killed = { code: 0, signal: 15, working: true, lastText: '', ranMs: 53 * MIN };
+    expect(cliExit('codex', killed)).toEqual({ ok: false, error: 'Codex was stopped (SIGTERM) before finishing.' });
+    // A keeper from before this change doesn't pass the signal on: still mid-task, so still not finished.
+    expect(cliExit('codex', { ...killed, signal: undefined })).toEqual({ ok: false, error: 'Codex exited in the middle of its task.' });
+    expect(cliExit('claude', { ...killed, code: 143, signal: undefined, lastText: 'Earlier turn' }).ok).toBe(false);
+  });
+
+  it('finishes a CLI that quits cleanly once its turn has ended', () => {
+    expect(cliExit('claude', { code: 0, working: false, lastText: 'Done: https://github.com/o/r/pull/3', ranMs: MIN })).toEqual({ ok: true, error: null });
+    expect(cliExit('codex', { code: 0, working: false, lastText: '', ranMs: MIN })).toEqual({ ok: true, error: null });
+  });
+
+  it("fails one that couldn't start or crashed", () => {
+    expect(cliExit('codex', { code: 0, working: false, lastText: '', ranMs: 5_000 })).toEqual({ ok: false, error: 'Codex exited before finishing.' });
+    expect(cliExit('opencode', { code: 1, working: true, lastText: '', ranMs: 2_000 }).error).toBe('OpenCode exited with code 1 before finishing.');
   });
 });
 

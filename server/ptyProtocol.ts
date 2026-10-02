@@ -35,7 +35,7 @@ export type FromHost =
   | { op: 'spawned'; id: string; pid: number }
   | { op: 'failed'; id: string; error: string }
   | { op: 'data'; id: string; data: string }
-  | { op: 'exit'; id: string; code: number }
+  | { op: 'exit'; id: string; code: number; signal?: number } // signal: an older keeper doesn't say
   | { op: 'hook'; rid: number; token: string; body: unknown };
 
 /** The keeper's socket for an office home: a named pipe on Windows, a Unix socket in the home elsewhere. */
