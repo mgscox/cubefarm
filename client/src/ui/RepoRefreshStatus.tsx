@@ -19,8 +19,9 @@ export function RepoRefreshStatus({ repo, onRefresh }: { repo: RepoView; onRefre
       <div className="muted">PRs: {refresh?.pulls.at ? `${repo.pulls.filter((p) => p.state === 'OPEN').length} open` : 'unknown'} · {freshness('pulls')}</div>
       {(refresh?.issues.error || refresh?.pulls.error) && <div role="alert">Some GitHub data could not be refreshed. Previous data is stale; see diagnostics.</div>}
       {refresh?.checksError && <div role="alert">
-        Checks unavailable; automatic merging is blocked for affected PRs. Fine-grained PATs cannot access GitHub’s Checks API. Use GitHub CLI browser login (<code>gh auth login --web</code>) with OAuth, or a classic PAT where allowed. If a PAT is set in <code>GH_TOKEN</code> or <code>GITHUB_TOKEN</code>, it overrides stored login.{' '}
-        <a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#fine-grained-personal-access-tokens-limitations" target="_blank" rel="noreferrer">GitHub documentation</a>
+        {repo.pulls.some((p) => p.state === 'OPEN' && p.checks === 'unavailable')
+          ? 'Some PR checks could not be read; automatic merging is blocked for those PRs. Check token access to GitHub Actions and see diagnostics.'
+          : 'PR checks are read through GitHub Actions and commit statuses.'}
       </div>}
       {details && <details><summary>GitHub refresh diagnostics</summary><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 180, overflow: 'auto' }}>{details}</pre></details>}
     </div>

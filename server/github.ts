@@ -114,7 +114,50 @@ export function isCheckAccessError(error: unknown): boolean {
     /^(?:GraphQL:\s*)?Resource not accessible by (?:personal access token|integration)\s*\([\w.]*statusCheckRollup[\w.]*\)$/.test(line.trim()));
 }
 
-export async function listPulls(fullName: string, query: (args: string[]) => Promise<RawPull[]> = ghJson): Promise<PullRefresh> {
+type RestQuery = (args: string[]) => Promise<unknown>;
+interface WorkflowRun { name: string | null; status: string; conclusion: string | null; html_url: string }
+interface CommitStatus { context: string; state: string; target_url: string | null }
+const REST_CACHE_MS = 30_000; // Reuse manual refresh bursts, but re-read even completed runs on the normal 45s sync.
+const restCache = new WeakMap<RestQuery, Map<string, { at: number; checks: Check[] }>>();
+
+async function restChecks(fullName: string, sha: string, api: RestQuery): Promise<Check[]> {
+  let cache = restCache.get(api);
+  if (!cache) restCache.set(api, cache = new Map());
+  const key = `${fullName}#${sha}`;
+  const now = Date.now();
+  for (const [key, entry] of cache) if (now - entry.at >= REST_CACHE_MS) cache.delete(key);
+  const cached = cache.get(key);
+  if (cached) return cached.checks;
+
+  // Both endpoints paginate. Never infer passing from a truncated response.
+  const pages = async <T>(endpoint: string, field: 'workflow_runs' | 'statuses'): Promise<T[]> => {
+    const items: T[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const response = await api(['api', `${endpoint}${endpoint.includes('?') ? '&' : '?'}per_page=100&page=${page}`]) as { total_count: number } & Record<typeof field, T[]>;
+      items.push(...response[field]);
+      if (items.length >= response.total_count) return items;
+      if (response[field].length === 0) break;
+    }
+    throw new Error('REST checks exceeded the pagination limit');
+  };
+  const runs = await pages<WorkflowRun>(`repos/${fullName}/actions/runs?head_sha=${encodeURIComponent(sha)}`, 'workflow_runs');
+  let statuses: CommitStatus[] = [];
+  try {
+    statuses = await pages<CommitStatus>(`repos/${fullName}/commits/${encodeURIComponent(sha)}/status`, 'statuses');
+  } catch (error) {
+    // Commit statuses are optional for tokens that can read Actions but not statuses.
+    if (!(error instanceof CommandError) || !/\bHTTP (?:403|404)\b/.test(error.stderr)) throw error;
+  }
+  const checks: Check[] = [
+    ...runs.map((r) => ({ name: r.name || 'workflow', status: r.status.toUpperCase(), conclusion: r.conclusion?.toUpperCase(), detailsUrl: r.html_url })),
+    ...statuses.map((s) => ({ context: s.context, state: s.state.toUpperCase(), targetUrl: s.target_url || undefined })),
+  ];
+  if (cache.size >= 500) cache.delete(cache.keys().next().value!);
+  cache.set(key, { at: now, checks });
+  return checks;
+}
+
+export async function listPulls(fullName: string, query: (args: string[]) => Promise<RawPull[]> = ghJson, api: RestQuery = ghJson): Promise<PullRefresh> {
   const list = async (state: string, limit: string): Promise<PullRefresh> => {
     const args = ['pr', 'list', '-R', fullName, '--state', state, '--limit', limit, '--json'];
     try {
@@ -123,7 +166,27 @@ export async function listPulls(fullName: string, query: (args: string[]) => Pro
     } catch (error) {
       if (!isCheckAccessError(error)) throw error;
       const raw = await query([...args, PR_FIELDS]);
-      return { pulls: raw.map((p) => ({ ...toPull(p), checks: 'unavailable', failedChecks: [], pendingChecks: [] })), checksError: (error as Error).message };
+      if (state !== 'open') return { pulls: raw.map(toPull) };
+      const bySha = new Map<string, Promise<Check[]>>();
+      const pulls: PullInfo[] = new Array(raw.length);
+      const errors: string[] = [];
+      let next = 0;
+      const worker = async () => {
+        while (next < raw.length) {
+          const index = next++;
+          const p = raw[index];
+          try {
+            let checks = bySha.get(p.headRefOid);
+            if (!checks) bySha.set(p.headRefOid, checks = restChecks(fullName, p.headRefOid, api));
+            pulls[index] = toPull({ ...p, statusCheckRollup: await checks });
+          } catch (error) {
+            pulls[index] = { ...toPull(p), checks: 'unavailable', failedChecks: [], pendingChecks: [] };
+            errors.push(`PR #${p.number}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, raw.length) }, worker));
+      return { pulls, checksError: `Check rollup access denied; REST fallback in use (GitHub Actions and commit statuses).${errors.length ? `\n${errors.join('\n')}` : ''}` };
     }
   };
   const [open, merged] = await Promise.all([list('open', '50'), list('merged', '8')]);
