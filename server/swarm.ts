@@ -1925,8 +1925,6 @@ export class Swarm {
       const issueNumber = rec.issueNumber ?? pr.closesIssues[0] ?? null;
       if (issueNumber) issue = await this.backend.issueDetails(repo.fullName, issueNumber).catch(() => null);
       Object.assign(a, { issueTitle: pr.title, prUrl: pr.url });
-      if (rec.failedSha === pr.headSha) return this.skipUnchangedQa(a, rec, lastTester);
-      rec.testedSha = pr.headSha;
       this.emitAgent(a);
     } catch (err) {
       a.status = 'error';
@@ -1944,6 +1942,8 @@ export class Swarm {
       this.clearTask(a);
       return;
     }
+    if (rec.failedSha === pr.headSha) return this.skipUnchangedQa(a, rec, lastTester);
+    rec.testedSha = pr.headSha;
 
     const cwd = await this.prepare(a, repo, { pr: rec.prNumber }, branch);
     if (!cwd) {

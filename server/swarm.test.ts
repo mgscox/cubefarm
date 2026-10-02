@@ -434,6 +434,20 @@ describe('QA rounds', () => {
       expect(runFix).toHaveBeenCalledWith(ada, repo, rec);
     });
 
+    it.each(['CLOSED', 'MERGED'] as const)('drops a %s PR rather than sending its unchanged commit to a developer', async (state) => {
+      vi.mocked(s.backend.prDetails).mockResolvedValue({ ...pull, state, body: '', isCrossRepository: false });
+      const tester = addAgent('q2', 'Marple', 'qa', 1);
+      rec.failedSha = 'sha-1';
+      await swarm.sendToQa(repo.id, 13); // the polled pull list still says OPEN
+      await s.runQa(tester, repo, rec);
+      expect(session).not.toHaveBeenCalled();
+      expect(s.state.qa).toEqual([]);
+      expect(tester).toMatchObject({ status: 'idle', task: null });
+      ada.status = 'idle';
+      expect(s.startPipelineWork(repo)).toBe(false);
+      expect(runFix).not.toHaveBeenCalled();
+    });
+
     it('tests a commit QA has not failed', async () => {
       const tester = addAgent('q2', 'Marple', 'qa', 1);
       rec.status = 'queued';
