@@ -677,6 +677,42 @@ describe('a developer session that ends without a PR after pushing commits', () 
     });
   });
 
+  describe('when the manager takes over during the desk clean-up', () => {
+    let cleaned!: () => void;
+    beforeEach(() => {
+      const cleanup = new Promise<void>((r) => (cleaned = r));
+      vi.spyOn(backend, 'releaseDesk').mockReturnValue(cleanup);
+    });
+    const stopDuringCleanup = async () => {
+      sessions[0].cb.finished(cut);
+      await vi.waitFor(() => expect(ahead).toHaveBeenCalled());
+      swarm.stopAgent('a1');
+    };
+
+    it('Stop then Clear desk: the old session starts no retry', async () => {
+      await stopDuringCleanup();
+      swarm.resetAgent('a1');
+      cleaned();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(sessions).toHaveLength(1);
+      expect(ada()).toMatchObject({ status: 'idle', task: null, issueNumber: null, branch: null, heldRetry: null, lastError: null });
+    });
+
+    it('Stop then Assign another issue: the old session leaves the new task alone', async () => {
+      s.runTask = (Swarm.prototype as unknown as { runTask: RunTask }).runTask; // the real one: prepares the desk and starts the session
+      Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready' });
+      setIssues(issue(66), issue(67));
+      await stopDuringCleanup();
+      await swarm.assign('a1', 67);
+      cleaned();
+      await vi.advanceTimersByTimeAsync(1000); // the demo desk takes 900ms to prepare
+      expect(sessions).toHaveLength(2);
+      expect(sessions[1].opts.prompt).toContain('Please resolve GitHub issue #67');
+      expect(sessions[1].opts.prompt).not.toContain('#66');
+      expect(ada()).toMatchObject({ status: 'working', task: 'issue', issueNumber: 67, branch: 'swarm/issue-67-ada', prNumber: null, heldRetry: null, lastError: null });
+    });
+  });
+
   it('fails as before when nothing was pushed', async () => {
     ahead.mockRejectedValue(new Error('gh api failed: HTTP 404'));
     expect(await end(cut)).toBe(false);

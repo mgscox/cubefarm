@@ -172,6 +172,7 @@ interface AgentRuntime {
   screenshot: { data: Buffer; mime: string; at: number } | null;
   shots: Shot[]; // every screenshot of the current session (QA evidence)
   terminal: AgentTerminal | null; // their terminal, once they've run in the terminal runtime
+  generation?: number; // bumped by every new task, cleared task and session: see nextGeneration
 }
 
 interface RepoRuntime {
@@ -846,7 +847,14 @@ export class Swarm {
     return `${slugify(a.name)}-${a.id.slice(0, 4)}`;
   }
 
+  /** The agent's task or session changes: a session end still being handled for the old one must not act on it. */
+  private nextGeneration(a: PersistedAgent) {
+    const rt = this.agentRt.get(a.id);
+    if (rt) rt.generation = (rt.generation ?? 0) + 1;
+  }
+
   private clearTask(a: PersistedAgent) {
+    this.nextGeneration(a);
     Object.assign(a, { status: 'idle', task: null, issueNumber: null, issueTitle: null, branch: null, prNumber: null, prUrl: null, lastError: null, heldRetry: null });
     this.emitAgent(a);
   }
@@ -1615,6 +1623,7 @@ export class Swarm {
 
   private beginTask(a: PersistedAgent, patch: Partial<PersistedAgent>, banner: string, preparing: string) {
     const rt = this.agentRt.get(a.id)!;
+    this.nextGeneration(a);
     Object.assign(a, {
       status: 'preparing' as AgentStatus,
       startedAt: Date.now(),
@@ -1693,6 +1702,7 @@ export class Swarm {
     mode: 'typed' | 'reattach' | null = null,
   ) {
     const rt = this.agentRt.get(a.id)!;
+    this.nextGeneration(a);
     a.status = 'working';
     const how = this.sessionRuntime(a, resumeSessionId);
     this.emitAgent(a);
@@ -1783,6 +1793,9 @@ export class Swarm {
 
   /** `released`: the clean-up of the desk the session just left, which a session started on that desk must wait for. */
   private async onIssueFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, released: Promise<void>) {
+    // Every await below can outlive this task: the manager may clear it, assign another or send a follow-up meanwhile.
+    const generation = this.agentRt.get(a.id)?.generation;
+    const gone = () => !this.state.agents.includes(a) || this.officeUpdate.handedOver || this.agentRt.get(a.id)?.generation !== generation;
     const escaped = repo.fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const m = result.text.match(new RegExp(`https://github\\.com/${escaped}/pull/(\\d+)`, 'i'));
     if (m) {
@@ -1790,6 +1803,7 @@ export class Swarm {
       a.prUrl = m[0];
     } else if (a.branch) {
       const pr = await this.backend.prForBranch(repo.fullName, a.branch).catch(() => null);
+      if (gone()) return;
       if (pr) {
         a.prNumber = pr.number;
         a.prUrl = pr.url;
@@ -1798,11 +1812,12 @@ export class Swarm {
 
     // Work pushed without a PR (the CLI was cut off, or skipped the last step) isn't dropped: see finishPushedWork.
     const ahead = !a.prNumber && a.branch && !result.interrupted ? await this.backend.branchAhead(repo.fullName, repo.defaultBranch, a.branch).catch(() => 0) : 0;
+    if (gone()) return;
     if (a.prNumber) this.cancelRequestedStart(a);
     // One more session on this desk (pushed work, or a nudge to open the PR) waits for the desk's clean-up, which kills what runs there.
     const retry = !a.prNumber && !this.nudged.has(`${repo.id}#${a.issueNumber}`) && (ahead > 0 || result.ok);
     if (retry) await released;
-    if (!this.state.agents.includes(a) || this.officeUpdate.handedOver) return; // fired, or stopped for the office's update
+    if (gone()) return; // fired, cleared, reassigned, or stopped for the office's update
     if (a.status === 'stopped' || this.agentRt.get(a.id)?.session) return; // the manager already logged the stop, or sent a follow-up meanwhile
     const why = result.ok ? 'ended without opening a pull request' : `was cut off before it opened a pull request (${(result.errors[0] ?? 'it failed').replace(/\.$/, '')})`;
     if (retry && ahead > 0 && !this.limited()) return this.finishPushedWork(a, repo, why, ahead);
