@@ -6,7 +6,7 @@ import { detectClis } from './clis.ts';
 import { realPreviews, type PreviewBackend } from './previewRunner.ts';
 import { realOffice, type OfficeHost } from './officeUpdate.ts';
 import type { AgentTerminal } from './terminal.ts';
-import type { CliView, GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
+import type { CliView, GhRepoSummary, IssueInfo, PullRefresh } from '../shared/types.ts';
 
 /** Everything the swarm needs from the outside world. The demo backend fakes all of it. */
 export interface Backend {
@@ -15,7 +15,7 @@ export interface Backend {
   listMyRepos(owner?: string): Promise<GhRepoSummary[]>;
   repoMeta(fullName: string): Promise<github.RepoMeta>;
   listIssues(fullName: string): Promise<IssueInfo[]>;
-  listPulls(fullName: string): Promise<PullInfo[]>;
+  listPulls(fullName: string): Promise<PullRefresh>;
   createIssue(fullName: string, title: string, body: string, labels?: string[]): Promise<number>;
   /** OPEN or CLOSED; null when there is no such issue. */
   issueState(fullName: string, number: number): Promise<'OPEN' | 'CLOSED' | null>;

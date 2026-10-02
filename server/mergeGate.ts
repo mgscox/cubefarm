@@ -36,6 +36,7 @@ export type MergeStep = { set: MergeBookkeeping } & (
  */
 export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { base: string; detailed?: boolean }): MergeStep {
   if (pr.isDraft) return { do: 'wait', note: 'a draft: waiting', set: {} };
+  if (pr.checks === 'unavailable') return { do: 'wait', note: 'checks unavailable: restore GitHub check access before merging', set: { pendingSince: null } };
   if (!opts.detailed && (pr.mergeable === 'UNKNOWN' || pr.mergeState === 'UNKNOWN')) return { do: 'details', set: {} };
   const set: MergeBookkeeping = {};
   if (rec.passedSha == null) set.passedSha = pr.headSha; // signed off before the office tracked commits

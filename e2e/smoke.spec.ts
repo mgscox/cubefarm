@@ -1,6 +1,7 @@
 import { test as base, expect, type Page } from '@playwright/test';
 import { MANAGER_DESK } from '../client/src/world/layout';
 import { colourStats, decodePng } from './png';
+import type { RepoView, ServerEvent } from '../shared/types';
 
 // Smoke tests against the demo office: it loads without errors, you can walk in, the 3D view renders and moves,
 // and the main panels open and close. Pointer lock may not work headless, so nothing here depends on it.
@@ -152,6 +153,66 @@ test("the manager's console opens with E at its desk and closes with Esc", async
   await page.keyboard.press('Escape');
   await expect(panel).toBeHidden();
   await expect(phoneButton(page)).toBeVisible();
+});
+
+test('repository refresh distinguishes unavailable checks, stale data, failure and recovery', async ({ page }, testInfo) => {
+  let phase: 'checks' | 'stale' | 'failed' | 'success' = 'checks';
+  const diagnostic = 'GraphQL: Resource not accessible by personal access token (repository.pullRequests.nodes.0.statusCheckRollup.contexts.nodes.0)';
+  const decorate = (repo: RepoView) => {
+    repo.folderSync = 'in sync';
+    repo.syncing = false;
+    repo.syncError = undefined;
+    repo.refresh = {
+      status: phase === 'failed' ? 'failed' : phase === 'success' ? 'success' : 'partial',
+      issues: { at: 1_800_000_000_000, error: phase === 'failed' ? 'HTTP 401: Bad credentials' : undefined },
+      pulls: { at: 1_800_000_000_000, error: phase === 'stale' ? 'network timeout' : phase === 'failed' ? 'HTTP 401: Bad credentials' : undefined },
+      checksError: phase === 'checks' ? diagnostic : undefined,
+    };
+  };
+  // Exercise both the initial snapshot and subsequent repo events without credentials or real GitHub traffic.
+  await page.routeWebSocket('**/ws', (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((message) => {
+      const event = JSON.parse(message.toString()) as ServerEvent;
+      if (event.type === 'snapshot') {
+        event.data.settings.tutorialStep = -1;
+        event.data.repos.forEach(decorate);
+      }
+      if (event.type === 'repo') decorate(event.repo);
+      ws.send(JSON.stringify(event));
+    });
+  });
+  const spot: SavedView = { floor: 0, x: MANAGER_DESK.x, z: MANAGER_DESK.z + MANAGER_DESK.d / 2 + 0.8, yaw: 0, pitch: -0.6 };
+  await page.addInitScript(([key, view]) => localStorage.setItem(key, view), [VIEW_KEY, JSON.stringify(spot)] as const);
+  await enterOffice(page);
+  await expect(page.getByText("Open the manager's console")).toBeVisible();
+  await page.keyboard.press('e');
+  await page.getByRole('button', { name: /Floors & repos/ }).click();
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  const card = page.locator('.floor-card').first();
+  await expect(card.getByText('GitHub: partially refreshed')).toBeVisible();
+  await expect(card.getByRole('alert')).toHaveCount(1);
+  await expect(card.getByRole('alert')).toContainText('gh auth login --web');
+  await expect(card.getByText(/Local Git: in sync/)).toBeVisible();
+  await expect(card.locator('pre')).toBeHidden();
+  await card.getByText('GitHub refresh diagnostics').click();
+  await expect(card.locator('pre')).toHaveText(diagnostic);
+  await card.getByText('GitHub refresh diagnostics').click();
+  await card.screenshot({ path: testInfo.outputPath('checks-unavailable.png') });
+
+  phase = 'stale';
+  await card.getByRole('button', { name: 'Refresh GitHub' }).click();
+  await expect(card.getByText(/PRs:.*stale · last refreshed/)).toBeVisible();
+  await expect(card.getByText(/Issues:.*open · refreshed/)).toBeVisible();
+  await expect(card.getByText(/Checks unavailable/)).toBeHidden();
+  phase = 'failed';
+  await card.getByRole('button', { name: 'Refresh GitHub' }).click();
+  await expect(card.getByText('GitHub: refresh failed')).toBeVisible();
+  phase = 'success';
+  await card.getByRole('button', { name: 'Refresh GitHub' }).click();
+  await expect(card.getByText('GitHub: refreshed')).toBeVisible();
+  await expect(card.getByRole('alert')).toHaveCount(0);
+  await expect(card.getByText('GitHub refresh diagnostics')).toHaveCount(0);
 });
 
 test('holding W walks forward', async ({ page }) => {

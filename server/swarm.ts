@@ -9,6 +9,7 @@ import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, specialtyLabel, specialtySlug, type CeoJob, type OfficeTools, type StartIssueRequest } from './ceo.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
+import { applyRepoRefresh } from './repoRefresh.ts';
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type LastUpdate } from './officeUpdate.ts';
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
@@ -163,6 +164,7 @@ interface RepoRuntime {
   pulls: PullInfo[];
   lastSync: number | null;
   syncError?: string;
+  refresh?: RepoView['refresh'];
   syncing: boolean;
   cloneStatus: RepoView['cloneStatus'];
   cloneError?: string;
@@ -621,6 +623,8 @@ export class Swarm {
       pulls: rt.pulls,
       lastSync: rt.lastSync,
       syncError: rt.syncError,
+      refresh: rt.refresh,
+      syncing: rt.syncing,
       previewConfig: r.preview,
       preview: this.previews.view(r),
     };
@@ -979,7 +983,7 @@ export class Swarm {
    */
   private async advanceMerges(repo: PersistedRepo) {
     const rt = this.repoRt.get(repo.id);
-    if (!rt || !repo.autoMerge || rt.merging) return;
+    if (!rt || !repo.autoMerge || rt.merging || rt.syncing || rt.refresh?.pulls.error) return;
     rt.merging = true;
     let merged = false;
     try {
@@ -1154,14 +1158,14 @@ export class Swarm {
     const rt = this.repoRt.get(id);
     if (!repo || !rt || rt.syncing) return;
     rt.syncing = true;
+    this.emitRepo(repo);
     try {
       const started = Date.now();
-      const [issues, pulls] = await Promise.all([this.backend.listIssues(repo.fullName), this.backend.listPulls(repo.fullName)]);
-      rt.issues = issues;
-      rt.pulls = pulls;
-      rt.lastSync = Date.now();
+      const [issues, pullResult] = await Promise.allSettled([this.backend.listIssues(repo.fullName), this.backend.listPulls(repo.fullName)]);
+      Object.assign(rt, applyRepoRefresh(rt, issues, pullResult, Date.now()));
+      if (pullResult.status === 'rejected') return;
+      const pulls = pullResult.value.pulls;
       rt.fetchedAt = started;
-      rt.syncError = undefined;
       this.reconcilePulls(repo, pulls);
       // Something was merged since the last look (by the office or anyone else): bring the folder up to date.
       const newest = pulls.reduce<string | null>((m, p) => (p.mergedAt && (!m || p.mergedAt > m) ? p.mergedAt : m), null);
@@ -1169,13 +1173,14 @@ export class Swarm {
         rt.lastMergedAt = newest;
         void this.syncFolder(repo);
       }
-      void this.advanceMerges(repo);
     } catch (err) {
       rt.syncError = (err as Error).message;
+      if (rt.refresh) rt.refresh.status = 'failed';
     } finally {
       rt.syncing = false;
+      if (this.repoRt.has(id)) this.emitRepo(repo);
     }
-    if (this.repoRt.has(id)) this.emitRepo(repo);
+    void this.advanceMerges(repo);
   }
 
   /** Keep agents and QA records in step with what happened to PRs on GitHub. */

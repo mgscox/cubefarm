@@ -432,7 +432,9 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
       ready.push({
         ...base,
         agent: dev,
-        note: rec.mergeNote
+        note: p.checks === 'unavailable'
+          ? 'QA ✓ · checks unavailable · merge blocked'
+          : rec.mergeNote
           ? `QA ✓ · ${rec.mergeNote}`
           : p.mergeable === 'CONFLICTING'
             ? 'QA ✓ · conflicts'
@@ -441,7 +443,7 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
               : repo.autoMerge && p.checks === 'pending'
                 ? 'QA ✓ · waiting for checks'
                 : '✅ QA passed',
-        tone: p.mergeable === 'CONFLICTING' || p.checks === 'failing' ? 'warn' : 'good',
+        tone: p.mergeable === 'CONFLICTING' || p.checks === 'failing' || p.checks === 'unavailable' ? 'warn' : 'good',
       });
       continue;
     }

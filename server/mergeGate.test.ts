@@ -25,6 +25,9 @@ const record = (r: Partial<MergeRecord> = {}): MergeRecord => ({
 });
 
 describe('mergeStep', () => {
+  it.each(['CLEAN', 'BEHIND', 'UNKNOWN'])('blocks unavailable checks even when merge state is %s', (mergeState) => {
+    expect(mergeStep(pull({ checks: 'unavailable', mergeState }), record(), NOW, base)).toMatchObject({ do: 'wait', note: expect.stringContaining('checks unavailable') });
+  });
   it('merges a clean, green PR at the commit QA passed', () => {
     expect(mergeStep(pull(), record(), NOW, base)).toEqual({ do: 'merge', set: { pendingSince: null } });
     expect(mergeStep(pull({ checks: 'none' }), record(), NOW, base).do).toBe('merge');

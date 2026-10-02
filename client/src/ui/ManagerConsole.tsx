@@ -12,6 +12,7 @@ import { MouseSettings, Panel } from './Overlays';
 import { Resume } from './Phone';
 import { ProjectPicker } from './ProjectPicker';
 import { StatusPill } from './TerminalView';
+import { RepoRefreshStatus } from './RepoRefreshStatus';
 
 const MODELS = ['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5'];
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -118,18 +119,18 @@ function FloorRow({ repo, all }: { repo: RepoView; all: RepoView[] }) {
           </a>
           {repo.summary && <div className="small">🧠 {repo.summary}</div>}
           <div className="muted small">
-            {team.length} agents · {repo.issues.length} open issues · {repo.pulls.filter((p) => p.state === 'OPEN').length} open PRs · default branch <code>{repo.defaultBranch}</code>
+            {team.length} agents · default branch <code>{repo.defaultBranch}</code>
             {repo.cloneStatus !== 'ready' && ` · checkout: ${repo.cloneStatus}`}
           </div>
           <div className="muted small" title={repo.localPath ? 'Your own project folder' : 'A clone the office manages'}>
             📁 <code>{repo.checkoutPath}</code>
-            {officeFolder ? " · the office's own folder, updated from the Office row" : repo.folderSync && ` · ${repo.folderSync}`}{' '}
+            {officeFolder ? " · the office's own folder, updated from the Office row" : repo.folderSync && ` · Local Git: ${repo.folderSync}`}{' '}
             <button className="btn btn-small btn-ghost" title="Fast-forward it to GitHub's default branch, when that's safe" onClick={() => void attempt(() => api.syncFolder(repo.id))}>
               ⟳ Sync now
             </button>
           </div>
           {repo.cloneError && <div className="term-error small">clone failed: {repo.cloneError}</div>}
-          {repo.syncError && <div className="term-error small">sync failed: {repo.syncError}</div>}
+          <RepoRefreshStatus repo={repo} onRefresh={() => void attempt(() => api.syncRepo(repo.id))} />
         </div>
         <input type="color" value={repo.color} onChange={(e) => patch({ color: e.target.value })} title="Floor colour" />
         <button className="btn btn-small" onClick={() => goToFloor(repo.floor)}>
