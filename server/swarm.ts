@@ -1741,12 +1741,12 @@ export class Swarm {
     a.costUsd += result.costUsd;
     a.turns += result.turns;
     // Dev servers the agent forgot to stop would otherwise keep its port and lock its desk folder.
-    void this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
+    const released = this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
     if (result.interrupted) this.interrupted(a);
 
     if (a.task === 'qa') await this.onQaFinished(a, repo, result);
     else if (a.task === 'fix') this.onFixFinished(a, repo, result);
-    else await this.onIssueFinished(a, repo, result);
+    else await this.onIssueFinished(a, repo, result, released);
 
     this.emitAgent(a);
     this.save();
@@ -1765,7 +1765,8 @@ export class Swarm {
     this.toast('error', `${a.name} hit a problem on ${what}: ${a.lastError.slice(0, 120)}`);
   }
 
-  private async onIssueFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult) {
+  /** `released`: the clean-up of the desk the session just left, which a session started on that desk must wait for. */
+  private async onIssueFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, released: Promise<void>) {
     const escaped = repo.fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const m = result.text.match(new RegExp(`https://github\\.com/${escaped}/pull/(\\d+)`, 'i'));
     if (m) {
@@ -1783,7 +1784,7 @@ export class Swarm {
     const ahead = !a.prNumber && a.branch && !result.interrupted ? await this.backend.branchAhead(repo.fullName, repo.defaultBranch, a.branch).catch(() => 0) : 0;
     if (a.prNumber) this.cancelRequestedStart(a);
     if (a.status === 'stopped' || this.agentRt.get(a.id)?.session) return; // the manager already logged the stop, or sent a follow-up meanwhile
-    if (ahead > 0 && !this.limited() && this.finishPushedWork(a, repo, result, ahead)) return;
+    if (ahead > 0 && !this.limited() && (await this.finishPushedWork(a, repo, result, ahead, released))) return;
     if (!result.ok) {
       this.issueFailed(repo, a.issueNumber);
       if (ahead > 0) this.postMessage('office', `⚠️ ${a.name}'s session on #${a.issueNumber} (${repo.fullName}) failed without a pull request. Its branch ${a.branch} has ${this.commits(ahead)} on GitHub.`);
@@ -1810,10 +1811,13 @@ export class Swarm {
    * skipped the last step). Once per issue the developer gets another session on the same desk and branch, resuming
    * the old one when there is one, to verify that work and open the PR. False when it already had that chance.
    */
-  private finishPushedWork(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, ahead: number): boolean {
+  private async finishPushedWork(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, ahead: number, released: Promise<void>): Promise<boolean> {
     const key = `${repo.id}#${a.issueNumber}`;
     if (this.nudged.has(key) || !a.branch) return false;
     this.nudged.add(key);
+    // The clean-up kills what's running from the desk (on Windows by process tree): the new CLI must not be there yet.
+    await released;
+    if (!this.state.agents.includes(a) || this.officeUpdate.handedOver || a.status === 'stopped' || this.agentRt.get(a.id)?.session) return true; // fired, stopped or busy meanwhile
     const why = result.ok ? 'ended without opening a pull request' : `was cut off before it opened a pull request (${(result.errors[0] ?? 'it failed').replace(/\.$/, '')})`;
     this.appendLog(a, [{ kind: 'system', text: `↻ The session ${why}, but ${a.branch} has ${this.commits(ahead)}. Starting one more to finish it.` }]);
     const cwd = this.backend.deskDir(repo.fullName, this.agentSlug(a));

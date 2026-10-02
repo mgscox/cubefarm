@@ -404,6 +404,34 @@ describe('a developer session that ends without a PR after pushing commits', () 
     expect(f.state.messages.at(-1)?.text).toContain('Its branch swarm/issue-66-ada has 3 pushed commits to pick up from.');
   });
 
+  it('starts the retry only once the desk it left is cleaned up', async () => {
+    let cleaned!: () => void;
+    const release = vi.spyOn(backend, 'releaseDesk').mockReturnValue(new Promise<void>((r) => (cleaned = r)));
+    sessions[0].cb.finished(cut);
+    await vi.waitFor(() => expect(ahead).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(50);
+    expect(release).toHaveBeenCalledWith('demo-co/pixel-todo', 'ada-a1', expect.any(Number));
+    expect(sessions).toHaveLength(1); // the clean-up could otherwise kill the new CLI's processes
+    cleaned();
+    await vi.waitFor(() => expect(sessions).toHaveLength(2));
+    expect(sessions[1].opts.cwd).toBe(backend.deskDir(repo.fullName, 'ada-a1'));
+    expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada');
+    await vi.advanceTimersByTimeAsync(50);
+    expect(sessions).toHaveLength(2);
+  });
+
+  it('starts no retry when the manager stops them during the clean-up', async () => {
+    let cleaned!: () => void;
+    vi.spyOn(backend, 'releaseDesk').mockReturnValue(new Promise<void>((r) => (cleaned = r)));
+    sessions[0].cb.finished(cut);
+    await vi.waitFor(() => expect(ahead).toHaveBeenCalled());
+    swarm.stopAgent(String(ada().id));
+    cleaned();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(sessions).toHaveLength(1);
+    expect(ada().status).toBe('stopped');
+  });
+
   it('fails as before when nothing was pushed', async () => {
     ahead.mockRejectedValue(new Error('gh api failed: HTTP 404'));
     expect(await end(cut)).toBe(false);
