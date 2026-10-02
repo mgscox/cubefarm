@@ -101,17 +101,19 @@ export function HUD() {
       )}
       {started && !overlay && !travel && <HeldHint />}
       {started && !overlay && !locked && !travel && <div className="hud-resume">Click to look around</div>}
-      {started && !(settings.setupDone && settings.tutorialStep >= 0) && (
-        <div className="hud-help">
-          <kbd>WASD</kbd> move · <kbd>Q</kbd>/<kbd>R</kbd> turn · <kbd>Z</kbd>/<kbd>X</kbd> look down/up · <kbd>Shift</kbd> run · <kbd>E</kbd> / <kbd>Click</kbd> interact · <kbd>P</kbd> phone · <kbd>Tab</kbd> workers · <kbd>H</kbd> help · <kbd>Esc</kbd> free mouse
-        </div>
-      )}
 
       <div className={`fade ${travel?.phase === 'closing' ? 'fade-in' : ''}`}>
         {travel && <div className="fade-label">{travel.to === 0 ? 'Lobby' : `Floor ${travel.to}`}</div>}
       </div>
 
-      <PhoneButton />
+      <div className="hud-bottom">
+        {started && !(settings.setupDone && settings.tutorialStep >= 0) && (
+          <div className="hud-help">
+            <kbd>WASD</kbd> move · <kbd>Q</kbd>/<kbd>R</kbd> turn · <kbd>Z</kbd>/<kbd>X</kbd> look down/up · <kbd>Shift</kbd> run · <kbd>E</kbd> / <kbd>Click</kbd> interact · <kbd>P</kbd> phone · <kbd>Tab</kbd> workers · <kbd>H</kbd> help · <kbd>Esc</kbd> free mouse
+          </div>
+        )}
+        <PhoneButton />
+      </div>
       <div className="toasts">
         {toasts.map((t) => (
           <div key={t.id} className={`toast toast-${t.level}`} onClick={() => dismiss(t.id)}>

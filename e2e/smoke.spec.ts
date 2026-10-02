@@ -322,14 +322,21 @@ test('holding W walks forward', async ({ page }) => {
   expect(to.yaw).toBeCloseTo(from.yaw); // W walks, it doesn't turn
 });
 
-test('the shortcut bar wraps clear of the phone button at 1024x640', async ({ page }) => {
+test('the shortcut bar ends before the phone button at 1024x640, whatever the phone says', async ({ page }) => {
   await page.setViewportSize({ width: 1024, height: 640 });
   await enterOffice(page);
   // The bar shows once the tour is over. Last in the file, as skipping the tour is saved for the tests after it.
   await page.getByRole('button', { name: 'Skip tour' }).click();
   const bar = page.locator('.hud-help');
   await expect(bar).toContainText('Esc free mouse');
-  const help = (await bar.boundingBox())!;
-  const phone = (await phoneButton(page).boundingBox())!;
-  expect(help.x + help.width).toBeLessThanOrEqual(phone.x);
+  // The phone's label: unread messages, or the CEO at work, whose name is free text (up to 24 characters).
+  for (const label of ['3 waiting', 'Morgan is working', 'Christopher is working', 'Wolfeschlegelsteinhausen is working']) {
+    await page.locator('.phone-btn-label').evaluate((el, text) => {
+      el.lastChild!.textContent = ` ${text}`;
+    }, label);
+    const help = (await bar.boundingBox())!;
+    const phone = (await phoneButton(page).boundingBox())!;
+    expect(help.x + help.width, label).toBeLessThanOrEqual(phone.x);
+    expect(phone.x + phone.width, label).toBeLessThanOrEqual(1024);
+  }
 });
