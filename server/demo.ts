@@ -10,6 +10,7 @@ import { READY_FOR_HUMAN } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR } from './config.ts';
 import { takeLastUpdate, underLauncher, type OfficeHost } from './officeUpdate.ts';
+import type { prStatusView } from './ceo.ts';
 
 // `npm run demo`: a fake GitHub and fake Claude Code sessions, so the office (including the
 // dev → QA → fix loop) can be explored without spending any usage or touching real repos.
@@ -734,6 +735,29 @@ interface DemoFloor {
   pullRequests: unknown[];
 }
 
+type DemoPull = ReturnType<typeof prStatusView>;
+
+/** The demo CEO's answer to "why is PR #N stuck?", read from company_status like a real CEO would. */
+export function stuckAnswer(floor: number, p: Partial<DemoPull> & { number: number; qa: string }): string {
+  const why: string[] = [];
+  if (p.qaSummary) why.push(`QA said: ${p.qaSummary}`);
+  if (p.failedChecks?.length) why.push(`Failed QA checks: ${p.failedChecks.join(', ')}.`);
+  if (p.mergeable === 'conflicting') why.push('It conflicts with the default branch.');
+  if (p.checks === 'failing') why.push("GitHub's checks are failing.");
+  if (p.newCommitsSinceQa) why.push(`${p.headSha} was pushed after QA tested ${p.testedSha}.`);
+  if (p.sessionFailures) why.push(`QA sessions failed ${p.sessionFailures} time${p.sessionFailures === 1 ? '' : 's'}.`);
+  const next = p.newCommitsSinceQa
+    ? `I'd rerun QA: say "rerun QA on #${p.number} on floor ${floor}".`
+    : p.mergeable === 'conflicting'
+      ? `${p.developer ?? 'A developer'} should resolve the conflicts.`
+      : p.qaRoundsLeft === 0
+        ? 'QA is out of rounds, so it needs your call: fix it by hand, close it, or rerun QA.'
+        : p.qaRoundsLeft
+          ? `${p.developer ?? 'A developer'} gets it back to fix (${p.qaRoundsLeft} QA round${p.qaRoundsLeft === 1 ? '' : 's'} left).`
+          : '';
+  return [`PR #${p.number} on floor ${floor} is ${p.qa}.`, ...why, next].filter(Boolean).join(' ') + (why.length ? '' : ' Nothing is holding it up.');
+}
+
 /** A scripted CEO that uses the real office tools, so proposals, profiles and issues behave exactly as in the real thing. */
 function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
   const office = opts.office!;
@@ -850,7 +874,7 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
       // An issue nobody routed while the floor has a specialist: re-route it rather than file a duplicate.
       for (const f of s.floors) {
         const specialist = f.team.find((a) => a.role === 'dev' && a.specialty);
-        const unrouted = (f.backlog as { number: number; specialty: string | null; inProgress: boolean; readyForHuman?: boolean }[]).find(
+        const unrouted = (f.backlog as { number: number; specialty: string | null; inProgress?: boolean; readyForHuman?: boolean }[]).find(
           (i) => !i.specialty && !i.inProgress && !i.readyForHuman,
         );
         if (!specialist || !unrouted) continue;
@@ -869,6 +893,17 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
         const floor = rerun[2] ? Number(rerun[2]) : s.floors.find((f) => f.repo.toLowerCase() === rerun[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === rerun[3].toLowerCase())?.floor;
         if (floor === undefined) return `Refused: No floor for "${rerun[3]}".`;
         return use('rerun_qa', { floor, number: Number(rerun[1]), ...(rerun[4] ? { note: rerun[4].trim() } : {}) });
+      }
+      const stuck = text.match(/\bwhy\b.*?#(\d+)(?:.*?\bon\s+(?:floor\s+(\d+)|([\w./-]+)))?/i);
+      if (stuck) {
+        const named = stuck[2] ? Number(stuck[2]) : s.floors.find((f) => stuck[3] && (f.repo.toLowerCase() === stuck[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === stuck[3].toLowerCase()))?.floor;
+        const floors = named !== undefined ? [named] : s.floors.map((f) => f.floor);
+        for (const floor of floors) {
+          const f = JSON.parse(await use('company_status', { floor })) as { floors: DemoFloor[] };
+          const pr = (f.floors[0]?.pullRequests as DemoPull[]).find((p) => p.number === Number(stuck[1]));
+          if (pr) return stuckAnswer(floor, pr);
+        }
+        return `I can't find an open PR #${stuck[1]}${named !== undefined ? ` on floor ${named}` : ''}.`;
       }
       const start = text.match(/\bstart\s+#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))(?:\s+with\s+([^.;\n]+))?/i);
       if (start) {
