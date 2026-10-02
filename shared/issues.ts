@@ -1,4 +1,5 @@
 // Issue conventions shared by the server's scheduler and the client's whiteboard.
+import type { IssueInfo } from './types.ts';
 
 /** The specialty an issue is routed to, from its swarm:<specialty> label ('' = anyone). */
 export function issueSpecialty(labels: string[]) {
@@ -24,6 +25,18 @@ export function blockers(body: string, open: Set<number>) {
   const out = new Set<number>();
   for (const m of (body ?? '').matchAll(/\b(?:depends\s+on|blocked\s+by)\s*:?\s*((?:#\d+(?:\s*(?:,|and|&)\s*)?)+)/gi)) {
     for (const n of m[1].matchAll(/#(\d+)/g)) if (open.has(Number(n[1]))) out.add(Number(n[1]));
+  }
+  return [...out];
+}
+
+export type IssueRef = number | string;
+type DependencyIssue = Pick<IssueInfo, 'body' | 'nativeBlockers'>;
+
+/** Union body dependencies with open native blockers, including blockers outside the fetched backlog. */
+export function issueBlockers(issue: DependencyIssue, open: Set<number>): IssueRef[] {
+  const out = new Set<IssueRef>(blockers(issue.body, open));
+  for (const b of issue.nativeBlockers ?? []) {
+    if (b.state === 'OPEN') out.add(b.repo ? `${b.repo}#${b.number}` : b.number);
   }
   return [...out];
 }
@@ -60,13 +73,13 @@ export function setDependsOn(body: string, deps: number[]) {
  * many wait on it directly or indirectly (`waiting`). Starting the issues with the most behind them first lets the
  * most work run in parallel later.
  */
-export function holdUps(issues: { number: number; body: string }[]) {
+export function holdUps(issues: (DependencyIssue & { number: number })[]) {
   const open = new Set(issues.map((i) => i.number));
-  const waiters = new Map<number, number[]>();
-  for (const i of issues) for (const b of blockers(i.body, open)) waiters.set(b, [...(waiters.get(b) ?? []), i.number]);
-  const chains = new Map<number, number>();
-  const visiting = new Set<number>();
-  const chain = (n: number): number => {
+  const waiters = new Map<IssueRef, number[]>();
+  for (const i of issues) for (const b of issueBlockers(i, open)) waiters.set(b, [...(waiters.get(b) ?? []), i.number]);
+  const chains = new Map<IssueRef, number>();
+  const visiting = new Set<IssueRef>();
+  const chain = (n: IssueRef): number => {
     const known = chains.get(n);
     if (known !== undefined) return known;
     if (visiting.has(n)) return 0; // a dependency cycle
@@ -76,17 +89,17 @@ export function holdUps(issues: { number: number; body: string }[]) {
     chains.set(n, longest);
     return longest;
   };
-  const out = new Map<number, { chain: number; waiting: number }>();
-  for (const i of issues) {
+  const out = new Map<IssueRef, { chain: number; waiting: number }>();
+  for (const n of new Set<IssueRef>([...issues.map((i) => i.number), ...waiters.keys()])) {
     const seen = new Set<number>();
-    const stack = [...(waiters.get(i.number) ?? [])];
+    const stack = [...(waiters.get(n) ?? [])];
     while (stack.length) {
-      const n = stack.pop()!;
-      if (n === i.number || seen.has(n)) continue;
-      seen.add(n);
-      stack.push(...(waiters.get(n) ?? []));
+      const w = stack.pop()!;
+      if (w === n || seen.has(w)) continue;
+      seen.add(w);
+      stack.push(...(waiters.get(w) ?? []));
     }
-    out.set(i.number, { chain: chain(i.number), waiting: seen.size });
+    out.set(n, { chain: chain(n), waiting: seen.size });
   }
   return out;
 }

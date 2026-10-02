@@ -1,6 +1,6 @@
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { blockers, holdUps, issueSpecialty, setDependsOn } from '../shared/issues.ts';
+import { issueBlockers, holdUps, issueSpecialty, setDependsOn, type IssueRef } from '../shared/issues.ts';
 import type { AgentView, CeoJobKind, IssueInfo, PullInfo, QaView } from '../shared/types.ts';
 import type { FixReason } from './fixPlan.ts';
 
@@ -70,7 +70,7 @@ type StartAgent = Pick<AgentView, 'id' | 'name' | 'repoId' | 'role' | 'status' |
 /** CEO preflight; assign still enforces its own guards and reserves the developer synchronously. */
 export function planStartIssue<A extends StartAgent>(x: StartIssueRequest, context: {
   repoId: string;
-  issues: Pick<IssueInfo, 'number' | 'title' | 'body' | 'labels'>[];
+  issues: Pick<IssueInfo, 'number' | 'title' | 'body' | 'labels' | 'nativeBlockers'>[];
   agents: A[];
   available: A[];
   ready: string[];
@@ -79,8 +79,8 @@ export function planStartIssue<A extends StartAgent>(x: StartIssueRequest, conte
 }) {
   const issue = context.issues.find((i) => i.number === x.number);
   if (!issue) throw new Error(`Issue #${x.number} is not open on floor ${x.floor}.`);
-  const waits = blockers(issue.body, new Set(context.issues.map((i) => i.number)));
-  if (waits.length) throw new Error(`#${x.number} waits on open ${waits.map((n) => `#${n}`).join(', ')}.`);
+  const waits = issueBlockers(issue, new Set(context.issues.map((i) => i.number)));
+  if (waits.length) throw new Error(`#${x.number} waits on open ${waits.map((n) => typeof n === 'number' ? `#${n}` : n).join(', ')}.`);
   if (context.inProgress) throw new Error(`#${x.number} is already in progress or has an open PR.`);
   if (context.usagePaused) throw new Error('Usage is paused; wait for the usage limit to reset.');
   let agent: A | undefined;
@@ -261,7 +261,7 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
         floor: z.number().int(),
         number: z.number().int().positive().describe('The issue number'),
         specialty: z.string().max(24).optional().describe('Sets swarm:<specialty> and removes any other; "" for none. Someone on the floor, or a pending proposal, must have it.'),
-        depends_on: z.array(z.number().int().positive()).max(10).optional().describe('Issues it waits for; [] for none. Not for an issue in progress.'),
+        depends_on: z.array(z.number().int().positive()).max(10).optional().describe('Body dependencies; [] clears the body line. Native GitHub blockers remain. Not for an issue in progress.'),
       },
       (a) => run(() => h.routeIssue(a)),
     ),
@@ -444,7 +444,7 @@ export interface RouteRequest {
   number: number;
   specialty?: string; // '' = no specialty
   dependsOn?: number[]; // [] = no dependencies
-  issues: { number: number; body: string; labels: string[] }[]; // the floor's open issues
+  issues: Pick<IssueInfo, 'number' | 'body' | 'labels' | 'nativeBlockers'>[]; // the floor's open issues
   closed: (n: number) => boolean; // for numbers that aren't open: closed, rather than unknown
   inProgress: boolean;
   specialties: string[]; // held by someone on the floor or by a pending hire proposal for it
@@ -457,11 +457,11 @@ export interface RoutePlan {
   summary: string;
 }
 
-/** Longest chain of open issues this one waits for, one step per "Depends on". */
-function waitsDepth(n: number, deps: Map<number, number[]>, seen = new Set<number>()): number {
+/** Longest chain of open body or native dependencies this issue waits for. */
+function waitsDepth(n: IssueRef, deps: Map<number, IssueRef[]>, seen = new Set<IssueRef>()): number {
   if (seen.has(n)) return 0;
   seen.add(n);
-  const depth = Math.max(0, ...(deps.get(n) ?? []).map((d) => waitsDepth(d, deps, seen) + 1));
+  const depth = Math.max(0, ...((typeof n === 'number' ? deps.get(n) : undefined) ?? []).map((d) => waitsDepth(d, deps, seen) + 1));
   seen.delete(n);
   return depth;
 }
@@ -501,13 +501,14 @@ export function planRoute(r: RouteRequest): RoutePlan {
     }
     const body = setDependsOn(issue.body, deps);
     const after = r.issues.map((i) => (i.number === r.number ? { ...i, body } : i));
-    const waits = new Map(after.map((i) => [i.number, blockers(i.body, open)]));
+    const waits = new Map(after.map((i) => [i.number, issueBlockers(i, open)]));
     const loop = deps.find((d) => reaches(d, r.number, waits));
     if (loop !== undefined) throw new Error(`#${loop} already waits for #${r.number}, directly or through other issues, so that would be a cycle.`);
     const depth = waitsDepth(r.number, waits) + (holdUps(after).get(r.number)?.chain ?? 0);
     if (depth > 2) throw new Error(`That makes a dependency chain ${depth} steps deep through #${r.number}. Keep chains to 2 steps at most: split the work so more of it can start side by side.`);
     if (body !== issue.body) plan.body = body;
-    done.push(deps.length ? `depends on ${deps.map((d) => `#${d}`).join(', ')}` : 'no dependencies');
+    const merged = issueBlockers({ ...issue, body }, open);
+    done.push(merged.length ? `depends on ${merged.map((d) => typeof d === 'number' ? `#${d}` : d).join(', ')}` : 'no dependencies');
   }
 
   plan.summary = `#${r.number} on floor ${r.floor}: ${done.join(', ')}.`;
@@ -515,11 +516,11 @@ export function planRoute(r: RouteRequest): RoutePlan {
 }
 
 /** Does `from` wait for `to`, directly or through other issues? */
-function reaches(from: number, to: number, waits: Map<number, number[]>, seen = new Set<number>()): boolean {
+function reaches(from: IssueRef, to: number, waits: Map<number, IssueRef[]>, seen = new Set<IssueRef>()): boolean {
   if (from === to) return true;
   if (seen.has(from)) return false;
   seen.add(from);
-  return (waits.get(from) ?? []).some((n) => reaches(n, to, waits, seen));
+  return ((typeof from === 'number' ? waits.get(from) : undefined) ?? []).some((n) => reaches(n, to, waits, seen));
 }
 
 /** Short lowercase slug for a specialty ("Three.js graphics" -> "three-js-graphics"). */

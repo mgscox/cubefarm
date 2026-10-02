@@ -1,7 +1,31 @@
 import { describe, expect, it } from 'vitest';
-import { blockers, forHuman, holdUps, issueSpecialty, READY_FOR_HUMAN, schedulable, setDependsOn } from './issues.ts';
+import { blockers, forHuman, holdUps, issueBlockers, issueSpecialty, READY_FOR_HUMAN, schedulable, setDependsOn } from './issues.ts';
 
 const open = (...n: number[]) => new Set(n);
+
+describe('merged dependencies', () => {
+  it('reads native-only blockers even outside the fetched open backlog', () => {
+    expect(issueBlockers({ body: '', nativeBlockers: [{ number: 1, state: 'OPEN' }] }, open())).toEqual([1]);
+  });
+
+  it('unions native and body blockers without duplicates', () => {
+    expect(issueBlockers({ body: 'Depends on #1, #2', nativeBlockers: [{ number: 2, state: 'OPEN' }, { number: 3, state: 'OPEN' }] }, open(1, 2))).toEqual([1, 2, 3]);
+  });
+
+  it('ignores closed native blockers and falls back to the body when native data is absent', () => {
+    expect(issueBlockers({ body: 'Depends on #2', nativeBlockers: [{ number: 1, state: 'CLOSED' }] }, open(2))).toEqual([2]);
+    expect(issueBlockers({ body: 'Depends on #2' }, open(2))).toEqual([2]);
+  });
+
+  it('keeps cross-repository blockers distinct and includes them in dependency chains', () => {
+    const issues = [
+      { number: 1, body: '', nativeBlockers: [{ number: 1, state: 'OPEN' as const, repo: 'other/repo' }] },
+      { number: 2, body: 'Depends on #1' },
+    ];
+    expect(issueBlockers(issues[0], open(1, 2))).toEqual(['other/repo#1']);
+    expect(holdUps(issues).get('other/repo#1')).toEqual({ chain: 2, waiting: 2 });
+  });
+});
 
 describe('blockers', () => {
   it('reads a single "Depends on #N"', () => {

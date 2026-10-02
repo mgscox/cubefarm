@@ -65,6 +65,7 @@ seed('demo-co/pixel-todo', 'A cheerful todo app', [
   // Needs a person: the office never hands it out, however many developers are free.
   ['Register the app in the App Store', 'Needs the company account and a signed agreement.', [READY_FOR_HUMAN]],
 ]);
+repos.get('demo-co/pixel-todo')!.issues[2].nativeBlockers = [{ number: 2, state: 'OPEN' }];
 seed('demo-co/weather-api', 'Tiny weather REST API', [
   ['Add /forecast endpoint', 'Return a 5-day forecast for a city.'],
   ['Rate limit anonymous callers', '60 requests per minute per IP.'],
@@ -423,7 +424,11 @@ export function createDemoBackend(): Backend {
       if (folders.has(name)) throw new Error(`/demo/projects/${name} already exists. Pick another name, or connect that folder instead.`);
       return { fullName: newRepo(name, opts.description), path: `/demo/projects/${name}` };
     },
-    listIssues: async (fullName) => [...(repos.get(fullName)?.issues ?? [])],
+    listIssues: async (fullName) => (repos.get(fullName)?.issues ?? []).map((i) => ({ ...i,
+      nativeBlockers: (i.nativeBlockers ?? []).map((b) => ({ ...b,
+        state: closedIssues.has(`${b.repo ?? fullName}#${b.number}`) ? 'CLOSED' : b.state,
+      })),
+    })),
     listPulls: async (fullName) => ({ pulls: [...(repos.get(fullName)?.pulls ?? [])] }),
     createIssue: async (fullName, title, body, labels = []) => {
       const r = repos.get(fullName);

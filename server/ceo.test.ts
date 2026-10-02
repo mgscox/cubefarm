@@ -176,6 +176,13 @@ describe('planRoute (route_issue)', () => {
   };
   const route = (over: Partial<RouteRequest>) => planRoute({ ...base, ...over });
 
+  it('checks cycles through native blockers and reports native dependencies left after clearing the body', () => {
+    const issues = base.issues.map((i) => i.number === 5 ? { ...i, body: '', nativeBlockers: [{ number: 4, state: 'OPEN' as const }] } : i);
+    expect(() => route({ issues, dependsOn: [5] })).toThrow('cycle');
+    const native = base.issues.map((i) => i.number === 4 ? { ...i, nativeBlockers: [{ number: 6, state: 'OPEN' as const }] } : i);
+    expect(route({ issues: native, dependsOn: [] }).summary).toBe('#4 on floor 1: depends on #6.');
+  });
+
   it('re-routes to a specialty on the floor, dropping the old swarm label only', () => {
     expect(route({ specialty: 'Frontend' })).toEqual({ addLabels: ['swarm:frontend'], removeLabels: ['swarm:backend'], body: null, summary: '#4 on floor 1: routed to frontend.' });
     expect(route({ specialty: '' })).toMatchObject({ addLabels: [], removeLabels: ['swarm:backend'], summary: '#4 on floor 1: no specialty.' });
@@ -257,6 +264,12 @@ describe('planStartIssue', () => {
     agents: [other, dev], available: [other, dev], ready: ['server'], inProgress: false, usagePaused: false,
   };
   const request = { floor: 1, number: 4 };
+
+  it('refuses an open native blocker outside the fetched backlog, then allows a closed blocker', () => {
+    const native = (state: 'OPEN' | 'CLOSED') => ({ ...context, issues: [{ ...context.issues[0], nativeBlockers: [{ number: 3, state }] }] });
+    expect(() => planStartIssue(request, native('OPEN'))).toThrow('#4 waits on open #3.');
+    expect(planStartIssue(request, native('CLOSED')).issue.number).toBe(4);
+  });
 
   it('prefers a matching free specialist and falls back to any free developer', () => {
     expect(planStartIssue(request, context).agent.id).toBe('ada');

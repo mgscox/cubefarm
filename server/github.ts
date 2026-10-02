@@ -38,13 +38,58 @@ export async function repoMeta(fullName: string): Promise<RepoMeta> {
   };
 }
 
-export async function listIssues(fullName: string): Promise<IssueInfo[]> {
-  const raw = await ghJson<
-    { number: number; title: string; body: string; url: string; labels: { name: string }[]; createdAt: string }[]
-  >(['issue', 'list', '-R', fullName, '--state', 'open', '--limit', '100', '--json', 'number,title,body,url,labels,createdAt']);
-  return raw
+interface RawIssue {
+  number: number; title: string; body: string; url: string; labels: { name: string }[]; createdAt: string;
+}
+
+interface BlockerConnection {
+  nodes: { number: number; state: 'OPEN' | 'CLOSED'; repository: { nameWithOwner: string } }[];
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
+}
+
+const dependencyWarnings = new Set<string>();
+
+/** Repo sync batches dependency reads; scheduling uses the resulting IssueInfo cache without any API calls. */
+export async function listIssues(fullName: string, query: (args: string[]) => Promise<RawIssue[]> = ghJson, api: RestQuery = ghJson): Promise<IssueInfo[]> {
+  const raw = await query(['issue', 'list', '-R', fullName, '--state', 'open', '--limit', '100', '--json', 'number,title,body,url,labels,createdAt']);
+  const issues: IssueInfo[] = raw
     .map((i) => ({ number: i.number, title: i.title, body: i.body ?? '', url: i.url, labels: i.labels.map((l) => l.name), createdAt: i.createdAt }))
     .sort((a, b) => a.number - b.number);
+  const [owner, name] = fullName.split('/');
+  try {
+    for (let start = 0; start < issues.length; start += 25) {
+      let pending = issues.slice(start, start + 25).map((issue) => ({ issue, cursor: null as string | null }));
+      while (pending.length) {
+        const fields = pending.map(({ issue, cursor }) => `i${issue.number}: issue(number:${issue.number}) { blockedBy(first:100${cursor ? `,after:${JSON.stringify(cursor)}` : ''}) { nodes { number state repository { nameWithOwner } } pageInfo { hasNextPage endCursor } } }`).join('\n');
+        const result = await api(['api', 'graphql', '-f', `query=query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { ${fields} } }`, '-f', `owner=${owner}`, '-f', `name=${name}`]) as {
+          data?: { repository: Record<string, { blockedBy: BlockerConnection }> }; errors?: unknown[];
+        };
+        if (result.errors?.length || !result.data?.repository) throw new Error('Dependency query unavailable');
+        const next: typeof pending = [];
+        for (const { issue, cursor } of pending) {
+          const connection = result.data.repository[`i${issue.number}`]?.blockedBy;
+          if (!connection) throw new Error('Dependency query incomplete');
+          issue.nativeBlockers = [...(issue.nativeBlockers ?? []), ...connection.nodes.map((b) => ({
+            number: b.number, state: b.state,
+            ...(b.repository.nameWithOwner.toLowerCase() !== fullName.toLowerCase() && { repo: b.repository.nameWithOwner }),
+          }))];
+          if (connection.pageInfo.hasNextPage) {
+            if (!connection.pageInfo.endCursor || connection.pageInfo.endCursor === cursor) throw new Error('Dependency pagination incomplete');
+            next.push({ issue, cursor: connection.pageInfo.endCursor });
+          }
+        }
+        pending = next;
+      }
+    }
+  } catch {
+    // Older hosts and restricted tokens still sync issues normally, without repeated warning noise.
+    for (const issue of issues) delete issue.nativeBlockers;
+    if (!dependencyWarnings.has(fullName)) {
+      dependencyWarnings.add(fullName);
+      console.warn(`[GitHub] Native issue dependencies unavailable for ${fullName}; using body dependencies.`);
+    }
+  }
+  return issues;
 }
 
 interface RawPull {

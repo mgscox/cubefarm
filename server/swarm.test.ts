@@ -446,6 +446,38 @@ describe('CEO send_back_to_dev', () => {
   });
 });
 
+describe('native issue dependencies', () => {
+  it('never auto-assigns an open native blocker, then starts after a sync sees it closed', () => {
+    const blocked = { ...issue(2), nativeBlockers: [{ number: 1, state: 'OPEN' as const }] };
+    setIssues(issue(1, ['ready-for-human']), blocked);
+    expect(ready()).toEqual([]);
+    expect(s.startIssueWork(repo)).toBe(false);
+    expect(runTask).not.toHaveBeenCalled();
+    setIssues({ ...blocked, nativeBlockers: [{ number: 1, state: 'CLOSED' }] });
+    expect(ready()).toEqual([2]);
+    s.startIssueWork(repo);
+    expect(runTask.mock.calls[0][2].number).toBe(2);
+  });
+
+  it('unions blockers in CEO status, ready counts and longest chain, and ranks the foundation first', () => {
+    setIssues(issue(1), issue(2), { ...issue(3, [], 'Depends on #2'), nativeBlockers: [{ number: 2, state: 'OPEN' }] },
+      { ...issue(4), nativeBlockers: [{ number: 3, state: 'OPEN' }] });
+    expect(ready()).toEqual([2, 1]);
+    const floor = JSON.parse(s.companyStatus()).floors[0];
+    expect(floor.capacity).toMatchObject({ issuesReadyToStart: 2, issuesWaitingOnOthers: 2, longestDependencyChain: 2 });
+    expect(floor.backlog[2].waitsFor).toEqual([2]);
+    expect(floor.backlog[3].waitsFor).toEqual([3]);
+  });
+
+  it('blocks on external native issues independently of same-number local issues', () => {
+    setIssues({ ...issue(2), nativeBlockers: [{ number: 2, state: 'OPEN', repo: 'other/repo' }] });
+    expect(ready()).toEqual([]);
+    const floor = JSON.parse(s.companyStatus()).floors[0];
+    expect(floor.backlog[0].waitsFor).toEqual(['other/repo#2']);
+    expect(floor.capacity.longestDependencyChain).toBe(1);
+  });
+});
+
 describe('ready-for-human issues', () => {
   it('are never ready to start, in any letter case', () => {
     setIssues(issue(1), issue(2, ['ready-for-human']), issue(3, ['swarm:server', 'Ready-For-Human']), issue(4, ['READY-FOR-HUMAN']));

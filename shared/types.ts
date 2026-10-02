@@ -18,6 +18,12 @@ export interface LogLine {
   tool?: string; // tool name for kind === 'tool'
 }
 
+export interface IssueDependency {
+  number: number;
+  state: 'OPEN' | 'CLOSED';
+  repo?: string; // present only for a blocker in another repository
+}
+
 export interface IssueInfo {
   number: number;
   title: string;
@@ -25,6 +31,7 @@ export interface IssueInfo {
   url: string;
   labels: string[];
   createdAt: string;
+  nativeBlockers?: IssueDependency[]; // cached at repo sync; absent when dependency access is unavailable
 }
 
 export interface PullInfo {
