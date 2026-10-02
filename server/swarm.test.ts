@@ -26,6 +26,7 @@ interface Internals {
   runFix(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   onQaFinished(agent: unknown, repo: Repo, result: SessionResult): Promise<void>;
   onFixFinished(agent: unknown, repo: Repo, result: SessionResult): void;
+  postMessage(from: string, text: string): void;
   broadcast(event: ServerEvent): void;
   save(): void;
   schedule(): void;
@@ -292,6 +293,135 @@ describe('CEO rerun_qa', () => {
 
   it('explains unknown floors', async () => {
     expect(await rerun({ floor: 8, number: 13 })).toContain('Refused: There is no floor 8.');
+  });
+});
+
+describe('CEO send_back_to_dev', () => {
+  const send = (extra: Record<string, unknown> = {}) => s.officeTools().call('send_back_to_dev', { floor: 1, number: 13, ...extra });
+  let pull: PullInfo;
+  beforeEach(() => {
+    repo.autoAssign = false;
+    Object.assign(repo, { defaultBranch: 'trunk', links: [] });
+    pull = {
+      number: 13, title: 'Recovery', url: '', headRefName: 'swarm/13', state: 'OPEN',
+      isDraft: false, closesIssues: [], checks: 'failing', mergeable: 'MERGEABLE', headSha: 'sha',
+      reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
+      mergeState: 'CLEAN', failedChecks: [{ name: 'Build', url: null }], pendingChecks: [],
+    };
+    s.repoRt.get(repo.id)!.pulls = [pull];
+    s.backend.prDetails = async () => ({ ...pull, body: '', isCrossRepository: false });
+    s.state.qa.push({
+      repoId: repo.id, prNumber: 13, status: 'needs-human', round: 3, sessionFailures: 2,
+      devAgentId: 'a1', qaAgentId: null, summary: 'Recovery loses work',
+      checks: [{ name: 'Recovery', result: 'fail', details: 'Missing task' }], commentUrl: null, mergeNote: null, updatedAt: 0,
+    });
+    Object.assign(s.state.qa[0], { retests: 0, devSessionId: 'old-session', passedSha: 'old-sha', mergeFixes: 3, testedSha: 'old-sha', failedSha: 'old-sha', fixCrashes: ['a1'] });
+    vi.spyOn(s, 'beginTask').mockImplementation((agent, patch) => Object.assign(agent as object, patch, { status: 'preparing' }));
+    vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
+  });
+
+  it.each(['needs-human', 'failed', 'passed'] as const)('hands a %s PR to a developer with findings and the CEO note', async (status) => {
+    s.state.qa[0].status = status;
+    const session = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    const message = vi.spyOn(s, 'postMessage');
+    await send({ note: 'Keep the queued task', reason: 'qa' });
+    expect(s.state.qa[0]).toMatchObject({ status: 'failed', round: 3, retests: 3, sessionFailures: 0, passedSha: null, fixCrashes: [] });
+    expect(message).toHaveBeenCalledWith('office', 'Joi sent PR #13 back to Ada: qa');
+    expect(s.startPipelineWork(repo)).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    const prompt = session.mock.calls[0][3] as string;
+    expect(prompt).toContain('Recovery loses work');
+    expect(prompt).toContain('Missing task');
+    expect(prompt).toContain('GitHub check failed: Build');
+    expect(prompt).toContain('Keep the queued task');
+    expect(prompt).toContain('git push origin HEAD:swarm/13');
+  });
+
+  it.each([undefined, 'qa', 'checks', 'other'] as const)('includes conflicts and QA fixes together for reason %s', async (reason) => {
+    pull.mergeable = 'CONFLICTING';
+    const session = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    await send({ reason, note: 'Preserve recovery' });
+    expect(s.state.qa[0]).toMatchObject({ fixReason: reason ?? 'conflict' });
+    await s.runFix(s.state.agents[0], repo, s.state.qa[0]);
+    const prompt = session.mock.calls[0][3] as string;
+    expect(prompt).toContain('git merge origin/trunk');
+    expect(prompt).toContain('Recovery loses work');
+    expect(prompt).toContain('Preserve recovery');
+    expect(prompt).not.toContain('QA passed');
+  });
+
+  it.each(['testing', 'fixing', 'queued'] as const)('refuses %s with 409', async (status) => {
+    s.state.qa[0].status = status;
+    await expect(swarm.sendBackToDev({ floor: 1, number: 13 })).rejects.toMatchObject({ status: 409 });
+    expect(await send()).toContain(`Refused: PR #13 is ${status}`);
+  });
+
+  it.each(['CLOSED', 'MERGED'] as const)('refuses a freshly %s PR with 404 even with a stale open cache', async (state) => {
+    s.backend.prDetails = async () => ({ ...pull, state, body: '', isCrossRepository: false });
+    await expect(swarm.sendBackToDev({ floor: 1, number: 13 })).rejects.toMatchObject({ status: 404 });
+    expect(s.state.qa[0].status).toBe('needs-human');
+  });
+
+  it('refuses unknown PRs and rechecks QA status after querying GitHub', async () => {
+    await expect(swarm.sendBackToDev({ floor: 1, number: 99 })).rejects.toMatchObject({ status: 404 });
+    s.backend.prDetails = async () => {
+      s.state.qa[0].status = 'testing';
+      return { ...pull, body: '', isCrossRepository: false };
+    };
+    await expect(swarm.sendBackToDev({ floor: 1, number: 13 })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('uses another free developer, queues when all are busy, and accepts a named developer', async () => {
+    const other = { id: 'a2', name: 'Barbara', repoId: repo.id, role: 'dev', status: 'idle', desk: 1, specialty: '' };
+    s.state.agents.push(other);
+    s.agentRt.set('a2', { log: [], pending: [], terminal: null });
+    s.state.agents[0].status = 'working';
+    await send();
+    expect(s.state.qa[0]).toMatchObject({ devAgentId: 'a2', devSessionId: null });
+    other.status = 'working';
+    await send();
+    expect(s.startPipelineWork(repo)).toBe(false);
+    other.status = 'idle';
+    const fix = vi.spyOn(s, 'runFix').mockResolvedValue();
+    expect(s.startPipelineWork(repo)).toBe(true);
+    expect(fix).toHaveBeenCalledWith(other, repo, s.state.qa[0]);
+    s.state.agents[0].status = 'idle';
+    await send({ agent: 'ada' });
+    expect(s.state.qa[0].devAgentId).toBe('a1');
+    expect(await send({ agent: 'Joi' })).toContain('Refused: Choose a developer');
+  });
+
+  it.each(['qa', 'conflict', 'checks', 'other'] as const)('re-tests a %s fix and sends another QA failure to a developer', async (reason) => {
+    vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    await send({ reason });
+    const dev = s.state.agents[0];
+    await s.runFix(dev, repo, s.state.qa[0]);
+    s.onFixFinished(dev, repo, { ok: true, text: '', errors: [], costUsd: 0, turns: 0 });
+    expect(s.state.qa[0]).toMatchObject({ status: 'queued', round: 4, retests: 3 });
+    const tester = { id: 'q1', name: 'Grace', repoId: repo.id, role: 'qa', status: 'working', prNumber: 13 };
+    s.state.agents.push(tester);
+    s.agentRt.set('q1', { log: [], pending: [], terminal: null, shots: [] });
+    s.backend.commentPull = vi.fn(async () => 'comment');
+    await s.onQaFinished(tester, repo, { ok: true, text: '', errors: [], costUsd: 0, turns: 0, structured: {
+      verdict: 'fail', summary: 'Still missing task', checks: [{ name: 'Recovery', result: 'fail', details: 'Missing task' }], commands: [], screenshots: [],
+    } });
+    expect(s.state.qa[0]).toMatchObject({ status: 'failed', round: 4, fixReason: 'qa' });
+    const fix = vi.spyOn(s, 'runFix').mockResolvedValue();
+    expect(s.startPipelineWork(repo)).toBe(true);
+    expect(fix).toHaveBeenCalledWith(dev, repo, s.state.qa[0]);
+  });
+
+  it('lets the demo CEO send a PR to a developer', async () => {
+    const finished = vi.fn();
+    const callbacks: SessionCallbacks = { log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished };
+    const handle = createDemoBackend().startSession({
+      role: 'ceo', cwd: '', prompt: 'Manager asks:\nSend PR #13 back to dev on floor 1 with Keep the task',
+      systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools(),
+    }, callbacks);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: expect.stringContaining('queued for fixes with Ada') }));
+    expect(s.state.qa[0]).toMatchObject({ status: 'failed', sessionFailures: 0, fixInstructions: expect.stringContaining('Keep the task') });
+    handle.stop();
   });
 });
 

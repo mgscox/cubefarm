@@ -6,7 +6,8 @@ import type { Backend } from './backend.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
-import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, specialtyLabel, specialtySlug, type CeoJob, type OfficeTools, type StartIssueRequest } from './ceo.ts';
+import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type OfficeTools, type StartIssueRequest } from './ceo.ts';
+import { planDevFix, type FixReason } from './fixPlan.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
@@ -114,7 +115,7 @@ interface QaRecord extends QaView {
   passedSha: string | null; // the head commit QA signed off on: auto-merge merges exactly that
   failedSha: string | null; // the head commit QA last failed: re-testing it unchanged would fail again
   fixCrashes: string[]; // developers whose fix session crashed since the last pushed fix, one entry per crash
-  fixReason: 'qa' | 'checks' | 'conflict' | null; // why it was last sent back to a developer
+  fixReason: FixReason | null; // why it was last sent back to a developer
   mergeFixes: number; // times it went back for failing checks or conflicts
   retests: number; // QA rounds caused by merge fixes or new commits rather than by QA failing it
   pendingSince: number | null; // when auto-merge started waiting on its checks
@@ -393,6 +394,7 @@ export class Swarm {
       routeIssue: (a) => this.routeIssue(a),
       startIssue: (a) => this.startIssue(a),
       rerunQa: (a) => this.rerunQa(a),
+      sendBackToDev: (a) => this.sendBackToDev(a),
     });
   }
   private ceoIssues = new IssueCap(MAX_ISSUES_PER_JOB); // issues filed during the current CEO job
@@ -2110,13 +2112,14 @@ export class Swarm {
     const mergeFix =
       rec.fixReason === 'conflict'
         ? [
-            `QA passed pull request #${rec.prNumber} (${pull?.url ?? ''}), but it now conflicts with ${repo.defaultBranch} because other work was merged first.${takeover}`,
+            `Pull request #${rec.prNumber} (${pull?.url ?? ''}) conflicts with ${repo.defaultBranch}.${takeover}`,
+            rec.fixInstructions ?? '',
             '',
             `Bring it up to date: git fetch origin && git merge origin/${repo.defaultBranch}. Resolve the conflicts so both this change and the newly merged work keep working, run the project's checks, and ${push}`,
           ]
         : rec.fixReason === 'checks'
           ? [
-              `QA passed pull request #${rec.prNumber} (${pull?.url ?? ''}), but GitHub checks failed on it.${takeover}`,
+              `GitHub checks failed on pull request #${rec.prNumber} (${pull?.url ?? ''}).${takeover}`,
               '',
               `Failed checks:\n${rec.fixInstructions ?? ''}`,
               '',
@@ -2126,8 +2129,8 @@ export class Swarm {
           : null;
     const qaFix = [
       original
-        ? `QA tester ${qaAgent?.name ?? 'QA'} tested your pull request #${rec.prNumber} and it FAILED (round ${rec.round}).`
-        : `You are taking over pull request #${rec.prNumber} (${pull?.url ?? ''}), written by a teammate, because QA failed it (round ${rec.round}). Read the PR and the linked issue first.`,
+        ? `Fix your pull request #${rec.prNumber} after ${qaAgent?.name ?? 'QA'} round ${rec.round}.`
+        : `You are taking over pull request #${rec.prNumber} (${pull?.url ?? ''}), written by a teammate, for fixes after round ${rec.round}. Read the PR and the linked issue first.`,
       '',
       `QA summary: ${rec.summary ?? ''}`,
       failed.length ? `Failed checks:\n${failed.map((c) => `- ${c.name}: ${c.details}`).join('\n')}` : '',
@@ -2160,7 +2163,7 @@ export class Swarm {
       return;
     }
     a.status = 'done';
-    if (rec && (rec.fixReason === 'checks' || rec.fixReason === 'conflict')) {
+    if (rec?.passedSha && (rec.fixReason === 'checks' || rec.fixReason === 'conflict')) {
       // Back in line to merge: new commits go through QA again first, a re-run of flaky checks doesn't.
       this.appendLog(a, [{ kind: 'done', text: `✔ PR #${a.prNumber} fixed in ${this.minutes(a)}m. Back in line to merge.` }]);
       this.setQa(rec, { status: 'passed', devSessionId: a.sessionId ?? rec.devSessionId, mergeNote: 'waiting for fresh checks', fixCrashes: [] });
@@ -3032,7 +3035,9 @@ export class Swarm {
             .filter((p) => p.state === 'OPEN')
             .map((p) => {
               const q = this.state.qa.find((x) => x.repoId === r.id && x.prNumber === p.number);
-              return { number: p.number, title: p.title, qa: q ? `${q.status}${q.round > 1 ? ` (round ${q.round})` : ''}` : 'not tested', merge: q?.mergeNote ?? null, checks: p.checks };
+              return { number: p.number, title: p.title, qa: q ? `${q.status}${q.round > 1 ? ` (round ${q.round})` : ''}` : 'not tested', merge: q?.mergeNote ?? null, checks: p.checks,
+                headSha: p.headSha, testedSha: q?.testedSha ?? null, mergeable: p.mergeable,
+                qaSummary: q?.summary ?? null, qaFailedChecks: q?.checks.filter((c) => c.result === 'fail') ?? [], failedChecks: p.failedChecks };
             }),
           mergedRecently: rt.pulls.filter((p) => p.state === 'MERGED').map((p) => `#${p.number} ${p.title}`),
         };
@@ -3239,6 +3244,44 @@ export class Swarm {
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number)!;
     this.setQa(rec, { rerunNote: x.note ? { round: rec.round, text: x.note } : undefined });
     return `PR #${x.number} on floor ${repo.floor} is queued for QA (round ${rec.round}).`;
+  }
+
+  /** CEO handoff into the normal fix pipeline, even on floors with auto-assign off. */
+  async sendBackToDev(x: DevFixRequest) {
+    const repo = this.floorRepo(x.floor);
+    const rt = this.repoRt.get(repo.id)!;
+    const pull = rt.pulls.find((p) => p.number === x.number && p.state === 'OPEN');
+    if (!pull) throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
+    const getRecord = () => {
+      const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number);
+      if (!rec || !['needs-human', 'failed', 'passed'].includes(rec.status)) throw new HttpError(409, `PR #${x.number} is ${rec?.status ?? 'not in QA'}; wait until QA or its fix finishes`);
+      if (rt.merging) throw new HttpError(409, `A merge is in progress on ${repo.fullName}; try again once it finishes`);
+      return rec;
+    };
+    getRecord();
+    const pr = await this.backend.prDetails(repo.fullName, x.number);
+    if (pr.state !== 'OPEN') throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
+    const rec = getRecord(); // QA or another handoff may have started while GitHub was queried.
+    let preferred = rec.devAgentId;
+    if (x.agent !== undefined) {
+      const ref = x.agent.trim().toLowerCase();
+      const dev = this.state.agents.find((a) => a.repoId === repo.id && (a.id === x.agent || a.name.toLowerCase() === ref));
+      if (!dev || dev.role !== 'dev') throw new HttpError(409, `Choose a developer id or name on floor ${x.floor} from company_status`);
+      preferred = dev.id;
+    }
+    const free = this.available(repo, 'dev');
+    const dev = free.find((a) => a.id === preferred) ?? free[0];
+    const chosen = dev?.id ?? preferred;
+    this.setQa(rec, {
+      ...planDevFix(rec, { ...pull, mergeable: pr.mergeable, mergeState: pr.mergeState }, repo.defaultBranch, x.note?.slice(0, 1500), x.reason),
+      status: 'failed',
+      devAgentId: chosen,
+      devSessionId: chosen === rec.devAgentId ? rec.devSessionId : null,
+    });
+    const target = dev?.name ?? 'the next free developer';
+    this.postMessage('office', `${this.state.agents.find((a) => a.id === CEO_ID)?.name ?? 'Joi'} sent PR #${x.number} back to ${target}: ${rec.fixReason}`);
+    setTimeout(() => this.schedule(), 200);
+    return `PR #${x.number} on floor ${repo.floor} is queued for fixes with ${target}: ${rec.fixReason}.`;
   }
 
   /** Change an open issue's specialty and/or dependencies (see planRoute for what is refused). */
