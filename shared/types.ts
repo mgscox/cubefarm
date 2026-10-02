@@ -229,6 +229,7 @@ export interface QaView {
   prNumber: number;
   status: QaStatus;
   round: number; // 1-based QA round
+  rerunNote?: { round: number; text: string }; // manager's instructions for one QA round
   devAgentId: string | null; // who wrote it (null for PRs opened outside the swarm)
   qaAgentId: string | null; // who is testing / last tested it
   summary: string | null; // latest QA summary
