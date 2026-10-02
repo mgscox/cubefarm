@@ -693,10 +693,20 @@ input.inline:focus {
     display: none;
   }
 }
-.hud-help {
+/* The bottom row: the shortcut bar on the left wraps and shrinks so it always ends before the phone button. */
+.hud-bottom {
   position: absolute;
-  bottom: 14px;
   left: 16px;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  pointer-events: none;
+}
+.hud-help {
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: 0.85rem;
   background: rgba(255, 253, 246, 0.85);
   border-radius: 12px;
@@ -1988,9 +1998,10 @@ input.inline:focus {
   bottom: 88px;
 }
 .phone-btn {
-  position: absolute;
-  right: 16px;
-  bottom: 16px;
+  position: relative;
+  flex: none;
+  margin-left: auto;
+  pointer-events: auto;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2007,6 +2018,13 @@ input.inline:focus {
 }
 .phone-btn:hover {
   transform: translateY(-1px);
+}
+/* "<CEO> is working": the CEO's name is free text, so a long one is cut short rather than crowding the bar. */
+.phone-btn-label {
+  max-width: 15rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .phone-btn-icon {
   font-size: 1.7rem;

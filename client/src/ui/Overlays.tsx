@@ -108,7 +108,7 @@ function Help() {
           <kbd>W</kbd>
           <kbd>A</kbd>
           <kbd>S</kbd>
-          <kbd>D</kbd> walk · <kbd>Shift</kbd> run · mouse to look · <kbd>E</kbd> or left click interacts with whatever the crosshair is on (the first click only grabs the mouse) · <kbd>Esc</kbd> frees the mouse. Closing a panel or changing floor grabs it again.
+          <kbd>D</kbd> walk · <kbd>Shift</kbd> run · mouse to look · <kbd>Q</kbd>/<kbd>R</kbd> turn left/right · <kbd>Z</kbd>/<kbd>X</kbd> look down/up · <kbd>E</kbd> or left click interacts with whatever the crosshair is on (the first click only grabs the mouse) · <kbd>Esc</kbd> frees the mouse. Closing a panel or changing floor grabs it again.
         </p>
         <MouseSettings />
         <h3>Balls</h3>
@@ -118,7 +118,7 @@ function Help() {
         </p>
         <h3>Foam blasters</h3>
         <p>
-          Every floor has a rack of foam blasters by the south wall: aim at it and press <kbd>E</kbd> to take one. <b>Fire</b>: click or <kbd>F</kbd> (12 darts, up to four a second). <b>Reload</b>: <kbd>R</kbd>. <b>Drop</b>: <kbd>G</kbd>, then <kbd>E</kbd> picks it up again.
+          Every floor has a rack of foam blasters by the south wall: aim at it and press <kbd>E</kbd> to take one. <b>Fire</b>: click or <kbd>F</kbd> (12 darts, up to four a second). <b>Reload</b>: <kbd>T</kbd>. <b>Drop</b>: <kbd>G</kbd>, then <kbd>E</kbd> picks it up again.
           Darts stick to walls, boards and screens when they hit square on and bounce off everything else. They never open anything, and the blasters go back on the rack when you change floors.
         </p>
         <h3>Sound</h3>

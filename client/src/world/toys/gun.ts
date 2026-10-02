@@ -56,7 +56,7 @@ export function pullTrigger() {
   thwip();
 }
 
-/** R: reload the blaster in hand, if it isn't full. */
+/** T: reload the blaster in hand, if it isn't full. */
 export function reloadHeld() {
   const h = heldBlaster();
   if (!h) return;
