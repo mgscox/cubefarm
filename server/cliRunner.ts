@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { HOME_DIR } from './config.ts';
+import { projectEnv } from './projectEnv.ts';
 import { cliLabel, CODEX_HOOK_SOURCE, codexThread, commandFor, hookReviewKey, interruptions, isCli, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE, trustKey } from './clis.ts';
 import { adoptPty, discardPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, startKeeper, terminalsAvailable, type Pty } from './ptyClient.ts';
 import {
@@ -658,7 +659,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   // Each agent must be a clean instance on the account its CLI is logged into: no API keys (they would switch Claude
   // Code's billing to the API) and nothing inherited from a Claude Code session the office itself was started from.
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
+  for (const [k, v] of Object.entries(projectEnv(process.env))) {
     if (v === undefined) continue;
     if (/^(ANTHROPIC_|CLAUDE)/i.test(k) && k !== 'CLAUDE_CONFIG_DIR') continue;
     if (/^(NO_COLOR|FORCE_COLOR|TERM_PROGRAM|TERM_PROGRAM_VERSION|CODEX_THREAD_ID|OPENCODE_CONFIG_CONTENT)$/i.test(k)) continue;
