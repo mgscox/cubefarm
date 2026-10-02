@@ -10,6 +10,7 @@ import { confirmDialog, isConfirmOpen } from '../ui/Confirm';
 import { footstepsFollow, getAudioPrefs, toggleMute } from '../ui/sfx';
 import { dropHeld, startCharge, throwHeld, walk } from './toys/hands';
 import { watchLookLock } from './lookLock';
+import { keyboardLook } from './keyboardLook';
 import { pokeToy } from './toys/poke';
 import { isBlasterId } from './toys/darts';
 import { reloadHeld, takeBlaster } from './toys/gun';
@@ -183,7 +184,7 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
       if (e.code === 'KeyE' && !e.repeat && s.focus) runFocusAction(s.focus);
       if (e.code === 'KeyF' && !e.repeat && !s.travel) startCharge();
       if (e.code === 'KeyG' && !e.repeat) dropHeld();
-      if (e.code === 'KeyR' && !e.repeat && !s.travel) reloadHeld();
+      if (e.code === 'KeyT' && !e.repeat && !s.travel) reloadHeld();
       if (e.code === 'KeyH') s.openOverlay({ kind: 'help' });
       if (e.code === 'KeyP') {
         e.preventDefault(); // don't type the "p" into the phone's message box
@@ -227,6 +228,7 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
 
     // movement
     const k = keys.current;
+    if (s.started && !s.travel) look.current = keyboardLook(look.current, k, dt);
     const fwd = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0);
     const strafe = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
     const speed = k.has('ShiftLeft') || k.has('ShiftRight') ? 6.5 : 3.6;

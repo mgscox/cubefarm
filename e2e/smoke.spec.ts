@@ -230,6 +230,41 @@ test('repository refresh distinguishes unavailable checks, REST fallback, stale 
   await expect(card.getByText('GitHub refresh diagnostics')).toHaveCount(0);
 });
 
+test('Q/R turn and Z/X pitch without walking, and help pauses keyboard look', async ({ page }) => {
+  await enterOffice(page);
+  await expect.poll(() => savedView(page)).not.toBeNull();
+  const start = (await savedView(page))!;
+
+  for (const [key, axis, direction] of [
+    ['q', 'yaw', 1], ['r', 'yaw', -1], ['z', 'pitch', -1], ['x', 'pitch', 1],
+  ] as const) {
+    const before = (await savedView(page))!;
+    await page.keyboard.down(key);
+    try {
+      await expect.poll(async () => ((await savedView(page))![axis] - before[axis]) * direction).toBeGreaterThan(0.1);
+    } finally {
+      await page.keyboard.up(key);
+    }
+    // Allow the saved view to catch up to key release before checking the next direction.
+    await page.waitForTimeout(1200);
+  }
+
+  const stopped = (await savedView(page))!;
+  expect(stopped.x).toBe(start.x);
+  expect(stopped.z).toBe(start.z);
+  await page.waitForTimeout(1200);
+  expect(await savedView(page)).toEqual(stopped);
+
+  await page.keyboard.press('h');
+  await expect(page.getByText('How the office works', { exact: true })).toBeVisible();
+  await page.keyboard.down('q');
+  await page.keyboard.down('x');
+  await page.waitForTimeout(1200);
+  await page.keyboard.up('q');
+  await page.keyboard.up('x');
+  expect(await savedView(page)).toEqual(stopped);
+});
+
 test('holding W walks forward', async ({ page }) => {
   await enterOffice(page);
   // The client saves the player's spot about once a second while you're inside.

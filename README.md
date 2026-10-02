@@ -50,6 +50,8 @@ Demo mode fakes GitHub and the agents, so it costs nothing and changes nothing.
 | `W A S D` / arrows | walk |
 | `Shift` | run |
 | mouse | look around (click the view first) |
+| `Q` / `R` | turn left / right |
+| `Z` / `X` | look down / up |
 | `E` | use what you're looking at: a desk, the whiteboard, the elevator, the manager's computer |
 | `P` | your phone |
 | `H` | help |
