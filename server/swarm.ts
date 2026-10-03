@@ -8,6 +8,7 @@ import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type OfficeTools, type ParkPrRequest, type StartIssueRequest } from './ceo.ts';
 import { checkParkPr } from './parkPr.ts';
+import { orphanedQa } from './qaOwnership.ts';
 import { planDevFix, type FixReason } from './fixPlan.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
@@ -614,7 +615,7 @@ export class Swarm {
         else if (request && repo) this.setRequestedStarts(repo, repo.requestedStarts.filter((r) => r !== request));
         this.appendLog(a, [{ kind: 'system', text: `↺ The office server restarted. ${restart ? `Restarting #${a.issueNumber} when a desk is free.` : 'Back to the queue.'}` }]);
         const rec = a.task === 'qa' ? this.state.qa.find((q) => q.qaAgentId === a.id && q.status === 'testing') : undefined;
-        if (rec) this.setQa(rec, { status: 'queued' });
+        if (rec) this.setQa(rec, { status: 'queued', qaAgentId: null });
         const fix = a.task === 'fix' ? this.state.qa.find((q) => q.devAgentId === a.id && q.status === 'fixing') : undefined;
         if (fix) this.setQa(fix, { status: 'failed' });
         this.clearTask(a);
@@ -625,6 +626,7 @@ export class Swarm {
         console.warn(`could not resume ${a.name}`, err),
       );
     }
+    this.reconcileOrphanedQa();
   }
 
   // ---------- views ----------
@@ -863,7 +865,16 @@ export class Swarm {
   private clearTask(a: PersistedAgent) {
     this.nextGeneration(a);
     Object.assign(a, { status: 'idle', task: null, issueNumber: null, issueTitle: null, branch: null, prNumber: null, prUrl: null, lastError: null, heldRetry: null });
+    this.reconcileOrphanedQa();
     this.emitAgent(a);
+  }
+
+  private reconcileOrphanedQa() {
+    for (const rec of this.state.qa) {
+      if (!orphanedQa(rec, this.state.agents)) continue;
+      this.setQa(rec, { status: 'queued', qaAgentId: null });
+      this.postMessage('office', `↺ Requeued orphaned QA for PR #${rec.prNumber} on ${rec.repoId}; its tester moved on or is missing.`);
+    }
   }
 
   private setRequestedStarts(repo: PersistedRepo, requests: RequestedStart[]) {
@@ -1651,6 +1662,7 @@ export class Swarm {
       heldRetry: null,
       ...patch,
     });
+    this.reconcileOrphanedQa();
     rt.screenshot = null;
     rt.browserUrl = null;
     rt.shots = [];
@@ -2087,12 +2099,23 @@ export class Swarm {
       .filter((l) => l !== '')
       .join('\n');
 
-    this.startAgentSession(a, repo, cwd, prompt, this.buildQaSystemAppend(a, repo, cwd, branch, pr), undefined, QA_SCHEMA);
+    try {
+      this.startAgentSession(a, repo, cwd, prompt, this.buildQaSystemAppend(a, repo, cwd, branch, pr), undefined, QA_SCHEMA);
+    } catch (err) {
+      a.status = 'error';
+      a.endedAt = Date.now();
+      a.lastError = (err as Error).message;
+      this.appendLog(a, [{ kind: 'error', text: `✗ ${a.lastError}` }]);
+      this.setQa(rec, { status: 'queued', qaAgentId: null });
+      this.emitAgent(a);
+    }
   }
 
   private async onQaFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult) {
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
     const rt = this.agentRt.get(a.id)!;
+    const generation = rt.generation;
+    const gone = () => !this.state.agents.includes(a) || rt.generation !== generation;
     const report = result.ok ? parseReport(result) : null;
 
     if (a.status === 'stopped' || !report) {
@@ -2109,7 +2132,7 @@ export class Swarm {
       return;
     }
 
-    a.status = 'done';
+    // Keep the desk busy until the report is recorded: uploads/comments can outlast a scheduler tick.
     const pass = report.verdict === 'pass';
     this.appendLog(a, [{ kind: pass ? 'done' : 'error', text: `${pass ? '✅ QA passed' : '❌ QA failed'} PR #${a.prNumber} · ${report.checks.length} checks · ${rt.shots.length} screenshots` }]);
 
@@ -2119,11 +2142,14 @@ export class Swarm {
       try {
         this.appendLog(a, [{ kind: 'system', text: '📎 Uploading evidence and posting the QA report on the PR…' }]);
         const body = await this.renderQaComment(a, repo, rec, report, rt.shots);
+        if (gone()) return;
         commentUrl = (await this.backend.commentPull(repo.fullName, rec.prNumber, body)) || null;
+        if (gone()) return;
         this.appendLog(a, [{ kind: 'system', text: `  ⎿ ${commentUrl ?? 'comment posted'}` }]);
       } catch (err) {
         this.appendLog(a, [{ kind: 'error', text: `  ⎿ Could not post the QA report: ${(err as Error).message}` }]);
       }
+      if (gone()) return;
       const qaRounds = rec.round - rec.retests; // rounds QA itself asked for
       const nextStatus = pass ? 'passed' : qaRounds >= MAX_QA_ROUNDS ? 'needs-human' : 'failed';
       this.setQa(rec, {
@@ -2150,14 +2176,15 @@ export class Swarm {
             : `❌ ${a.name} failed PR #${rec.prNumber}; sending it back to the developer`,
       );
     }
+    a.status = 'done';
   }
 
   /** QA already failed this exact commit: send it straight back to a developer with those findings rather than spend a session re-testing it. */
   private skipUnchangedQa(a: PersistedAgent, rec: QaRecord, lastTester: string | null) {
     const human = rec.round - rec.retests >= MAX_QA_ROUNDS;
     this.appendLog(a, [{ kind: 'system', text: `PR #${rec.prNumber} has no new commits since QA failed it; ${human ? 'it needs a human decision' : 'sending it back to a developer with the last findings'}.` }]);
-    this.clearTask(a);
     this.setQa(rec, { status: human ? 'needs-human' : 'failed', qaAgentId: lastTester });
+    this.clearTask(a);
     this.toast('info', `PR #${rec.prNumber} is unchanged since QA failed it: ${human ? 'it needs a human' : 'back to a developer, no re-test'}`);
   }
 
@@ -2541,6 +2568,7 @@ export class Swarm {
    * so no repo can hog the slots.
    */
   private schedule() {
+    this.reconcileOrphanedQa();
     this.tickUsage();
     if (this.officeUpdateTick()) return; // draining for the office's own update
     if (this.limited()) return;
@@ -3383,7 +3411,7 @@ export class Swarm {
         a.issueNumber === record()?.issueNumber || pr.headRefName.startsWith(`swarm/issue-${a.issueNumber}-`)))
     ));
     const preflight = (pr: Pick<PrDetails, 'headRefName' | 'closesIssues'>, reserved = false) => checkParkPr(x.number, repo.fullName, {
-      merging: rt.merging, syncing: rt.syncing, parking: !reserved && !!rt.parking, status: record()?.status,
+      merging: rt.merging, syncing: rt.syncing, parking: !reserved && !!rt.parking,
       busy: linkedAgents(pr).some((a) => BUSY.includes(a.status) || !!this.agentRt.get(a.id)?.session),
     });
     preflight(pull);
@@ -3429,7 +3457,11 @@ export class Swarm {
     const getRecord = () => {
       if (rt.parking) throw new HttpError(409, 'Wait until PR parking finishes');
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number);
-      if (!rec || !['needs-human', 'failed', 'passed'].includes(rec.status)) throw new HttpError(409, `PR #${x.number} is ${rec?.status ?? 'not in QA'}; wait until QA or its fix finishes`);
+      const busy = this.state.agents.some((a) => a.repoId === repo.id && a.prNumber === x.number &&
+        (a.task === 'qa' || a.task === 'fix') && (BUSY.includes(a.status) || !!this.agentRt.get(a.id)?.session));
+      if (!rec || busy || !['needs-human', 'failed', 'passed', 'testing', 'fixing'].includes(rec.status)) {
+        throw new HttpError(409, `PR #${x.number} is ${rec?.status ?? 'not in QA'}; wait until QA or its fix finishes`);
+      }
       if (rt.merging) throw new HttpError(409, `A merge is in progress on ${repo.fullName}; try again once it finishes`);
       return rec;
     };
@@ -3450,6 +3482,7 @@ export class Swarm {
     this.setQa(rec, {
       ...planDevFix(rec, { ...pull, mergeable: pr.mergeable, mergeState: pr.mergeState }, repo.defaultBranch, x.note?.slice(0, 1500), x.reason),
       status: 'failed',
+      qaAgentId: rec.status === 'testing' ? null : rec.qaAgentId,
       devAgentId: chosen,
       devSessionId: chosen === rec.devAgentId ? rec.devSessionId : null,
     });
