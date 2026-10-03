@@ -1635,6 +1635,10 @@ input.inline:focus {
 .office-lifecycle p {
   margin: 4px 0;
 }
+/* Worktree paths have no spaces to break at; wrap them inside the card instead of widening it. */
+.settings-path {
+  overflow-wrap: anywhere;
+}
 .section {
   margin: 0 0 10px;
 }

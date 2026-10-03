@@ -155,6 +155,44 @@ test("the manager's console opens with E at its desk and closes with Esc", async
   await expect(phoneButton(page)).toBeVisible();
 });
 
+test('a long agent desks path wraps inside the Settings card on narrow screens', async ({ page }, testInfo) => {
+  // No spaces or hyphens: nothing the browser would break the line at on its own.
+  const longPath = '/Users/someone/.cubefarm/workspaces/' + 'averylongfoldername/'.repeat(6);
+  await page.routeWebSocket('**/ws', (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((message) => {
+      const event = JSON.parse(message.toString()) as ServerEvent;
+      if (event.type === 'snapshot') {
+        event.data.settings.tutorialStep = -1;
+        event.data.workspaceRoot = longPath;
+      }
+      ws.send(JSON.stringify(event));
+    });
+  });
+  const spot: SavedView = { floor: 0, x: MANAGER_DESK.x, z: MANAGER_DESK.z + MANAGER_DESK.d / 2 + 0.8, yaw: 0, pitch: -0.6 };
+  await page.addInitScript(([key, view]) => localStorage.setItem(key, view), [VIEW_KEY, JSON.stringify(spot)] as const);
+  await enterOffice(page);
+  await expect(page.getByText("Open the manager's console")).toBeVisible();
+  await page.keyboard.press('e');
+  await page.waitForTimeout(450); // the console ignores clicks just after it opens
+  const tab = page.getByRole('button', { name: '⚙️ Settings' });
+  await tab.focus();
+  await page.keyboard.press('Enter');
+  await expect(tab).toHaveClass(/tab-on/);
+  const path = page.getByText(longPath, { exact: true });
+  await expect(path).toBeVisible();
+  for (const [width, height] of [[390, 844], [901, 640], [1024, 640], [1280, 800]] as const) {
+    await page.setViewportSize({ width, height });
+    await path.scrollIntoViewIfNeeded();
+    const overflow = await page.evaluate(() => {
+      const wide = (el: Element) => el.scrollWidth - el.clientWidth;
+      return [document.querySelector('.tab-body')!, ...document.querySelectorAll('.settings-grid > .card')].map(wide);
+    });
+    expect(overflow, `horizontal overflow at ${width}px (Settings scroller, then each card)`).toEqual(overflow.map(() => 0));
+    await page.screenshot({ path: testInfo.outputPath(`settings-long-path-${width}.png`) });
+  }
+});
+
 test('repository refresh distinguishes unavailable checks, REST fallback, stale data, failure and recovery', async ({ page }, testInfo) => {
   let phase: 'checks' | 'fallback' | 'stale' | 'failed' | 'success' = 'checks';
   const diagnostic = 'GraphQL: Resource not accessible by personal access token (repository.pullRequests.nodes.0.statusCheckRollup.contexts.nodes.0)';

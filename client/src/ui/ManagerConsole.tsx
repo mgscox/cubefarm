@@ -800,7 +800,7 @@ function SettingsTab() {
           GitHub: <b>{user ?? 'not signed in'}</b>
           {demo && ' (demo)'}
           <br />
-          Agent desks: <code>{workspaceRoot}</code>
+          Agent desks: <code className="settings-path">{workspaceRoot}</code>
         </div>
       </div>
     </div>
