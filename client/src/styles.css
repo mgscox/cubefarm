@@ -1618,6 +1618,12 @@ input.inline:focus {
     grid-template-rows: minmax(200px, 1fr) auto;
   }
 }
+.settings-grid > .card {
+  min-width: 0;
+}
+.office-lifecycle p {
+  margin: 4px 0;
+}
 .section {
   margin: 0 0 10px;
 }

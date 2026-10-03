@@ -1,3 +1,5 @@
+import { EventEmitter } from 'node:events';
+import type { WebSocket } from 'ws';
 import { describe, expect, it } from 'vitest';
 import { AgentTerminal } from './terminal.ts';
 
@@ -27,4 +29,19 @@ describe('AgentTerminal', () => {
     expect(t.live).toBe(false);
     t.dispose();
   });
+  it('checks admission before forwarding any keystrokes to an idle CLI', () => {
+    const terminal = new AgentTerminal();
+    const keys: string[] = [];
+    const ws = Object.assign(new EventEmitter(), { readyState: 1, OPEN: 1, bufferedAmount: 0, send: () => {}, close: () => {} });
+    terminal.bind({ write: (data) => keys.push(data), resize: () => {} });
+    terminal.attach(ws as unknown as WebSocket);
+    terminal.allowInput = () => false;
+    ws.emit('message', JSON.stringify({ t: 'input', data: 'start another job\r' }));
+    expect(keys).toEqual([]);
+    terminal.allowInput = () => true;
+    ws.emit('message', JSON.stringify({ t: 'input', data: 'feedback\r' }));
+    expect(keys).toEqual(['feedback\r']);
+    terminal.dispose();
+  });
+
 });

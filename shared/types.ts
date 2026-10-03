@@ -293,6 +293,11 @@ export interface UsageView {
  */
 export type OfficeUpdateState = 'none' | 'available' | 'waiting' | 'draining' | 'updating' | 'failed';
 
+export interface OfficeLifecycleView {
+  state: 'open' | 'closing' | 'closed';
+  running: number; // includes preparation and completion bookkeeping across all floors
+}
+
 export interface OfficeUpdateView {
   state: OfficeUpdateState;
   behind: number; // commits the office's folder is behind GitHub
@@ -360,6 +365,7 @@ export interface WorldSnapshot {
   messages: PhoneMessage[];
   phoneReadAt: number; // CEO messages newer than this are unread
   officeCommit?: string | null; // short sha the server started on (absent on servers without self-update)
+  officeLifecycle: OfficeLifecycleView;
   officeUpdate?: OfficeUpdateView;
   usage: UsageView;
   clis: CliView[];
@@ -380,6 +386,7 @@ export type ServerEvent =
   | { type: 'ceo'; ceo: CeoInfo }
   | { type: 'message'; message: PhoneMessage }
   | { type: 'phoneRead'; at: number }
+  | { type: 'officeLifecycle'; officeLifecycle: OfficeLifecycleView }
   | { type: 'officeUpdate'; officeUpdate: OfficeUpdateView }
   | { type: 'usage'; usage: UsageView }
   | { type: 'clis'; clis: CliView[] }

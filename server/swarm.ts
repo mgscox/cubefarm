@@ -15,6 +15,7 @@ import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './m
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { pickRequestedStart, retainRequestedStarts } from './requestedStarts.ts';
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
+import { officeLifecycle } from './officeLifecycle.ts';
 import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type LastUpdate } from './officeUpdate.ts';
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { isCli } from './clis.ts';
@@ -36,6 +37,7 @@ import type {
   IssueInfo,
   LogLine,
   OfficeUpdateView,
+  OfficeLifecycleView,
   PhoneMessage,
   PreviewConfig,
   PreviewView,
@@ -150,6 +152,8 @@ interface CeoState {
 }
 
 interface Persisted {
+  officeHeld: boolean;
+  deferredResumes: string[];
   settings: SwarmSettings;
   repos: PersistedRepo[];
   agents: PersistedAgent[];
@@ -368,6 +372,8 @@ export { HttpError };
 
 export class Swarm {
   private state: Persisted = {
+    officeHeld: false,
+    deferredResumes: [],
     settings: {
       sessionLimit: 0,
       defaultModel: DEFAULT_MODEL,
@@ -456,6 +462,8 @@ export class Swarm {
       const raw = await fs.readFile(STATE_FILE, 'utf8');
       const loaded = JSON.parse(raw) as Partial<Persisted>;
       this.state = {
+        officeHeld: loaded.officeHeld === true,
+        deferredResumes: loaded.deferredResumes ?? [],
         settings: { ...this.state.settings, ...loaded.settings },
         repos: (loaded.repos ?? []).map((r) => ({
           ...r,
@@ -601,6 +609,7 @@ export class Swarm {
       })
       .catch((err) => console.warn('could not look for agent CLIs', err));
     this.save();
+    await this.refreshOfficeLifecycle().catch((err) => console.warn('could not save closing office state', err));
     setTimeout(() => this.schedule(), 1000);
   }
 
@@ -610,7 +619,7 @@ export class Swarm {
       if (a.task === 'qa' || this.backend.demo || !a.sessionId || !a.branch) {
         const repo = this.state.repos.find((r) => r.id === a.repoId);
         const request = a.task === 'issue' ? repo?.requestedStarts.find((r) => r.issueNumber === a.issueNumber) : undefined;
-        const restart = request && repo && !repo.autoAssign;
+        const restart = request && repo && (!repo.autoAssign || this.state.officeHeld);
         if (restart) this.setRequestedStarts(repo, repo.requestedStarts.map((r) => r === request ? { ...r, restartPending: true } : r));
         else if (request && repo) this.setRequestedStarts(repo, repo.requestedStarts.filter((r) => r !== request));
         this.appendLog(a, [{ kind: 'system', text: `↺ The office server restarted. ${restart ? `Restarting #${a.issueNumber} when a desk is free.` : 'Back to the queue.'}` }]);
@@ -619,6 +628,10 @@ export class Swarm {
         const fix = a.task === 'fix' ? this.state.qa.find((q) => q.devAgentId === a.id && q.status === 'fixing') : undefined;
         if (fix) this.setQa(fix, { status: 'failed' });
         this.clearTask(a);
+        continue;
+      }
+      if (this.state.officeHeld) {
+        if (!this.state.deferredResumes.includes(a.id)) this.state.deferredResumes.push(a.id);
         continue;
       }
       if (this.slotsFull()) continue; // stays 'stopped'; the manager can resume it later
@@ -741,6 +754,7 @@ export class Swarm {
       usage: this.usageNow(),
       clis: this.clis,
       officeCommit: this.officeHead?.slice(0, 7) ?? null,
+      officeLifecycle: this.officeLifecycleView(),
       officeUpdate: this.officeHead ? this.officeUpdateView() : undefined,
     };
   }
@@ -818,7 +832,15 @@ export class Swarm {
   }
 
   /** Write the state file now, e.g. before the office stops or hands itself to the launcher. */
-  private async writeState() {
+  private stateWrites: Promise<void> = Promise.resolve();
+
+  private writeState(): Promise<void> {
+    const write = this.stateWrites.then(() => this.writeStateNow());
+    this.stateWrites = write.catch(() => undefined);
+    return write;
+  }
+
+  private async writeStateNow() {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = null;
     for (const a of this.state.agents) a.logTail = (this.agentRt.get(a.id)?.log ?? []).slice(-200);
@@ -1050,8 +1072,14 @@ export class Swarm {
    * it back to QA. Merging deletes the remote branch, and the floor's folder then fast-forwards (syncRepo sees the merge).
    */
   private async advanceMerges(repo: PersistedRepo) {
+    if (this.state.officeHeld) return;
     const rt = this.repoRt.get(repo.id);
     if (!rt || !repo.autoMerge || rt.merging || rt.syncing || rt.parking || rt.refresh?.pulls.error) return;
+    await this.trackOfficeActivity(`merge:${repo.id}`, () => this.finishMerges(repo));
+  }
+
+  private async finishMerges(repo: PersistedRepo) {
+    const rt = this.repoRt.get(repo.id)!;
     rt.merging = true;
     let merged = false;
     try {
@@ -1085,6 +1113,7 @@ export class Swarm {
       pr = { ...pr, headSha: d.headSha, mergeable: d.mergeable, mergeState: d.mergeState };
       step = mergeStep(pr, rec, Date.now(), { base: repo.defaultBranch, detailed: true });
     }
+    if (this.state.officeHeld) return false;
     Object.assign(rec, step.set);
     if (step.do === 'requeue') {
       // Commits arrived after QA's sign-off: they get tested too.
@@ -1111,6 +1140,7 @@ export class Swarm {
     this.mergeNote(rec, 'merging…');
     let error = '';
     for (const method of ['squash', 'merge', 'rebase'] as const) {
+      if (this.state.officeHeld) break;
       try {
         await this.backend.mergePull(repo.fullName, pr.number, method, rec.passedSha ?? pr.headSha);
         error = '';
@@ -1288,6 +1318,7 @@ export class Swarm {
 
   async createIssue(repoId: string, title: string, body: string, assignTo?: string, specialty?: string) {
     const repo = this.repo(repoId);
+    if (assignTo) this.ensureOfficeOpen();
     if (!title.trim()) throw new HttpError(400, 'An issue needs a title');
     const slug = specialtySlug(specialty);
     const number = await this.backend.createIssue(repo.fullName, title.trim(), body, slug ? [specialtyLabel(slug)] : []);
@@ -1521,6 +1552,7 @@ export class Swarm {
   }
 
   private ensureSlot() {
+    this.ensureOfficeOpen();
     if (this.slotsFull()) {
       throw new HttpError(429, `All ${this.state.settings.sessionLimit} session slots are busy. Raise or clear the session limit in the manager's console, or wait.`);
     }
@@ -1531,6 +1563,7 @@ export class Swarm {
   }
 
   private async assignIssue(agentId: string, issueNumber: number, note: string | undefined, explicit: boolean) {
+    this.ensureOfficeOpen();
     const a = this.agent(agentId);
     const repo = this.repo(a.repoId);
     if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
@@ -1600,6 +1633,11 @@ export class Swarm {
 
   private newTerminal(agentId: string) {
     const t = new AgentTerminal();
+    t.allowInput = () => {
+      if (!this.state.officeHeld || this.agentRt.get(agentId)?.session) return true;
+      this.toast('error', 'The office is closed to new work. Reopen Office in Settings first.');
+      return false;
+    };
     // Typed at a CLI waiting at its prompt after its task: a follow-up, which starts synchronously when it can.
     t.onIdlePrompt = (text) => {
       void this.message(agentId, text, true).catch(() => undefined);
@@ -1703,6 +1741,10 @@ export class Swarm {
   }
 
   private async runTask(a: PersistedAgent, repo: PersistedRepo, issue: IssueInfo, note?: string) {
+    await this.trackOfficeActivity(a.id, () => this.prepareTask(a, repo, issue, note));
+  }
+
+  private async prepareTask(a: PersistedAgent, repo: PersistedRepo, issue: IssueInfo, note?: string) {
     const branch = `swarm/issue-${issue.number}-${slugify(a.name)}`;
     this.beginTask(
       a,
@@ -1739,6 +1781,10 @@ export class Swarm {
     /** typed: the manager typed the prompt at the CLI; reattach: follow the CLI that kept working through a restart. */
     mode: 'typed' | 'reattach' | null = null,
   ) {
+    if (mode !== 'reattach' && this.state.officeHeld) {
+      this.deferPrepared(a, repo);
+      return;
+    }
     const rt = this.agentRt.get(a.id)!;
     this.nextGeneration(a);
     const generation = rt.generation;
@@ -1799,6 +1845,10 @@ export class Swarm {
 
   /** `generation`: the agent's when this session started. A session that ends after its task was cleared or replaced changes nothing. */
   private async onFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, generation: number | undefined, session: SessionHandle | undefined) {
+    await this.trackOfficeActivity(a.id, () => this.recordFinished(a, repo, result, generation, session));
+  }
+
+  private async recordFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, generation: number | undefined, session: SessionHandle | undefined) {
     const rt = this.agentRt.get(a.id);
     if (!rt || !this.state.agents.includes(a)) return; // fired
     if (this.officeUpdate.handedOver) return; // stopped for the office's update: recovered like after a restart
@@ -1819,6 +1869,7 @@ export class Swarm {
     else if (a.task === 'fix') this.onFixFinished(a, repo, result);
     else await this.onIssueFinished(a, repo, result, released, generation);
 
+    await released;
     this.emitAgent(a);
     this.save();
     void this.syncRepo(repo.id);
@@ -1864,8 +1915,8 @@ export class Swarm {
     if (gone()) return; // fired, cleared, reassigned, or stopped for the office's update
     if (a.status === 'stopped' || this.agentRt.get(a.id)?.session) return; // the manager already logged the stop, or sent a follow-up meanwhile
     const why = result.ok ? 'ended without opening a pull request' : `was cut off before it opened a pull request (${(result.errors[0] ?? 'it failed').replace(/\.$/, '')})`;
-    if (retry && ahead > 0 && !this.limited()) return this.finishPushedWork(a, repo, why, ahead);
-    const later = retry && this.limited(); // the retry waits for the usage pause to end: see runHeldRetries
+    if (retry && ahead > 0 && !this.state.officeHeld && !this.limited()) return this.finishPushedWork(a, repo, why, ahead);
+    const later = retry && (this.state.officeHeld || this.limited()); // retries wait for admission: see runHeldRetries
     if (!result.ok) {
       this.issueFailed(repo, a.issueNumber);
       this.fail(a, result, `#${a.issueNumber}`);
@@ -1911,11 +1962,12 @@ export class Swarm {
   /** A retry that would start during Claude's usage pause: the developer keeps the issue (in the state file too) and gets it once the pause ends. */
   private holdRetry(a: PersistedAgent, why: string, ahead: number) {
     a.heldRetry = { issueNumber: a.issueNumber, ahead, why };
-    this.appendLog(a, [{ kind: 'system', text: `⏸ No pull request yet${ahead > 0 ? `, but ${a.branch} has ${this.commits(ahead)}` : ''}. They get one more session to finish it once Claude's usage pause ends.` }]);
+    this.appendLog(a, [{ kind: 'system', text: `⏸ No pull request yet${ahead > 0 ? `, but ${a.branch} has ${this.commits(ahead)}` : ''}. They get one more session to finish it once scheduling resumes.` }]);
   }
 
   /** Held retries, outside a usage pause: each still applies only if its developer is free and on that issue, and takes a session slot like any start. */
   private runHeldRetries() {
+    if (this.state.officeHeld) return;
     for (const a of this.state.agents) {
       const held = a.heldRetry;
       if (!held) continue;
@@ -2043,6 +2095,10 @@ export class Swarm {
   }
 
   private async runQa(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord) {
+    await this.trackOfficeActivity(a.id, () => this.prepareQa(a, repo, rec));
+  }
+
+  private async prepareQa(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord) {
     const branch = `qa/pr-${rec.prNumber}-${slugify(a.name)}`;
     const lastTester = rec.qaAgentId;
     this.setQa(rec, { status: 'testing', qaAgentId: a.id });
@@ -2239,6 +2295,10 @@ export class Swarm {
 
   /** Send a failed PR back to the developer who wrote it (or any free developer on the floor). */
   private async runFix(dev: PersistedAgent, repo: PersistedRepo, rec: QaRecord) {
+    await this.trackOfficeActivity(dev.id, () => this.prepareFix(dev, repo, rec));
+  }
+
+  private async prepareFix(dev: PersistedAgent, repo: PersistedRepo, rec: QaRecord) {
     const original = rec.devAgentId === dev.id;
     const pull = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber);
     const headRef = pull?.headRefName ?? dev.branch ?? `pr-${rec.prNumber}`;
@@ -2447,6 +2507,7 @@ export class Swarm {
    * holds up the floor. A failed PR goes back to its author when they're free, and otherwise to any free developer.
    */
   private startPipelineWork(repo: PersistedRepo): boolean {
+    if (this.state.officeHeld) return false;
     if (this.repoRt.get(repo.id)?.parking) return false;
     const devs = this.available(repo, 'dev');
     const testers = this.available(repo, 'qa');
@@ -2486,18 +2547,19 @@ export class Swarm {
    * free developer is least needed elsewhere, so nobody sits idle while there is work that can start.
    */
   private startIssueWork(repo: PersistedRepo): boolean {
+    if (this.state.officeHeld) return false;
     if (this.repoRt.get(repo.id)?.parking) return false;
     const rt = this.repoRt.get(repo.id)!;
     const requests = retainRequestedStarts(repo.requestedStarts, rt.issues, rt.pulls);
     if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests);
     if (!this.mayStart('issue')) return false;
     const free = this.available(repo, 'dev');
-    if (!repo.autoAssign) {
-      const pick = pickRequestedStart(repo.requestedStarts, free, (n) => this.issueTaken(repo, n));
-      if (!pick) return false;
-      void this.assign(pick.agent.id, pick.request.issueNumber, pick.request.note).catch((err) => console.warn('requested start failed', err));
-      return pick.agent.status === 'preparing';
+    const requested = pickRequestedStart(repo.requestedStarts, free, (n) => this.issueTaken(repo, n));
+    if (requested) {
+      void this.assign(requested.agent.id, requested.request.issueNumber, requested.request.note).catch((err) => console.warn('requested start failed', err));
+      return requested.agent.status === 'preparing';
     }
+    if (!repo.autoAssign) return false;
     const ready = free.length ? this.readyIssues(repo) : [];
     if (ready.length === 0) return false;
     const fits = (a: PersistedAgent, want: string) => a.specialty.toLowerCase() === want;
@@ -2579,8 +2641,13 @@ export class Swarm {
   private schedule() {
     this.reconcileOrphanedQa();
     this.tickUsage();
+    if (this.state.officeHeld) {
+      void this.refreshOfficeLifecycle().catch((err) => console.warn('could not save closing office state', err));
+      return;
+    }
     if (this.officeUpdateTick()) return; // draining for the office's own update
     if (this.limited()) return;
+    this.runDeferredResumes();
     this.runHeldRetries();
     // Management first: the CEO's jobs are short and shape everyone else's work.
     this.maybeHeartbeat();
@@ -2601,6 +2668,132 @@ export class Swarm {
           if (start(repo)) progress = true;
         }
       }
+    }
+  }
+
+  // ---------- manual office closure ----------
+
+  private officeActivities = new Map<string, number>();
+  private officeSaved = false;
+  private officeUnrecorded = new Set<string>();
+  private lastLifecycleView = '';
+
+  private activeOfficeJobs() {
+    const active = new Set(this.officeActivities.keys());
+    for (const a of this.state.agents) if (BUSY.includes(a.status) || this.agentRt.get(a.id)?.session) active.add(a.id);
+    return active;
+  }
+
+  private officeLifecycleView(): OfficeLifecycleView {
+    const active = this.activeOfficeJobs();
+    for (const id of this.officeUnrecorded) active.add(id);
+    return officeLifecycle(this.state.officeHeld, active.size, this.officeSaved);
+  }
+
+  private emitOfficeLifecycle() {
+    const view = this.officeLifecycleView();
+    const key = JSON.stringify(view);
+    if (key === this.lastLifecycleView) return;
+    this.lastLifecycleView = key;
+    this.broadcast({ type: 'officeLifecycle', officeLifecycle: view });
+  }
+
+  private async refreshOfficeLifecycle() {
+    if (this.state.officeHeld && this.activeOfficeJobs().size === 0 && !this.officeSaved) {
+      await this.writeState();
+      if (this.state.officeHeld && this.activeOfficeJobs().size === 0) {
+        this.officeUnrecorded.clear();
+        this.officeSaved = true;
+      }
+    }
+    this.emitOfficeLifecycle();
+  }
+
+  private async trackOfficeActivity(id: string, run: () => Promise<void>) {
+    this.beginOfficeActivity(id);
+    try { await run(); }
+    finally { await this.endOfficeActivity(id); }
+  }
+
+  private beginOfficeActivity(id: string) {
+    this.officeActivities.set(id, (this.officeActivities.get(id) ?? 0) + 1);
+    this.officeSaved = false;
+    this.emitOfficeLifecycle();
+  }
+
+  private async endOfficeActivity(id: string) {
+    // Keep the job counted until its outcomes have reached disk.
+    try {
+      if (this.state.officeHeld) await this.writeState();
+    } catch (err) {
+      console.warn('could not record closing office progress', err);
+      this.officeUnrecorded.add(id); // Retried by the scheduler; never indicate safe while recording failed.
+    }
+    const count = this.officeActivities.get(id) ?? 1;
+    if (count > 1) this.officeActivities.set(id, count - 1);
+    else this.officeActivities.delete(id);
+    if (!this.officeUnrecorded.has(id)) await this.refreshOfficeLifecycle();
+    else this.emitOfficeLifecycle();
+  }
+
+  private ensureOfficeOpen() {
+    if (this.state.officeHeld) throw new HttpError(409, 'The office is closed to new work. Reopen Office in Settings first.');
+    const update = drainDecision(this.drainInput());
+    if (update.state === 'draining' || update.state === 'updating') throw new HttpError(409, 'The office is draining for an update. Wait until it restarts.');
+  }
+
+  /** Establish the admission hold synchronously; acknowledge only after it is durable. */
+  async closeOffice(): Promise<OfficeLifecycleView> {
+    if (this.officeUpdate.sent) throw new HttpError(409, 'The update is already under way. Close the office after it restarts.');
+    this.state.officeHeld = true;
+    this.officeUpdate.drainingSince = null; // Manual closure time must never consume an update's forced-stop clock.
+    this.officeSaved = false;
+    this.emitOfficeLifecycle();
+    this.emitOfficeUpdate();
+    await this.writeState();
+    await this.refreshOfficeLifecycle();
+    return this.officeLifecycleView();
+  }
+
+  async reopenOffice(): Promise<OfficeLifecycleView> {
+    this.state.officeHeld = false;
+    this.officeSaved = false;
+    await this.writeState();
+    this.officeUnrecorded.clear();
+    this.emitOfficeLifecycle();
+    this.emitOfficeUpdate();
+    setTimeout(() => this.schedule(), 0);
+    return this.officeLifecycleView();
+  }
+
+  private deferPrepared(a: PersistedAgent, repo: PersistedRepo) {
+    const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
+    if (a.task === 'qa' && rec) this.setQa(rec, { status: 'queued', qaAgentId: null });
+    else if (a.task === 'fix' && rec) this.setQa(rec, { status: 'failed' });
+    else if (a.issueNumber) {
+      const previous = repo.requestedStarts.find((r) => r.issueNumber === a.issueNumber);
+      this.setRequestedStarts(repo, [...repo.requestedStarts.filter((r) => r !== previous), {
+        issueNumber: a.issueNumber, preferredAgentId: a.id, note: previous?.note, restartPending: true,
+      }]);
+    }
+    this.clearTask(a);
+  }
+
+  private resumingDeferred = new Set<string>();
+
+  private runDeferredResumes() {
+    for (const id of [...this.state.deferredResumes]) {
+      if (this.slotsFull()) return;
+      const a = this.state.agents.find((a) => a.id === id);
+      if (!a || BUSY.includes(a.status) || this.resumingDeferred.has(id)) continue;
+      this.resumingDeferred.add(id);
+      void this.message(id, 'The office reopened after a restart. Check your worktree and continue where you left off.')
+        .then(() => {
+          this.state.deferredResumes = this.state.deferredResumes.filter((x) => x !== id);
+          this.save();
+        })
+        .catch((err) => console.warn('could not resume deferred work', err))
+        .finally(() => this.resumingDeferred.delete(id));
     }
   }
 
@@ -2627,10 +2820,10 @@ export class Swarm {
   private officeUpdateView(): OfficeUpdateView {
     const u = this.officeUpdate;
     const input = this.drainInput();
-    const d = drainDecision(input);
+    const d = drainDecision(this.state.officeHeld ? { ...input, autoUpdate: false, requested: false, drainingSince: null } : input);
     const until = u.postponedUntil ? new Date(u.postponedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-    const detail = d.state === 'failed' ? u.failed : d.state === 'waiting' ? `Postponed until ${until}, or until a newer commit lands.` : null;
-    return { state: d.state, behind: input.behind, launcher: input.launcher, drainingSince: u.drainingSince ?? d.drainingSince, running: input.running, detail };
+    const detail = this.state.officeHeld && input.behind > 0 ? 'Updates wait until Reopen Office is chosen in Settings.' : d.state === 'failed' ? u.failed : d.state === 'waiting' ? `Postponed until ${until}, or until a newer commit lands.` : null;
+    return { state: d.state, behind: input.behind, launcher: input.launcher, drainingSince: this.state.officeHeld ? null : u.drainingSince ?? d.drainingSince, running: input.running, detail };
   }
 
   private emitOfficeUpdate() {
@@ -2656,6 +2849,7 @@ export class Swarm {
    * out, hand it to the launcher. True while nothing new may start.
    */
   private officeUpdateTick(): boolean {
+    if (this.state.officeHeld) return true;
     if (!this.officeHead) return false;
     const u = this.officeUpdate;
     const d = drainDecision(this.drainInput());
@@ -2831,6 +3025,7 @@ export class Swarm {
 
   /** Start the CEO's next job when they're free and a session slot is open. Replies to the manager go first. */
   private startCeoWork(): void {
+    if (this.state.officeHeld) return;
     const a = this.state.agents.find((x) => x.id === CEO_ID);
     const c = this.state.ceo;
     if (!a || BUSY.includes(a.status) || c.job || c.queue.length === 0) return;
@@ -2856,6 +3051,10 @@ export class Swarm {
   }
 
   private async runCeoJob(a: PersistedAgent, job: CeoJob) {
+    await this.trackOfficeActivity(a.id, () => this.prepareCeoJob(a, job));
+  }
+
+  private async prepareCeoJob(a: PersistedAgent, job: CeoJob) {
     const rt = this.agentRt.get(a.id)!;
     const floor = this.ceoFloor(job.repoId);
     const label = jobLabel(job, floor);
@@ -2878,6 +3077,14 @@ export class Swarm {
     if (a.status !== 'working') {
       // stopped before the session started
       this.state.ceo.job = null;
+      this.emitCeo();
+      return;
+    }
+    if (this.state.officeHeld) {
+      this.state.ceo.queue.unshift(job);
+      this.state.ceo.job = null;
+      a.status = 'idle';
+      this.emitAgent(a);
       this.emitCeo();
       return;
     }
@@ -2926,7 +3133,11 @@ export class Swarm {
     );
   }
 
-  private onCeoFinished(a: PersistedAgent, result: SessionResult) {
+  private async onCeoFinished(a: PersistedAgent, result: SessionResult) {
+    await this.trackOfficeActivity(a.id, () => this.recordCeoFinished(a, result));
+  }
+
+  private async recordCeoFinished(a: PersistedAgent, result: SessionResult) {
     const rt = this.agentRt.get(a.id);
     if (!rt || this.officeUpdate.handedOver) return;
     rt.session = null;
@@ -2962,6 +3173,7 @@ export class Swarm {
     const t = text.trim().slice(0, 4000);
     if (!t) throw new HttpError(400, 'Empty message');
     const a = this.ceo();
+    if (!this.agentRt.get(a.id)?.session) this.ensureOfficeOpen();
     this.postMessage('manager', t);
     const rt = this.agentRt.get(a.id)!;
     if (rt.session) {
@@ -2974,11 +3186,13 @@ export class Swarm {
   }
 
   requestReview() {
+    this.ensureOfficeOpen();
     if (this.state.repos.length === 0) throw new HttpError(400, 'Connect a repo first: the CEO needs a floor to review.');
     this.enqueueCeo({ kind: 'review', at: Date.now() });
   }
 
   onboardFloor(repoId: string) {
+    this.ensureOfficeOpen();
     const repo = this.repo(repoId);
     this.enqueueCeo({ kind: 'onboard', repoId: repo.id, at: Date.now() });
   }
@@ -3383,6 +3597,7 @@ export class Swarm {
   }
 
   private async startIssue(x: StartIssueRequest) {
+    this.ensureOfficeOpen();
     const repo = this.floorRepo(x.floor);
     const { agent, issue } = planStartIssue(x, {
       repoId: repo.id,

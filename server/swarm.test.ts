@@ -1,3 +1,4 @@
+import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
@@ -1385,5 +1386,385 @@ describe('QA rounds', () => {
       s.onFixFinished(ada, repo, result(true));
       expect(rec).toMatchObject({ status: 'queued', round: 3, fixCrashes: [] });
     });
+  });
+});
+
+describe('manual office closure', () => {
+  type LifecycleInternals = Internals & {
+    state: { officeHeld: boolean; deferredResumes: string[]; ceo: { queue: unknown[]; job: unknown }; settings: { autoUpdate: boolean }; messages: unknown[] };
+    officeLifecycleView(): { state: string; running: number };
+    refreshOfficeLifecycle(): Promise<void>;
+    writeState(): Promise<void>;
+    buildSystemAppend(...args: unknown[]): string;
+    syncRepo(id: string): Promise<void>;
+    newTerminal(id: string): { allowInput(): boolean; dispose(): void };
+    officeHead: string | null;
+    officeUpdate: { behind: number; drainingSince: number | null; requested: boolean };
+    setOfficeBehind(n: number): void;
+    officeUpdateView(): { state: string; drainingSince: number | null };
+    onCeoFinished(agent: unknown, result: SessionResult): Promise<void>;
+    runCeoJob(agent: unknown, job: unknown): Promise<void>;
+    advanceMerges(repo: Repo): Promise<void>;
+  };
+  let f: LifecycleInternals;
+  let writes: Mock;
+  let sessions: { opts: SessionOptions; cb: SessionCallbacks; stop: Mock }[];
+  const result: SessionResult = { ok: true, text: '', errors: [], turns: 2, costUsd: 1 };
+  const ada = () => s.state.agents[0];
+  const drain = async () => {
+    await vi.advanceTimersByTimeAsync(0);
+    await f.refreshOfficeLifecycle();
+  };
+
+  beforeEach(() => {
+    f = s as unknown as LifecycleInternals;
+    writes = vi.spyOn(f, 'writeState').mockResolvedValue();
+    vi.spyOn(f, 'buildSystemAppend').mockReturnValue('');
+    vi.spyOn(f, 'syncRepo').mockResolvedValue();
+    Object.assign(repo, { defaultBranch: 'main', links: [], browserTesting: false });
+    Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready', lastSync: Date.now() });
+    Object.assign(ada(), { model: '', effort: '', cli: '', costUsd: 0, turns: 0 });
+    s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
+    sessions = [];
+    vi.spyOn(s.backend, 'startSession').mockImplementation((opts, cb) => {
+      const stop = vi.fn();
+      sessions.push({ opts, cb, stop });
+      return { stop, send: vi.fn() };
+    });
+    vi.spyOn(s, 'prepare').mockResolvedValue('/fake-desk');
+    s.runTask = (Swarm.prototype as unknown as Pick<Internals, 'runTask'>).runTask;
+    setIssues(issue(66), issue(67));
+  });
+
+  it('closes an idle office durably, is idempotent, and snapshots reconnect with the hold', async () => {
+    const events = vi.spyOn(s, 'broadcast');
+    expect(await swarm.closeOffice()).toEqual({ state: 'closed', running: 0 });
+    expect(writes).toHaveBeenCalled();
+    expect(f.state.officeHeld).toBe(true);
+    expect(swarm.snapshot().officeLifecycle).toEqual({ state: 'closed', running: 0 });
+    expect(await swarm.closeOffice()).toEqual({ state: 'closed', running: 0 });
+    expect(events).toHaveBeenCalledWith({ type: 'officeLifecycle', officeLifecycle: { state: 'closed', running: 0 } });
+    expect(repo.autoAssign).toBe(true);
+  });
+
+  it('establishes admission before the close command finishes writing', async () => {
+    let saved!: () => void;
+    writes.mockReturnValueOnce(new Promise<void>((r) => { saved = r; }));
+    const closing = swarm.closeOffice();
+    const before = JSON.stringify(f.state);
+    await expect(swarm.assign('a1', 66)).rejects.toThrow('Reopen Office in Settings');
+    expect(JSON.stringify(f.state)).toBe(before);
+    expect(sessions).toHaveLength(0);
+    expect(f.officeLifecycleView().state).toBe('closing');
+    saved();
+    await closing;
+    expect(f.officeLifecycleView().state).toBe('closed');
+  });
+
+  it.each([false, true])('defers preparation preserving desk and note with auto-assign %s', async (autoAssign) => {
+    let prepared!: (cwd: string) => void;
+    vi.mocked(s.prepare).mockReturnValueOnce(new Promise<string>((r) => { prepared = r; }));
+    repo.autoAssign = autoAssign;
+    setIssues(issue(66));
+    await swarm.assign('a1', 66, 'Preserve this note');
+    expect(await swarm.closeOffice()).toEqual({ state: 'closing', running: 1 });
+    prepared('/fake-desk');
+    await drain();
+    expect(sessions).toHaveLength(0);
+    expect(f.officeLifecycleView()).toEqual({ state: 'closed', running: 0 });
+    expect(repo.requestedStarts).toEqual([{ issueNumber: 66, preferredAgentId: 'a1', note: 'Preserve this note', restartPending: true }]);
+    await swarm.reopenOffice();
+    vi.mocked(s.schedule).mockRestore();
+    vi.spyOn(s, 'maybeHeartbeat').mockImplementation(() => {});
+    vi.spyOn(s, 'startCeoWork').mockImplementation(() => {});
+    s.schedule();
+    await drain();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].opts.prompt).toContain('Preserve this note');
+    s.schedule();
+    expect(sessions).toHaveLength(1);
+    expect(repo.autoAssign).toBe(autoAssign);
+  });
+
+  it('counts developer, QA and CEO work across floors, and ignores the self-update timeout', async () => {
+    await swarm.assign('a1', 66);
+    await drain();
+    s.state.agents.push({ id: 'q2', repoId: 'r2', role: 'qa', task: 'qa', status: 'working' });
+    Object.assign(s.state.agents.find((a) => a.id === CEO_ID)!, { status: 'working' });
+    f.officeHead = 'old';
+    s.backend.office.launcher = true;
+    const update = vi.spyOn(s.backend.office, 'update');
+    f.officeUpdate.drainingSince = Date.now();
+    f.setOfficeBehind(3);
+    expect(await swarm.closeOffice()).toEqual({ state: 'closing', running: 3 });
+    f.officeUpdate.requested = true;
+    await vi.advanceTimersByTimeAsync(21 * 60_000);
+    expect(s.officeUpdateTick()).toBe(true);
+    expect(f.officeLifecycleView()).toEqual({ state: 'closing', running: 3 });
+    expect(update).not.toHaveBeenCalled();
+    expect(sessions[0].stop).not.toHaveBeenCalled();
+    expect(f.officeUpdateView()).toMatchObject({ state: 'available', drainingSince: null });
+    await swarm.reopenOffice();
+    expect(f.officeLifecycleView()).toEqual({ state: 'open', running: 3 });
+    s.officeUpdateTick();
+    expect(f.officeUpdate.drainingSince).toBe(Date.now());
+    expect(update).not.toHaveBeenCalled();
+    expect(sessions[0].stop).not.toHaveBeenCalled();
+  });
+
+  it('records developer results and queues QA, waiting for cleanup and disk before reporting safe', async () => {
+    await swarm.assign('a1', 66);
+    await drain();
+    await swarm.closeOffice();
+    let released!: () => void;
+    vi.spyOn(s.backend, 'releaseDesk').mockReturnValueOnce(new Promise<void>((r) => { released = r; }));
+    sessions[0].cb.finished({ ...result, text: 'https://github.com/demo-co/pixel-todo/pull/13' });
+    await drain();
+    expect(s.state.qa[0]).toMatchObject({ prNumber: 13, status: 'queued' });
+    expect(ada()).toMatchObject({ status: 'done', costUsd: 1, turns: 2 });
+    expect(f.officeLifecycleView()).toEqual({ state: 'closing', running: 1 });
+    released();
+    await drain();
+    expect(f.officeLifecycleView()).toEqual({ state: 'closed', running: 0 });
+    expect(sessions).toHaveLength(1);
+    expect(s.startPipelineWork(repo)).toBe(false);
+  });
+
+  it('holds completion retries and resumes them once, retaining pushed work', async () => {
+    vi.spyOn(s.backend, 'prForBranch').mockResolvedValue(null);
+    vi.spyOn(s.backend, 'branchAhead').mockResolvedValue(3);
+    await swarm.assign('a1', 66);
+    await drain();
+    sessions[0].cb.sessionId('thread-1');
+    await swarm.closeOffice();
+    sessions[0].cb.finished(result);
+    await drain();
+    expect(ada()).toMatchObject({ status: 'done', heldRetry: { issueNumber: 66, ahead: 3 } });
+    expect(sessions).toHaveLength(1);
+    expect(f.officeLifecycleView().state).toBe('closed');
+    await swarm.reopenOffice();
+    vi.mocked(s.schedule).mockRestore();
+    vi.spyOn(s, 'maybeHeartbeat').mockImplementation(() => {});
+    vi.spyOn(s, 'startCeoWork').mockImplementation(() => {});
+    s.schedule();
+    s.schedule();
+    expect(sessions).toHaveLength(2);
+    expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
+  });
+
+  it('rejects manual, follow-up, idle-terminal and CEO starts without mutating submitted work', async () => {
+    Object.assign(ada(), { task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', sessionId: 'old' });
+    await swarm.closeOffice();
+    const before = JSON.stringify(f.state);
+    await expect(swarm.assign('a1', 67)).rejects.toThrow('Reopen Office');
+    await expect(swarm.message('a1', 'follow up')).rejects.toThrow('Reopen Office');
+    await expect(swarm.messageCeo('Start another job')).rejects.toThrow('Reopen Office');
+    expect(() => swarm.requestReview()).toThrow('Reopen Office');
+    expect(await s.officeTools().call('start_issue', { floor: 1, number: 67 })).toContain('Reopen Office');
+    const terminal = f.newTerminal('a1');
+    expect(terminal.allowInput()).toBe(false);
+    terminal.dispose();
+    expect(JSON.stringify(f.state)).toBe(before);
+    expect(sessions).toHaveLength(0);
+  });
+
+  const qaRecord = (): QaRec => ({
+    repoId: repo.id, prNumber: 13, status: 'queued', round: 1, sessionFailures: 0, retests: 0,
+    devAgentId: 'a1', qaAgentId: null, summary: null, checks: [], commentUrl: null, mergeNote: null, updatedAt: 0,
+  });
+  const qaPull = (): PullInfo => ({
+    number: 13, title: 'Feature', url: '', headRefName: 'swarm/13', state: 'OPEN', isDraft: false,
+    closesIssues: [], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'sha-1', reviewDecision: null,
+    createdAt: '', mergedAt: null, additions: 0, deletions: 0, mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+  });
+
+  it.each(['qa', 'fix'] as const)('leaves a preparing %s stage queued on closure', async (task) => {
+    s.backend.prDetails = async () => ({ ...qaPull(), body: '', isCrossRepository: false });
+    const rec = qaRecord();
+    s.state.qa.push(rec);
+    let prepared!: (cwd: string) => void;
+    vi.mocked(s.prepare).mockReturnValueOnce(new Promise<string>((r) => { prepared = r; }));
+    const preparing = task === 'qa' ? s.runQa(ada(), repo, rec) : s.runFix(ada(), repo, rec);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await swarm.closeOffice()).toEqual({ state: 'closing', running: 1 });
+    prepared('/fake-desk');
+    await preparing;
+    expect(sessions).toHaveLength(0);
+    expect(rec.status).toBe(task === 'qa' ? 'queued' : 'failed');
+    expect(f.officeLifecycleView()).toEqual({ state: 'closed', running: 0 });
+  });
+
+  it('records a QA failure before reporting safe and leaves the fix queued', async () => {
+    s.backend.prDetails = async () => ({ ...qaPull(), body: '', isCrossRepository: false });
+    s.repoRt.get(repo.id)!.pulls = [qaPull()];
+    const rec = qaRecord();
+    s.state.qa.push(rec);
+    s.state.agents.push({ ...ada(), id: 'q1', name: 'Poirot', role: 'qa' });
+    s.agentRt.set('q1', { log: [], pending: [], terminal: null, shots: [] });
+    await s.runQa(s.state.agents[2], repo, rec);
+    await swarm.closeOffice();
+    let posted!: (url: string) => void;
+    const comment = vi.spyOn(s.backend, 'commentPull').mockReturnValueOnce(new Promise<string>((r) => { posted = r; }));
+    sessions[0].cb.finished({ ...result, text: JSON.stringify({ verdict: 'fail', summary: 'Needs a fix', checks: [{ name: 'Flow', result: 'fail', details: 'Broken' }], commands: [], screenshots: [] }) });
+    await drain();
+    expect(comment).toHaveBeenCalled();
+    expect(f.officeLifecycleView()).toEqual({ state: 'closing', running: 1 });
+    posted('fake-comment');
+    await drain();
+    expect(rec).toMatchObject({ status: 'failed', summary: 'Needs a fix', failedSha: 'sha-1', commentUrl: 'fake-comment' });
+    expect(f.officeLifecycleView()).toEqual({ state: 'closed', running: 0 });
+    expect(s.startPipelineWork(repo)).toBe(false);
+    expect(sessions).toHaveLength(1);
+  });
+
+  it('finishes an active CEO job without starting its queued successor', async () => {
+    const ceo = s.state.agents.find((a) => a.id === CEO_ID)!;
+    Object.assign(ceo, { status: 'working', costUsd: 0, turns: 0 });
+    f.state.ceo.job = { kind: 'chat', text: 'Current', at: Date.now() };
+    f.state.ceo.queue.push({ kind: 'chat', text: 'Next', at: Date.now() });
+    await swarm.closeOffice();
+    await f.onCeoFinished(ceo, result);
+    s.startCeoWork();
+    expect(ceo).toMatchObject({ status: 'done', costUsd: 1, turns: 2 });
+    expect(f.state.ceo.job).toBeNull();
+    expect(f.state.ceo.queue).toHaveLength(1);
+    expect(f.officeLifecycleView()).toEqual({ state: 'closed', running: 0 });
+    expect(sessions).toHaveLength(0);
+  });
+
+  it('returns a preparing CEO job to the queue without opening a session', async () => {
+    let ready!: () => void;
+    vi.spyOn(fs, 'mkdir').mockReturnValueOnce(new Promise<undefined>((resolve) => { ready = () => resolve(undefined); }));
+    const ceo = s.state.agents.find((a) => a.id === CEO_ID)!;
+    const job = { kind: 'chat', text: 'Read the office', at: Date.now() };
+    const preparing = f.runCeoJob(ceo, job);
+    expect(await swarm.closeOffice()).toEqual({ state: 'closing', running: 1 });
+    ready();
+    await preparing;
+    expect(f.state.ceo.queue).toContainEqual(job);
+    expect(f.state.ceo.job).toBeNull();
+    expect(sessions).toHaveLength(0);
+    expect(f.officeLifecycleView()).toEqual({ state: 'closed', running: 0 });
+  });
+
+  it('keeps restart recovery queued under the hold and resumes once on reopen', async () => {
+    s.backend.demo = false; // Still the fake backend; exercise session-resume recovery.
+    Object.assign(ada(), { status: 'stopped', task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', sessionId: 'old-thread' });
+    await swarm.closeOffice();
+    s.recover([ada()]);
+    expect(f.state.deferredResumes).toEqual(['a1']);
+    expect(sessions).toHaveLength(0);
+    await swarm.reopenOffice();
+    vi.mocked(s.schedule).mockRestore();
+    vi.spyOn(s, 'maybeHeartbeat').mockImplementation(() => {});
+    vi.spyOn(s, 'startCeoWork').mockImplementation(() => {});
+    s.schedule();
+    s.schedule();
+    await drain();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].opts.resumeSessionId).toBe('old-thread');
+    expect(f.state.deferredResumes).toEqual([]);
+  });
+
+  it('retains restart recovery when reopening during unrelated PR parking, then resumes once', async () => {
+    s.backend.demo = false; // Fake sessions, with real recovery and admission checks.
+    repo.autoAssign = false;
+    Object.assign(ada(), { status: 'stopped', task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', sessionId: 'old-thread' });
+    const pull = { ...qaPull(), headRefName: 'swarm/issue-67-other', closesIssues: [67] };
+    s.repoRt.get(repo.id)!.pulls = [pull];
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, body: '', isCrossRepository: false });
+    let releaseParking!: () => void;
+    vi.spyOn(s.backend, 'commentPull').mockImplementation(() => new Promise<string>((resolve) => { releaseParking = () => resolve('fake-comment'); }));
+    vi.spyOn(s.backend, 'closePull').mockResolvedValue();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await swarm.closeOffice();
+    s.recover([ada()]);
+    const parking = swarm.parkPr({ floor: 1, number: pull.number, reason: 'Park an unrelated placeholder' });
+    await Promise.resolve();
+    await swarm.reopenOffice();
+    vi.mocked(s.schedule).mockRestore();
+    vi.spyOn(s, 'maybeHeartbeat').mockImplementation(() => {});
+    vi.spyOn(s, 'startCeoWork').mockImplementation(() => {});
+    s.schedule();
+    await drain();
+    expect(f.state.deferredResumes).toEqual(['a1']);
+    expect(sessions).toHaveLength(0);
+    expect(ada()).toMatchObject({ status: 'stopped', issueNumber: 66 });
+
+    releaseParking();
+    await parking;
+    expect(f.state.deferredResumes).toEqual(['a1']);
+    const savedResumes: string[][] = [];
+    vi.mocked(s.save).mockImplementation(() => savedResumes.push([...f.state.deferredResumes]));
+    s.schedule();
+    s.schedule(); // A second tick before the successful promise settles must not start twice.
+    await drain();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].opts.resumeSessionId).toBe('old-thread');
+    expect(f.state.deferredResumes).toEqual([]);
+    expect(savedResumes).toContainEqual([]);
+    s.schedule();
+    await drain();
+    expect(sessions).toHaveLength(1);
+  });
+
+  it('keeps passed PRs queued for automatic merge until reopened', async () => {
+    Object.assign(repo, { autoMerge: true });
+    Object.assign(s.repoRt.get(repo.id)!, { fetchedAt: Date.now(), syncing: false, merging: false });
+    s.repoRt.get(repo.id)!.pulls = [qaPull()];
+    const rec = qaRecord();
+    Object.assign(rec, { status: 'passed', passedSha: 'sha-1' });
+    s.state.qa.push(rec);
+    const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+    await swarm.closeOffice();
+    await f.advanceMerges(repo);
+    expect(merge).not.toHaveBeenCalled();
+    expect(rec.status).toBe('passed');
+    await swarm.reopenOffice();
+    await f.advanceMerges(repo);
+    expect(merge).toHaveBeenCalledOnce();
+  });
+
+  it('round-trips the hold through atomic persistence and startup before scheduling', async () => {
+    writes.mockRestore();
+    const mkdir = vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+    const rename = vi.spyOn(fs, 'rename').mockResolvedValue();
+    await swarm.closeOffice();
+    expect(mkdir).toHaveBeenCalled();
+    expect(rename).toHaveBeenCalled();
+    const persisted = JSON.parse(String(write.mock.calls.at(-1)![1]));
+    expect(persisted.officeHeld).toBe(true);
+    // Startup without floors isolates the hold load from unrelated demo onboarding.
+    persisted.repos = [];
+    persisted.agents = [];
+    const fresh = new Swarm(createDemoBackend());
+    const restored = fresh as unknown as LifecycleInternals;
+    restored.backend.demo = false;
+    vi.spyOn(restored, 'save').mockImplementation(() => {});
+    vi.spyOn(fs, 'readFile').mockResolvedValueOnce(JSON.stringify(persisted));
+    await fresh.init();
+    await restored.refreshOfficeLifecycle();
+    expect(fresh.snapshot().officeLifecycle).toEqual({ state: 'closed', running: 0 });
+    expect(restored.state.officeHeld).toBe(true);
+    const start = vi.spyOn(restored.backend, 'startSession');
+    restored.schedule();
+    expect(start).not.toHaveBeenCalled();
+    await fresh.reopenOffice();
+    expect(restored.state.officeHeld).toBe(false);
+  });
+
+  it('does not advertise safe if completion state cannot be saved', async () => {
+    await swarm.assign('a1', 66);
+    await drain();
+    await swarm.closeOffice();
+    writes.mockRejectedValue(new Error('disk full'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sessions[0].cb.finished({ ...result, text: 'https://github.com/demo-co/pixel-todo/pull/13' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.officeLifecycleView()).toEqual({ state: 'closing', running: 1 });
+    writes.mockResolvedValue(undefined);
+    await f.refreshOfficeLifecycle();
+    expect(f.officeLifecycleView()).toEqual({ state: 'closed', running: 0 });
   });
 });

@@ -144,6 +144,9 @@ app.get('/api/agents/:id/screen', (req, res) => {
   res.end(shot.data);
 });
 
+app.post('/api/office/close', route(() => swarm.closeOffice()));
+app.post('/api/office/reopen', route(() => swarm.reopenOffice()));
+
 app.patch('/api/settings', route((req) => swarm.updateSettings(req.body ?? {})));
 // The office's own update: Update now / Later
 app.post('/api/office/update', route((req) => swarm.updateOffice(req.body?.action)));

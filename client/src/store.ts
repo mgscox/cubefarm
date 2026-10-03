@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CEO_ID, type AgentView, type CeoInfo, type CliView, type HireRequestView, type LogLine, type OfficeUpdateView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type AgentView, type CeoInfo, type CliView, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { issueBlockers } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
@@ -56,6 +56,7 @@ interface State {
   messages: PhoneMessage[];
   phoneReadAt: number;
   officeCommit?: string | null; // undefined: the server can't update itself
+  officeLifecycle: OfficeLifecycleView;
   officeUpdate?: OfficeUpdateView;
   usage: UsageView; // Claude's subscription usage: normal, pacing after a warning, or paused at the limit
   restarting: boolean; // the connection dropped because the office is restarting to update
@@ -126,6 +127,7 @@ export const useStore = create<State>((set, get) => ({
   demo: false,
   workspaceRoot: '',
   // Until the server's snapshot arrives; setupDone stays true so the wizard doesn't flash while loading.
+  officeLifecycle: { state: 'open', running: 0 },
   settings: {
     sessionLimit: 0,
     defaultModel: 'claude-opus-5-5',
@@ -202,6 +204,7 @@ export const useStore = create<State>((set, get) => ({
           messages: d.messages,
           phoneReadAt: d.phoneReadAt,
           officeCommit: d.officeCommit,
+          officeLifecycle: d.officeLifecycle,
           officeUpdate: d.officeUpdate,
           usage: d.usage,
           clis: d.clis ?? [],
@@ -298,6 +301,9 @@ export const useStore = create<State>((set, get) => ({
         break;
       case 'toast':
         get().pushToast(ev.level, ev.text);
+        break;
+      case 'officeLifecycle':
+        set({ officeLifecycle: ev.officeLifecycle });
         break;
       case 'officeUpdate':
         set({ officeUpdate: ev.officeUpdate });

@@ -42,6 +42,8 @@ export class AgentTerminal {
   onIdlePrompt: ((text: string) => boolean) | null = null;
   /** Keys a viewer typed, after they went to the CLI (the runtime watches for Esc interrupting a turn). */
   onInput: ((data: string) => void) | null = null;
+  /** Admission check before keystrokes reach a CLI waiting for new work. */
+  allowInput: (() => boolean) | null = null;
   private term = new Terminal({ cols: TERM_COLS, rows: TERM_ROWS, scrollback: SCROLLBACK, allowProposedApi: true, scrollOnEraseInDisplay: true });
   private ser = new SerializeAddon();
   private viewers = new Map<WebSocket, { stale: boolean; queued: string[] | null }>();
@@ -154,6 +156,7 @@ export class AgentTerminal {
         return;
       }
       if (msg.t === 'input' && typeof msg.data === 'string') {
+        if (this.allowInput && !this.allowInput()) return;
         const data = msg.data.slice(0, 64 * 1024);
         this.sink?.write(data);
         this.onInput?.(data);
