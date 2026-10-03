@@ -2779,12 +2779,21 @@ export class Swarm {
     this.clearTask(a);
   }
 
+  private resumingDeferred = new Set<string>();
+
   private runDeferredResumes() {
     for (const id of [...this.state.deferredResumes]) {
       if (this.slotsFull()) return;
-      this.state.deferredResumes = this.state.deferredResumes.filter((x) => x !== id);
       const a = this.state.agents.find((a) => a.id === id);
-      if (a && !BUSY.includes(a.status)) void this.message(id, 'The office reopened after a restart. Check your worktree and continue where you left off.').catch((err) => console.warn('could not resume deferred work', err));
+      if (!a || BUSY.includes(a.status) || this.resumingDeferred.has(id)) continue;
+      this.resumingDeferred.add(id);
+      void this.message(id, 'The office reopened after a restart. Check your worktree and continue where you left off.')
+        .then(() => {
+          this.state.deferredResumes = this.state.deferredResumes.filter((x) => x !== id);
+          this.save();
+        })
+        .catch((err) => console.warn('could not resume deferred work', err))
+        .finally(() => this.resumingDeferred.delete(id));
     }
   }
 

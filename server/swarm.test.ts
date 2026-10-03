@@ -1660,9 +1660,52 @@ describe('manual office closure', () => {
     vi.spyOn(s, 'startCeoWork').mockImplementation(() => {});
     s.schedule();
     s.schedule();
+    await drain();
     expect(sessions).toHaveLength(1);
     expect(sessions[0].opts.resumeSessionId).toBe('old-thread');
     expect(f.state.deferredResumes).toEqual([]);
+  });
+
+  it('retains restart recovery when reopening during unrelated PR parking, then resumes once', async () => {
+    s.backend.demo = false; // Fake sessions, with real recovery and admission checks.
+    repo.autoAssign = false;
+    Object.assign(ada(), { status: 'stopped', task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', sessionId: 'old-thread' });
+    const pull = { ...qaPull(), headRefName: 'swarm/issue-67-other', closesIssues: [67] };
+    s.repoRt.get(repo.id)!.pulls = [pull];
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, body: '', isCrossRepository: false });
+    let releaseParking!: () => void;
+    vi.spyOn(s.backend, 'commentPull').mockImplementation(() => new Promise<string>((resolve) => { releaseParking = () => resolve('fake-comment'); }));
+    vi.spyOn(s.backend, 'closePull').mockResolvedValue();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await swarm.closeOffice();
+    s.recover([ada()]);
+    const parking = swarm.parkPr({ floor: 1, number: pull.number, reason: 'Park an unrelated placeholder' });
+    await Promise.resolve();
+    await swarm.reopenOffice();
+    vi.mocked(s.schedule).mockRestore();
+    vi.spyOn(s, 'maybeHeartbeat').mockImplementation(() => {});
+    vi.spyOn(s, 'startCeoWork').mockImplementation(() => {});
+    s.schedule();
+    await drain();
+    expect(f.state.deferredResumes).toEqual(['a1']);
+    expect(sessions).toHaveLength(0);
+    expect(ada()).toMatchObject({ status: 'stopped', issueNumber: 66 });
+
+    releaseParking();
+    await parking;
+    expect(f.state.deferredResumes).toEqual(['a1']);
+    const savedResumes: string[][] = [];
+    vi.mocked(s.save).mockImplementation(() => savedResumes.push([...f.state.deferredResumes]));
+    s.schedule();
+    s.schedule(); // A second tick before the successful promise settles must not start twice.
+    await drain();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].opts.resumeSessionId).toBe('old-thread');
+    expect(f.state.deferredResumes).toEqual([]);
+    expect(savedResumes).toContainEqual([]);
+    s.schedule();
+    await drain();
+    expect(sessions).toHaveLength(1);
   });
 
   it('keeps passed PRs queued for automatic merge until reopened', async () => {
