@@ -1621,6 +1621,17 @@ input.inline:focus {
 .settings-grid > .card {
   min-width: 0;
 }
+/* The tall Agents card spans every row, so it doesn't stretch the Office row and push the next card down. The
+   last 1fr row takes whatever height it has left over. */
+@media (min-width: 901px) {
+  .settings-grid {
+    grid-template-rows: auto auto 1fr;
+  }
+  .settings-grid > .settings-side {
+    grid-column: 2;
+    grid-row: 1 / -1;
+  }
+}
 .office-lifecycle p {
   margin: 4px 0;
 }
