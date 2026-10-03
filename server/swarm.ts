@@ -1467,10 +1467,18 @@ export class Swarm {
     const a = this.agent(id);
     this.cancelRequestedStart(a);
     if (!BUSY.includes(a.status)) return;
+    const rt = this.agentRt.get(id);
+    const postingQa = a.task === 'qa' && a.status === 'working' && !rt?.session;
     a.status = 'stopped';
     a.lastError = 'Stopped by manager';
+    // A completed session can still be posting its report. Stop revokes that completion too.
+    if (postingQa) {
+      this.nextGeneration(a);
+      const rec = this.state.qa.find((q) => q.repoId === a.repoId && q.prNumber === a.prNumber && q.qaAgentId === a.id && q.status === 'testing');
+      if (rec) this.setQa(rec, { status: 'needs-human', qaAgentId: null, summary: 'QA was stopped by the manager.' });
+    }
     this.appendLog(a, [{ kind: 'manager', text: '■ Manager stopped this session.' }]);
-    this.agentRt.get(id)?.session?.stop();
+    rt?.session?.stop();
     this.emitAgent(a);
     this.save();
   }
@@ -2115,7 +2123,8 @@ export class Swarm {
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
     const rt = this.agentRt.get(a.id)!;
     const generation = rt.generation;
-    const gone = () => !this.state.agents.includes(a) || rt.generation !== generation;
+    const gone = () => !this.state.agents.includes(a) || rt.generation !== generation || this.officeUpdate.handedOver ||
+      (rec !== undefined && (!this.state.qa.includes(rec) || rec.status !== 'testing' || rec.qaAgentId !== a.id || orphanedQa(rec, this.state.agents)));
     const report = result.ok ? parseReport(result) : null;
 
     if (a.status === 'stopped' || !report) {

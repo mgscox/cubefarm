@@ -713,8 +713,9 @@ describe('CEO send_back_to_dev', () => {
     await s.runFix(dev, repo, s.state.qa[0]);
     s.onFixFinished(dev, repo, { ok: true, text: '', errors: [], costUsd: 0, turns: 0 });
     expect(s.state.qa[0]).toMatchObject({ status: 'queued', round: 4, retests: 3 });
-    const tester = { id: 'q1', name: 'Grace', repoId: repo.id, role: 'qa', status: 'working', prNumber: 13 };
+    const tester = { id: 'q1', name: 'Grace', repoId: repo.id, role: 'qa', task: 'qa', status: 'working', prNumber: 13 };
     s.state.agents.push(tester);
+    Object.assign(s.state.qa[0], { status: 'testing', qaAgentId: tester.id });
     s.agentRt.set('q1', { log: [], pending: [], terminal: null, shots: [] });
     s.backend.commentPull = vi.fn(async () => 'comment');
     await s.onQaFinished(tester, repo, { ok: true, text: '', errors: [], costUsd: 0, turns: 0, structured: {
@@ -1236,6 +1237,56 @@ describe('QA rounds', () => {
     await finishing;
     expect(rec).toMatchObject({ status: 'queued', qaAgentId: null, round: 2, retests: 0, sessionFailures: 0 });
     expect(tester).toMatchObject({ task: null, status: 'idle' });
+  });
+
+  it.each(['send-back', 'park'] as const)('preserves an accepted %s after Stop during a delayed passing report', async (handoff) => {
+    const tester = addAgent('q1', 'Poirot', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(repo, { autoMerge: true, defaultBranch: 'main', links: [], parkedBranches: [] });
+    s.repoRt.get(repo.id)!.pulls = [{ ...pull }];
+    Object.assign(rec, { status: 'testing', testedSha: 'sha-1', retests: 1, sessionFailures: 1, passedSha: null });
+    s.backend.prDetails = async () => ({ ...pull, body: '', isCrossRepository: false });
+    let posted!: (url: string) => void;
+    const comment = vi.spyOn(s.backend, 'commentPull').mockResolvedValue('park-comment')
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { posted = resolve; }));
+    const events = vi.spyOn(s, 'broadcast');
+    const finishing = s.onQaFinished(tester, repo, result(true, {
+      verdict: 'pass', summary: 'Passed before Stop', checks: [{ name: 'Recovery', result: 'pass', details: 'OK' }],
+    }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(comment).toHaveBeenCalledOnce();
+    swarm.stopAgent('q1');
+    if (handoff === 'send-back') {
+      await swarm.sendBackToDev({ floor: 1, number: 13, reason: 'other', note: 'Preserve the accepted fix request' });
+      expect(rec).toMatchObject({ status: 'failed', fixReason: 'other', passedSha: null });
+    } else {
+      await swarm.parkPr({ floor: 1, number: 13, reason: 'Wait for the dependency' });
+      expect(s.state.qa).toEqual([]);
+    }
+    const accepted = structuredClone(rec);
+    const agentAfterHandoff = structuredClone(tester);
+    events.mockClear();
+    posted('old-passing-comment');
+    await finishing;
+    expect(rec).toEqual(accepted);
+    expect(tester).toEqual(agentAfterHandoff);
+    expect(events).not.toHaveBeenCalledWith({ type: 'qa', qa: expect.objectContaining({ status: 'passed' }) });
+    if (handoff === 'park') expect(s.state.qa).toEqual([]);
+  });
+
+  it('leaves stopped report posting for a human without spending a round or failure', async () => {
+    const tester = addAgent('q1', 'Poirot', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', retests: 1, sessionFailures: 1, passedSha: null });
+    let posted!: (url: string) => void;
+    vi.spyOn(s.backend, 'commentPull').mockImplementation(() => new Promise<string>((resolve) => { posted = resolve; }));
+    const finishing = s.onQaFinished(tester, repo, result(true, { verdict: 'pass', summary: 'Passed before Stop', checks: [] }));
+    await vi.advanceTimersByTimeAsync(0);
+    swarm.stopAgent('q1');
+    posted('old-passing-comment');
+    await finishing;
+    expect(rec).toMatchObject({ status: 'needs-human', qaAgentId: null, passedSha: null, round: 2, retests: 1, sessionFailures: 1 });
+    expect(tester).toMatchObject({ status: 'stopped', lastError: 'Stopped by manager' });
   });
 
   it('requeues a QA session that throws before it starts without charging a failure', async () => {
