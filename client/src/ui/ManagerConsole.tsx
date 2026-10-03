@@ -647,6 +647,13 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
 // ---------- settings ----------
 
 function SettingsTab() {
+  const office = useStore((s) => s.officeLifecycle);
+  const [officeBusy, setOfficeBusy] = useState(false);
+  const changeOffice = async () => {
+    setOfficeBusy(true);
+    try { await attempt(() => office.state === 'open' ? api.closeOffice() : api.reopenOffice()); }
+    finally { setOfficeBusy(false); }
+  };
   const settings = useStore((s) => s.settings);
   const clis = useStore((s) => s.clis);
   const user = useStore((s) => s.user);
@@ -656,7 +663,16 @@ function SettingsTab() {
   const terminal = settings.runtime === 'terminal';
   const defaultCli = terminal ? settings.defaultCli : 'claude';
   return (
-    <div className="tab-grid">
+    <div className="tab-grid settings-grid">
+      <div className="card office-lifecycle">
+        <h3>Office</h3>
+        <p role="status" aria-live="polite">
+          {office.state === 'closed' ? 'Closed — safe to shut down' : office.state === 'closing' ? 'Closing — waiting for jobs to finish' : 'Open — accepting work'}
+        </p>
+        <p>{office.running} active job{office.running === 1 ? '' : 's'} across all floors.</p>
+        <p className="muted">Close the office before host maintenance. Running jobs finish normally, with no timeout. Queued work waits until you reopen. Quit the app after it is safe.</p>
+        <button className="btn" disabled={officeBusy} onClick={() => void changeOffice()}>{office.state === 'open' ? 'Close Office' : 'Reopen Office'}</button>
+      </div>
       <div className="card">
         <h3>🧠 Agents</h3>
         {terminal && (
