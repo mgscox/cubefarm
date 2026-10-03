@@ -673,7 +673,7 @@ function SettingsTab() {
         <p className="muted">Close the office before host maintenance. Running jobs finish normally, with no timeout. Queued work waits until you reopen. Quit the app after it is safe.</p>
         <button className="btn" disabled={officeBusy} onClick={() => void changeOffice()}>{office.state === 'open' ? 'Close Office' : 'Reopen Office'}</button>
       </div>
-      <div className="card">
+      <div className="card settings-side">
         <h3>🧠 Agents</h3>
         {terminal && (
           <label className="field">
@@ -800,7 +800,7 @@ function SettingsTab() {
           GitHub: <b>{user ?? 'not signed in'}</b>
           {demo && ' (demo)'}
           <br />
-          Agent desks: <code>{workspaceRoot}</code>
+          Agent desks: <code className="settings-path">{workspaceRoot}</code>
         </div>
       </div>
     </div>
