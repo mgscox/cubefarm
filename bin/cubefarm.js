@@ -29,6 +29,7 @@ const HELP = `
     -h, --help
 
   The office keeps its state and workspaces in ~/.cubefarm (set SWARM_HOME to use another folder).
+  SWARM_HOST=0.0.0.0 enables trusted-LAN access (default: 127.0.0.1).
 `;
 
 const color = process.stdout.isTTY && !process.env.NO_COLOR;

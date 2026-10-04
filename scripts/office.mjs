@@ -13,6 +13,7 @@ import { execFile, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { bindMessage, officeHost } from '../bin/officeNetwork.js';
 import { clientPort, isUpdateCommand, parseOfficeArgs, parseSymref, refusal, rollbackPlan, stepsFor, swarmHome } from './officeSteps.mjs';
 
 const HELP = `
@@ -23,6 +24,7 @@ const HELP = `
     --no-open   start mode: don't open the browser
 
   Type u + Enter to update the office now (only on the default branch with no local changes).
+  SWARM_HOST=0.0.0.0 enables trusted-LAN access (default: 127.0.0.1).
 `;
 
 const root = path.resolve(import.meta.dirname, '..');
@@ -123,6 +125,7 @@ function startChildren() {
   if (opts.dev) {
     startClient();
     log(`Open http://localhost:${clientPort()}  ·  type u + Enter to update the office`);
+    log(bindMessage(officeHost(), clientPort()));
   } else {
     log('Type u + Enter to update the office');
   }

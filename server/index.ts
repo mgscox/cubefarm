@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
-import { DEMO, PORT, STATE_FILE, WORKSPACE_ROOT } from './config.ts';
+import { DEMO, HOST, PORT, STATE_FILE, WORKSPACE_ROOT } from './config.ts';
+import { bindMessage } from '../bin/officeNetwork.js';
 import { realBackend } from './backend.ts';
 import { handleHook, handleMcp, setOfficeUrl } from './cliRunner.ts';
 import { createDemoBackend } from './demo.ts';
@@ -190,9 +191,11 @@ server.on('upgrade', (req, socket, head) => {
   target.handleUpgrade(req, socket, head, (ws) => target.emit('connection', ws, req));
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  setOfficeUrl(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
-  console.log(`\n  🏢 cubefarm on http://localhost:${PORT}${DEMO ? '  (DEMO MODE: fake GitHub + fake agents)' : ''}`);
+server.listen(PORT, HOST, () => {
+  const port = (server.address() as AddressInfo).port;
+  setOfficeUrl(`http://127.0.0.1:${port}`);
+  console.log(`\n  🏢 cubefarm on http://localhost:${port}${DEMO ? '  (DEMO MODE: fake GitHub + fake agents)' : ''}`);
+  console.log(`     ${bindMessage(HOST, port)}`);
   console.log(`     state: ${STATE_FILE}`);
   console.log(`     workspaces: ${WORKSPACE_ROOT}\n`);
 });
