@@ -75,6 +75,35 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('PR fixes with an occupied author branch', () => {
+  it.each([false, true])('uses its own local branch and pushes to the PR branch (recorded developer: %s)', async (recordedDeveloper) => {
+    Object.assign(repo, { links: [] });
+    const dev = s.state.agents[0];
+    const headRef = 'swarm/issue-120-barbara';
+    s.repoRt.get(repo.id)!.pulls = [{ number: 204, headRefName: headRef, title: 'Fix recovery', url: '' } as PullInfo];
+    const rec = { repoId: repo.id, prNumber: 204, devAgentId: recordedDeveloper ? 'a1' : 'barbara', devSessionId: null, round: 2, checks: [], status: 'failed' } as unknown as QaRec;
+    s.state.qa.push(rec);
+    const prepare = vi.spyOn(s, 'prepare').mockImplementation(async (_agent, _repo, _base, branch) => {
+      if (branch === headRef) throw new Error(`git worktree add -B failed: fatal: '${headRef}' is already used by worktree at Barbara's desk`);
+      return '/fake-desk';
+    });
+    const start = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+
+    await s.runFix(dev, repo, rec);
+
+    const localBranch = prepare.mock.calls[0][3];
+    expect(localBranch).not.toBe(headRef);
+    expect(start).toHaveBeenCalledOnce();
+    expect(prepare.mock.calls[0][2]).toEqual({ pr: 204 });
+    expect(localBranch).toContain('ada-a1');
+    expect(start.mock.calls[0][4]).toContain(`git push origin HEAD:${headRef}`);
+    expect(dev.branch).toBe(headRef);
+    Object.assign(dev, { sessionId: 'fix-session', status: 'stopped' });
+    await swarm.message('a1', 'Continue fixing');
+    expect(start.mock.calls[1][4]).toContain(`git push origin HEAD:${headRef}`);
+  });
+});
+
 describe('explicit issue starts across office restarts', () => {
   beforeEach(() => {
     s.backend.demo = false; // Fake backend, but exercise the real missing-session recovery condition.

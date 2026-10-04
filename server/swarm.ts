@@ -1672,7 +1672,7 @@ export class Swarm {
       repo.mission ? `What the team is building (the manager's brief): ${repo.mission}` : '',
       `Your worktree: ${cwd}`,
       fixing
-        ? `You are fixing pull request #${fixing.pr}. Its code is checked out on local branch ${branch}; push fixes with: ${push}. Do not open a new pull request.`
+        ? `You are fixing pull request #${fixing.pr}. Its code is checked out in your worktree; push fixes with: ${push}. Do not open a new pull request.`
         : `Your branch: ${branch} (already checked out, created from origin/${repo.defaultBranch})`,
       linked.length ? `Related repositories you may read for context (do not modify them):\n${linked.join('\n')}` : '',
       '',
@@ -2310,7 +2310,9 @@ export class Swarm {
       rec.fixReason === 'conflict' ? `Resolving conflicts on PR #${rec.prNumber}` : rec.fixReason === 'checks' ? `Fixing checks on PR #${rec.prNumber}` : `Fixing PR #${rec.prNumber} after QA round ${rec.round}`,
       `Checking out PR #${rec.prNumber}…`,
     );
-    const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, headRef);
+    // The author's branch may still be checked out at another desk, including after a restart.
+    const localBranch = `fix/pr-${rec.prNumber}-${this.agentSlug(dev)}`;
+    const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, localBranch);
     if (!cwd) {
       if (rec.status === 'fixing') this.setQa(rec, { status: 'failed' });
       return;
@@ -2352,7 +2354,7 @@ export class Swarm {
     const mergeEnd = 'Then reply with a short summary of what you did. Do not open a new pull request; the office merges it once the checks pass, after another QA round if the code changed.';
     const prompt = (mergeFix ? [...mergeFix, '', mergeEnd] : qaFix).filter((l) => l !== '').join('\n');
     const resume = original && rec.devSessionId ? rec.devSessionId : undefined;
-    this.startAgentSession(dev, repo, cwd, prompt, this.buildSystemAppend(dev, repo, cwd, headRef, { pr: rec.prNumber, headRef }), resume);
+    this.startAgentSession(dev, repo, cwd, prompt, this.buildSystemAppend(dev, repo, cwd, localBranch, { pr: rec.prNumber, headRef }), resume);
   }
 
   private onFixFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult) {

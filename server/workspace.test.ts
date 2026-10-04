@@ -33,7 +33,7 @@ await fs.writeFile(gitConfig, '[user]\n\tname = Sync Test\n\temail = sync-test@e
 process.env.GIT_CONFIG_GLOBAL = gitConfig;
 
 const { git } = await import('./exec.ts');
-const { leftoversInDesk, mainDir, syncMain: sync } = await import('./workspace.ts');
+const { deskDir, leftoversInDesk, mainDir, prepareDesk, repoDir, setLocalPath, syncMain: sync } = await import('./workspace.ts');
 // Most tests only care about the status line.
 const syncMain = async (...args: Parameters<typeof sync>) => (await sync(...args))?.status ?? null;
 
@@ -217,6 +217,45 @@ describe('syncMain', { timeout: 60_000 }, () => {
     expect(await syncMain(r.fullName, 'main', { touch: true })).toMatch(/^updated to \w+$/);
     expect(await head(r.dir)).toBe(await head(r.upstream));
     expect(await fs.readFile(path.join(r.dir, 'lines.txt'), 'utf8')).toBe('one\r\ntwo\r\n');
+  });
+});
+
+describe('prepareDesk', { timeout: 60_000 }, () => {
+  it.each([false, true])('prepares a PR takeover with the author branch occupied (existing desk: %s)', async (existingDesk) => {
+    const r = await makeRepos();
+    const branch = 'swarm/issue-120-barbara';
+    const original = await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'barbara-8528', branch);
+    await git(['update-ref', 'refs/pull/120/head', 'HEAD'], { cwd: r.upstream });
+    await git(['push', '-q', 'origin', 'refs/pull/120/head'], { cwd: r.upstream });
+    const originalHead = await head(original);
+    await fs.writeFile(path.join(original, 'README.md'), '# Author work in progress\n');
+    if (existingDesk) await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'ken-cfe2', 'swarm/issue-127-ken');
+    const fixBranch = 'fix/pr-120-ken-cfe2';
+    const takeover = await prepareDesk(r.fullName, { defaultBranch: 'main', pr: 120 }, 'ken-cfe2', fixBranch);
+    expect(takeover).toBe(deskDir(r.fullName, 'ken-cfe2'));
+    expect(await git(['branch', '--show-current'], { cwd: takeover })).toBe(fixBranch);
+    expect(await head(takeover)).toBe(originalHead);
+    expect(await head(original)).toBe(originalHead);
+    expect(await fs.readFile(path.join(original, 'README.md'), 'utf8')).toBe('# Author work in progress\n');
+    expect(await git(['branch', '--show-current'], { cwd: original })).toBe(branch);
+  });
+
+  it('reuses a desk after its workspace is relocated behind a symlink', async () => {
+    const r = await makeRepos();
+    const slug = 'barbara-8528';
+    const branch = 'swarm/issue-120-barbara';
+    const wt = await prepareDesk(r.fullName, { defaultBranch: 'main' }, slug, branch);
+    // The main checkout stays in the user's projects folder; only the managed workspace moves.
+    const main = path.join(ROOT, `project ${seq}`);
+    await fs.rename(r.dir, main);
+    setLocalPath(r.fullName, main);
+    await git(['worktree', 'repair', wt], { cwd: main });
+    const relocated = path.join(ROOT, `relocated workspace ${seq}`);
+    await fs.rename(repoDir(r.fullName), relocated);
+    await fs.symlink(relocated, repoDir(r.fullName), process.platform === 'win32' ? 'junction' : 'dir');
+
+    expect(await prepareDesk(r.fullName, { defaultBranch: 'main' }, slug, branch)).toBe(deskDir(r.fullName, slug));
+    expect(await git(['branch', '--show-current'], { cwd: wt })).toBe(branch);
   });
 });
 
