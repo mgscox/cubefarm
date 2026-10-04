@@ -17,6 +17,29 @@ For the build that gets published: `npm run build && npm start`.
 
 All three run `scripts/office.mjs`, the launcher: `--dev` runs the server from source plus Vite, and without it (`npm start`) it runs `bin/cubefarm.js` on the build. It also keeps the checkout up to date: when the office has finished its work and a new commit is on `origin`, or when you type `u` + Enter in its terminal, it stops the office, fast-forwards, installs and builds as needed, and starts it again. See [Updating the office](docs/how-it-works.md#updating-the-office).
 
+## Trusted LAN access
+
+`SWARM_HOST` controls both the office server and Vite: it defaults to `127.0.0.1`; `0.0.0.0` listens on all IPv4 interfaces. Set it in the launcher's environment so it remains in effect across code-change and update restarts.
+
+```bash
+SWARM_HOST=0.0.0.0 npm run dev
+# For the built office, after npm run build:
+SWARM_HOST=0.0.0.0 npm start
+```
+
+```powershell
+$env:SWARM_HOST="0.0.0.0"
+npm run dev
+# Or, after npm run build:
+npm start
+# Return to the default on the next launch:
+Remove-Item Env:SWARM_HOST
+```
+
+Remote devices open `http://<office-machine-LAN-IP>:5317` in development (`SWARM_CLIENT_PORT` overrides it), or port `4317` for the built office (`SWARM_PORT` overrides it). Local browser URLs, duplicate-office probes, agent hook/MCP callbacks and Vite's REST/WebSocket proxy targets stay on loopback. Never open `http://0.0.0.0`.
+
+Reachable clients have access to the manager API and terminals without a manager login: use only on a trusted LAN. This setting adds no authentication or TLS and does not expose floor-app previews. Agents testing this repo must follow [CLAUDE.md](CLAUDE.md#safety-read-first): demo mode, isolated `SWARM_HOME`, reserved ports, and no live-office restart.
+
 ## Testing
 
 ```bash

@@ -1,8 +1,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { officeHost } from '../bin/officeNetwork.js';
 
 export const PORT = Number(process.env.SWARM_PORT ?? 4317);
+export const HOST = officeHost();
 // package.json sits one folder up both from server/ and from the published dist-server/.
 export const VERSION: string = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '..', 'package.json'), 'utf8')).version;
 

@@ -68,6 +68,23 @@ Demo mode fakes GitHub and the agents, so it costs nothing and changes nothing.
 | `npx cubefarm --port 4400` | use another port (the default is 4317) |
 | `npx cubefarm --no-open` | don't open the browser |
 
+## Trusted LAN access
+
+By default the office listens only on `127.0.0.1`. To open it from other devices on your trusted LAN, set `SWARM_HOST=0.0.0.0`:
+
+```bash
+SWARM_HOST=0.0.0.0 npx cubefarm
+```
+
+```powershell
+$env:SWARM_HOST="0.0.0.0"
+npx cubefarm
+```
+
+On another device, open `http://<office-machine-LAN-IP>:4317` (use your `--port` or `SWARM_PORT` if different). The local browser still opens localhost; `0.0.0.0` is a bind address, not a browser URL. Unset `SWARM_HOST` to return to loopback only.
+
+Reachable clients can use the manager API and agent terminals without a manager login. Enable this only on a trusted LAN; authentication, TLS and public hosting are not provided by this setting. Floor-app previews remain a separate, local surface. For a checkout and development access, see [Contributing](CONTRIBUTING.md#trusted-lan-access).
+
 ## Updating
 
 `npx` keeps using the version it downloaded first. When a newer one is out, cubefarm tells you as it starts. To update:
