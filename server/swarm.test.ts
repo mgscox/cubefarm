@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { CommandError } from './exec.ts';
 import { listIssues } from './github.ts';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
@@ -773,6 +774,28 @@ describe('CEO send_back_to_dev', () => {
 });
 
 describe('native issue dependencies', () => {
+  it.each([
+    ["Field 'blockedBy' doesn't exist on type 'Issue'", '\n'],
+    ["Field 'blockedBy' doesn't exist on type 'Issue'", '\r\n'],
+    ['Resource not accessible by personal access token (repository.i2.blockedBy)', '\n'],
+    ['Resource not accessible by personal access token (repository.i2.blockedBy)', '\r\n'],
+  ])('schedules body dependencies after newline-terminated unsupported diagnostics: %s %j', async (diagnostic, ending) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const query = vi.fn().mockResolvedValue([issue(1), issue(2, [], 'Depends on #1'), issue(3)]);
+    const stderr = `gh: GraphQL: ${diagnostic}${ending}`;
+    const api = vi.fn().mockRejectedValue(new CommandError(stderr, stderr, 1));
+    const issues = await listIssues(repo.fullName, query, api);
+    expect(issues.every((i) => i.nativeBlockers === undefined)).toBe(true);
+    setIssues({ ...issues[0], labels: ['ready-for-human'] }, ...issues.slice(1));
+    expect(ready()).toEqual([3]);
+    setIssues(...issues.slice(1));
+    expect(ready()).toEqual([2, 3]);
+    const mixed = `${stderr}network unavailable${ending}`;
+    setIssues(...await listIssues(repo.fullName, query, vi.fn().mockRejectedValue(new CommandError(mixed, mixed, 1))));
+    expect(s.repoRt.get(repo.id)!.issues.every((i) => i.nativeBlockers === null)).toBe(true);
+    expect(ready()).toEqual([]);
+  });
+
   it('keeps native blockers through a failed dependency sync and excludes unread new issues', async () => {
     const raw = { ...issue(2), labels: [] };
     const query = vi.fn().mockResolvedValue([raw]);
@@ -958,6 +981,48 @@ describe('a developer session that ends without a PR after pushing commits', () 
     cleaned();
     await vi.waitFor(() => expect(ada().status).toBe('idle'));
     expect(sessions).toHaveLength(1);
+  });
+
+  it.each(['before', 'after'] as const)('joins an active refresh when cleanup finishes %s the blockers load', async (cleanupOrder) => {
+    vi.mocked(f.syncRepo).mockRestore(); // Exercise the real concurrent refresh contract.
+    ahead.mockResolvedValue(0);
+    ada().sessionId = 'thread-1';
+    setIssues(issue(66));
+    repo.requestedStarts = [{ issueNumber: 66, preferredAgentId: 'a1', restartPending: false }];
+    Object.assign(s.repoRt.get(repo.id)!, { lastSync: null, lastMergedAt: null });
+    let refreshed!: (issues: IssueInfo[]) => void;
+    const list = vi.spyOn(backend, 'listIssues').mockReturnValue(new Promise((resolve) => (refreshed = resolve)));
+    vi.spyOn(backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    let cleaned!: () => void;
+    const cleanup = vi.spyOn(backend, 'releaseDesk').mockReturnValue(new Promise<void>((resolve) => (cleaned = resolve)));
+    const message = vi.spyOn(swarm, 'message');
+    const refresh = f.syncRepo(repo.id);
+    await vi.waitFor(() => expect(list).toHaveBeenCalledOnce());
+    sessions[0].cb.finished({ ...cut, ok: true, errors: [] });
+    await vi.waitFor(() => expect(ahead).toHaveBeenCalled());
+    expect(cleanup).toHaveBeenCalledOnce();
+    if (cleanupOrder === 'before') cleaned();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(message).not.toHaveBeenCalled();
+    expect(sessions).toHaveLength(1);
+
+    const blocked = { ...issue(66), nativeBlockers: [{ number: 1, state: 'OPEN' as const }] };
+    refreshed([blocked]);
+    await refresh;
+    await vi.advanceTimersByTimeAsync(50);
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(message).not.toHaveBeenCalled();
+    if (cleanupOrder === 'after') {
+      expect(ada()).toMatchObject({ status: 'working', issueNumber: 66 });
+      cleaned();
+    }
+    await vi.waitFor(() => expect(ada()).toMatchObject({ status: 'idle', task: null, issueNumber: null }));
+    expect(repo.requestedStarts).toEqual([]);
+    expect(message).not.toHaveBeenCalled();
+    expect(sessions).toHaveLength(1);
+    expect(ready()).toEqual([]);
+    expect(s.startIssueWork(repo)).toBe(false);
+    expect(runTask).not.toHaveBeenCalled();
   });
 
   it('re-checks dependencies at session end before deciding whether to nudge', async () => {

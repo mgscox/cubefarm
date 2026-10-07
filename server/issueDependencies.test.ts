@@ -129,6 +129,16 @@ describe('native dependency refresh', () => {
     warn.mockRestore();
   });
 
+  it.each(['\n', '\r\n'])('normalizes %j diagnostics without dropping substantive failures', (ending) => {
+    const unsupported = "gh: GraphQL: Field 'blockedBy' doesn't exist on type 'Issue'";
+    const denied = 'gh: GraphQL: Resource not accessible by personal access token (repository.i2.blockedBy)';
+    for (const diagnostic of [unsupported, denied]) {
+      expect(dependenciesUnsupported(error(`  ${diagnostic}${ending}  ${ending}`))).toBe(true);
+      expect(dependenciesUnsupported(error(`${diagnostic}${ending}${ending}network unavailable${ending}`))).toBe(false);
+    }
+    expect(dependenciesUnsupported(error(ending))).toBe(false);
+  });
+
   it('does not classify mixed access and outage errors as unsupported', () => {
     expect(dependenciesUnsupported([{ message: "Field 'blockedBy' doesn't exist on type 'Issue'" }, { message: 'rate limit' }])).toBe(false);
   });

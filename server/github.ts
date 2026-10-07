@@ -56,11 +56,12 @@ const dependencyCaches = new WeakMap<RestQuery, Map<string, DependencyCache>>();
 
 /** Only explicit schema/access denials permit body-only scheduling; outages and partial results do not. */
 export function dependenciesUnsupported(error: unknown): boolean {
-  const messages = error instanceof CommandError ? error.stderr.replace(/^gh:\s*/, '').replace(/^GraphQL:\s*/, '').split(/,\s*(?=Resource)|\r?\n/)
+  const messages = error instanceof CommandError ? error.stderr.trim().replace(/^gh:\s*/, '').replace(/^GraphQL:\s*/, '').split(/,\s*(?=Resource)|\r?\n/)
     : Array.isArray(error) ? error.map((e) => e?.message ?? '') : [];
-  return messages.length > 0 && messages.every((m: string) =>
+  const lines = messages.map((m) => String(m).trim()).filter(Boolean);
+  return lines.length > 0 && lines.every((m) =>
     /(?:Field ['"]blockedBy['"] doesn't exist on type ['"]Issue['"]|Cannot query field ['"]blockedBy['"] on type ['"]Issue['"])/i.test(m) ||
-    /^(?:GraphQL:\s*)?Resource not accessible by (?:personal access token|integration)\s*\([\w.]*blockedBy[\w.]*\)$/.test(m.trim()));
+    /^(?:GraphQL:\s*)?Resource not accessible by (?:personal access token|integration)\s*\([\w.]*blockedBy[\w.]*\)$/.test(m));
 }
 
 /** Repo sync batches dependency reads; scheduling uses the resulting IssueInfo cache without any API calls. */

@@ -190,6 +190,7 @@ interface RepoRuntime {
   syncError?: string;
   refresh?: RepoView['refresh'];
   syncing: boolean;
+  syncPromise?: Promise<void>; // Concurrent callers wait for the same issue/PR refresh.
   cloneStatus: RepoView['cloneStatus'];
   cloneError?: string;
   fetchedAt?: number; // when the latest issues/PRs fetch started
@@ -1254,8 +1255,21 @@ export class Swarm {
   async syncRepo(id: string) {
     const repo = this.state.repos.find((r) => r.id === id);
     const rt = this.repoRt.get(id);
-    if (!repo || !rt || rt.syncing || rt.parking) return;
+    if (!repo || !rt) return;
+    if (rt.syncPromise) return rt.syncPromise;
+    if (rt.parking) return;
     rt.syncing = true;
+    // Register the promise before refresh callbacks can ask to sync this floor again.
+    const sync = Promise.resolve().then(() => this.refreshRepo(repo, rt));
+    rt.syncPromise = sync;
+    try {
+      await sync;
+    } finally {
+      if (rt.syncPromise === sync) delete rt.syncPromise;
+    }
+  }
+
+  private async refreshRepo(repo: PersistedRepo, rt: RepoRuntime) {
     this.emitRepo(repo);
     try {
       const started = Date.now();
@@ -1278,7 +1292,8 @@ export class Swarm {
       if (rt.refresh) rt.refresh.status = 'failed';
     } finally {
       rt.syncing = false;
-      if (this.repoRt.has(id)) this.emitRepo(repo);
+      delete rt.syncPromise; // Merge follow-ups must be able to start a new refresh.
+      if (this.repoRt.has(repo.id)) this.emitRepo(repo);
     }
     void this.advanceMerges(repo);
   }
