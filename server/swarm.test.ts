@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { listIssues } from './github.ts';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
 import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
@@ -772,6 +773,30 @@ describe('CEO send_back_to_dev', () => {
 });
 
 describe('native issue dependencies', () => {
+  it('keeps native blockers through a failed dependency sync and excludes unread new issues', async () => {
+    const raw = { ...issue(2), labels: [] };
+    const query = vi.fn().mockResolvedValue([raw]);
+    const api = vi.fn().mockResolvedValueOnce({ data: { repository: { i2: { blockedBy: {
+      nodes: [{ number: 1, state: 'OPEN', repository: { nameWithOwner: repo.fullName } }],
+      pageInfo: { hasNextPage: false, endCursor: null },
+    } } } } }).mockRejectedValue(new Error('network'));
+    setIssues(...await listIssues(repo.fullName, query, api));
+    expect(ready()).toEqual([]);
+    query.mockResolvedValue([raw, { ...raw, number: 3 }]);
+    setIssues(...await listIssues(repo.fullName, query, api));
+    expect(ready()).toEqual([]);
+    expect(s.startIssueWork(repo)).toBe(false);
+  });
+
+  it('fails closed for unread blockers, but schedules unsupported hosts from the body', () => {
+    setIssues({ ...issue(1), nativeBlockers: null });
+    expect(ready()).toEqual([]);
+    setIssues(issue(1, ['ready-for-human']), issue(2, [], 'Depends on #1'), issue(3));
+    expect(ready()).toEqual([3]);
+    setIssues(issue(2, [], 'Depends on #1'));
+    expect(ready()).toEqual([2]);
+  });
+
   it('never auto-assigns an open native blocker, then starts after a sync sees it closed', () => {
     const blocked = { ...issue(2), nativeBlockers: [{ number: 1, state: 'OPEN' as const }] };
     setIssues(issue(1, ['ready-for-human']), blocked);
@@ -897,6 +922,67 @@ describe('a developer session that ends without a PR after pushing commits', () 
     vi.spyOn(f, 'syncRepo').mockResolvedValue();
     vi.spyOn(f, 'buildSystemAppend').mockReturnValue('');
     s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+  });
+
+
+  it.each(['native', 'body', 'human', 'parent', 'prd', 'unread', 'unpushed'] as const)('releases zero-commit %s work without a PR nudge and waits for changes', async (kind) => {
+    ahead.mockResolvedValue(0);
+    if (kind === 'unpushed') ahead.mockRejectedValue(new Error('gh api failed: HTTP 404'));
+    const waiting = issue(66);
+    if (kind === 'native' || kind === 'unpushed') waiting.nativeBlockers = [{ number: 1, state: 'OPEN' }];
+    if (kind === 'body') waiting.body = 'Depends on #1';
+    if (kind === 'human') waiting.labels = ['ready-for-human'];
+    if (kind === 'parent') waiting.labels = ['parent'];
+    if (kind === 'prd') waiting.title = 'PRD: build an app';
+    if (kind === 'unread') waiting.nativeBlockers = null;
+    setIssues(issue(1, ['ready-for-human']), waiting);
+    repo.requestedStarts = [{ issueNumber: 66, preferredAgentId: 'a1', restartPending: false }];
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(false);
+    expect(ada()).toMatchObject({ status: 'idle', task: null, issueNumber: null });
+    expect(sessions).toHaveLength(1);
+    expect(repo.requestedStarts).toEqual([]);
+    expect(ready()).toEqual([]);
+    expect(s.startIssueWork(repo)).toBe(false);
+    setIssues(issue(66));
+    expect(ready()).toEqual([66]);
+  });
+
+  it('waits for desk cleanup before releasing blocked work', async () => {
+    ahead.mockResolvedValue(0);
+    setIssues({ ...issue(66), nativeBlockers: [{ number: 1, state: 'OPEN' }] });
+    let cleaned!: () => void;
+    vi.spyOn(backend, 'releaseDesk').mockReturnValue(new Promise<void>((r) => (cleaned = r)));
+    sessions[0].cb.finished({ ...cut, ok: true, errors: [] });
+    await vi.waitFor(() => expect(f.syncRepo).toHaveBeenCalled());
+    expect(ada().issueNumber).toBe(66);
+    cleaned();
+    await vi.waitFor(() => expect(ada().status).toBe('idle'));
+    expect(sessions).toHaveLength(1);
+  });
+
+  it('re-checks dependencies at session end before deciding whether to nudge', async () => {
+    ahead.mockResolvedValue(0);
+    setIssues(issue(66));
+    vi.mocked(f.syncRepo).mockImplementation(async () => {
+      setIssues({ ...issue(66), nativeBlockers: [{ number: 1, state: 'OPEN' }] });
+    });
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(false);
+    expect(ada()).toMatchObject({ status: 'idle', issueNumber: null });
+    expect(ready()).toEqual([]);
+  });
+
+  it('does not release potentially pushed work when its commit read fails', async () => {
+    ahead.mockRejectedValue(new Error('network'));
+    ada().sessionId = 'thread-1';
+    setIssues({ ...issue(66), nativeBlockers: [{ number: 1, state: 'OPEN' }] });
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(true);
+    expect(ada().issueNumber).toBe(66);
+  });
+
+  it('still nudges pushed commits even when the issue is blocked', async () => {
+    setIssues({ ...issue(66), nativeBlockers: [{ number: 1, state: 'OPEN' }] });
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(true);
+    expect(sessions[1].opts.prompt).toContain('open the PR');
   });
 
   it('is retried once on the same desk and branch, then reported with its branch', async () => {

@@ -41,6 +41,15 @@ export function issueBlockers(issue: DependencyIssue, open: Set<number>): IssueR
   return [...out];
 }
 
+/** Why an issue must stay in the backlog, including explicit parent/PRD containers. */
+export function issueWaitReason(issue: IssueInfo, open: Set<number>): string | null {
+  if (issue.nativeBlockers === null) return 'native blockers have not loaded';
+  if (issueBlockers(issue, open).length) return 'open blockers';
+  if (!schedulable(issue.labels)) return 'reserved or skipped work';
+  if (issue.labels.some((l) => /^(parent|prd|epic)$/i.test(l)) || /^(?:\[PRD\]|PRD:|Parent:)\s*/i.test(issue.title)) return 'parent or PRD';
+  return null;
+}
+
 const DEPENDENCY = /\b(?:depends\s+on|blocked\s+by)\s*:?\s*(?:#\d+(?:\s*(?:,|and|&)\s*)?)+/gi;
 const STATEMENT = new RegExp(`\\s*${DEPENDENCY.source}[.;,]?`, 'gi'); // with the space before it and a full stop after
 

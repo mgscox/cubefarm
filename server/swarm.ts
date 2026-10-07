@@ -20,7 +20,7 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { isCli } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { issueBlockers, forHuman, holdUps, issueSpecialty, READY_FOR_HUMAN, schedulable } from '../shared/issues.ts';
+import { issueBlockers, issueWaitReason, forHuman, holdUps, issueSpecialty, READY_FOR_HUMAN } from '../shared/issues.ts';
 import { effectiveModel } from '../shared/models.ts';
 import { CEO_ID } from '../shared/types.ts';
 import type {
@@ -1906,8 +1906,29 @@ export class Swarm {
     }
 
     // Work pushed without a PR (the CLI was cut off, or skipped the last step) isn't dropped: see finishPushedWork.
-    const ahead = !a.prNumber && a.branch && !result.interrupted ? await this.backend.branchAhead(repo.fullName, repo.defaultBranch, a.branch).catch(() => 0) : 0;
+    let aheadKnown = true;
+    const ahead = !a.prNumber && a.branch && !result.interrupted ? await this.backend.branchAhead(repo.fullName, repo.defaultBranch, a.branch).catch((error) => {
+      aheadKnown = /HTTP 404/.test(String(error)); // A branch that was never pushed has no remote commits.
+      return 0;
+    }) : 0;
     if (gone()) return;
+    if (!a.prNumber && aheadKnown && ahead === 0 && !result.interrupted) {
+      const unavailable = () => gone() || a.status === 'stopped' || this.agentRt.get(a.id)?.session;
+      await this.syncRepo(repo.id);
+      if (unavailable()) return;
+      const issues = this.repoRt.get(repo.id)?.issues ?? [];
+      const issue = issues.find((i) => i.number === a.issueNumber);
+      const reason = issue && issueWaitReason(issue, new Set(issues.map((i) => i.number)));
+      if (reason) {
+        await released;
+        if (unavailable()) return;
+        this.issueFailures.delete(`${repo.id}#${a.issueNumber}`);
+        this.appendLog(a, [{ kind: 'system', text: `Returned #${a.issueNumber} to the backlog: ${reason}. No PR is needed for work that cannot start.` }]);
+        this.cancelRequestedStart(a);
+        this.releaseIssue(a, repo, 0, reason);
+        return;
+      }
+    }
     if (a.prNumber) this.cancelRequestedStart(a);
     // One more session on this desk (pushed work, or a nudge to open the PR) waits for the desk's clean-up, which kills what runs there.
     const retry = !a.prNumber && !this.nudged.has(`${repo.id}#${a.issueNumber}`) && (ahead > 0 || result.ok);
@@ -1998,13 +2019,13 @@ export class Swarm {
     ).catch(() => this.releaseIssue(a, repo, ahead));
   }
 
-  private releaseIssue(a: PersistedAgent, repo: PersistedRepo, ahead: number) {
+  private releaseIssue(a: PersistedAgent, repo: PersistedRepo, ahead: number, waiting?: string) {
     const n = a.issueNumber;
     const branch = a.branch;
     this.clearTask(a);
     this.postMessage(
       'office',
-      `⚠️ ${a.name} finished #${n} on ${repo.fullName} without opening a pull request, so it's back on the board for anyone.${ahead > 0 ? ` Its branch ${branch} has ${this.commits(ahead)} to pick up from.` : ''}`,
+      `⚠️ ${a.name} finished #${n} on ${repo.fullName} without opening a pull request, so it's ${waiting ? `back in the backlog waiting for ${waiting} to change` : 'back on the board for anyone'}.${ahead > 0 ? ` Its branch ${branch} has ${this.commits(ahead)} to pick up from.` : ''}`,
     );
   }
 
@@ -2483,9 +2504,8 @@ export class Swarm {
     return issues
       .filter(
         (i) =>
-          schedulable(i.labels) &&
+          issueWaitReason(i, open) === null &&
           !this.issueTaken(repo, i.number) &&
-          issueBlockers(i, open).length === 0 &&
           (this.issueFailures.get(`${repo.id}#${i.number}`) ?? 0) < MAX_ISSUE_FAILURES,
       )
       .map((issue) => ({ issue, want: issueSpecialty(issue.labels), ...weight.get(issue.number)! }))

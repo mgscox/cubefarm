@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { blockers, forHuman, holdUps, issueBlockers, issueSpecialty, READY_FOR_HUMAN, schedulable, setDependsOn } from './issues.ts';
+import { blockers, forHuman, holdUps, issueBlockers, issueWaitReason, issueSpecialty, READY_FOR_HUMAN, schedulable, setDependsOn } from './issues.ts';
 
 const open = (...n: number[]) => new Set(n);
 
@@ -162,5 +162,17 @@ describe('ready-for-human', () => {
   it('is not a specialty', () => {
     expect(issueSpecialty([READY_FOR_HUMAN, 'swarm:ui'])).toBe('ui');
     expect(issueSpecialty([READY_FOR_HUMAN])).toBe('');
+  });
+});
+
+
+describe('issue wait decisions', () => {
+  const issue = { number: 2, title: 'Implement', body: '', labels: [], url: '', createdAt: '' };
+  it('distinguishes unread dependencies from unsupported hosts', () => {
+    expect(issueWaitReason({ ...issue, nativeBlockers: null }, open())).toBe('native blockers have not loaded');
+    expect(issueWaitReason(issue, open())).toBeNull();
+  });
+  it.each(['parent', 'PRD', 'epic'])('keeps explicit %s containers in the backlog', (label) => {
+    expect(issueWaitReason({ ...issue, labels: [label] }, open())).toBe('parent or PRD');
   });
 });

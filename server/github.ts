@@ -47,7 +47,21 @@ interface BlockerConnection {
   pageInfo: { hasNextPage: boolean; endCursor: string | null };
 }
 
-const dependencyWarnings = new Set<string>();
+interface DependencyCache {
+  supported?: boolean;
+  blockers: Map<number, NonNullable<IssueInfo['nativeBlockers']>>;
+  warnedAt?: number;
+}
+const dependencyCaches = new WeakMap<RestQuery, Map<string, DependencyCache>>();
+
+/** Only explicit schema/access denials permit body-only scheduling; outages and partial results do not. */
+export function dependenciesUnsupported(error: unknown): boolean {
+  const messages = error instanceof CommandError ? error.stderr.replace(/^gh:\s*/, '').replace(/^GraphQL:\s*/, '').split(/,\s*(?=Resource)|\r?\n/)
+    : Array.isArray(error) ? error.map((e) => e?.message ?? '') : [];
+  return messages.length > 0 && messages.every((m: string) =>
+    /(?:Field ['"]blockedBy['"] doesn't exist on type ['"]Issue['"]|Cannot query field ['"]blockedBy['"] on type ['"]Issue['"])/i.test(m) ||
+    /^(?:GraphQL:\s*)?Resource not accessible by (?:personal access token|integration)\s*\([\w.]*blockedBy[\w.]*\)$/.test(m.trim()));
+}
 
 /** Repo sync batches dependency reads; scheduling uses the resulting IssueInfo cache without any API calls. */
 export async function listIssues(fullName: string, query: (args: string[]) => Promise<RawIssue[]> = ghJson, api: RestQuery = ghJson): Promise<IssueInfo[]> {
@@ -55,6 +69,11 @@ export async function listIssues(fullName: string, query: (args: string[]) => Pr
   const issues: IssueInfo[] = raw
     .map((i) => ({ number: i.number, title: i.title, body: i.body ?? '', url: i.url, labels: i.labels.map((l) => l.name), createdAt: i.createdAt }))
     .sort((a, b) => a.number - b.number);
+  let caches = dependencyCaches.get(api);
+  if (!caches) dependencyCaches.set(api, caches = new Map());
+  const key = fullName.toLowerCase();
+  let cache = caches.get(key);
+  if (!cache) caches.set(key, cache = { blockers: new Map() });
   const [owner, name] = fullName.split('/');
   try {
     for (let start = 0; start < issues.length; start += 25) {
@@ -64,11 +83,14 @@ export async function listIssues(fullName: string, query: (args: string[]) => Pr
         const result = await api(['api', 'graphql', '-f', `query=query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { ${fields} } }`, '-f', `owner=${owner}`, '-f', `name=${name}`]) as {
           data?: { repository: Record<string, { blockedBy: BlockerConnection }> }; errors?: unknown[];
         };
-        if (result.errors?.length || !result.data?.repository) throw new Error('Dependency query unavailable');
+        if (Object.values(result.data?.repository ?? {}).some((i) => i?.blockedBy)) cache.supported = true;
+        if (result.errors?.length) throw result.errors;
+        if (!result.data?.repository) throw new Error('Dependency query unavailable');
         const next: typeof pending = [];
         for (const { issue, cursor } of pending) {
           const connection = result.data.repository[`i${issue.number}`]?.blockedBy;
           if (!connection) throw new Error('Dependency query incomplete');
+          cache.supported = true;
           issue.nativeBlockers = [...(issue.nativeBlockers ?? []), ...connection.nodes.map((b) => ({
             number: b.number, state: b.state,
             ...(b.repository.nameWithOwner.toLowerCase() !== fullName.toLowerCase() && { repo: b.repository.nameWithOwner }),
@@ -81,12 +103,19 @@ export async function listIssues(fullName: string, query: (args: string[]) => Pr
         pending = next;
       }
     }
-  } catch {
-    // Older hosts and restricted tokens still sync issues normally, without repeated warning noise.
-    for (const issue of issues) delete issue.nativeBlockers;
-    if (!dependencyWarnings.has(fullName)) {
-      dependencyWarnings.add(fullName);
-      console.warn(`[GitHub] Native issue dependencies unavailable for ${fullName}; using body dependencies.`);
+    if (issues.length) {
+      cache.supported = true;
+      cache.blockers = new Map(issues.map((i) => [i.number, i.nativeBlockers ?? []]));
+    }
+  } catch (error) {
+    if (cache.supported !== true && dependenciesUnsupported(error)) cache.supported = false;
+    for (const issue of issues) {
+      issue.nativeBlockers = cache.blockers.get(issue.number) ?? (cache.supported === false ? undefined : null);
+    }
+    const now = Date.now();
+    if (cache.warnedAt === undefined || now - cache.warnedAt >= 10 * 60_000) {
+      cache.warnedAt = now;
+      console.warn(`[GitHub] Native issue dependency read failed for ${fullName}; ${cache.supported === false ? 'using body dependencies' : 'keeping cached blockers; unread issues wait'}.`, error);
     }
   }
   return issues;
