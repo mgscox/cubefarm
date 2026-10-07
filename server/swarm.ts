@@ -1922,8 +1922,8 @@ export class Swarm {
 
     // Work pushed without a PR (the CLI was cut off, or skipped the last step) isn't dropped: see finishPushedWork.
     let aheadKnown = true;
-    const ahead = !a.prNumber && a.branch && !result.interrupted ? await this.backend.branchAhead(repo.fullName, repo.defaultBranch, a.branch).catch((error) => {
-      aheadKnown = /HTTP 404/.test(String(error)); // A branch that was never pushed has no remote commits.
+    const ahead = !a.prNumber && a.branch && !result.interrupted ? await this.backend.branchAhead(repo.fullName, repo.defaultBranch, a.branch).catch(() => {
+      aheadKnown = false;
       return 0;
     }) : 0;
     if (gone()) return;

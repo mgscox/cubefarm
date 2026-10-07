@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
-import { isCheckAccessError, listPulls } from './github.ts';
+import { branchAhead, isCheckAccessError, listPulls } from './github.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { mergeStep } from './mergeGate.ts';
 
@@ -21,6 +21,47 @@ const run = (status = 'completed', conclusion: string | null = 'success') => ({ 
 const rest = (runs = [run()], statuses: { context: string; state: string; target_url: string | null }[] = []) => vi.fn<Api>(async (args) =>
   args[1].includes('/actions/runs?') ? { workflow_runs: runs, total_count: runs.length } : { statuses, total_count: statuses.length });
 afterEach(() => vi.useRealTimers());
+
+describe('remote branch commits', () => {
+  const branch = 'swarm/issue-66-ada';
+  const missing = () => error('gh: Not Found (HTTP 404)');
+
+  it.each([0, 3])('returns a verified comparison count of %s', async (count) => {
+    const api = vi.fn<Api>().mockResolvedValue({ ahead_by: count });
+    expect(await branchAhead('demo/repo', 'main', branch, api)).toBe(count);
+    expect(api).toHaveBeenCalledOnce();
+  });
+
+  it.each([{ refs: [] }, { refs: [{ ref: `refs/heads/${branch}-other` }] }])('confirms an absent branch using successful matching refs: %j', async ({ refs }) => {
+    const api = vi.fn<Api>().mockRejectedValueOnce(missing()).mockResolvedValueOnce(refs);
+    expect(await branchAhead('demo/repo', 'main', branch, api)).toBe(0);
+    expect(api.mock.calls[1][0]).toEqual(['api', `repos/demo/repo/git/matching-refs/heads/${encodeURIComponent(branch)}`]);
+  });
+
+  it('keeps a missing-base comparison unknown when the pushed head exists', async () => {
+    const comparison = missing();
+    const api = vi.fn<Api>().mockRejectedValueOnce(comparison).mockResolvedValueOnce([{ ref: `refs/heads/${branch}`, object: { sha: 'pushed-head' } }]);
+    await expect(branchAhead('demo/repo', 'missing-base', branch, api)).rejects.toBe(comparison);
+  });
+
+  it.each(['HTTP 404: inaccessible repository', 'network unavailable'])('keeps a failed refs read unknown: %s', async (diagnostic) => {
+    const lookup = error(diagnostic);
+    const api = vi.fn<Api>().mockRejectedValueOnce(missing()).mockRejectedValueOnce(lookup);
+    await expect(branchAhead('demo/repo', 'main', branch, api)).rejects.toBe(lookup);
+  });
+
+  it.each([{ refs: null }, { refs: {} }, { refs: [{ object: { sha: 'unknown' } }] }])('does not interpret malformed refs as absent: %j', async ({ refs }) => {
+    const comparison = missing();
+    const api = vi.fn<Api>().mockRejectedValueOnce(comparison).mockResolvedValueOnce(refs);
+    await expect(branchAhead('demo/repo', 'main', branch, api)).rejects.toBe(comparison);
+  });
+
+  it.each([null, {}, { ahead_by: '0' }, { ahead_by: -1 }])('does not interpret unavailable comparison counts as zero: %j', async (result) => {
+    const api = vi.fn<Api>().mockResolvedValue(result);
+    await expect(branchAhead('demo/repo', 'main', branch, api)).rejects.toThrow('Branch comparison unavailable');
+    expect(api).toHaveBeenCalledOnce();
+  });
+});
 
 describe('optional PR checks', () => {
   it('retries denied check queries without check fields and refreshes metadata', async () => {

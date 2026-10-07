@@ -358,9 +358,20 @@ export async function prForBranch(fullName: string, branch: string): Promise<{ n
   return list[0] ?? null;
 }
 
-/** How many commits a branch has on GitHub that the base branch doesn't (throws when the branch isn't there). */
-export async function branchAhead(fullName: string, base: string, branch: string): Promise<number> {
-  return Number(await gh(['api', `repos/${fullName}/compare/${base}...${branch}?per_page=1`, '--jq', '.ahead_by'])) || 0;
+/** Pushed commits ahead of base; zero also covers a verified absent remote branch. Unknown reads throw. */
+export async function branchAhead(fullName: string, base: string, branch: string, api: RestQuery = ghJson): Promise<number> {
+  try {
+    const result = await api(['api', `repos/${fullName}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?per_page=1`]) as { ahead_by?: number } | null;
+    const ahead = result?.ahead_by;
+    if (typeof ahead !== 'number' || !Number.isInteger(ahead) || ahead < 0) throw new Error('Branch comparison unavailable');
+    return ahead;
+  } catch (error) {
+    if (!(error instanceof CommandError) || !/\bHTTP 404\b/.test(error.stderr)) throw error;
+    // A comparison 404 can mean a missing base or inaccessible repo. Only a successful refs read proves absence.
+    const refs = await api(['api', `repos/${fullName}/git/matching-refs/heads/${encodeURIComponent(branch)}`]);
+    if (Array.isArray(refs) && refs.every((ref) => typeof ref?.ref === 'string') && !refs.some((ref) => ref.ref === `refs/heads/${branch}`)) return 0;
+    throw error;
+  }
 }
 
 // ---------- QA support ----------

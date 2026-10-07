@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { CommandError, ghJson, run } from './exec.ts';
-import { listIssues } from './github.ts';
+import { branchAhead, listIssues } from './github.ts';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
 import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
@@ -981,7 +981,10 @@ describe('a developer session that ends without a PR after pushing commits', () 
 
   it.each(['native', 'body', 'human', 'parent', 'prd', 'unread', 'unpushed'] as const)('releases zero-commit %s work without a PR nudge and waits for changes', async (kind) => {
     ahead.mockResolvedValue(0);
-    if (kind === 'unpushed') ahead.mockRejectedValue(new Error('gh api failed: HTTP 404'));
+    if (kind === 'unpushed') {
+      const api = vi.fn<NonNullable<Parameters<typeof branchAhead>[3]>>().mockRejectedValueOnce(new CommandError('Not Found', 'HTTP 404', 1)).mockResolvedValueOnce([]);
+      ahead.mockImplementation((name, base, branch) => branchAhead(name, base, branch, api));
+    }
     const waiting = issue(66);
     if (kind === 'native' || kind === 'unpushed') waiting.nativeBlockers = [{ number: 1, state: 'OPEN' }];
     if (kind === 'body') waiting.body = 'Depends on #1';
@@ -1073,6 +1076,23 @@ describe('a developer session that ends without a PR after pushing commits', () 
     setIssues({ ...issue(66), nativeBlockers: [{ number: 1, state: 'OPEN' }] });
     expect(await end({ ...cut, ok: true, errors: [] })).toBe(true);
     expect(ada().issueNumber).toBe(66);
+  });
+
+  it.each(['missing-base', 'inaccessible-repo'])('preserves blocked work and PR recovery after a comparison 404: %s', async (failure) => {
+    const comparison = new CommandError('Not Found', 'gh: Not Found (HTTP 404)', 1);
+    const api = vi.fn<NonNullable<Parameters<typeof branchAhead>[3]>>().mockRejectedValueOnce(comparison);
+    if (failure === 'missing-base') api.mockResolvedValueOnce([{ ref: 'refs/heads/swarm/issue-66-ada', object: { sha: 'existing-pushed-head' } }]);
+    else api.mockRejectedValueOnce(new CommandError('Not Found', 'gh: Not Found (HTTP 404)', 1));
+    ahead.mockImplementation((name, base, branch) => branchAhead(name, base, branch, api));
+    ada().sessionId = 'thread-1';
+    setIssues({ ...issue(66), nativeBlockers: [{ number: 1, state: 'OPEN' }] });
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(true);
+    expect(ada()).toMatchObject({ status: 'working', task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada' });
+    expect(sessions).toHaveLength(2);
+    expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
+    expect(sessions[1].opts.prompt).toContain('pull request');
+    expect(runTask).not.toHaveBeenCalled();
+    expect(api).toHaveBeenCalledTimes(2);
   });
 
   it('still nudges pushed commits even when the issue is blocked', async () => {
@@ -1290,7 +1310,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
     });
   });
 
-  it('fails as before when nothing was pushed', async () => {
+  it('preserves failed work when the comparison is unavailable', async () => {
     ahead.mockRejectedValue(new Error('gh api failed: HTTP 404'));
     expect(await end(cut)).toBe(false);
     expect(ada()).toMatchObject({ status: 'error', branch: 'swarm/issue-66-ada' });
