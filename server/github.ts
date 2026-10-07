@@ -47,7 +47,46 @@ interface BlockerConnection {
   pageInfo: { hasNextPage: boolean; endCursor: string | null };
 }
 
-const dependencyWarnings = new Set<string>();
+interface DependencyResponse {
+  data?: { repository: Record<string, { blockedBy: BlockerConnection }> };
+  errors?: unknown[];
+}
+
+function hasNativeDependencies(result: DependencyResponse | undefined): boolean {
+  return Object.values(result?.data?.repository ?? {}).some((issue) => issue?.blockedBy);
+}
+
+function failedDependencyResponse(error: unknown): DependencyResponse | undefined {
+  if (error instanceof CommandError && error.stdout.trim()) {
+    try { return JSON.parse(error.stdout) as DependencyResponse; } catch { /* Invalid output cannot prove lack of support. */ }
+  }
+  return undefined;
+}
+
+interface DependencyCache {
+  supported?: boolean;
+  blockers: Map<number, NonNullable<IssueInfo['nativeBlockers']>>;
+  warnedAt?: number;
+}
+const dependencyCaches = new WeakMap<RestQuery, Map<string, DependencyCache>>();
+
+/** Only explicit schema/access denials permit body-only scheduling; outages and partial results do not. */
+export function dependenciesUnsupported(error: unknown): boolean {
+  if (error instanceof CommandError && error.stdout.trim()) {
+    const result = failedDependencyResponse(error);
+    if (!result || hasNativeDependencies(result) || (result.errors?.length && !dependenciesUnsupported(result.errors))) return false;
+  }
+  const messages = error instanceof CommandError ? error.stderr.trim().replace(/^gh:\s*/, '').replace(/^GraphQL:\s*/, '').split(/,\s*(?=Resource)|\r?\n/)
+    : Array.isArray(error) ? error.map((e) => {
+      const message = e?.message ?? '';
+      return Array.isArray(e?.path) && /^Resource not accessible by (?:personal access token|integration)$/.test(message)
+        ? `${message} (${e.path.join('.')})` : message;
+    }) : [];
+  const lines = messages.map((m) => String(m).trim()).filter(Boolean);
+  return lines.length > 0 && lines.every((m) =>
+    /(?:Field ['"]blockedBy['"] doesn't exist on type ['"]Issue['"]|Cannot query field ['"]blockedBy['"] on type ['"]Issue['"])/i.test(m) ||
+    /^(?:GraphQL:\s*)?Resource not accessible by (?:personal access token|integration)\s*\([\w.]*blockedBy[\w.]*\)$/.test(m));
+}
 
 /** Repo sync batches dependency reads; scheduling uses the resulting IssueInfo cache without any API calls. */
 export async function listIssues(fullName: string, query: (args: string[]) => Promise<RawIssue[]> = ghJson, api: RestQuery = ghJson): Promise<IssueInfo[]> {
@@ -55,20 +94,26 @@ export async function listIssues(fullName: string, query: (args: string[]) => Pr
   const issues: IssueInfo[] = raw
     .map((i) => ({ number: i.number, title: i.title, body: i.body ?? '', url: i.url, labels: i.labels.map((l) => l.name), createdAt: i.createdAt }))
     .sort((a, b) => a.number - b.number);
+  let caches = dependencyCaches.get(api);
+  if (!caches) dependencyCaches.set(api, caches = new Map());
+  const key = fullName.toLowerCase();
+  let cache = caches.get(key);
+  if (!cache) caches.set(key, cache = { blockers: new Map() });
   const [owner, name] = fullName.split('/');
   try {
     for (let start = 0; start < issues.length; start += 25) {
       let pending = issues.slice(start, start + 25).map((issue) => ({ issue, cursor: null as string | null }));
       while (pending.length) {
         const fields = pending.map(({ issue, cursor }) => `i${issue.number}: issue(number:${issue.number}) { blockedBy(first:100${cursor ? `,after:${JSON.stringify(cursor)}` : ''}) { nodes { number state repository { nameWithOwner } } pageInfo { hasNextPage endCursor } } }`).join('\n');
-        const result = await api(['api', 'graphql', '-f', `query=query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { ${fields} } }`, '-f', `owner=${owner}`, '-f', `name=${name}`]) as {
-          data?: { repository: Record<string, { blockedBy: BlockerConnection }> }; errors?: unknown[];
-        };
-        if (result.errors?.length || !result.data?.repository) throw new Error('Dependency query unavailable');
+        const result = await api(['api', 'graphql', '-f', `query=query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { ${fields} } }`, '-f', `owner=${owner}`, '-f', `name=${name}`]) as DependencyResponse;
+        if (hasNativeDependencies(result)) cache.supported = true;
+        if (result.errors?.length) throw result.errors;
+        if (!result.data?.repository) throw new Error('Dependency query unavailable');
         const next: typeof pending = [];
         for (const { issue, cursor } of pending) {
           const connection = result.data.repository[`i${issue.number}`]?.blockedBy;
           if (!connection) throw new Error('Dependency query incomplete');
+          cache.supported = true;
           issue.nativeBlockers = [...(issue.nativeBlockers ?? []), ...connection.nodes.map((b) => ({
             number: b.number, state: b.state,
             ...(b.repository.nameWithOwner.toLowerCase() !== fullName.toLowerCase() && { repo: b.repository.nameWithOwner }),
@@ -81,12 +126,20 @@ export async function listIssues(fullName: string, query: (args: string[]) => Pr
         pending = next;
       }
     }
-  } catch {
-    // Older hosts and restricted tokens still sync issues normally, without repeated warning noise.
-    for (const issue of issues) delete issue.nativeBlockers;
-    if (!dependencyWarnings.has(fullName)) {
-      dependencyWarnings.add(fullName);
-      console.warn(`[GitHub] Native issue dependencies unavailable for ${fullName}; using body dependencies.`);
+    if (issues.length) {
+      cache.supported = true;
+      cache.blockers = new Map(issues.map((i) => [i.number, i.nativeBlockers ?? []]));
+    }
+  } catch (error) {
+    if (hasNativeDependencies(failedDependencyResponse(error))) cache.supported = true;
+    if (cache.supported !== true && dependenciesUnsupported(error)) cache.supported = false;
+    for (const issue of issues) {
+      issue.nativeBlockers = cache.blockers.get(issue.number) ?? (cache.supported === false ? undefined : null);
+    }
+    const now = Date.now();
+    if (cache.warnedAt === undefined || now - cache.warnedAt >= 10 * 60_000) {
+      cache.warnedAt = now;
+      console.warn(`[GitHub] Native issue dependency read failed for ${fullName}; ${cache.supported === false ? 'using body dependencies' : 'keeping cached blockers; unread issues wait'}.`, error);
     }
   }
   return issues;
@@ -305,9 +358,20 @@ export async function prForBranch(fullName: string, branch: string): Promise<{ n
   return list[0] ?? null;
 }
 
-/** How many commits a branch has on GitHub that the base branch doesn't (throws when the branch isn't there). */
-export async function branchAhead(fullName: string, base: string, branch: string): Promise<number> {
-  return Number(await gh(['api', `repos/${fullName}/compare/${base}...${branch}?per_page=1`, '--jq', '.ahead_by'])) || 0;
+/** Pushed commits ahead of base; zero also covers a verified absent remote branch. Unknown reads throw. */
+export async function branchAhead(fullName: string, base: string, branch: string, api: RestQuery = ghJson): Promise<number> {
+  try {
+    const result = await api(['api', `repos/${fullName}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?per_page=1`]) as { ahead_by?: number } | null;
+    const ahead = result?.ahead_by;
+    if (typeof ahead !== 'number' || !Number.isInteger(ahead) || ahead < 0) throw new Error('Branch comparison unavailable');
+    return ahead;
+  } catch (error) {
+    if (!(error instanceof CommandError) || !/\bHTTP 404\b/.test(error.stderr)) throw error;
+    // A comparison 404 can mean a missing base or inaccessible repo. Only a successful refs read proves absence.
+    const refs = await api(['api', `repos/${fullName}/git/matching-refs/heads/${encodeURIComponent(branch)}`]);
+    if (Array.isArray(refs) && refs.every((ref) => typeof ref?.ref === 'string') && !refs.some((ref) => ref.ref === `refs/heads/${branch}`)) return 0;
+    throw error;
+  }
 }
 
 // ---------- QA support ----------

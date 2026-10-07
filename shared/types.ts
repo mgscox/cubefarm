@@ -31,7 +31,7 @@ export interface IssueInfo {
   url: string;
   labels: string[];
   createdAt: string;
-  nativeBlockers?: IssueDependency[]; // cached at repo sync; absent when dependency access is unavailable
+  nativeBlockers?: IssueDependency[] | null; // null: unread, undefined: unsupported; otherwise last successful sync
 }
 
 export interface PullInfo {
