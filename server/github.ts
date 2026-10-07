@@ -47,6 +47,22 @@ interface BlockerConnection {
   pageInfo: { hasNextPage: boolean; endCursor: string | null };
 }
 
+interface DependencyResponse {
+  data?: { repository: Record<string, { blockedBy: BlockerConnection }> };
+  errors?: unknown[];
+}
+
+function hasNativeDependencies(result: DependencyResponse | undefined): boolean {
+  return Object.values(result?.data?.repository ?? {}).some((issue) => issue?.blockedBy);
+}
+
+function failedDependencyResponse(error: unknown): DependencyResponse | undefined {
+  if (error instanceof CommandError && error.stdout.trim()) {
+    try { return JSON.parse(error.stdout) as DependencyResponse; } catch { /* Invalid output cannot prove lack of support. */ }
+  }
+  return undefined;
+}
+
 interface DependencyCache {
   supported?: boolean;
   blockers: Map<number, NonNullable<IssueInfo['nativeBlockers']>>;
@@ -56,8 +72,16 @@ const dependencyCaches = new WeakMap<RestQuery, Map<string, DependencyCache>>();
 
 /** Only explicit schema/access denials permit body-only scheduling; outages and partial results do not. */
 export function dependenciesUnsupported(error: unknown): boolean {
+  if (error instanceof CommandError && error.stdout.trim()) {
+    const result = failedDependencyResponse(error);
+    if (!result || hasNativeDependencies(result) || (result.errors?.length && !dependenciesUnsupported(result.errors))) return false;
+  }
   const messages = error instanceof CommandError ? error.stderr.trim().replace(/^gh:\s*/, '').replace(/^GraphQL:\s*/, '').split(/,\s*(?=Resource)|\r?\n/)
-    : Array.isArray(error) ? error.map((e) => e?.message ?? '') : [];
+    : Array.isArray(error) ? error.map((e) => {
+      const message = e?.message ?? '';
+      return Array.isArray(e?.path) && /^Resource not accessible by (?:personal access token|integration)$/.test(message)
+        ? `${message} (${e.path.join('.')})` : message;
+    }) : [];
   const lines = messages.map((m) => String(m).trim()).filter(Boolean);
   return lines.length > 0 && lines.every((m) =>
     /(?:Field ['"]blockedBy['"] doesn't exist on type ['"]Issue['"]|Cannot query field ['"]blockedBy['"] on type ['"]Issue['"])/i.test(m) ||
@@ -81,10 +105,8 @@ export async function listIssues(fullName: string, query: (args: string[]) => Pr
       let pending = issues.slice(start, start + 25).map((issue) => ({ issue, cursor: null as string | null }));
       while (pending.length) {
         const fields = pending.map(({ issue, cursor }) => `i${issue.number}: issue(number:${issue.number}) { blockedBy(first:100${cursor ? `,after:${JSON.stringify(cursor)}` : ''}) { nodes { number state repository { nameWithOwner } } pageInfo { hasNextPage endCursor } } }`).join('\n');
-        const result = await api(['api', 'graphql', '-f', `query=query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { ${fields} } }`, '-f', `owner=${owner}`, '-f', `name=${name}`]) as {
-          data?: { repository: Record<string, { blockedBy: BlockerConnection }> }; errors?: unknown[];
-        };
-        if (Object.values(result.data?.repository ?? {}).some((i) => i?.blockedBy)) cache.supported = true;
+        const result = await api(['api', 'graphql', '-f', `query=query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { ${fields} } }`, '-f', `owner=${owner}`, '-f', `name=${name}`]) as DependencyResponse;
+        if (hasNativeDependencies(result)) cache.supported = true;
         if (result.errors?.length) throw result.errors;
         if (!result.data?.repository) throw new Error('Dependency query unavailable');
         const next: typeof pending = [];
@@ -109,6 +131,7 @@ export async function listIssues(fullName: string, query: (args: string[]) => Pr
       cache.blockers = new Map(issues.map((i) => [i.number, i.nativeBlockers ?? []]));
     }
   } catch (error) {
+    if (hasNativeDependencies(failedDependencyResponse(error))) cache.supported = true;
     if (cache.supported !== true && dependenciesUnsupported(error)) cache.supported = false;
     for (const issue of issues) {
       issue.nativeBlockers = cache.blockers.get(issue.number) ?? (cache.supported === false ? undefined : null);

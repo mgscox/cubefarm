@@ -5,6 +5,7 @@ export class CommandError extends Error {
     message: string,
     public readonly stderr: string,
     public readonly code: number | null,
+    public readonly stdout: string = '',
   ) {
     super(message);
   }
@@ -26,7 +27,7 @@ export function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs
       (err, stdout, stderr) => {
         if (err) {
           const detail = (stderr || err.message).toString().trim();
-          reject(new CommandError(`${cmd} ${args.slice(0, 3).join(' ')} failed: ${detail}`, stderr?.toString() ?? '', (err as { code?: number }).code ?? null));
+          reject(new CommandError(`${cmd} ${args.slice(0, 3).join(' ')} failed: ${detail}`, stderr?.toString() ?? '', (err as { code?: number }).code ?? null, stdout?.toString() ?? ''));
           return;
         }
         resolve(stdout.toString().trim());
@@ -41,7 +42,7 @@ export function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs
 export const gh = (args: string[], opts?: { cwd?: string; timeoutMs?: number; input?: string }) => run('gh', args, opts);
 export const git = (args: string[], opts?: { cwd?: string; timeoutMs?: number }) => run('git', args, opts);
 
-export async function ghJson<T>(args: string[], opts?: { cwd?: string; timeoutMs?: number }): Promise<T> {
-  const out = await gh(args, opts);
+export async function ghJson<T>(args: string[], opts?: { cwd?: string; timeoutMs?: number }, command: typeof gh = gh): Promise<T> {
+  const out = await command(args, opts);
   return (out ? JSON.parse(out) : null) as T;
 }

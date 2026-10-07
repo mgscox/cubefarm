@@ -142,4 +142,15 @@ describe('native dependency refresh', () => {
   it('does not classify mixed access and outage errors as unsupported', () => {
     expect(dependenciesUnsupported([{ message: "Field 'blockedBy' doesn't exist on type 'Issue'" }, { message: 'rate limit' }])).toBe(false);
   });
+
+  it('checks failed-command JSON errors before allowing unsupported fallback', () => {
+    const denied = 'Resource not accessible by personal access token (repository.i2.blockedBy)';
+    const stderr = `gh: GraphQL: ${denied}\n`;
+    const failed = (stdout: string) => new CommandError(stderr, stderr, 1, stdout);
+    expect(dependenciesUnsupported(failed(JSON.stringify({ errors: [{ message: denied }] })))).toBe(true);
+    expect(dependenciesUnsupported(failed(JSON.stringify({ errors: [{ message: 'Resource not accessible by personal access token', path: ['repository', 'i2', 'blockedBy'] }] })))).toBe(true);
+    expect(dependenciesUnsupported(failed(JSON.stringify({ errors: [{ message: 'Resource not accessible by personal access token', path: ['repository', 'i2', 'title'] }] })))).toBe(false);
+    expect(dependenciesUnsupported(failed(JSON.stringify({ errors: [{ message: denied }, { message: 'network unavailable' }] })))).toBe(false);
+    expect(dependenciesUnsupported(failed('{incomplete'))).toBe(false);
+  });
 });

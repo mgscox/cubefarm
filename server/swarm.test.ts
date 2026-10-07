@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { CommandError } from './exec.ts';
+import { CommandError, ghJson, run } from './exec.ts';
 import { listIssues } from './github.ts';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
@@ -774,16 +774,47 @@ describe('CEO send_back_to_dev', () => {
 });
 
 describe('native issue dependencies', () => {
+  it.each(['fresh', 'unsupported', 'cached'])('fails closed through a real failed JSON command after %s dependency reads', async (previous) => {
+    vi.useRealTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const query = vi.fn().mockResolvedValue([issue(2)]);
+    const denied = 'Resource not accessible by personal access token (repository.i3.blockedBy)';
+    const blockedBy = {
+      nodes: [{ number: 1, state: 'OPEN', repository: { nameWithOwner: repo.fullName } }],
+      pageInfo: { hasNextPage: false, endCursor: null },
+    };
+    const response = { data: { repository: { i2: { blockedBy }, i3: { blockedBy: null } } },
+      errors: [{ message: 'Resource not accessible by personal access token', path: ['repository', 'i3', 'blockedBy'] }] };
+    const stderr = `gh: GraphQL: ${denied}\n`;
+    const command = () => run(process.execPath, ['-e', `process.stdout.write(${JSON.stringify(JSON.stringify(response))}); process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 1;`]);
+    const api = vi.fn<NonNullable<Parameters<typeof listIssues>[2]>>((args) => ghJson(args, undefined, command));
+    if (previous === 'unsupported') api.mockRejectedValueOnce(new CommandError(stderr, stderr, 1));
+    if (previous === 'cached') api.mockResolvedValueOnce({ data: { repository: { i2: { blockedBy } } } });
+    if (previous !== 'fresh') await listIssues(repo.fullName, query, api);
+    query.mockResolvedValue([issue(2), issue(3)]);
+    const issues = await listIssues(repo.fullName, query, api);
+    expect(issues[0].nativeBlockers).toEqual(previous === 'cached' ? [{ number: 1, state: 'OPEN' }] : null);
+    expect(issues[1].nativeBlockers).toBeNull();
+    expect(issues.every((i) => i.nativeBlockers !== undefined)).toBe(true);
+    setIssues(...issues);
+    expect(ready()).toEqual([]);
+    expect(s.startIssueWork(repo)).toBe(false);
+    expect(runTask).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["Field 'blockedBy' doesn't exist on type 'Issue'", '\n'],
     ["Field 'blockedBy' doesn't exist on type 'Issue'", '\r\n'],
     ['Resource not accessible by personal access token (repository.i2.blockedBy)', '\n'],
     ['Resource not accessible by personal access token (repository.i2.blockedBy)', '\r\n'],
   ])('schedules body dependencies after newline-terminated unsupported diagnostics: %s %j', async (diagnostic, ending) => {
+    vi.useRealTimers();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const query = vi.fn().mockResolvedValue([issue(1), issue(2, [], 'Depends on #1'), issue(3)]);
     const stderr = `gh: GraphQL: ${diagnostic}${ending}`;
-    const api = vi.fn().mockRejectedValue(new CommandError(stderr, stderr, 1));
+    const stdout = JSON.stringify({ errors: [{ message: diagnostic.split(' (')[0], path: ['repository', 'i2', 'blockedBy'] }] });
+    const command = () => run(process.execPath, ['-e', `process.stdout.write(${JSON.stringify(stdout)}); process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 1;`]);
+    const api = (args: string[]) => ghJson(args, undefined, command);
     const issues = await listIssues(repo.fullName, query, api);
     expect(issues.every((i) => i.nativeBlockers === undefined)).toBe(true);
     setIssues({ ...issues[0], labels: ['ready-for-human'] }, ...issues.slice(1));
