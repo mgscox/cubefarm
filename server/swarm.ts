@@ -1281,6 +1281,7 @@ export class Swarm {
       const pulls = pullResult.value.pulls;
       rt.fetchedAt = started;
       this.reconcilePulls(repo, pulls);
+      await this.pruneUnlistedQa(repo, pulls);
       // Something was merged since the last look (by the office or anyone else): bring the folder up to date.
       const newest = pulls.reduce<string | null>((m, p) => (p.mergedAt && (!m || p.mergedAt > m) ? p.mergedAt : m), null);
       if (newest !== rt.lastMergedAt) {
@@ -1329,6 +1330,27 @@ export class Swarm {
       this.queueQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null);
     }
     this.save();
+  }
+
+  /**
+   * The sync only lists open and recently merged PRs, so a record whose PR merged or closed a while ago never shows up
+   * finished there. Ask GitHub about each one; a failed lookup keeps the record for the next sync. The first sync after
+   * startup clears records left over from before this check.
+   */
+  private async pruneUnlistedQa(repo: PersistedRepo, pulls: PullInfo[]) {
+    const unlisted = this.state.qa.filter((q) => q.repoId === repo.id && q.status !== 'testing' && q.status !== 'fixing' && !pulls.some((p) => p.number === q.prNumber));
+    if (!unlisted.length) return;
+    const states = await Promise.all(unlisted.map((q) => this.backend.prDetails(repo.fullName, q.prNumber).then((d) => d.state, () => null)));
+    let removed = false;
+    unlisted.forEach((q, i) => {
+      const state = states[i];
+      // The record may have moved on (a QA run started) while GitHub answered.
+      if (!state || state === 'OPEN' || !this.state.qa.includes(q) || q.status === 'testing' || q.status === 'fixing') return;
+      this.state.qa = this.state.qa.filter((x) => x !== q);
+      this.broadcast({ type: 'qaRemoved', repoId: repo.id, prNumber: q.prNumber });
+      removed = true;
+    });
+    if (removed) this.save();
   }
 
   async createIssue(repoId: string, title: string, body: string, assignTo?: string, specialty?: string) {

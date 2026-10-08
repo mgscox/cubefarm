@@ -4,6 +4,7 @@ import { CEO_ID } from '../../../shared/types';
 import { HeldHint } from './HeldHint';
 import { WorkersPanel } from './WorkersPanel';
 import { officeUpdateChip } from '../officeUpdate';
+import { qaCounts } from '../qaCounts';
 
 /** While the office is on its way to updating itself (or restarting to do it); opens the console's Office row. */
 function OfficeUpdateChip() {
@@ -62,7 +63,7 @@ export function HUD() {
   const running = useMemo(() => Object.values(agents).filter((a) => a.status === 'working' || a.status === 'preparing').length, [agents]);
   const floorAgents = repo ? Object.values(agents).filter((a) => a.repoId === repo.id) : [];
   const qa = useStore((s) => s.qa);
-  const floorQa = repo ? Object.values(qa).filter((q) => q.repoId === repo.id) : [];
+  const floorQa = qaCounts(Object.values(qa), new Map(repo ? [[repo.id, repo.pulls]] : []));
 
   return (
     <div className="hud">
@@ -72,7 +73,7 @@ export function HUD() {
           <div className="floor-name">{repo ? repo.fullName : `${settings.companyName || 'cubefarm'} · Lobby`}</div>
           <div className="floor-sub">
             {repo
-              ? `${floorAgents.length} agents · ${floorAgents.filter((a) => a.status === 'working' || a.status === 'preparing').length} working · ${floorQa.filter((q) => q.status !== 'passed').length} in QA · ${floorQa.filter((q) => q.status === 'passed').length} ready to merge`
+              ? `${floorAgents.length} agents · ${floorAgents.filter((a) => a.status === 'working' || a.status === 'preparing').length} working · ${floorQa.inQa} in QA · ${floorQa.readyToMerge} ready to merge${floorQa.passedDrafts ? ` · ${floorQa.passedDrafts} passed, draft: waiting on you` : ''}`
               : `${repos.length} floor${repos.length === 1 ? '' : 's'} connected`}
           </div>
         </div>

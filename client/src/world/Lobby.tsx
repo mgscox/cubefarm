@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import * as THREE from 'three';
 import { Billboard } from '@react-three/drei';
 import { pendingRequests, useStore, type Agent } from '../store';
+import { qaCounts } from '../qaCounts';
 import { CEO_ID, type HireRequestView } from '../../../shared/types';
 import { Character } from './Character';
 import { Desk } from './Desk';
@@ -39,11 +40,9 @@ function useOfficeStats() {
       working: list.filter((a) => a.repoId === r.id && (a.status === 'working' || a.status === 'preparing')).length,
       prs: r.pulls.filter((p) => p.state === 'OPEN').length,
     }));
-    const qaList = Object.values(qa);
-    const inQa = qaList.filter((q) => q.status !== 'passed').length;
-    const readyToMerge = qaList.filter((q) => q.status === 'passed').length;
+    const { inQa, readyToMerge, passedDrafts } = qaCounts(Object.values(qa), new Map(repos.map((r) => [r.id, r.pulls])));
     const pending = pendingRequests(requests).length;
-    return { repos: repos.length, agents: list.length, working, openPrs, inQa, readyToMerge, merged, issues, floors, max: settings.sessionLimit, pending };
+    return { repos: repos.length, agents: list.length, working, openPrs, inQa, readyToMerge, passedDrafts, merged, issues, floors, max: settings.sessionLimit, pending };
   }, [repos, agents, settings, qa, requests]);
 }
 
@@ -68,7 +67,7 @@ function ManagerComputer() {
         ['Agents on staff', `${stats.agents}`],
         ['Sessions running', stats.max ? `${stats.working} / ${stats.max}` : `${stats.working}`],
         ['Open issues', `${stats.issues}`],
-        ['PRs in QA / ready to merge', `${stats.inQa} / ${stats.readyToMerge}`],
+        ['PRs in QA / ready to merge', `${stats.inQa} / ${stats.readyToMerge}${stats.passedDrafts ? ` +${stats.passedDrafts} draft` : ''}`],
         ['📄 Hiring decisions waiting', `${stats.pending}`],
       ];
       rows.forEach(([k, v], i) => {

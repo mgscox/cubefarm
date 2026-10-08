@@ -398,6 +398,53 @@ describe('orphaned QA recovery', () => {
   });
 });
 
+describe('QA records for PRs the sync no longer lists', () => {
+  const record = (prNumber: number, status: QaRec['status']): QaRec => ({ repoId: repo.id, prNumber, issueNumber: null, status, round: 1, sessionFailures: 0,
+    devAgentId: null, qaAgentId: null, summary: '', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 });
+  let states: Record<number, PullInfo['state'] | Error>;
+
+  beforeEach(() => {
+    Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
+    Object.assign(s.repoRt.get(repo.id)!, { lastMergedAt: null });
+    vi.spyOn(s.backend, 'listIssues').mockResolvedValue([]);
+    vi.spyOn(s.backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    states = {};
+    vi.spyOn(s.backend, 'prDetails').mockImplementation(async (_name, n) => {
+      const state = states[n];
+      if (state instanceof Error) throw state;
+      return { number: n, title: '', body: '', url: '', headRefName: `swarm/issue-${n}-ada`, headSha: 'sha', isCrossRepository: false, closesIssues: [], state, mergeable: 'MERGEABLE', mergeState: 'CLEAN' };
+    });
+  });
+
+  it('removes finished PRs and keeps open ones, failed lookups and running QA', async () => {
+    s.state.qa.push(record(45, 'passed'), record(56, 'queued'), record(70, 'passed'), record(82, 'passed'), record(90, 'testing'));
+    Object.assign(states, { 45: 'MERGED', 56: 'CLOSED', 70: new Error('HTTP 502'), 82: 'OPEN', 90: 'MERGED' });
+    const events = vi.spyOn(s, 'broadcast');
+    await swarm.syncRepo(repo.id);
+    expect(s.state.qa.map((q) => q.prNumber)).toEqual([70, 82, 90]);
+    expect(events).toHaveBeenCalledWith({ type: 'qaRemoved', repoId: repo.id, prNumber: 45 });
+    expect(events).toHaveBeenCalledWith({ type: 'qaRemoved', repoId: repo.id, prNumber: 56 });
+    expect(s.backend.prDetails).not.toHaveBeenCalledWith(repo.fullName, 90);
+
+    // The failed lookup is retried on the next sync.
+    states[70] = 'MERGED';
+    await swarm.syncRepo(repo.id);
+    expect(s.state.qa.map((q) => q.prNumber)).toEqual([82, 90]);
+  });
+
+  it('does not look up records whose PR is listed', async () => {
+    s.state.qa.push(record(13, 'passed'));
+    vi.mocked(s.backend.listPulls).mockResolvedValue({ pulls: [{
+      number: 13, title: '', url: '', headRefName: 'swarm/issue-67-ada', state: 'OPEN', isDraft: false, closesIssues: [67], checks: 'none',
+      mergeable: 'MERGEABLE', headSha: 'sha', reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
+      mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+    }] });
+    await swarm.syncRepo(repo.id);
+    expect(s.backend.prDetails).not.toHaveBeenCalled();
+    expect(s.state.qa).toHaveLength(1);
+  });
+});
+
 describe('CEO park_pr', () => {
   const args = { floor: 1, number: 13, reason: 'Placeholder waits on #66' };
   let pull: PullInfo;
