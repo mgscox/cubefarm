@@ -864,6 +864,10 @@ describe('native parent issues', () => {
 });
 
 describe('native issue dependencies', () => {
+  const nativeAnswer = (args: string[]) => ({ data: { repository: Object.fromEntries([...args[3].matchAll(/i(\d+): issue/g)].map((m) => [`i${m[1]}`, {
+    ...(args[3].includes('subIssuesSummary') && { subIssuesSummary: { total: 0, completed: 0 } }), comments: { nodes: [] },
+  }])) } });
+
   it.each(['fresh', 'unsupported', 'cached'])('fails closed through a real failed JSON command after %s dependency reads', async (previous) => {
     vi.useRealTimers();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -897,25 +901,48 @@ describe('native issue dependencies', () => {
     ["Field 'blockedBy' doesn't exist on type 'Issue'", '\r\n'],
     ['Resource not accessible by personal access token (repository.i2.blockedBy)', '\n'],
     ['Resource not accessible by personal access token (repository.i2.blockedBy)', '\r\n'],
-  ])('keeps unread parents waiting after newline-terminated unsupported diagnostics: %s %j', async (diagnostic, ending) => {
+  ])('schedules body dependencies after newline-terminated unsupported diagnostics: %s %j', async (diagnostic, ending) => {
     vi.useRealTimers();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const query = vi.fn().mockResolvedValue([issue(1), issue(2, [], 'Depends on #1'), issue(3)]);
     const stderr = `gh: GraphQL: ${diagnostic}${ending}`;
     const stdout = JSON.stringify({ errors: [{ message: diagnostic.split(' (')[0], path: ['repository', 'i2', 'blockedBy'] }] });
     const command = () => run(process.execPath, ['-e', `process.stdout.write(${JSON.stringify(stdout)}); process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 1;`]);
-    const api = (args: string[]) => ghJson(args, undefined, command);
+    const api = vi.fn((args: string[]) => args[3].includes('blockedBy') ? ghJson(args, undefined, command) : Promise.resolve(nativeAnswer(args)));
     const issues = await listIssues(repo.fullName, query, api);
-    expect(issues.every((i) => i.nativeBlockers === undefined)).toBe(true);
+    expect(api).toHaveBeenCalledTimes(2); // the retry without blockedBy still reads the sub-issue summaries
+    expect(issues.every((i) => i.nativeBlockers === undefined && i.subIssues?.total === 0)).toBe(true);
     setIssues({ ...issues[0], labels: ['ready-for-human'] }, ...issues.slice(1));
-    expect(issues.every((i) => i.subIssues === null)).toBe(true);
-    expect(ready()).toEqual([]);
+    expect(ready()).toEqual([3]);
     setIssues(...issues.slice(1));
-    expect(ready()).toEqual([]);
+    expect(ready()).toEqual([2, 3]);
     const mixed = `${stderr}network unavailable${ending}`;
     setIssues(...await listIssues(repo.fullName, query, vi.fn().mockRejectedValue(new CommandError(mixed, mixed, 1))));
     expect(s.repoRt.get(repo.id)!.issues.every((i) => i.nativeBlockers === null)).toBe(true);
     expect(ready()).toEqual([]);
+  });
+
+  it.each([
+    "Field 'blockedBy' doesn't exist on type 'Issue', Field 'subIssuesSummary' doesn't exist on type 'Issue'",
+    "Cannot query field 'subIssuesSummary' on type 'Issue', Cannot query field 'blockedBy' on type 'Issue'",
+    'Resource not accessible by personal access token (repository.i2.blockedBy), Resource not accessible by personal access token (repository.i2.subIssuesSummary)',
+  ])('schedules issues on hosts without blockers or sub-issues: %s', async (diagnostic) => {
+    vi.useRealTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const query = vi.fn().mockResolvedValue([issue(1), issue(2, [], 'Depends on #1'), issue(3)]);
+    const stderr = `gh: GraphQL: ${diagnostic}\n`;
+    const command = () => run(process.execPath, ['-e', `process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 1;`]);
+    const api = vi.fn((args: string[]) => /blockedBy|subIssuesSummary/.test(args[3]) ? ghJson(args, undefined, command) : Promise.resolve(nativeAnswer(args)));
+    const issues = await listIssues(repo.fullName, query, api);
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(issues.every((i) => i.nativeBlockers === undefined && i.subIssues === undefined)).toBe(true);
+    setIssues(...issues);
+    expect(ready()).toEqual([1, 3]);
+    // A host that keeps answering with the same diagnostics still schedules from issue bodies.
+    const stuck = vi.fn((args: string[]) => ghJson(args, undefined, command));
+    setIssues(...await listIssues(repo.fullName, query, stuck));
+    expect(stuck).toHaveBeenCalledTimes(2);
+    expect(ready()).toEqual([1, 3]);
   });
 
   it('keeps native blockers through a failed dependency sync and excludes unread new issues', async () => {
@@ -1149,6 +1176,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
     ahead.mockResolvedValue(0);
     await end(cut);
     expect(repo.noWorkEndings?.[0].count).toBe(1);
+    expect([ada().status, ada().lastError]).toEqual(['error', cut.errors[0]]); // a crash reads as one, not as a quiet hand-back
     Object.assign(ada(), { task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', prNumber: null });
     await s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
     await end({ ...cut, interrupted: true } as typeof cut);

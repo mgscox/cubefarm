@@ -1988,8 +1988,12 @@ export class Swarm {
       const reason = issue && issueWaitReason(issue, new Set(issues.map((i) => i.number)));
       await released;
       if (unavailable()) return;
-      this.issueFailures.delete(`${repo.id}#${a.issueNumber}`);
       if (issue) this.setNoWorkEndings(repo, recordNoWork(repo.noWorkEndings ?? [], issue));
+      if (!result.ok) { // a crash still counts as an empty ending, but shows as an error rather than a quiet hand-back
+        this.issueFailed(repo, a.issueNumber);
+        return this.fail(a, result, `#${a.issueNumber}`);
+      }
+      this.issueFailures.delete(`${repo.id}#${a.issueNumber}`);
       const waiting = (issue && this.workIssue(repo, issue).stalled) || reason || undefined;
       this.appendLog(a, [{ kind: 'system', text: `Returned #${a.issueNumber} to the backlog: ${waiting ?? 'no commits and no PR'}. No PR nudge is needed for this session.` }]);
       this.cancelRequestedStart(a);

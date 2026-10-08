@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
-import { dependenciesUnsupported, listIssues } from './github.ts';
+import { dependenciesUnsupported, listIssues, unsupportedFields } from './github.ts';
 
 type Query = NonNullable<Parameters<typeof listIssues>[1]>;
 type Api = NonNullable<Parameters<typeof listIssues>[2]>;
@@ -114,6 +114,29 @@ describe('native dependency refresh', () => {
     });
     const issues = await listIssues('demo/deps', vi.fn<Query>().mockResolvedValue([issue, { ...issue, number: 3 }]), api);
     expect(issues.map((i) => i.nativeBlockers)).toEqual([null, null]);
+  });
+
+  it('names each unsupported native field, including mixes, and keeps partial denials closed', () => {
+    const missing = (field: string) => ({ message: `Field '${field}' doesn't exist on type 'Issue'` });
+    expect(unsupportedFields([missing('blockedBy'), missing('subIssuesSummary'), missing('comments')])).toEqual(new Set(['blockedBy', 'subIssuesSummary', 'comments']));
+    expect(unsupportedFields(error("gh: GraphQL: Field 'subIssuesSummary' doesn't exist on type 'Issue', Field 'blockedBy' doesn't exist on type 'Issue'\n"))).toEqual(new Set(['subIssuesSummary', 'blockedBy']));
+    expect(unsupportedFields([{ message: 'Resource not accessible by integration', path: ['repository', 'i2', 'subIssuesSummary'] }])).toEqual(new Set(['subIssuesSummary']));
+    expect(unsupportedFields([missing('title')])).toBeNull();
+    expect(unsupportedFields([missing('subIssuesSummary'), { message: 'rate limit' }])).toBeNull();
+    const denied = 'Resource not accessible by personal access token (repository.i3.subIssuesSummary)';
+    const partial = JSON.stringify({ data: { repository: { i2: { subIssuesSummary: { total: 1, completed: 0 } } } }, errors: [{ message: denied }] });
+    expect(unsupportedFields(new CommandError(denied, denied, 1, partial))).toBeNull();
+  });
+
+  it('reads sub-issues without blockers, and blockers without sub-issues, on hosts lacking one of them', async () => {
+    const answer = (args: string[]) => args[3].includes('subIssuesSummary') && args[3].includes('blockedBy')
+      ? Promise.reject(error(`GraphQL: Field '${args[7] === 'name=a' ? 'blockedBy' : 'subIssuesSummary'}' doesn't exist on type 'Issue'`))
+      : Promise.resolve({ data: { repository: { i2: args[3].includes('blockedBy') ? { blockedBy: connection([blocker('OPEN', 'demo/b')]) } : { subIssuesSummary: { total: 3, completed: 1 } } } } });
+    const api = vi.fn<Api>(answer);
+    const [a] = await listIssues('demo/a', query(), api);
+    expect([a.nativeBlockers, a.subIssues]).toEqual([undefined, { total: 3, completed: 1 }]);
+    const [b] = await listIssues('demo/b', query(), api);
+    expect([b.nativeBlockers, b.subIssues]).toEqual([[{ number: 1, state: 'OPEN' }], undefined]);
   });
 
   it('logs persistent failures again after ten minutes', async () => {
