@@ -156,11 +156,13 @@ test("the manager's console opens with E at its desk and closes with Esc", async
 });
 
 test('the demo backlog marks parents and stalled work for the manager', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
   // A repo event carries stalled status through the same path as the initial snapshot.
   await page.routeWebSocket('**/ws', (ws) => {
     const server = ws.connectToServer();
     server.onMessage((message) => {
       const event = JSON.parse(message.toString()) as ServerEvent;
+      if (event.type === 'snapshot') event.data.settings.tutorialStep = -1;
       const repos = event.type === 'snapshot' ? event.data.repos : event.type === 'repo' ? [event.repo] : [];
       for (const repo of repos) if (repo.fullName === 'demo-co/pixel-todo') {
         const issue = repo.issues.find((i) => i.number === 1);
@@ -174,10 +176,14 @@ test('the demo backlog marks parents and stalled work for the manager', async ({
   await enterOffice(page);
   await expect(page.getByText("Open the manager's console")).toBeVisible();
   await page.keyboard.press('e');
-  await page.waitForTimeout(450);
-  await page.getByRole('button', { name: '📝 Issues' }).click();
+  const tab = page.getByRole('button', { name: '📝 Issues' });
+  await expect(async () => {
+    await tab.click();
+    await expect(tab).toHaveClass(/tab-on/, { timeout: 1000 });
+  }).toPass();
   await expect(page.getByText('parent: 6/6 sub-issues done', { exact: true })).toBeVisible();
   await expect(page.getByText('ended twice with no work', { exact: true })).toBeVisible();
+  await page.getByText('parent: 6/6 sub-issues done', { exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('parent-and-stalled-backlog.png') });
 });
 

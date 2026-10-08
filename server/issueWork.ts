@@ -22,3 +22,10 @@ export function recordNoWork(records: NoWorkEnding[], issue: IssueInfo): NoWorkE
     body: issue.body, labels: [...issue.labels], ownerCommentAt: issue.ownerCommentAt,
   }];
 }
+
+/** A known session baseline takes precedence over commits inherited from earlier sessions. */
+export function issueSessionWork(x: { startHead?: string | null; head: string | null; localAhead: number | null; remoteAhead: number | null }): 'none' | 'commits' | 'unknown' {
+  if (x.head && x.startHead) return x.head === x.startHead ? 'none' : 'commits';
+  if ((x.localAhead ?? 0) > 0 || (x.remoteAhead ?? 0) > 0) return 'commits';
+  return x.localAhead === 0 && x.remoteAhead === 0 ? 'none' : 'unknown';
+}

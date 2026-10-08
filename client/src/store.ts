@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { CEO_ID, type AgentView, type CeoInfo, type CliView, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
-import { issueBlockers, issueParent } from '../../shared/issues';
+import { issueBlockers, issueWorkNote } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
 export type Agent = Omit<AgentView, 'log'>;
@@ -482,7 +482,7 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
     .map((i) => {
       const waits = issueBlockers(i, open);
       const labels = i.labels.map((l) => l.replace(/^swarm:/i, '🎯 ')).slice(0, 2).join(', ');
-      return { key: `i-${i.number}`, number: i.number, title: i.title, url: i.url, note: [issueParent(i) ? `parent: ${issueParent(i)}` : i.subIssues === null ? 'sub-issues have not loaded' : '', i.stalled].filter(Boolean).join(' · ') || (waits.length ? `⏳ after ${waits.map((n) => typeof n === 'number' ? `#${n}` : n).join(', ')}` : labels || undefined) };
+      return { key: `i-${i.number}`, number: i.number, title: i.title, url: i.url, note: issueWorkNote(i) || (waits.length ? `⏳ after ${waits.map((n) => typeof n === 'number' ? `#${n}` : n).join(', ')}` : labels || undefined) };
     });
 
   const merged: KanbanCard[] = repo.pulls

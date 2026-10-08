@@ -408,3 +408,8 @@ export async function deskAhead(fullName: string, agentSlug: string, base: strin
   if (!Number.isSafeInteger(count) || count < 0) throw new Error('Local branch comparison unavailable');
   return count;
 }
+
+/** Session baseline, also for a resumed branch with existing commits. */
+export function deskHead(fullName: string, agentSlug: string): Promise<string> {
+  return git(['rev-parse', '--verify', 'HEAD'], { cwd: deskDir(fullName, agentSlug) });
+}

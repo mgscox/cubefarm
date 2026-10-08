@@ -48,6 +48,12 @@ export function issueParent(issue: Pick<IssueInfo, 'subIssues' | 'labels' | 'tit
   return null;
 }
 
+/** Status shared by the manager's issue list and Kanban cards. */
+export function issueWorkNote(issue: IssueInfo): string | null {
+  const parent = issueParent(issue);
+  return [parent ? `parent: ${parent}` : issue.subIssues === null ? 'sub-issues have not loaded' : '', issue.stalled].filter(Boolean).join(' · ') || null;
+}
+
 /** Why an issue must stay in the backlog, including explicit parent/PRD containers. */
 export function issueWaitReason(issue: IssueInfo, open: Set<number>): string | null {
   if (issue.subIssues === null) return 'sub-issues have not loaded';

@@ -230,6 +230,7 @@ export interface AgentView {
   issueNumber: number | null; // devs: the issue being worked on
   issueTitle: string | null; // devs: issue title; QA: title of the PR under test
   branch: string | null;
+  issueStartHead?: string | null; // baseline of this issue session; unknown after legacy recovery
   prNumber: number | null; // devs: the PR they opened; QA: the PR under test
   prUrl: string | null;
   currentTool: string | null;

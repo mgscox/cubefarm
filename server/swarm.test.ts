@@ -773,6 +773,25 @@ describe('CEO send_back_to_dev', () => {
   });
 });
 
+describe('issue baseline admission', () => {
+  it.each(['handover', 'stop', 'hold'] as const)('does not launch after %s while reading the baseline', async (action) => {
+    Object.assign(repo, { defaultBranch: 'main', links: [] });
+    const dev = s.state.agents[0];
+    Object.assign(dev, { task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', model: '', effort: '', cli: '' });
+    let read!: (head: string) => void;
+    vi.spyOn(s.backend, 'deskHead').mockReturnValue(new Promise<string>((resolve) => { read = resolve; }));
+    const launch = vi.spyOn(s.backend, 'startSession');
+    const starting = s.startAgentSession(dev, repo, '/desk', 'Please resolve issue #66', '');
+    expect(dev.status).toBe('working');
+    if (action === 'handover') (s as unknown as { officeUpdate: { handedOver: boolean } }).officeUpdate.handedOver = true;
+    if (action === 'stop') swarm.stopAgent('a1');
+    if (action === 'hold') (s.state as unknown as { officeHeld: boolean }).officeHeld = true;
+    read('base');
+    await starting;
+    expect(launch).not.toHaveBeenCalled();
+  });
+});
+
 describe('native parent issues', () => {
   it('never auto-starts a parent, but manual starts warn', async () => {
     setIssues({ ...issue(49), subIssues: { total: 8, completed: 8 } });
@@ -1033,7 +1052,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
     return sessions.length > n;
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
     f = s as unknown as Fake;
     backend = (s as unknown as { backend: Backend }).backend;
     Object.assign(repo, { defaultBranch: 'main', links: [], browserTesting: false });
@@ -1043,18 +1062,19 @@ describe('a developer session that ends without a PR after pushing commits', () 
       sessions.push({ opts, cb });
       return { send: () => undefined, stop: () => undefined };
     });
+    vi.spyOn(backend, 'deskHead').mockRejectedValue(new Error('baseline unavailable'));
     ahead = vi.spyOn(backend, 'branchAhead').mockResolvedValue(3);
     vi.spyOn(backend, 'prForBranch').mockResolvedValue(null);
     vi.spyOn(f, 'syncRepo').mockResolvedValue();
     vi.spyOn(f, 'buildSystemAppend').mockReturnValue('');
-    s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+    await s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
   });
 
 
   const emptyEnding = async () => {
     Object.assign(ada(), { status: 'working', task: 'issue', issueNumber: 66, issueTitle: 'Issue 66', branch: 'swarm/issue-66-ada', prNumber: null });
     ahead.mockResolvedValue(0);
-    s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+    await s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
     expect(await end({ ...cut, ok: true, errors: [] })).toBe(false);
     expect(ada()).toMatchObject({ status: 'idle', issueNumber: null });
   };
@@ -1130,9 +1150,25 @@ describe('a developer session that ends without a PR after pushing commits', () 
     await end(cut);
     expect(repo.noWorkEndings?.[0].count).toBe(1);
     Object.assign(ada(), { task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', prNumber: null });
-    s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+    await s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
     await end({ ...cut, interrupted: true } as typeof cut);
     expect(repo.noWorkEndings?.[0].count).toBe(1);
+  });
+
+  it('empty resumed sessions with inherited commits still stall without a draft PR nudge', async () => {
+    setIssues(issue(66));
+    const message = vi.spyOn(swarm, 'message');
+    vi.mocked(backend.deskHead).mockResolvedValue('existing-commit');
+    vi.spyOn(backend, 'deskAhead').mockResolvedValue(3);
+    for (let n = 0; n < 2; n++) {
+      Object.assign(ada(), { task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', prNumber: null });
+      await s.startAgentSession(ada(), repo, '/desk', 'Continue issue #66', '', 'thread-1');
+      await end({ ...cut, ok: true, errors: [] });
+      expect(repo.noWorkEndings?.[0].count).toBe(n + 1);
+    }
+    expect(ready()).toEqual([]);
+    expect(message).not.toHaveBeenCalled();
+    expect(f.state.messages.at(-1)?.text).toContain('3 pushed commits');
   });
 
   it('a work-producing ending breaks the no-work streak', async () => {
@@ -1140,7 +1176,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
     await emptyEnding();
     Object.assign(ada(), { task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', sessionId: 'thread-1', prNumber: null });
     ahead.mockResolvedValue(2);
-    s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+    await s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
     await end({ ...cut, ok: true, errors: [] });
     expect(repo.noWorkEndings).toEqual([]);
   });
@@ -1346,10 +1382,12 @@ describe('a developer session that ends without a PR after pushing commits', () 
       expect(sessions).toHaveLength(1);
       expect(ada()).toMatchObject({ status: 'error', task: 'issue', issueNumber: 66 }); // not left 'working' with no session
       pauseEnds();
+      await vi.advanceTimersByTimeAsync(0);
       expect(sessions).toHaveLength(2);
       expect(sessions[1].opts.cwd).toBe(backend.deskDir(repo.fullName, 'ada-a1'));
       expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
       f.schedule();
+      await vi.advanceTimersByTimeAsync(0);
       expect(sessions).toHaveLength(2);
     });
 
@@ -1362,6 +1400,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
       expect(sessions).toHaveLength(1);
       expect(ada()).toMatchObject({ status: 'done', task: 'issue', issueNumber: 66 });
       pauseEnds();
+      await vi.advanceTimersByTimeAsync(0);
       expect(sessions).toHaveLength(2);
       expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
       expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
@@ -1380,6 +1419,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
       expect(f.issueTaken(repo, 66)).toBe(true);
       barbara.status = 'done';
       f.schedule();
+      await vi.advanceTimersByTimeAsync(0);
       expect(sessions).toHaveLength(2);
       expect(ada()).toMatchObject({ status: 'working', heldRetry: null });
     });
@@ -1395,6 +1435,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
       expect(ada()).toMatchObject({ status: 'done', task: 'issue', issueNumber: 66, heldRetry: { issueNumber: 66, ahead: 3 } });
       expect(f.issueTaken(repo, 66)).toBe(true);
       f.schedule();
+      await vi.advanceTimersByTimeAsync(0);
       expect(sessions).toHaveLength(2);
       expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
       expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
@@ -1928,6 +1969,7 @@ describe('manual office closure', () => {
   });
 
   it('holds completion retries and resumes them once, retaining pushed work', async () => {
+    vi.spyOn(s.backend, 'deskHead').mockResolvedValueOnce('base').mockResolvedValue('new-commit');
     vi.spyOn(s.backend, 'prForBranch').mockResolvedValue(null);
     vi.spyOn(s.backend, 'branchAhead').mockResolvedValue(3);
     await swarm.assign('a1', 66);
@@ -1945,6 +1987,7 @@ describe('manual office closure', () => {
     vi.spyOn(s, 'startCeoWork').mockImplementation(() => {});
     s.schedule();
     s.schedule();
+    await drain();
     expect(sessions).toHaveLength(2);
     expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
   });

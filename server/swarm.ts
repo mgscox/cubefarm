@@ -13,7 +13,7 @@ import { planDevFix, type FixReason } from './fixPlan.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
-import { recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
+import { issueSessionWork, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
 import { pickRequestedStart, retainRequestedStarts } from './requestedStarts.ts';
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { officeLifecycle } from './officeLifecycle.ts';
@@ -112,6 +112,7 @@ interface PersistedAgent {
   sessionCli: AgentCli | null; // the CLI whose session sessionId is: only it can resume it
   /** The one more session an issue that ended without a PR gets, held over Claude's usage pause: see holdRetry. */
   heldRetry?: HeldRetry | null;
+  issueStartHead?: string | null;
   lastError: string | null;
   logTail: LogLine[];
 }
@@ -183,6 +184,7 @@ interface AgentRuntime {
   screenshot: { data: Buffer; mime: string; at: number } | null;
   shots: Shot[]; // every screenshot of the current session (QA evidence)
   terminal: AgentTerminal | null; // their terminal, once they've run in the terminal runtime
+  starting?: number; // reserved while reading an issue session baseline
   generation?: number; // bumped by every new task, cleared task and session: see nextGeneration
 }
 
@@ -710,6 +712,7 @@ export class Swarm {
       issueNumber: a.issueNumber,
       issueTitle: a.issueTitle,
       branch: a.branch,
+      issueStartHead: a.issueStartHead ?? null,
       prNumber: a.prNumber,
       prUrl: a.prUrl,
       currentTool: rt.currentTool,
@@ -1281,6 +1284,7 @@ export class Swarm {
   }
 
   private setNoWorkEndings(repo: PersistedRepo, records: NoWorkEnding[]) {
+    if (JSON.stringify(repo.noWorkEndings ?? []) === JSON.stringify(records)) return;
     repo.noWorkEndings = records;
     this.emitRepo(repo);
     this.save();
@@ -1808,10 +1812,10 @@ export class Swarm {
       .filter(Boolean)
       .join('\n');
 
-    this.startAgentSession(a, repo, cwd, prompt, this.buildSystemAppend(a, repo, cwd, branch));
+    await this.startAgentSession(a, repo, cwd, prompt, this.buildSystemAppend(a, repo, cwd, branch));
   }
 
-  private startAgentSession(
+  private async startAgentSession(
     a: PersistedAgent,
     repo: PersistedRepo,
     cwd: string,
@@ -1832,6 +1836,17 @@ export class Swarm {
     a.status = 'working';
     const how = this.sessionRuntime(a, resumeSessionId);
     this.emitAgent(a);
+    if (a.task === 'issue' && mode !== 'reattach') {
+      rt.starting = generation;
+      a.issueStartHead = null;
+      const head = await this.backend.deskHead(repo.fullName, this.agentSlug(a)).catch(() => null);
+      if (rt.starting === generation) delete rt.starting;
+      if (!this.state.agents.includes(a) || this.officeUpdate.handedOver || rt.generation !== generation || a.status !== 'working') return;
+      if (this.state.officeHeld) return this.deferPrepared(a, repo);
+      a.issueStartHead = head;
+      this.emitAgent(a);
+      this.save();
+    }
     let session: SessionHandle | undefined; // undefined while startSession runs, should a runner finish synchronously
     session = rt.session = this.backend.startSession(
       {
@@ -1958,29 +1973,30 @@ export class Swarm {
       return 0;
     }) : 0;
     if (gone()) return;
-    if (a.prNumber || ahead > 0) this.setNoWorkEndings(repo, (repo.noWorkEndings ?? []).filter((r) => r.issueNumber !== a.issueNumber));
     const localAhead = !a.prNumber && !result.interrupted ? await this.backend.deskAhead(repo.fullName, this.agentSlug(a), repo.defaultBranch).catch(() => null) : null;
     if (gone()) return;
-    if (localAhead && localAhead > 0) this.setNoWorkEndings(repo, (repo.noWorkEndings ?? []).filter((r) => r.issueNumber !== a.issueNumber));
-    if (!a.prNumber && prKnown && aheadKnown && ahead === 0 && !result.interrupted) {
+    const head = !a.prNumber && !result.interrupted ? await this.backend.deskHead(repo.fullName, this.agentSlug(a)).catch(() => null) : null;
+    if (gone()) return;
+    const work = issueSessionWork({ startHead: a.issueStartHead, head, localAhead, remoteAhead: aheadKnown ? ahead : null });
+    if (a.prNumber || work === 'commits') this.setNoWorkEndings(repo, (repo.noWorkEndings ?? []).filter((r) => r.issueNumber !== a.issueNumber));
+    if (!a.prNumber && prKnown && work === 'none' && !result.interrupted) {
       const unavailable = () => gone() || a.status === 'stopped' || this.agentRt.get(a.id)?.session;
       await this.syncRepo(repo.id);
       if (unavailable()) return;
       const issues = this.repoRt.get(repo.id)?.issues ?? [];
       const issue = issues.find((i) => i.number === a.issueNumber);
       const reason = issue && issueWaitReason(issue, new Set(issues.map((i) => i.number)));
-      if (localAhead === 0) {
-        await released;
-        if (unavailable()) return;
-        this.issueFailures.delete(`${repo.id}#${a.issueNumber}`);
-        if (issue) this.setNoWorkEndings(repo, recordNoWork(repo.noWorkEndings ?? [], issue));
-        const waiting = (issue && this.workIssue(repo, issue).stalled) || reason || undefined;
-        this.appendLog(a, [{ kind: 'system', text: `Returned #${a.issueNumber} to the backlog: ${waiting ?? 'no commits and no PR'}. No PR nudge is needed for this session.` }]);
-        this.cancelRequestedStart(a);
-        this.releaseIssue(a, repo, 0, waiting);
-        return;
-      }
+      await released;
+      if (unavailable()) return;
+      this.issueFailures.delete(`${repo.id}#${a.issueNumber}`);
+      if (issue) this.setNoWorkEndings(repo, recordNoWork(repo.noWorkEndings ?? [], issue));
+      const waiting = (issue && this.workIssue(repo, issue).stalled) || reason || undefined;
+      this.appendLog(a, [{ kind: 'system', text: `Returned #${a.issueNumber} to the backlog: ${waiting ?? 'no commits and no PR'}. No PR nudge is needed for this session.` }]);
+      this.cancelRequestedStart(a);
+      this.releaseIssue(a, repo, ahead, waiting);
+      return;
     }
+
     if (a.prNumber) this.cancelRequestedStart(a);
     // One more session on this desk (pushed work, or a nudge to open the PR) waits for the desk's clean-up, which kills what runs there.
     const retry = !a.prNumber && !this.nudged.has(`${repo.id}#${a.issueNumber}`) && (ahead > 0 || result.ok);
@@ -2029,7 +2045,7 @@ export class Swarm {
       `Check git status and git log origin/${repo.defaultBranch}..HEAD, finish what is left (run the checks), push, and open the PR with "Closes #${a.issueNumber}" in its body. If the issue can't be done, open a draft PR that explains why.`,
     ].join('\n');
     Object.assign(a, { startedAt: Date.now(), endedAt: null, lastError: null });
-    this.startAgentSession(a, repo, cwd, prompt, this.buildSystemAppend(a, repo, cwd, a.branch!), a.sessionId ?? undefined);
+    return this.startAgentSession(a, repo, cwd, prompt, this.buildSystemAppend(a, repo, cwd, a.branch!), a.sessionId ?? undefined);
   }
 
   /** A retry that would start during Claude's usage pause: the developer keeps the issue (in the state file too) and gets it once the pause ends. */
@@ -2237,7 +2253,7 @@ export class Swarm {
       .join('\n');
 
     try {
-      this.startAgentSession(a, repo, cwd, prompt, this.buildQaSystemAppend(a, repo, cwd, branch, pr), undefined, QA_SCHEMA);
+      await this.startAgentSession(a, repo, cwd, prompt, this.buildQaSystemAppend(a, repo, cwd, branch, pr), undefined, QA_SCHEMA);
     } catch (err) {
       a.status = 'error';
       a.endedAt = Date.now();
@@ -2427,7 +2443,7 @@ export class Swarm {
     const mergeEnd = 'Then reply with a short summary of what you did. Do not open a new pull request; the office merges it once the checks pass, after another QA round if the code changed.';
     const prompt = (mergeFix ? [...mergeFix, '', mergeEnd] : qaFix).filter((l) => l !== '').join('\n');
     const resume = original && rec.devSessionId ? rec.devSessionId : undefined;
-    this.startAgentSession(dev, repo, cwd, prompt, this.buildSystemAppend(dev, repo, cwd, localBranch, { pr: rec.prNumber, headRef }), resume);
+    await this.startAgentSession(dev, repo, cwd, prompt, this.buildSystemAppend(dev, repo, cwd, localBranch, { pr: rec.prNumber, headRef }), resume);
   }
 
   private onFixFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult) {
@@ -2475,6 +2491,7 @@ export class Swarm {
       return;
     }
     if (a.role === 'qa') throw new HttpError(409, `${a.name} isn't testing anything right now. Send a PR to QA from the Kanban board.`);
+    if (rt.starting !== undefined) throw new HttpError(409, `${a.name}'s session is still starting; try again in a moment`);
     if (a.status === 'preparing') throw new HttpError(409, `${a.name} is still setting up; try again in a moment`);
     if (!a.sessionId || !a.branch || a.task === 'qa') throw new HttpError(409, `${a.name} has no session to continue. Assign an issue instead.`);
     this.ensureSlot();
@@ -2484,7 +2501,7 @@ export class Swarm {
     a.startedAt = Date.now();
     if (a.task === null) a.task = 'issue';
     const fixing = a.task === 'fix' && a.prNumber ? { pr: a.prNumber, headRef: a.branch } : undefined;
-    this.startAgentSession(a, repo, cwd, text, this.buildSystemAppend(a, repo, cwd, a.branch, fixing), a.sessionId, undefined, typed ? 'typed' : null);
+    await this.startAgentSession(a, repo, cwd, text, this.buildSystemAppend(a, repo, cwd, a.branch, fixing), a.sessionId, undefined, typed ? 'typed' : null);
   }
 
   updateSettings(patch: Partial<SwarmSettings>) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { recordNoWork, retainNoWork } from './issueWork.ts';
+import { issueSessionWork, recordNoWork, retainNoWork } from './issueWork.ts';
 import { deskAhead } from './workspace.ts';
 import type { IssueInfo } from '../shared/types.ts';
 
@@ -24,5 +24,19 @@ describe('local commit inspection', () => {
 
   it.each(['', 'NaN', '-1', '0.5'])('rejects unavailable counts: %j', async (raw) => {
     await expect(deskAhead('demo/repo', 'ada', 'main', async () => raw)).rejects.toThrow('Local branch comparison unavailable');
+  });
+});
+
+describe('work produced by a session', () => {
+  it('counts an unchanged inherited branch as empty, but a new commit as work', () => {
+    const start = { startHead: 'old', localAhead: 3, remoteAhead: 3 };
+    expect(issueSessionWork({ ...start, head: 'old' })).toBe('none');
+    expect(issueSessionWork({ ...start, head: 'new' })).toBe('commits');
+  });
+
+  it('uses verified empty branches after legacy recovery and preserves unknown reads', () => {
+    expect(issueSessionWork({ head: null, localAhead: 0, remoteAhead: 0 })).toBe('none');
+    expect(issueSessionWork({ head: null, localAhead: null, remoteAhead: 0 })).toBe('unknown');
+    expect(issueSessionWork({ head: null, localAhead: 2, remoteAhead: null })).toBe('commits');
   });
 });
