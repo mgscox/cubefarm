@@ -1,3 +1,4 @@
+import { issueWorkNote } from '../../../shared/issues';
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { PreviewPill, PreviewSettings } from './AppViewer';
@@ -608,6 +609,7 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
         <div className="repo-list tall">
           {repo?.issues.length === 0 && <div className="muted small">None. Nice.</div>}
           {repo?.issues.map((i) => {
+            const note = issueWorkNote(i);
             const holder = agents.find((a) => a.role === 'dev' && a.issueNumber === i.number && a.status !== 'idle');
             return (
               <div key={i.number} className="repo-row">
@@ -616,6 +618,7 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
                     #{i.number}
                   </a>{' '}
                   {i.title}
+                  {note && <div className="muted small">{note}</div>}
                   {i.labels.length > 0 && <div className="muted small">{i.labels.join(', ')}</div>}
                 </div>
                 {holder ? (

@@ -65,6 +65,10 @@ seed('demo-co/pixel-todo', 'A cheerful todo app', [
   // Needs a person: the office never hands it out, however many developers are free.
   ['Register the app in the App Store', 'Needs the company account and a signed agreement.', [READY_FOR_HUMAN]],
 ]);
+const parentRepo = repos.get('demo-co/pixel-todo')!;
+const parent = issue(parentRepo.nextNumber++, 'Todo release plan', 'Implementation is complete; review and close this parent.', parentRepo.fullName);
+parent.subIssues = { total: 6, completed: 6 };
+parentRepo.issues.push(parent);
 repos.get('demo-co/pixel-todo')!.issues[2].nativeBlockers = [{ number: 2, state: 'OPEN' }];
 seed('demo-co/weather-api', 'Tiny weather REST API', [
   ['Add /forecast endpoint', 'Return a 5-day forecast for a city.'],
@@ -425,6 +429,7 @@ export function createDemoBackend(): Backend {
       return { fullName: newRepo(name, opts.description), path: `/demo/projects/${name}` };
     },
     listIssues: async (fullName) => (repos.get(fullName)?.issues ?? []).map((i) => ({ ...i,
+      subIssues: i.subIssues ?? { total: 0, completed: 0 },
       nativeBlockers: (i.nativeBlockers ?? []).map((b) => ({ ...b,
         state: closedIssues.has(`${b.repo ?? fullName}#${b.number}`) ? 'CLOSED' : b.state,
       })),
@@ -470,6 +475,8 @@ export function createDemoBackend(): Backend {
     },
     prForBranch: async () => null,
     branchAhead: async () => 0, // the fake sessions always open their PR
+    deskAhead: async () => 0,
+    deskHead: async () => 'demo-head',
     prDetails: async (fullName, number) => {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
       if (!pr) throw new Error(`Unknown PR #${number}`);

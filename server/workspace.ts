@@ -400,3 +400,16 @@ Write-Output $kill.Count`;
     }
   }
 }
+
+/** Read local commits without fetching or changing the developer's worktree. */
+export async function deskAhead(fullName: string, agentSlug: string, base: string, query = git): Promise<number> {
+  const raw = await query(['rev-list', '--count', `origin/${base}..HEAD`], { cwd: deskDir(fullName, agentSlug) });
+  const count = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error('Local branch comparison unavailable');
+  return count;
+}
+
+/** Session baseline, also for a resumed branch with existing commits. */
+export function deskHead(fullName: string, agentSlug: string): Promise<string> {
+  return git(['rev-parse', '--verify', 'HEAD'], { cwd: deskDir(fullName, agentSlug) });
+}

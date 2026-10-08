@@ -26,6 +26,10 @@ export interface Backend {
   prForBranch(fullName: string, branch: string): Promise<{ number: number; url: string } | null>;
   /** Commits a branch has on GitHub ahead of the base branch (throws when the branch was never pushed). */
   branchAhead(fullName: string, base: string, branch: string): Promise<number>;
+  /** Current local HEAD, captured before an issue session starts. */
+  deskHead(fullName: string, agentSlug: string): Promise<string>;
+  /** Local commits ahead of the desk base, including unpushed work. */
+  deskAhead(fullName: string, agentSlug: string, base: string): Promise<number>;
   prDetails(fullName: string, number: number): Promise<github.PrDetails>;
   issueDetails(fullName: string, number: number): Promise<{ title: string; body: string }>;
   commentPull(fullName: string, number: number, body: string): Promise<string>;
@@ -78,6 +82,8 @@ export const realBackend: Backend = {
   closePull: github.closePull,
   prForBranch: github.prForBranch,
   branchAhead: github.branchAhead,
+  deskAhead: workspace.deskAhead,
+  deskHead: workspace.deskHead,
   prDetails: github.prDetails,
   issueDetails: github.issueDetails,
   commentPull: github.commentPull,

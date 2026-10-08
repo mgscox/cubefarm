@@ -11,7 +11,7 @@ import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRun
 // A Swarm that is never init()ed: no state file, scheduler timers or real sessions.
 
 type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => Promise<void>;
-type Repo = { id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; parkedBranches?: ParkedBranch[]; preview: { command: null; env: object } };
+type Repo = { noWorkEndings?: import('../shared/types.ts').NoWorkEnding[]; id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; parkedBranches?: ParkedBranch[]; preview: { command: null; env: object } };
 type Backend = ReturnType<typeof createDemoBackend>;
 type QaRec = QaView & { issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
 interface Internals {
@@ -820,7 +820,101 @@ describe('CEO send_back_to_dev', () => {
   });
 });
 
+describe('issue baseline admission', () => {
+  it.each(['handover', 'stop', 'hold'] as const)('does not launch after %s while reading the baseline', async (action) => {
+    Object.assign(repo, { defaultBranch: 'main', links: [] });
+    const dev = s.state.agents[0];
+    Object.assign(dev, { task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', model: '', effort: '', cli: '' });
+    let read!: (head: string) => void;
+    vi.spyOn(s.backend, 'deskHead').mockReturnValue(new Promise<string>((resolve) => { read = resolve; }));
+    const launch = vi.spyOn(s.backend, 'startSession');
+    const starting = s.startAgentSession(dev, repo, '/desk', 'Please resolve issue #66', '');
+    expect(dev.status).toBe('working');
+    if (action === 'handover') (s as unknown as { officeUpdate: { handedOver: boolean } }).officeUpdate.handedOver = true;
+    if (action === 'stop') swarm.stopAgent('a1');
+    if (action === 'hold') (s.state as unknown as { officeHeld: boolean }).officeHeld = true;
+    read('base');
+    await starting;
+    expect(launch).not.toHaveBeenCalled();
+  });
+});
+
+describe('native parent issues', () => {
+  it('never auto-starts a parent, but manual starts warn', async () => {
+    setIssues({ ...issue(49), subIssues: { total: 8, completed: 8 } });
+    expect(ready()).toEqual([]);
+    expect(s.startIssueWork(repo)).toBe(false);
+    const status = JSON.parse(s.companyStatus());
+    expect(status.floors[0].capacity.issuesReadyToStart).toBe(0);
+    expect(status.floors[0].backlog[0].parent).toBe('8/8 sub-issues done');
+    const result = await swarm.assign('a1', 49);
+    expect(result.warning).toContain('parent: 8/8');
+    expect(runTask).toHaveBeenCalledOnce();
+    expect(await s.officeTools().call('start_issue', { floor: 1, number: 49 })).toContain('Warning: parent: 8/8');
+  });
+
+  it('preserves a parent through failed and incomplete summary queries; new unread issues wait', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const raw = issue(49);
+    const query = vi.fn().mockResolvedValue([raw]);
+    const blockedBy = { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+    const api = vi.fn().mockResolvedValueOnce({ data: { repository: { i49: { blockedBy, subIssuesSummary: { total: 8, completed: 8 } } } } }).mockRejectedValueOnce(new Error('network')).mockResolvedValue({ data: { repository: { i49: { blockedBy }, i50: { blockedBy } } } });
+    setIssues(...await listIssues(repo.fullName, query, api));
+    expect(api.mock.calls[0][0].join(' ')).toContain('subIssuesSummary { total completed }');
+    query.mockResolvedValue([raw, issue(50)]);
+    for (let n = 0; n < 2; n++) {
+      setIssues(...await listIssues(repo.fullName, query, api));
+      expect(s.repoRt.get(repo.id)!.issues[0].subIssues).toEqual({ total: 8, completed: 8 });
+      expect(s.repoRt.get(repo.id)!.issues[1].subIssues).toBeNull();
+      expect(ready()).toEqual([]);
+      expect(s.startIssueWork(repo)).toBe(false);
+    }
+  });
+
+  it('still reads parent summaries when native blockers are explicitly unsupported', async () => {
+    const raw = issue(49);
+    const query = vi.fn().mockResolvedValue([raw]);
+    const api = vi.fn().mockRejectedValueOnce([{ message: "Field 'blockedBy' doesn't exist on type 'Issue'" }]).mockResolvedValue({ data: { repository: { i49: { subIssuesSummary: { total: 8, completed: 8 } } } } });
+    setIssues(...await listIssues(repo.fullName, query, api));
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(api.mock.calls[1][0].join(' ')).not.toContain('blockedBy');
+    expect(ready()).toEqual([]);
+    expect(s.repoRt.get(repo.id)!.issues[0].nativeBlockers).toBeUndefined();
+    expect(s.repoRt.get(repo.id)!.issues[0].subIssues).toEqual({ total: 8, completed: 8 });
+  });
+
+  it('reads only new owner comments as reset markers, retaining markers through query failure', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const query = vi.fn().mockResolvedValue([issue(49)]);
+    const node = {
+      blockedBy: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+      subIssuesSummary: { total: 0, completed: 0 },
+      comments: { nodes: [
+        { author: { login: 'DEMO-CO' }, createdAt: '2026-10-08T01:00:00Z' },
+        { author: { login: 'developer' }, createdAt: '2026-10-08T02:00:00Z' },
+        { author: null, createdAt: '2026-10-08T03:00:00Z' },
+      ] },
+    };
+    const api = vi.fn().mockResolvedValueOnce({ data: { repository: { i49: node } } }).mockRejectedValue(new Error('network'));
+    const first = await listIssues(repo.fullName, query, api);
+    expect(first[0].ownerCommentAt).toBe('2026-10-08T01:00:00Z');
+    expect((await listIssues(repo.fullName, query, api))[0].ownerCommentAt).toBe(first[0].ownerCommentAt);
+  });
+
+  it('demo supplies a parent that stays out of ready capacity', async () => {
+    setIssues(...await s.backend.listIssues(repo.fullName));
+    const parent = s.repoRt.get(repo.id)!.issues.find((i) => i.subIssues?.total);
+    expect(parent).toBeDefined();
+    expect(ready()).not.toContain(parent!.number);
+    expect(JSON.parse(s.companyStatus()).floors[0].backlog.find((i: { number: number }) => i.number === parent!.number).parent).toBe('6/6 sub-issues done');
+  });
+});
+
 describe('native issue dependencies', () => {
+  const nativeAnswer = (args: string[]) => ({ data: { repository: Object.fromEntries([...args[3].matchAll(/i(\d+): issue/g)].map((m) => [`i${m[1]}`, {
+    ...(args[3].includes('subIssuesSummary') && { subIssuesSummary: { total: 0, completed: 0 } }), comments: { nodes: [] },
+  }])) } });
+
   it.each(['fresh', 'unsupported', 'cached'])('fails closed through a real failed JSON command after %s dependency reads', async (previous) => {
     vi.useRealTimers();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -830,13 +924,13 @@ describe('native issue dependencies', () => {
       nodes: [{ number: 1, state: 'OPEN', repository: { nameWithOwner: repo.fullName } }],
       pageInfo: { hasNextPage: false, endCursor: null },
     };
-    const response = { data: { repository: { i2: { blockedBy }, i3: { blockedBy: null } } },
+    const response = { data: { repository: { i2: { blockedBy, subIssuesSummary: { total: 0, completed: 0 } }, i3: { blockedBy: null } } },
       errors: [{ message: 'Resource not accessible by personal access token', path: ['repository', 'i3', 'blockedBy'] }] };
     const stderr = `gh: GraphQL: ${denied}\n`;
     const command = () => run(process.execPath, ['-e', `process.stdout.write(${JSON.stringify(JSON.stringify(response))}); process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 1;`]);
     const api = vi.fn<NonNullable<Parameters<typeof listIssues>[2]>>((args) => ghJson(args, undefined, command));
     if (previous === 'unsupported') api.mockRejectedValueOnce(new CommandError(stderr, stderr, 1));
-    if (previous === 'cached') api.mockResolvedValueOnce({ data: { repository: { i2: { blockedBy } } } });
+    if (previous === 'cached') api.mockResolvedValueOnce({ data: { repository: { i2: { blockedBy, subIssuesSummary: { total: 0, completed: 0 } } } } });
     if (previous !== 'fresh') await listIssues(repo.fullName, query, api);
     query.mockResolvedValue([issue(2), issue(3)]);
     const issues = await listIssues(repo.fullName, query, api);
@@ -861,9 +955,10 @@ describe('native issue dependencies', () => {
     const stderr = `gh: GraphQL: ${diagnostic}${ending}`;
     const stdout = JSON.stringify({ errors: [{ message: diagnostic.split(' (')[0], path: ['repository', 'i2', 'blockedBy'] }] });
     const command = () => run(process.execPath, ['-e', `process.stdout.write(${JSON.stringify(stdout)}); process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 1;`]);
-    const api = (args: string[]) => ghJson(args, undefined, command);
+    const api = vi.fn((args: string[]) => args[3].includes('blockedBy') ? ghJson(args, undefined, command) : Promise.resolve(nativeAnswer(args)));
     const issues = await listIssues(repo.fullName, query, api);
-    expect(issues.every((i) => i.nativeBlockers === undefined)).toBe(true);
+    expect(api).toHaveBeenCalledTimes(2); // the retry without blockedBy still reads the sub-issue summaries
+    expect(issues.every((i) => i.nativeBlockers === undefined && i.subIssues?.total === 0)).toBe(true);
     setIssues({ ...issues[0], labels: ['ready-for-human'] }, ...issues.slice(1));
     expect(ready()).toEqual([3]);
     setIssues(...issues.slice(1));
@@ -874,13 +969,36 @@ describe('native issue dependencies', () => {
     expect(ready()).toEqual([]);
   });
 
+  it.each([
+    "Field 'blockedBy' doesn't exist on type 'Issue', Field 'subIssuesSummary' doesn't exist on type 'Issue'",
+    "Cannot query field 'subIssuesSummary' on type 'Issue', Cannot query field 'blockedBy' on type 'Issue'",
+    'Resource not accessible by personal access token (repository.i2.blockedBy), Resource not accessible by personal access token (repository.i2.subIssuesSummary)',
+  ])('schedules issues on hosts without blockers or sub-issues: %s', async (diagnostic) => {
+    vi.useRealTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const query = vi.fn().mockResolvedValue([issue(1), issue(2, [], 'Depends on #1'), issue(3)]);
+    const stderr = `gh: GraphQL: ${diagnostic}\n`;
+    const command = () => run(process.execPath, ['-e', `process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 1;`]);
+    const api = vi.fn((args: string[]) => /blockedBy|subIssuesSummary/.test(args[3]) ? ghJson(args, undefined, command) : Promise.resolve(nativeAnswer(args)));
+    const issues = await listIssues(repo.fullName, query, api);
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(issues.every((i) => i.nativeBlockers === undefined && i.subIssues === undefined)).toBe(true);
+    setIssues(...issues);
+    expect(ready()).toEqual([1, 3]);
+    // A host that keeps answering with the same diagnostics still schedules from issue bodies.
+    const stuck = vi.fn((args: string[]) => ghJson(args, undefined, command));
+    setIssues(...await listIssues(repo.fullName, query, stuck));
+    expect(stuck).toHaveBeenCalledTimes(2);
+    expect(ready()).toEqual([1, 3]);
+  });
+
   it('keeps native blockers through a failed dependency sync and excludes unread new issues', async () => {
     const raw = { ...issue(2), labels: [] };
     const query = vi.fn().mockResolvedValue([raw]);
     const api = vi.fn().mockResolvedValueOnce({ data: { repository: { i2: { blockedBy: {
       nodes: [{ number: 1, state: 'OPEN', repository: { nameWithOwner: repo.fullName } }],
       pageInfo: { hasNextPage: false, endCursor: null },
-    } } } } }).mockRejectedValue(new Error('network'));
+    }, subIssuesSummary: { total: 0, completed: 0 } } } } }).mockRejectedValue(new Error('network'));
     setIssues(...await listIssues(repo.fullName, query, api));
     expect(ready()).toEqual([]);
     query.mockResolvedValue([raw, { ...raw, number: 3 }]);
@@ -1008,7 +1126,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
     return sessions.length > n;
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
     f = s as unknown as Fake;
     backend = (s as unknown as { backend: Backend }).backend;
     Object.assign(repo, { defaultBranch: 'main', links: [], browserTesting: false });
@@ -1018,13 +1136,125 @@ describe('a developer session that ends without a PR after pushing commits', () 
       sessions.push({ opts, cb });
       return { send: () => undefined, stop: () => undefined };
     });
+    vi.spyOn(backend, 'deskHead').mockRejectedValue(new Error('baseline unavailable'));
     ahead = vi.spyOn(backend, 'branchAhead').mockResolvedValue(3);
     vi.spyOn(backend, 'prForBranch').mockResolvedValue(null);
     vi.spyOn(f, 'syncRepo').mockResolvedValue();
     vi.spyOn(f, 'buildSystemAppend').mockReturnValue('');
-    s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+    await s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
   });
 
+
+  const emptyEnding = async () => {
+    Object.assign(ada(), { status: 'working', task: 'issue', issueNumber: 66, issueTitle: 'Issue 66', branch: 'swarm/issue-66-ada', prNumber: null });
+    ahead.mockResolvedValue(0);
+    await s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(false);
+    expect(ada()).toMatchObject({ status: 'idle', issueNumber: null });
+  };
+
+  it('two consecutive no-work endings stop automatic starts, persist and surface a stall without a draft PR nudge', async () => {
+    setIssues(issue(66));
+    const message = vi.spyOn(swarm, 'message');
+    await emptyEnding();
+    expect(ready()).toEqual([66]);
+    expect(repo.noWorkEndings?.[0].count).toBe(1);
+    await emptyEnding();
+    repo.noWorkEndings = JSON.parse(JSON.stringify(repo.noWorkEndings));
+    expect(ready()).toEqual([]);
+    expect(s.startIssueWork(repo)).toBe(false);
+    expect(message).not.toHaveBeenCalled();
+    const status = JSON.parse(s.companyStatus());
+    expect(status.floors[0].backlog[0].stalled).toBe('ended twice with no work');
+    expect(status.floors[0].capacity.issuesReadyToStart).toBe(0);
+    expect(s.repoView(repo)).toMatchObject({ issues: [{ stalled: 'ended twice with no work' }] });
+    expect(f.state.messages.at(-1)?.text).toContain('ended twice with no work');
+  });
+
+  it('a manual start clears the consecutive no-work count', async () => {
+    setIssues(issue(66));
+    await emptyEnding();
+    await emptyEnding();
+    await swarm.assign('a1', 66);
+    expect(repo.noWorkEndings).toEqual([]);
+    expect(ready()).toEqual([66]);
+    await emptyEnding();
+    expect(repo.noWorkEndings?.[0].count).toBe(1);
+  });
+
+  it.each(['owner comment', 'labels', 'body'] as const)('a new %s clears the stall on sync', async (edit) => {
+    setIssues(issue(66));
+    await emptyEnding();
+    await emptyEnding();
+    const changed = issue(66);
+    if (edit === 'owner comment') changed.ownerCommentAt = '2026-10-08T12:00:00Z';
+    if (edit === 'labels') changed.labels = ['swarm:server'];
+    if (edit === 'body') changed.body = 'Clarified work';
+    vi.mocked(f.syncRepo).mockRestore();
+    vi.spyOn(backend, 'listIssues').mockResolvedValue([changed]);
+    vi.spyOn(backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    await f.syncRepo(repo.id);
+    expect(repo.noWorkEndings).toEqual([]);
+    expect(ready()).toEqual([66]);
+  });
+
+  it('unpushed local commits are work and retain the finish-PR nudge', async () => {
+    setIssues(issue(66));
+    ahead.mockResolvedValue(0);
+    vi.spyOn(backend, 'deskAhead').mockResolvedValue(1);
+    ada().sessionId = 'thread-1';
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(true);
+    expect(repo.noWorkEndings ?? []).toEqual([]);
+    expect(sessions[1].opts.prompt).toContain('open the PR');
+  });
+
+  it('failed local commit reads and failed PR lookups do not count as no work', async () => {
+    setIssues(issue(66));
+    ahead.mockResolvedValue(0);
+    vi.spyOn(backend, 'deskAhead').mockRejectedValue(new Error('disk unavailable'));
+    vi.spyOn(backend, 'prForBranch').mockRejectedValue(new Error('network'));
+    ada().sessionId = 'thread-1';
+    expect(await end({ ...cut, ok: true, errors: [] })).toBe(true);
+    expect(repo.noWorkEndings ?? []).toEqual([]);
+  });
+
+  it('unsuccessful empty endings count but manager interruptions do not', async () => {
+    setIssues(issue(66));
+    ahead.mockResolvedValue(0);
+    await end(cut);
+    expect(repo.noWorkEndings?.[0].count).toBe(1);
+    expect([ada().status, ada().lastError]).toEqual(['error', cut.errors[0]]); // a crash reads as one, not as a quiet hand-back
+    Object.assign(ada(), { task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', prNumber: null });
+    await s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+    await end({ ...cut, interrupted: true } as typeof cut);
+    expect(repo.noWorkEndings?.[0].count).toBe(1);
+  });
+
+  it('empty resumed sessions with inherited commits still stall without a draft PR nudge', async () => {
+    setIssues(issue(66));
+    const message = vi.spyOn(swarm, 'message');
+    vi.mocked(backend.deskHead).mockResolvedValue('existing-commit');
+    vi.spyOn(backend, 'deskAhead').mockResolvedValue(3);
+    for (let n = 0; n < 2; n++) {
+      Object.assign(ada(), { task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', prNumber: null });
+      await s.startAgentSession(ada(), repo, '/desk', 'Continue issue #66', '', 'thread-1');
+      await end({ ...cut, ok: true, errors: [] });
+      expect(repo.noWorkEndings?.[0].count).toBe(n + 1);
+    }
+    expect(ready()).toEqual([]);
+    expect(message).not.toHaveBeenCalled();
+    expect(f.state.messages.at(-1)?.text).toContain('3 pushed commits');
+  });
+
+  it('a work-producing ending breaks the no-work streak', async () => {
+    setIssues(issue(66));
+    await emptyEnding();
+    Object.assign(ada(), { task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', sessionId: 'thread-1', prNumber: null });
+    ahead.mockResolvedValue(2);
+    await s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+    await end({ ...cut, ok: true, errors: [] });
+    expect(repo.noWorkEndings).toEqual([]);
+  });
 
   it.each(['native', 'body', 'human', 'parent', 'prd', 'unread', 'unpushed'] as const)('releases zero-commit %s work without a PR nudge and waits for changes', async (kind) => {
     ahead.mockResolvedValue(0);
@@ -1227,10 +1457,12 @@ describe('a developer session that ends without a PR after pushing commits', () 
       expect(sessions).toHaveLength(1);
       expect(ada()).toMatchObject({ status: 'error', task: 'issue', issueNumber: 66 }); // not left 'working' with no session
       pauseEnds();
+      await vi.advanceTimersByTimeAsync(0);
       expect(sessions).toHaveLength(2);
       expect(sessions[1].opts.cwd).toBe(backend.deskDir(repo.fullName, 'ada-a1'));
       expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
       f.schedule();
+      await vi.advanceTimersByTimeAsync(0);
       expect(sessions).toHaveLength(2);
     });
 
@@ -1243,6 +1475,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
       expect(sessions).toHaveLength(1);
       expect(ada()).toMatchObject({ status: 'done', task: 'issue', issueNumber: 66 });
       pauseEnds();
+      await vi.advanceTimersByTimeAsync(0);
       expect(sessions).toHaveLength(2);
       expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
       expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
@@ -1261,6 +1494,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
       expect(f.issueTaken(repo, 66)).toBe(true);
       barbara.status = 'done';
       f.schedule();
+      await vi.advanceTimersByTimeAsync(0);
       expect(sessions).toHaveLength(2);
       expect(ada()).toMatchObject({ status: 'working', heldRetry: null });
     });
@@ -1276,6 +1510,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
       expect(ada()).toMatchObject({ status: 'done', task: 'issue', issueNumber: 66, heldRetry: { issueNumber: 66, ahead: 3 } });
       expect(f.issueTaken(repo, 66)).toBe(true);
       f.schedule();
+      await vi.advanceTimersByTimeAsync(0);
       expect(sessions).toHaveLength(2);
       expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
       expect(sessions[1].opts.prompt).toContain('swarm/issue-66-ada has 3 pushed commits');
@@ -1809,6 +2044,7 @@ describe('manual office closure', () => {
   });
 
   it('holds completion retries and resumes them once, retaining pushed work', async () => {
+    vi.spyOn(s.backend, 'deskHead').mockResolvedValueOnce('base').mockResolvedValue('new-commit');
     vi.spyOn(s.backend, 'prForBranch').mockResolvedValue(null);
     vi.spyOn(s.backend, 'branchAhead').mockResolvedValue(3);
     await swarm.assign('a1', 66);
@@ -1826,6 +2062,7 @@ describe('manual office closure', () => {
     vi.spyOn(s, 'startCeoWork').mockImplementation(() => {});
     s.schedule();
     s.schedule();
+    await drain();
     expect(sessions).toHaveLength(2);
     expect(sessions[1].opts.resumeSessionId).toBe('thread-1');
   });

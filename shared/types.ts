@@ -31,6 +31,9 @@ export interface IssueInfo {
   url: string;
   labels: string[];
   createdAt: string;
+  subIssues?: { total: number; completed: number } | null; // null: unread; last successful native summary otherwise
+  ownerCommentAt?: string; // newest comment by the repository owner
+  stalled?: string;
   nativeBlockers?: IssueDependency[] | null; // null: unread, undefined: unsupported; otherwise last successful sync
 }
 
@@ -82,6 +85,14 @@ export interface ParkedBranch {
   branch: string;
 }
 
+export interface NoWorkEnding {
+  issueNumber: number;
+  count: number;
+  body: string;
+  labels: string[];
+  ownerCommentAt?: string;
+}
+
 export interface RepoView {
   id: string; // "owner/name"
   fullName: string;
@@ -93,6 +104,7 @@ export interface RepoView {
   autoAssign: boolean;
   requestedStarts: RequestedStart[];
   parkedBranches: ParkedBranch[];
+  noWorkEndings: NoWorkEnding[];
   autoMerge: boolean; // PRs merge themselves once QA passes and GitHub's checks are green
   folderSync: string | null; // how the floor's main checkout stands against GitHub: "in sync", "updated to abc1234", "2 behind: local changes" …
   browserTesting: boolean;
@@ -218,6 +230,7 @@ export interface AgentView {
   issueNumber: number | null; // devs: the issue being worked on
   issueTitle: string | null; // devs: issue title; QA: title of the PR under test
   branch: string | null;
+  issueStartHead?: string | null; // baseline of this issue session; unknown after legacy recovery
   prNumber: number | null; // devs: the PR they opened; QA: the PR under test
   prUrl: string | null;
   currentTool: string | null;
