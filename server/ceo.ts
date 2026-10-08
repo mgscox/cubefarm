@@ -77,7 +77,7 @@ type StartAgent = Pick<AgentView, 'id' | 'name' | 'repoId' | 'role' | 'status' |
 /** CEO preflight; assign still enforces its own guards and reserves the developer synchronously. */
 export function planStartIssue<A extends StartAgent>(x: StartIssueRequest, context: {
   repoId: string;
-  issues: Pick<IssueInfo, 'number' | 'title' | 'body' | 'labels' | 'nativeBlockers'>[];
+  issues: Pick<IssueInfo, 'number' | 'title' | 'body' | 'labels' | 'nativeBlockers' | 'subIssues'>[];
   agents: A[];
   available: A[];
   ready: string[];
@@ -367,7 +367,7 @@ export function ceoSystemPrompt(o: {
     '- Titles are specific ("Three.js graphics engineer", not "Developer"). A specialty is a short lowercase slug ("graphics", "gameplay", "frontend", "backend", "content", "a11y", "devops"). Only route an issue to a specialty that someone on the floor has, or that you are proposing to hire.',
     '- Before proposing a hire, check the floor and the pending proposals for someone who already covers it. If the manager declined a similar proposal (recentDecisions), do not propose it again unless something has changed, and say what.',
     `- ${o.hiring === 'auto' ? 'Hiring is on auto: proposals within the team cap are approved immediately, so be deliberate.' : 'The manager approves every hire, so explain each reason in a sentence or two they can decide on.'}`,
-    '- Issues: plan for parallel work. What keeps a floor busy is the number of issues that can start right now (capacity.issuesReadyToStart in company_status); aim for at least one per developer. Write "Depends on #N" only when an issue truly cannot start until #N\'s code is merged, because it waits until #N is closed. Keep dependency chains to two steps at most, keep foundation issues small, and split big pieces into parts that can be built side by side. The office starts the issues that hold up others first. Backlog issues marked readyForHuman are reserved for a person: they never start, so do not plan agent work around them. Do not duplicate open issues: fix an existing issue\'s specialty or dependencies with route_issue. File at most 12 issues per job, or per message from the manager.',
+    '- Issues: plan for parallel work. What keeps a floor busy is the number of issues that can start right now (capacity.issuesReadyToStart in company_status); aim for at least one per developer. Write "Depends on #N" only when an issue truly cannot start until #N\'s code is merged, because it waits until #N is closed. Keep dependency chains to two steps at most, keep foundation issues small, and split big pieces into parts that can be built side by side. The office starts the issues that hold up others first. Backlog issues marked parent or stalled are not ready capacity; review or close parents and clarify stalled work. Backlog issues marked readyForHuman are reserved for a person: they never start, so do not plan agent work around them. Do not duplicate open issues: fix an existing issue\'s specialty or dependencies with route_issue. File at most 12 issues per job, or per message from the manager.',
     "- When company.usage in company_status says pacing or paused, Claude's usage is running low and the office is finishing open work first: file only what is needed next, not a whole milestone.",
     '- Your final message goes straight to the manager\'s phone. Keep it short and plain: what you found, what you proposed, what you filed, and any question you need answered. No headings, no tables.',
   ].join('\n');

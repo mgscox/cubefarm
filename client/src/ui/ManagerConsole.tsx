@@ -1,3 +1,4 @@
+import { issueParent } from '../../../shared/issues';
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { PreviewPill, PreviewSettings } from './AppViewer';
@@ -616,6 +617,7 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
                     #{i.number}
                   </a>{' '}
                   {i.title}
+                  {(issueParent(i) || i.subIssues === null || i.stalled) && <div className="muted small">{[issueParent(i) ? `parent: ${issueParent(i)}` : i.subIssues === null ? 'sub-issues have not loaded' : '', i.stalled].filter(Boolean).join(' · ')}</div>}
                   {i.labels.length > 0 && <div className="muted small">{i.labels.join(', ')}</div>}
                 </div>
                 {holder ? (

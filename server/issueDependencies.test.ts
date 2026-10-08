@@ -7,7 +7,7 @@ type Api = NonNullable<Parameters<typeof listIssues>[2]>;
 const raw = (number: number) => ({ number, title: 'Issue', body: 'Depends on #1', url: '', labels: [{ name: 'swarm:server' }], createdAt: '' });
 const blocker = (state: 'OPEN' | 'CLOSED' = 'OPEN', repo = 'demo/repo') => ({ number: 1, state, repository: { nameWithOwner: repo } });
 const connection = (nodes = [blocker()], hasNextPage = false, endCursor: string | null = null) => ({ nodes, pageInfo: { hasNextPage, endCursor } });
-const result = (blockedBy = connection()) => ({ data: { repository: { i2: { blockedBy } } } });
+const result = (blockedBy = connection()) => ({ data: { repository: { i2: { blockedBy, subIssuesSummary: { total: 0, completed: 0 } } } } });
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('native dependency sync', () => {
@@ -24,7 +24,7 @@ describe('native dependency sync', () => {
   it('batches open issues and skips dependency queries for an empty backlog', async () => {
     const query = vi.fn<Query>().mockResolvedValue(Array.from({ length: 26 }, (_, i) => raw(i + 1)));
     const api = vi.fn<Api>(async (args) => ({ data: { repository: Object.fromEntries(
-      [...args[3].matchAll(/i(\d+): issue/g)].map((m) => [`i${m[1]}`, { blockedBy: connection([]) }]),
+      [...args[3].matchAll(/i(\d+): issue/g)].map((m) => [`i${m[1]}`, { blockedBy: connection([]), subIssuesSummary: { total: 0, completed: 0 } }]),
     ) } }));
     expect(await listIssues('demo/repo', query, api)).toHaveLength(26);
     expect(api).toHaveBeenCalledTimes(2);
@@ -74,7 +74,7 @@ describe('native dependency refresh', () => {
 
   it('retains the earlier blockers after an outage and leaves new issues unread', async () => {
     const q = query();
-    const api = vi.fn<Api>().mockResolvedValueOnce({ data: { repository: { i2: { blockedBy: connection([blocked]) } } } }).mockRejectedValue(new Error('rate limit'));
+    const api = vi.fn<Api>().mockResolvedValueOnce({ data: { repository: { i2: { blockedBy: connection([blocked]), subIssuesSummary: { total: 0, completed: 0 } } } } }).mockRejectedValue(new Error('rate limit'));
     const first = await listIssues('demo/deps', q, api);
     q.mockResolvedValue([issue, { ...issue, number: 3 }]);
     const next = await listIssues('demo/deps', q, api);
@@ -94,22 +94,22 @@ describe('native dependency refresh', () => {
   });
 
   it('never downgrades a previously supported host after an access denial', async () => {
-    const api = vi.fn<Api>().mockResolvedValueOnce({ data: { repository: { i2: { blockedBy: connection([blocked]) } } } })
+    const api = vi.fn<Api>().mockResolvedValueOnce({ data: { repository: { i2: { blockedBy: connection([blocked]), subIssuesSummary: { total: 0, completed: 0 } } } } })
       .mockRejectedValue(error('GraphQL: Resource not accessible by personal access token (repository.i2.blockedBy)'));
     await listIssues('demo/deps', query(), api);
     expect((await listIssues('demo/deps', query(), api))[0].nativeBlockers).toEqual([{ number: 1, state: 'OPEN' }]);
   });
 
   it.each(['partial', 'pagination', 'errors'])('does not replace cached blockers with a %s response', async (kind) => {
-    const api = vi.fn<Api>().mockResolvedValueOnce({ data: { repository: { i2: { blockedBy: connection([blocked]) } } } });
+    const api = vi.fn<Api>().mockResolvedValueOnce({ data: { repository: { i2: { blockedBy: connection([blocked]), subIssuesSummary: { total: 0, completed: 0 } } } } });
     await listIssues('demo/deps', query(), api);
     api.mockResolvedValue(kind === 'partial' ? { data: { repository: {} } } : kind === 'errors' ? { errors: [{ message: 'rate limit' }] }
-      : { data: { repository: { i2: { blockedBy: connection([], true) } } } });
+      : { data: { repository: { i2: { blockedBy: connection([], true), subIssuesSummary: { total: 0, completed: 0 } } } } });
     expect((await listIssues('demo/deps', query(), api))[0].nativeBlockers).toEqual([{ number: 1, state: 'OPEN' }]);
   });
 
   it('fails closed when a partial response proves support despite an access error', async () => {
-    const api = vi.fn<Api>().mockResolvedValue({ data: { repository: { i2: { blockedBy: connection([]) } } },
+    const api = vi.fn<Api>().mockResolvedValue({ data: { repository: { i2: { blockedBy: connection([]), subIssuesSummary: { total: 0, completed: 0 } } } },
       errors: [{ message: 'Resource not accessible by personal access token (repository.i3.blockedBy)' }],
     });
     const issues = await listIssues('demo/deps', vi.fn<Query>().mockResolvedValue([issue, { ...issue, number: 3 }]), api);

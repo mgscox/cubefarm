@@ -48,7 +48,7 @@ interface BlockerConnection {
 }
 
 interface DependencyResponse {
-  data?: { repository: Record<string, { blockedBy: BlockerConnection }> };
+  data?: { repository: Record<string, { blockedBy: BlockerConnection; subIssuesSummary?: { total: number; completed: number }; comments?: { nodes: { author: { login: string } | null; createdAt: string }[] } }> };
   errors?: unknown[];
 }
 
@@ -66,6 +66,8 @@ function failedDependencyResponse(error: unknown): DependencyResponse | undefine
 interface DependencyCache {
   supported?: boolean;
   blockers: Map<number, NonNullable<IssueInfo['nativeBlockers']>>;
+  parents: Map<number, NonNullable<IssueInfo['subIssues']>>;
+  ownerComments: Map<number, string>;
   warnedAt?: number;
 }
 const dependencyCaches = new WeakMap<RestQuery, Map<string, DependencyCache>>();
@@ -89,7 +91,7 @@ export function dependenciesUnsupported(error: unknown): boolean {
 }
 
 /** Repo sync batches dependency reads; scheduling uses the resulting IssueInfo cache without any API calls. */
-export async function listIssues(fullName: string, query: (args: string[]) => Promise<RawIssue[]> = ghJson, api: RestQuery = ghJson): Promise<IssueInfo[]> {
+export async function listIssues(fullName: string, query: (args: string[]) => Promise<RawIssue[]> = ghJson, api: RestQuery = ghJson, queryBlockers = true): Promise<IssueInfo[]> {
   const raw = await query(['issue', 'list', '-R', fullName, '--state', 'open', '--limit', '100', '--json', 'number,title,body,url,labels,createdAt']);
   const issues: IssueInfo[] = raw
     .map((i) => ({ number: i.number, title: i.title, body: i.body ?? '', url: i.url, labels: i.labels.map((l) => l.name), createdAt: i.createdAt }))
@@ -98,20 +100,26 @@ export async function listIssues(fullName: string, query: (args: string[]) => Pr
   if (!caches) dependencyCaches.set(api, caches = new Map());
   const key = fullName.toLowerCase();
   let cache = caches.get(key);
-  if (!cache) caches.set(key, cache = { blockers: new Map() });
+  if (!cache) caches.set(key, cache = { blockers: new Map(), parents: new Map(), ownerComments: new Map() });
   const [owner, name] = fullName.split('/');
   try {
     for (let start = 0; start < issues.length; start += 25) {
       let pending = issues.slice(start, start + 25).map((issue) => ({ issue, cursor: null as string | null }));
       while (pending.length) {
-        const fields = pending.map(({ issue, cursor }) => `i${issue.number}: issue(number:${issue.number}) { blockedBy(first:100${cursor ? `,after:${JSON.stringify(cursor)}` : ''}) { nodes { number state repository { nameWithOwner } } pageInfo { hasNextPage endCursor } } }`).join('\n');
+        const fields = pending.map(({ issue, cursor }) => `i${issue.number}: issue(number:${issue.number}) { subIssuesSummary { total completed } comments(last:100) { nodes { author { login } createdAt } } ${queryBlockers ? `blockedBy(first:100${cursor ? `,after:${JSON.stringify(cursor)}` : ''}) { nodes { number state repository { nameWithOwner } } pageInfo { hasNextPage endCursor } }` : ''} }`).join('\n');
         const result = await api(['api', 'graphql', '-f', `query=query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { ${fields} } }`, '-f', `owner=${owner}`, '-f', `name=${name}`]) as DependencyResponse;
         if (hasNativeDependencies(result)) cache.supported = true;
         if (result.errors?.length) throw result.errors;
         if (!result.data?.repository) throw new Error('Dependency query unavailable');
         const next: typeof pending = [];
         for (const { issue, cursor } of pending) {
-          const connection = result.data.repository[`i${issue.number}`]?.blockedBy;
+          const node = result.data.repository[`i${issue.number}`];
+          const summary = node?.subIssuesSummary;
+          if (!summary || !Number.isSafeInteger(summary.total) || !Number.isSafeInteger(summary.completed) || summary.total < 0 || summary.completed < 0 || summary.completed > summary.total) throw new Error('Sub-issue query incomplete');
+          issue.subIssues = summary;
+          issue.ownerCommentAt = node.comments?.nodes.filter((c) => c.author?.login.toLowerCase() === owner.toLowerCase()).map((c) => c.createdAt).sort().at(-1) ?? cache.ownerComments.get(issue.number);
+          if (!queryBlockers) continue;
+          const connection = node?.blockedBy;
           if (!connection) throw new Error('Dependency query incomplete');
           cache.supported = true;
           issue.nativeBlockers = [...(issue.nativeBlockers ?? []), ...connection.nodes.map((b) => ({
@@ -127,13 +135,20 @@ export async function listIssues(fullName: string, query: (args: string[]) => Pr
       }
     }
     if (issues.length) {
-      cache.supported = true;
+      if (queryBlockers) cache.supported = true;
       cache.blockers = new Map(issues.map((i) => [i.number, i.nativeBlockers ?? []]));
+      cache.parents = new Map(issues.map((i) => [i.number, i.subIssues!]));
+      cache.ownerComments = new Map(issues.filter((i) => i.ownerCommentAt).map((i) => [i.number, i.ownerCommentAt!]));
     }
   } catch (error) {
     if (hasNativeDependencies(failedDependencyResponse(error))) cache.supported = true;
-    if (cache.supported !== true && dependenciesUnsupported(error)) cache.supported = false;
+    if (cache.supported !== true && dependenciesUnsupported(error)) {
+      cache.supported = false;
+      if (queryBlockers) return listIssues(fullName, query, api, false); // Unsupported blockers must not hide readable parents.
+    }
     for (const issue of issues) {
+      issue.subIssues = cache.parents.get(issue.number) ?? null;
+      issue.ownerCommentAt = cache.ownerComments.get(issue.number);
       issue.nativeBlockers = cache.blockers.get(issue.number) ?? (cache.supported === false ? undefined : null);
     }
     const now = Date.now();

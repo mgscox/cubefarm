@@ -41,12 +41,21 @@ export function issueBlockers(issue: DependencyIssue, open: Set<number>): IssueR
   return [...out];
 }
 
+/** Native parent summary for backlog cards and manual-start warnings. */
+export function issueParent(issue: Pick<IssueInfo, 'subIssues' | 'labels' | 'title'>): string | null {
+  if (issue.subIssues?.total) return `${issue.subIssues.completed}/${issue.subIssues.total} sub-issues done`;
+  if (issue.labels.some((l) => /^(parent|prd|epic)$/i.test(l)) || /^(?:\[PRD\]|PRD:|Parent:)\s*/i.test(issue.title)) return 'parent or PRD';
+  return null;
+}
+
 /** Why an issue must stay in the backlog, including explicit parent/PRD containers. */
 export function issueWaitReason(issue: IssueInfo, open: Set<number>): string | null {
+  if (issue.subIssues === null) return 'sub-issues have not loaded';
+  if (issueParent(issue)) return 'parent or PRD';
+  if (issue.stalled) return issue.stalled;
   if (issue.nativeBlockers === null) return 'native blockers have not loaded';
   if (issueBlockers(issue, open).length) return 'open blockers';
   if (!schedulable(issue.labels)) return 'reserved or skipped work';
-  if (issue.labels.some((l) => /^(parent|prd|epic)$/i.test(l)) || /^(?:\[PRD\]|PRD:|Parent:)\s*/i.test(issue.title)) return 'parent or PRD';
   return null;
 }
 

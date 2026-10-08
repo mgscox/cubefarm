@@ -13,6 +13,7 @@ import { planDevFix, type FixReason } from './fixPlan.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
+import { recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
 import { pickRequestedStart, retainRequestedStarts } from './requestedStarts.ts';
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { officeLifecycle } from './officeLifecycle.ts';
@@ -20,7 +21,7 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { isCli } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { issueBlockers, issueWaitReason, forHuman, holdUps, issueSpecialty, READY_FOR_HUMAN } from '../shared/issues.ts';
+import { issueBlockers, issueParent, issueWaitReason, forHuman, holdUps, issueSpecialty, READY_FOR_HUMAN } from '../shared/issues.ts';
 import { effectiveModel } from '../shared/models.ts';
 import { CEO_ID } from '../shared/types.ts';
 import type {
@@ -35,6 +36,7 @@ import type {
   EffortLevel,
   HireRequestView,
   IssueInfo,
+  NoWorkEnding,
   LogLine,
   OfficeUpdateView,
   OfficeLifecycleView,
@@ -66,6 +68,7 @@ interface PersistedRepo {
   autoAssign: boolean;
   requestedStarts: RequestedStart[];
   parkedBranches: ParkedBranch[];
+  noWorkEndings: NoWorkEnding[];
   autoMerge: boolean; // PRs merge themselves once QA passes and GitHub's checks are green
   browserTesting: boolean;
   links: string[]; // other connected repos this floor's agents may read
@@ -471,6 +474,7 @@ export class Swarm {
           autoMerge: r.autoMerge ?? true,
           requestedStarts: r.requestedStarts ?? [],
           parkedBranches: r.parkedBranches ?? [],
+          noWorkEndings: r.noWorkEndings ?? [],
           links: r.links ?? [],
           mission: r.mission ?? '',
           summary: r.summary ?? '',
@@ -658,6 +662,7 @@ export class Swarm {
       autoAssign: r.autoAssign,
       requestedStarts: r.requestedStarts,
       parkedBranches: r.parkedBranches ?? [],
+      noWorkEndings: r.noWorkEndings ?? [],
       autoMerge: r.autoMerge,
       folderSync: rt.folderSync,
       browserTesting: r.browserTesting,
@@ -669,7 +674,7 @@ export class Swarm {
       checkoutPath: this.backend.mainDir(r.fullName),
       cloneStatus: rt.cloneStatus,
       cloneError: rt.cloneError,
-      issues: rt.issues,
+      issues: rt.issues.map((i) => this.workIssue(r, i)),
       pulls: rt.pulls,
       lastSync: rt.lastSync,
       syncError: rt.syncError,
@@ -940,6 +945,7 @@ export class Swarm {
       autoAssign: !!opts.autoAssign,
       requestedStarts: [],
       parkedBranches: [],
+      noWorkEndings: [],
       autoMerge: true,
       browserTesting: true,
       links: [],
@@ -1269,12 +1275,24 @@ export class Swarm {
     }
   }
 
+  private workIssue(repo: PersistedRepo, issue: IssueInfo): IssueInfo {
+    const record = retainNoWork(repo.noWorkEndings ?? [], [issue])[0];
+    return { ...issue, stalled: record && record.count >= 2 ? STALLED : undefined };
+  }
+
+  private setNoWorkEndings(repo: PersistedRepo, records: NoWorkEnding[]) {
+    repo.noWorkEndings = records;
+    this.emitRepo(repo);
+    this.save();
+  }
+
   private async refreshRepo(repo: PersistedRepo, rt: RepoRuntime) {
     this.emitRepo(repo);
     try {
       const started = Date.now();
       const [issues, pullResult] = await Promise.allSettled([this.backend.listIssues(repo.fullName), this.backend.listPulls(repo.fullName)]);
       Object.assign(rt, applyRepoRefresh(rt, issues, pullResult, Date.now()));
+      if (issues.status === 'fulfilled') this.setNoWorkEndings(repo, retainNoWork(repo.noWorkEndings ?? [], issues.value));
       const requests = retainRequestedStarts(repo.requestedStarts, issues.status === 'fulfilled' ? issues.value : null, pullResult.status === 'fulfilled' ? pullResult.value.pulls : null);
       if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests);
       if (pullResult.status === 'rejected') return;
@@ -1591,14 +1609,22 @@ export class Swarm {
     if (forHuman(issue.labels)) {
       throw new HttpError(409, `#${issueNumber} is labelled ${READY_FOR_HUMAN}: an agent can't complete it. Remove the label to hand it to a developer.`);
     }
+    if (!explicit && issueWaitReason(this.workIssue(repo, issue), new Set(this.repoRt.get(repo.id)!.issues.map((i) => i.number)))) throw new HttpError(409, `#${issueNumber} is not ready for automatic work`);
     const holder = this.state.agents.find((x) => x.id !== a.id && x.repoId === repo.id && x.issueNumber === issueNumber && BUSY.includes(x.status));
     if (holder) throw new HttpError(409, `${holder.name} is already working on #${issueNumber}`);
+    if (explicit) {
+      this.setNoWorkEndings(repo, (repo.noWorkEndings ?? []).filter((r) => r.issueNumber !== issueNumber));
+      this.issueFailures.delete(`${repo.id}#${issueNumber}`);
+      const parent = issueParent(issue);
+      if (parent || issue.subIssues === null) this.toast('info', `Starting #${issueNumber} manually: ${parent ? `parent: ${parent}` : 'sub-issues have not loaded'}.`);
+    }
     if (explicit) this.setRequestedStarts(repo, [
       ...repo.requestedStarts.filter((r) => r.issueNumber !== issueNumber),
       { issueNumber, preferredAgentId: a.id, note, restartPending: false },
     ]);
     void this.runTask(a, repo, issue, note);
-    return this.agentView(a, false);
+    const warning = explicit && issueParent(issue) ? `parent: ${issueParent(issue)}` : explicit && issue.subIssues === null ? 'sub-issues have not loaded' : undefined;
+    return { ...this.agentView(a, false), ...(warning && { warning }) };
   }
 
   private port(a: PersistedAgent) {
@@ -1906,14 +1932,19 @@ export class Swarm {
   private async onIssueFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, released: Promise<void>, generation: number | undefined) {
     // Every await below can outlive this task: the manager may clear it, assign another or send a follow-up meanwhile.
     const gone = () => !this.state.agents.includes(a) || this.officeUpdate.handedOver || this.agentRt.get(a.id)?.generation !== generation;
+    let prKnown = true;
     const escaped = repo.fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const m = result.text.match(new RegExp(`https://github\\.com/${escaped}/pull/(\\d+)`, 'i'));
     if (m) {
       a.prNumber = Number(m[1]);
       a.prUrl = m[0];
     } else if (a.branch) {
-      const pr = await this.backend.prForBranch(repo.fullName, a.branch).catch(() => null);
+      const pr = await this.backend.prForBranch(repo.fullName, a.branch).catch(() => undefined);
       if (gone()) return;
+      if (pr === undefined) {
+        prKnown = false;
+        this.appendLog(a, [{ kind: 'error', text: 'PR lookup unavailable; no-work detection skipped.' }]);
+      }
       if (pr) {
         a.prNumber = pr.number;
         a.prUrl = pr.url;
@@ -1927,20 +1958,26 @@ export class Swarm {
       return 0;
     }) : 0;
     if (gone()) return;
-    if (!a.prNumber && aheadKnown && ahead === 0 && !result.interrupted) {
+    if (a.prNumber || ahead > 0) this.setNoWorkEndings(repo, (repo.noWorkEndings ?? []).filter((r) => r.issueNumber !== a.issueNumber));
+    const localAhead = !a.prNumber && !result.interrupted ? await this.backend.deskAhead(repo.fullName, this.agentSlug(a), repo.defaultBranch).catch(() => null) : null;
+    if (gone()) return;
+    if (localAhead && localAhead > 0) this.setNoWorkEndings(repo, (repo.noWorkEndings ?? []).filter((r) => r.issueNumber !== a.issueNumber));
+    if (!a.prNumber && prKnown && aheadKnown && ahead === 0 && !result.interrupted) {
       const unavailable = () => gone() || a.status === 'stopped' || this.agentRt.get(a.id)?.session;
       await this.syncRepo(repo.id);
       if (unavailable()) return;
       const issues = this.repoRt.get(repo.id)?.issues ?? [];
       const issue = issues.find((i) => i.number === a.issueNumber);
       const reason = issue && issueWaitReason(issue, new Set(issues.map((i) => i.number)));
-      if (reason) {
+      if (localAhead === 0) {
         await released;
         if (unavailable()) return;
         this.issueFailures.delete(`${repo.id}#${a.issueNumber}`);
-        this.appendLog(a, [{ kind: 'system', text: `Returned #${a.issueNumber} to the backlog: ${reason}. No PR is needed for work that cannot start.` }]);
+        if (issue) this.setNoWorkEndings(repo, recordNoWork(repo.noWorkEndings ?? [], issue));
+        const waiting = (issue && this.workIssue(repo, issue).stalled) || reason || undefined;
+        this.appendLog(a, [{ kind: 'system', text: `Returned #${a.issueNumber} to the backlog: ${waiting ?? 'no commits and no PR'}. No PR nudge is needed for this session.` }]);
         this.cancelRequestedStart(a);
-        this.releaseIssue(a, repo, 0, reason);
+        this.releaseIssue(a, repo, 0, waiting);
         return;
       }
     }
@@ -2519,7 +2556,7 @@ export class Swarm {
     return issues
       .filter(
         (i) =>
-          issueWaitReason(i, open) === null &&
+          issueWaitReason(this.workIssue(repo, i), open) === null &&
           !this.issueTaken(repo, i.number) &&
           (this.issueFailures.get(`${repo.id}#${i.number}`) ?? 0) < MAX_ISSUE_FAILURES,
       )
@@ -3445,6 +3482,9 @@ export class Swarm {
               ...(waitsFor.length && { waitsFor }),
               ...(this.issueTaken(r, i.number) && { inProgress: true }),
               ...(forHuman(i.labels) && { readyForHuman: true }),
+              ...(issueParent(i) && { parent: issueParent(i) }),
+              ...(i.subIssues === null && { parent: 'sub-issues have not loaded' }),
+              ...(this.workIssue(r, i).stalled && { stalled: STALLED }),
             };
           }),
           pullRequests: rt.pulls
@@ -3646,7 +3686,8 @@ export class Swarm {
       usagePaused: this.limited(),
     });
     await this.assign(agent.id, issue.number, x.note);
-    return `${agent.name} started #${issue.number} ${issue.title} on floor ${repo.floor}.`;
+    const warning = issueParent(issue) ? ` Warning: parent: ${issueParent(issue)}.` : issue.subIssues === null ? ' Warning: sub-issues have not loaded.' : '';
+    return `${agent.name} started #${issue.number} ${issue.title} on floor ${repo.floor}.${warning}`;
   }
 
   private async rerunQa(x: { floor: number; number: number; note?: string }) {

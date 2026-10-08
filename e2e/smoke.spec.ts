@@ -155,6 +155,32 @@ test("the manager's console opens with E at its desk and closes with Esc", async
   await expect(phoneButton(page)).toBeVisible();
 });
 
+test('the demo backlog marks parents and stalled work for the manager', async ({ page }, testInfo) => {
+  // A repo event carries stalled status through the same path as the initial snapshot.
+  await page.routeWebSocket('**/ws', (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((message) => {
+      const event = JSON.parse(message.toString()) as ServerEvent;
+      const repos = event.type === 'snapshot' ? event.data.repos : event.type === 'repo' ? [event.repo] : [];
+      for (const repo of repos) if (repo.fullName === 'demo-co/pixel-todo') {
+        const issue = repo.issues.find((i) => i.number === 1);
+        if (issue) issue.stalled = 'ended twice with no work';
+      }
+      ws.send(JSON.stringify(event));
+    });
+  });
+  const spot: SavedView = { floor: 0, x: MANAGER_DESK.x, z: MANAGER_DESK.z + MANAGER_DESK.d / 2 + 0.8, yaw: 0, pitch: -0.6 };
+  await page.addInitScript(([key, view]) => localStorage.setItem(key, view), [VIEW_KEY, JSON.stringify(spot)] as const);
+  await enterOffice(page);
+  await expect(page.getByText("Open the manager's console")).toBeVisible();
+  await page.keyboard.press('e');
+  await page.waitForTimeout(450);
+  await page.getByRole('button', { name: '📝 Issues' }).click();
+  await expect(page.getByText('parent: 6/6 sub-issues done', { exact: true })).toBeVisible();
+  await expect(page.getByText('ended twice with no work', { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('parent-and-stalled-backlog.png') });
+});
+
 test('a long agent desks path wraps inside the Settings card on narrow screens', async ({ page }, testInfo) => {
   // No spaces or hyphens: nothing the browser would break the line at on its own.
   const longPath = '/Users/someone/.cubefarm/workspaces/' + 'averylongfoldername/'.repeat(6);
