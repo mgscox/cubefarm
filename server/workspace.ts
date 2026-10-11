@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { WORKSPACE_ROOT } from './config.ts';
 import { gh, git, run } from './exec.ts';
+import { projectEnv } from './projectEnv.ts';
 
 // Layout on disk:
 //   <your projects folder>/<repo>                    the floor's main checkout: your own folder, only fetched and fast-forwarded (syncMain)
@@ -72,7 +73,7 @@ const installs = new Map<string, Promise<unknown>>();
 /** npm install in a folder, one at a time per folder. */
 function npmInstall(dir: string) {
   const prev = installs.get(dir) ?? Promise.resolve();
-  const opts = { cwd: dir, timeoutMs: 600_000 };
+  const opts = { cwd: dir, timeoutMs: 600_000, env: projectEnv(process.env) };
   const next = prev
     .catch(() => undefined)
     .then(() => (process.platform === 'win32' ? run('cmd.exe', ['/d', '/s', '/c', 'npm install --no-audit --no-fund'], opts) : run('npm', ['install', '--no-audit', '--no-fund'], opts)));
