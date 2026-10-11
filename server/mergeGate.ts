@@ -27,6 +27,7 @@ export type MergeStep = { set: MergeBookkeeping } & (
   | { do: 'requeue' } // commits arrived after QA's sign-off: QA tests them too
   | { do: 'send-back'; reason: 'checks' | 'conflict'; instructions: string; needsHuman: boolean } // needsHuman: the fix budget ran out
   | { do: 'update-branch' } // the repo only merges up-to-date branches
+  | { do: 'ready' } // still a draft although QA passed it: mark it ready for review, then carry on
   | { do: 'merge' }
 );
 
@@ -35,11 +36,13 @@ export type MergeStep = { set: MergeBookkeeping } & (
  * and the office. `detailed` means the PR's mergeability has already been asked for, so UNKNOWN is waited out.
  */
 export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { base: string; detailed?: boolean }): MergeStep {
-  if (pr.isDraft) return { do: 'wait', note: 'a draft: waiting', set: {} };
   if (!opts.detailed && (pr.mergeable === 'UNKNOWN' || pr.mergeState === 'UNKNOWN')) return { do: 'details', set: {} };
   const set: MergeBookkeeping = {};
   if (rec.passedSha == null) set.passedSha = pr.headSha; // signed off before the office tracked commits
   if (pr.headSha !== (set.passedSha ?? rec.passedSha)) return { do: 'requeue', set };
+  // Workers open drafts when they think something is left, often a hand check they can't run (another OS, real
+  // devices). QA has passed this exact commit, so it's done: a draft would otherwise wait here forever.
+  if (pr.isDraft) return { do: 'ready', set };
   const needsHuman = rec.mergeFixes >= MAX_MERGE_FIXES;
   if (pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY') {
     return { do: 'send-back', reason: 'conflict', instructions: `It conflicts with ${opts.base}.`, needsHuman, set };

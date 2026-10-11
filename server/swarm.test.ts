@@ -2240,6 +2240,21 @@ describe('manual office closure', () => {
     expect(merge).toHaveBeenCalledOnce();
   });
 
+  it('marks a QA-passed draft ready instead of leaving it waiting', async () => {
+    Object.assign(repo, { autoMerge: true });
+    Object.assign(s.repoRt.get(repo.id)!, { fetchedAt: Date.now(), syncing: false, merging: false });
+    s.repoRt.get(repo.id)!.pulls = [{ ...qaPull(), isDraft: true }];
+    const rec = qaRecord();
+    Object.assign(rec, { status: 'passed', passedSha: 'sha-1' });
+    s.state.qa.push(rec);
+    const ready = vi.spyOn(s.backend, 'markPullReady').mockResolvedValue();
+    const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+    await f.advanceMerges(repo);
+    expect(ready).toHaveBeenCalledWith(repo.fullName, qaPull().number);
+    expect(merge).not.toHaveBeenCalled();
+    expect(rec.status).toBe('passed');
+  });
+
   it('round-trips the hold through atomic persistence and startup before scheduling', async () => {
     writes.mockRestore();
     const mkdir = vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);

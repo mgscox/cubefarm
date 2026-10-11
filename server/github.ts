@@ -413,6 +413,10 @@ export async function updateBranch(fullName: string, number: number): Promise<vo
   await gh(['pr', 'update-branch', String(number), '-R', fullName], { timeoutMs: 60_000 });
 }
 
+export async function markPullReady(fullName: string, number: number): Promise<void> {
+  await gh(['pr', 'ready', String(number), '-R', fullName]);
+}
+
 export async function closePull(fullName: string, number: number): Promise<void> {
   await gh(['pr', 'close', String(number), '-R', fullName]);
 }

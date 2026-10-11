@@ -1138,6 +1138,11 @@ export class Swarm {
       }
       return step.note === undefined ? false : this.mergeNote(rec, step.note);
     }
+    if (step.do === 'ready') {
+      this.mergeNote(rec, 'a draft QA passed: marking it ready for review');
+      await this.backend.markPullReady(repo.fullName, pr.number);
+      return false; // the next sync sees it ready and carries on toward merging
+    }
     if (step.do === 'update-branch') {
       // The repo only merges up-to-date branches. GitHub merges the base in cleanly (or refuses); CI checks the result.
       this.mergeNote(rec, `updating the branch with ${repo.defaultBranch}`);
@@ -1756,7 +1761,7 @@ export class Swarm {
         : `6. Open a pull request with the GitHub CLI: gh pr create --base ${repo.defaultBranch} --head ${branch} --title "<concise title>" --body "<what changed, how you verified it, assumptions>". The body must contain "Closes #<issue number>".`,
       fixing ? '' : '7. End your final message with the pull request URL on its own line.',
       '',
-      'Rules: never push to the default branch, never force-push, never merge pull requests yourself (the office merges them once QA and the checks pass), and never edit files outside your worktree. If you cannot finish, open a draft PR (gh pr create --draft) explaining what is left and why.',
+      'Rules: never push to the default branch, never force-push, never merge pull requests yourself (the office merges them once QA and the checks pass), and never edit files outside your worktree. If you cannot finish, open a draft PR (gh pr create --draft) explaining what is left and why. Checks you can\'t run yourself (another operating system, real devices, paid services, live voice or a person\'s judgement) are not unfinished work: list them in the PR body for the manager and open the PR ready for review.',
     ]
       .filter((l) => l !== '')
       .join('\n');
@@ -2068,7 +2073,7 @@ export class Swarm {
     const cwd = this.backend.deskDir(repo.fullName, this.agentSlug(a));
     const prompt = [
       `Your last session on GitHub issue #${a.issueNumber} (${a.issueTitle}) ${why}. Its branch ${a.branch} has ${this.commits(ahead)} ahead of ${repo.defaultBranch}, and this worktree may hold more.`,
-      `Check git status and git log origin/${repo.defaultBranch}..HEAD, finish what is left (run the checks), push, and open the PR with "Closes #${a.issueNumber}" in its body. If the issue can't be done, open a draft PR that explains why.`,
+      `Check git status and git log origin/${repo.defaultBranch}..HEAD, finish what is left (run the checks), push, and open the PR with "Closes #${a.issueNumber}" in its body. If the issue can't be done, open a draft PR that explains why. Checks you can't run yourself (another operating system, real devices, paid services, live voice or a person's judgement) are not unfinished work: list them in the PR body for the manager and open the PR ready for review.`,
     ].join('\n');
     Object.assign(a, { startedAt: Date.now(), endedAt: null, lastError: null });
     return this.startAgentSession(a, repo, cwd, prompt, this.buildSystemAppend(a, repo, cwd, a.branch!), a.sessionId ?? undefined);
@@ -2109,7 +2114,7 @@ export class Swarm {
     // message() starts the session before its first await, so the scheduler can't hand this developer other work first.
     void this.message(
       a.id,
-      `You finished without opening a pull request for #${a.issueNumber}. Finish the remaining steps now: commit, push your branch and open the PR with "Closes #${a.issueNumber}". If the issue can't be done, open a draft PR that explains why.`,
+      `You finished without opening a pull request for #${a.issueNumber}. Finish the remaining steps now: commit, push your branch and open the PR with "Closes #${a.issueNumber}". If the issue can't be done, open a draft PR that explains why. Checks you can't run yourself (another operating system, real devices, paid services, live voice or a person's judgement) are not unfinished work: list them in the PR body for the manager and open the PR ready for review.`,
     ).catch(() => this.releaseIssue(a, repo, ahead));
   }
 

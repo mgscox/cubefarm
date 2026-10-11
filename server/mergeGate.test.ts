@@ -54,12 +54,13 @@ describe('mergeStep', () => {
     expect(mergeStep(pull({ checks: 'none' }), record(), NOW, base).do).toBe('merge');
   });
 
-  it('waits on a draft without touching the record', () => {
-    expect(mergeStep(pull({ isDraft: true, mergeable: 'CONFLICTING', headSha: 'other' }), record({ passedSha: null }), NOW, base)).toEqual({
-      do: 'wait',
-      note: 'a draft: waiting',
-      set: {},
-    });
+  it('marks a QA-passed draft ready instead of waiting on it', () => {
+    expect(mergeStep(pull({ isDraft: true }), record(), NOW, base)).toEqual({ do: 'ready', set: {} });
+    expect(mergeStep(pull({ isDraft: true }), record({ passedSha: null }), NOW, base)).toEqual({ do: 'ready', set: { passedSha: pull().headSha } });
+  });
+
+  it('requeues a draft whose commits changed after QA instead of marking it ready', () => {
+    expect(mergeStep(pull({ isDraft: true, headSha: 'other' }), record(), NOW, base).do).toBe('requeue');
   });
 
   describe('UNKNOWN mergeability', () => {
