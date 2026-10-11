@@ -12,7 +12,7 @@ export class CommandError extends Error {
 }
 
 /** Run a CLI (gh, git) without a shell and return trimmed stdout. */
-export function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; input?: string } = {}): Promise<string> {
+export function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs?: number; input?: string; env?: NodeJS.ProcessEnv } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = execFile(
       cmd,
@@ -22,7 +22,7 @@ export function run(cmd: string, args: string[], opts: { cwd?: string; timeoutMs
         timeout: opts.timeoutMs ?? 120_000,
         maxBuffer: 32 * 1024 * 1024,
         windowsHide: true,
-        env: { ...process.env, GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', NO_COLOR: '1' },
+        env: { ...(opts.env ?? process.env), GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0', NO_COLOR: '1' },
       },
       (err, stdout, stderr) => {
         if (err) {

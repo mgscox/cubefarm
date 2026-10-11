@@ -1,21 +1,21 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // syncMain against real throwaway repos: a bare "origin", a clone of it as the floor's main checkout, and an
 // "upstream" clone that pushes new work. Everything lives in one temp folder whose path has spaces in it.
 
-const npmRuns = vi.hoisted(() => [] as { cmd: string; cwd?: string }[]);
+const npmRuns = vi.hoisted(() => [] as { cmd: string; cwd?: string; env?: NodeJS.ProcessEnv }[]);
 
 // npm install is stubbed: only what it was asked to do is recorded. git still runs for real.
 vi.mock('./exec.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./exec.ts')>();
   return {
     ...actual,
-    run: (cmd: string, args: string[], opts?: { cwd?: string; timeoutMs?: number }) => {
+    run: (cmd: string, args: string[], opts?: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv }) => {
       if (cmd === 'npm' || (cmd === 'cmd.exe' && args.join(' ').includes('npm install'))) {
-        npmRuns.push({ cmd, cwd: opts?.cwd });
+        npmRuns.push({ cmd, cwd: opts?.cwd, env: opts?.env });
         return Promise.resolve('');
       }
       return actual.run(cmd, args, opts);
@@ -82,6 +82,8 @@ const originMain = (cwd: string) => git(['rev-parse', 'origin/main'], { cwd });
 beforeEach(() => {
   npmRuns.length = 0;
 });
+
+afterEach(() => vi.unstubAllEnvs());
 
 afterAll(async () => {
   for (const [k, v] of Object.entries(savedEnv)) {
@@ -189,7 +191,28 @@ describe('syncMain', { timeout: 60_000 }, () => {
     const status = await syncMain(r.fullName, 'main', { touch: true });
     const short = await git(['rev-parse', '--short', 'HEAD'], { cwd: r.dir });
     expect(status).toBe(`updated to ${short} · dependencies installed`);
-    expect(npmRuns).toEqual([{ cmd: process.platform === 'win32' ? 'cmd.exe' : 'npm', cwd: r.dir }]);
+    expect(npmRuns).toMatchObject([{ cmd: process.platform === 'win32' ? 'cmd.exe' : 'npm', cwd: r.dir }]);
+  });
+
+  it.each(['npm_config_allow_scripts', 'NPM_CONFIG_ALLOW_SCRIPTS', 'NpM_cOnFiG_aLlOw_ScRiPtS'])('drops inherited %s before folder-sync installs', async (key) => {
+    vi.stubEnv(key, 'esbuild');
+    vi.stubEnv('npm_config_registry', 'https://registry.npmjs.org/');
+    vi.stubEnv('npm_config_proxy', 'http://proxy.example:8080');
+    vi.stubEnv('npm_config_cache', path.join(ROOT, 'npm cache'));
+    const r = await makeRepos();
+    await commitFile(r.upstream, 'package-lock.json', '{}\n');
+    await git(['push', '-q', 'origin', 'main'], { cwd: r.upstream });
+    expect(await syncMain(r.fullName, 'main', { touch: true })).toMatch(/^updated to \w+ · dependencies installed$/);
+    expect(npmRuns).toHaveLength(1);
+    const env = npmRuns[0]!.env;
+    expect(env).toBeDefined();
+    expect(Object.keys(env!).some((name) => name.toLowerCase() === 'npm_config_allow_scripts')).toBe(false);
+    expect(env).toMatchObject({
+      npm_config_registry: 'https://registry.npmjs.org/',
+      npm_config_proxy: 'http://proxy.example:8080',
+      npm_config_cache: path.join(ROOT, 'npm cache'),
+    });
+    expect(process.env[key]).toBe('esbuild');
   });
 
   it('installs dependencies when the lockfile changed', async () => {
