@@ -469,6 +469,11 @@ export function createDemoBackend(): Backend {
       Object.assign(pr, { headSha: fakeSha(), mergeState: 'CLEAN' });
       runChecks(pr, false);
     },
+    markPullReady: async (fullName, number) => {
+      const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
+      if (!pr) throw new Error('Unknown PR');
+      pr.isDraft = false;
+    },
     closePull: async (fullName, number) => {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
       if (pr) pr.state = 'CLOSED';

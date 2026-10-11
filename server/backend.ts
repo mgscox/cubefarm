@@ -22,6 +22,8 @@ export interface Backend {
   editIssue(fullName: string, number: number, edit: { body?: string; addLabels?: string[]; removeLabels?: string[] }): Promise<void>;
   mergePull(fullName: string, number: number, method: 'squash' | 'merge' | 'rebase', headSha?: string): Promise<void>;
   updateBranch(fullName: string, number: number): Promise<void>;
+  /** Marks a draft PR ready for review. */
+  markPullReady(fullName: string, number: number): Promise<void>;
   closePull(fullName: string, number: number): Promise<void>;
   prForBranch(fullName: string, branch: string): Promise<{ number: number; url: string } | null>;
   /** Commits a branch has on GitHub ahead of the base branch (throws when the branch was never pushed). */
@@ -79,6 +81,7 @@ export const realBackend: Backend = {
   editIssue: github.editIssue,
   mergePull: github.mergePull,
   updateBranch: github.updateBranch,
+  markPullReady: github.markPullReady,
   closePull: github.closePull,
   prForBranch: github.prForBranch,
   branchAhead: github.branchAhead,
