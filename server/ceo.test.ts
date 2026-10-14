@@ -70,7 +70,7 @@ describe('jobLabel', () => {
 // The CEO only sees the office tools if the whole list converts to JSON Schema: one schema the SDK can't handle
 // (z.record did this) empties tools/list, and the CEO silently loses every tool.
 describe('office tools', () => {
-  const connect = async (startIssue: OfficeHandlers['startIssue'] = async () => 'started', rerunQa: OfficeHandlers['rerunQa'] = async () => 'queued', sendBackToDev: OfficeHandlers['sendBackToDev'] = async () => 'sent back', parkPr: OfficeHandlers['parkPr'] = async () => 'parked') => {
+  const connect = async (startIssue: OfficeHandlers['startIssue'] = async () => 'started', rerunQa: OfficeHandlers['rerunQa'] = async () => 'queued', sendBackToDev: OfficeHandlers['sendBackToDev'] = async () => 'sent back', parkPr: OfficeHandlers['parkPr'] = async () => 'parked', mergePr: OfficeHandlers['mergePr'] = async () => 'merged', fileIssue: OfficeHandlers['fileIssue'] = async () => 'filed') => {
     const floors: unknown[] = [];
     const office = createOfficeTools({
       companyStatus: () => '{}',
@@ -79,12 +79,13 @@ describe('office tools', () => {
       updateJob: () => '',
       proposeHire: () => '',
       proposeLetGo: () => '',
-      fileIssue: async () => '',
+      fileIssue,
       routeIssue: async () => '',
       startIssue,
       rerunQa,
       sendBackToDev,
       parkPr,
+      mergePr,
     });
     const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
     await office.server.instance.connect(serverSide);
@@ -96,7 +97,35 @@ describe('office tools', () => {
   it('lists every tool the CEO relies on', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'park_pr', 'propose_hire', 'propose_let_go', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'merge_pr', 'park_pr', 'propose_hire', 'propose_let_go', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+  });
+
+  it('validates merge arguments and surfaces actionable refusals', async () => {
+    const requests: unknown[] = [];
+    const { client } = await connect(undefined, undefined, undefined, undefined, async (a) => {
+      requests.push(a);
+      if (a.number === 14) throw new Error('Head moved since QA');
+      return 'merged';
+    });
+    const args = { floor: 1, number: 13, reason: 'Manager requested merge; follow-up #66' };
+    expect(await client.callTool({ name: 'merge_pr', arguments: { ...args, reason: `  ${args.reason}  ` } })).toMatchObject({ content: [{ text: 'merged' }] });
+    for (const invalid of [{ floor: 1, number: 13 }, { ...args, floor: 1.5 }, { ...args, number: 0 }, { ...args, reason: '  ' }, { ...args, reason: 'x'.repeat(1001) }]) {
+      expect(await client.callTool({ name: 'merge_pr', arguments: invalid })).toMatchObject({ isError: true });
+    }
+    expect(requests).toEqual([args]);
+    expect(await client.callTool({ name: 'merge_pr', arguments: { ...args, number: 14 } })).toMatchObject({ isError: true, content: [{ text: 'Refused: Head moved since QA' }] });
+  });
+
+  it('passes ready_for_human and specialty together when filing an issue', async () => {
+    const requests: unknown[] = [];
+    const { client } = await connect(undefined, undefined, undefined, undefined, undefined, async (a) => {
+      requests.push(a);
+      return 'Filed for a person';
+    });
+    const args = { floor: 1, title: 'Verify deployment', body: 'Check hardware', specialty: 'server', ready_for_human: true };
+    expect(await client.callTool({ name: 'file_issue', arguments: args })).toMatchObject({ content: [{ text: 'Filed for a person' }] });
+    expect(await client.callTool({ name: 'file_issue', arguments: { ...args, ready_for_human: 'true' } })).toMatchObject({ isError: true });
+    expect(requests).toEqual([args]);
   });
 
   it('validates parking arguments and surfaces actionable refusals', async () => {
