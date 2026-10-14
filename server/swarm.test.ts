@@ -13,7 +13,7 @@ import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRun
 type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => Promise<void>;
 type Repo = { noWorkEndings?: import('../shared/types.ts').NoWorkEnding[]; id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; parkedBranches?: ParkedBranch[]; preview: { command: null; env: object } };
 type Backend = ReturnType<typeof createDemoBackend>;
-type QaRec = QaView & { issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
+type QaRec = QaView & { issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
 interface Internals {
   backend: Backend;
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[] };
@@ -466,7 +466,7 @@ describe('CEO merge_pr', () => {
       pull.state = 'MERGED';
     });
     s.state.qa.push({ repoId: repo.id, prNumber: 13, issueNumber: 67, status: 'needs-human', round: 3, sessionFailures: 2,
-      testedSha: 'tested', devAgentId: 'a1', qaAgentId: null, summary: 'Remaining findings', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 });
+      testedSha: 'tested', failedSha: 'tested', devAgentId: 'a1', qaAgentId: null, summary: 'Remaining findings', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 });
     Object.assign(s.state.agents[0], { status: 'done', task: 'issue', issueNumber: 67, prNumber: 13, branch: pull.headRefName });
   });
 
@@ -545,6 +545,79 @@ describe('CEO merge_pr', () => {
     await swarm.mergePull(repo.id, 13, 'rebase');
     expect(s.backend.commentPull).not.toHaveBeenCalled();
     expect(s.backend.mergePull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'rebase');
+  });
+
+  const qaSession = () => {
+    const tester = { id: 'q1', name: 'Poirot', repoId: repo.id, role: 'qa', specialty: '', status: 'idle', task: null, issueNumber: null, desk: 0, endedAt: null, model: '', effort: '', cli: '' };
+    s.state.agents.push(tester);
+    s.agentRt.set(tester.id, { log: [], pending: [], terminal: null, shots: [] });
+    Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready' });
+    Object.assign(repo, { browserTesting: false });
+    // Keep the actual QA preparation/session lifecycle; replace only disk and runner boundaries.
+    vi.spyOn(s.backend, 'releaseDesk').mockResolvedValue();
+    const checkout = vi.spyOn(s.backend, 'prepareDesk').mockResolvedValue('demo-worktree');
+    const sessions: SessionCallbacks[] = [];
+    const start = vi.spyOn(s.backend, 'startSession').mockImplementation((_opts, cb) => {
+      sessions.push(cb);
+      return { stop: vi.fn(), send: vi.fn() };
+    });
+    const rec = s.state.qa[0];
+    Object.assign(rec, { status: 'queued', testedSha: null, passedSha: null, failedSha: null, retests: 0, fixCrashes: [] });
+    return { tester, rec, checkout, start, sessions };
+  };
+
+  it.each(['checkout', 'session-start'] as const)('refuses a head whose QA %s failed before any completed report', async (failure) => {
+    const { tester, rec, checkout, start, sessions } = qaSession();
+    pull.headSha = 'new-never-tested-head';
+    if (failure === 'checkout') checkout.mockRejectedValue(new Error('Checkout failed'));
+    else start.mockImplementation(() => { throw new Error('Runner could not start'); });
+    await s.runQa(tester, repo, rec);
+    expect(rec).toMatchObject({ status: 'queued', testedSha: pull.headSha, passedSha: null, failedSha: null });
+    expect(tester).toMatchObject({ status: 'error' });
+    expect(tester).toMatchObject({ lastError: failure === 'checkout' ? 'Checkout failed' : 'Runner could not start' });
+    expect(sessions).toHaveLength(0);
+    if (failure === 'checkout') expect(start).not.toHaveBeenCalled();
+    else expect(start).toHaveBeenCalledOnce();
+    await expect(swarm.mergePr(args)).rejects.toMatchObject({ status: 409 });
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.mergePull).not.toHaveBeenCalled();
+  });
+
+  it.each(['pass', 'fail'] as const)('allows a manager override backed by a completed %s report', async (verdict) => {
+    const { tester, rec, sessions } = qaSession();
+    await s.runQa(tester, repo, rec);
+    expect(sessions).toHaveLength(1);
+    sessions[0].finished({ ok: true, text: '', errors: [], turns: 1, costUsd: 0, structured: {
+      verdict, summary: 'Completed QA', checks: [],
+    } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec).toMatchObject({ status: verdict === 'pass' ? 'passed' : 'needs-human', [verdict === 'pass' ? 'passedSha' : 'failedSha']: pull.headSha });
+    vi.mocked(s.backend.commentPull).mockClear();
+    expect(await swarm.mergePr(args)).toContain('Merged PR #13');
+    expect(s.backend.commentPull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, args.reason);
+    expect(s.backend.mergePull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'squash', 'tested');
+  });
+
+  it.each([
+    ['pass', 'checkout'], ['fail', 'checkout'], ['pass', 'session-start'], ['fail', 'session-start'],
+  ] as const)('rejects a new head after an older completed %s report and a failed %s attempt', async (verdict, failure) => {
+    const { tester, rec, checkout, start, sessions } = qaSession();
+    await s.runQa(tester, repo, rec);
+    sessions[0].finished({ ok: true, text: '', errors: [], turns: 1, costUsd: 0, structured: {
+      verdict, summary: 'Older completed QA', checks: [],
+    } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(rec).toMatchObject({ [verdict === 'pass' ? 'passedSha' : 'failedSha']: 'tested' });
+    pull.headSha = 'new-never-tested-head';
+    if (failure === 'checkout') checkout.mockRejectedValue(new Error('Checkout failed'));
+    else start.mockImplementation(() => { throw new Error('Runner could not start'); });
+    await s.runQa(tester, repo, rec);
+    expect(rec).toMatchObject({ status: 'queued', testedSha: pull.headSha, [verdict === 'pass' ? 'passedSha' : 'failedSha']: 'tested' });
+    expect(sessions).toHaveLength(1); // Only the old head ever reached a QA session.
+    vi.mocked(s.backend.commentPull).mockClear();
+    await expect(swarm.mergePr(args)).rejects.toMatchObject({ status: 409 });
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.mergePull).not.toHaveBeenCalled();
   });
 
   it('lets the demo CEO merge from an explicit manager message', async () => {

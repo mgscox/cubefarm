@@ -8,7 +8,7 @@ export function checkMergePr(number: number, repo: string, context: {
   syncing: boolean;
   parking: boolean;
   busy: boolean;
-  qa?: { status: QaView['status']; testedSha?: string | null };
+  qa?: { status: QaView['status']; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null };
   pull?: Pick<PullInfo, 'state' | 'headSha' | 'mergeable' | 'mergeState'>;
 }): string {
   checkParkPr(number, repo, context);
@@ -17,7 +17,10 @@ export function checkMergePr(number: number, repo: string, context: {
     throw new HttpError(409, `PR #${number} is mid-QA or mid-fix; wait until it finishes`);
   }
   const sha = context.qa?.testedSha;
-  if (!sha) throw new HttpError(409, `PR #${number} has no tested head; run QA before merging`);
+  // testedSha is an attempted head until checkout, session start and a usable report succeed.
+  if (!sha || (context.qa?.passedSha !== sha && context.qa?.failedSha !== sha)) {
+    throw new HttpError(409, `PR #${number} has no completed QA report for its tested head; run QA before merging`);
+  }
   if (context.pull.headSha !== sha) throw new HttpError(409, `PR #${number}'s head moved since QA; test the new commits before merging`);
   if (context.pull.mergeable === 'CONFLICTING' || context.pull.mergeState === 'DIRTY') {
     throw new HttpError(409, `PR #${number} is conflicting; send it back to a developer before merging`);
