@@ -25,6 +25,7 @@ interface Internals {
   companyStatus(a?: { floor?: number; verbose?: boolean }): string;
   officeTools(): OfficeTools;
   startPipelineWork(repo: Repo): boolean;
+  advanceMerge(repo: Repo, rec: QaRec, pull: PullInfo): Promise<boolean>;
   runQa(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   runFix(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   onQaFinished(agent: unknown, repo: Repo, result: SessionResult): Promise<void>;
@@ -502,6 +503,30 @@ describe('CEO merge_pr', () => {
     if (condition === 'untested') s.state.qa[0].testedSha = null;
     await expect(swarm.mergePr(args)).rejects.toMatchObject({ status: 409 });
     expect(s.backend.prDetails).not.toHaveBeenCalled();
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.mergePull).not.toHaveBeenCalled();
+  });
+
+  it.each(['checkout', 'session-start'] as const)('rejects an auto-merge branch update followed by a failed QA %s', async (failure) => {
+    const { tester, rec, checkout, start, sessions } = qaSession();
+    await s.runQa(tester, repo, rec);
+    sessions[0].finished({ ok: true, text: '', errors: [], turns: 1, costUsd: 0, structured: {
+      verdict: 'pass', summary: 'Older completed QA', checks: [],
+    } });
+    await vi.advanceTimersByTimeAsync(0);
+    Object.assign(pull, { checks: 'passing', mergeState: 'BEHIND' });
+    const update = vi.spyOn(s.backend, 'updateBranch').mockImplementation(async () => {
+      Object.assign(pull, { headSha: 'updated-never-tested-head', mergeState: 'CLEAN' });
+    });
+    expect(await s.advanceMerge(repo, rec, pull)).toBe(false);
+    expect(update).toHaveBeenCalledOnce();
+    expect(rec).toMatchObject({ status: 'passed', testedSha: 'tested', passedSha: pull.headSha });
+    if (failure === 'checkout') checkout.mockRejectedValue(new Error('Checkout failed'));
+    else start.mockImplementation(() => { throw new Error('Runner could not start'); });
+    await s.runQa(tester, repo, rec);
+    expect(rec).toMatchObject({ status: 'queued', testedSha: pull.headSha, passedSha: pull.headSha });
+    vi.mocked(s.backend.commentPull).mockClear();
+    await expect(swarm.mergePr(args)).rejects.toMatchObject({ status: 409 });
     expect(s.backend.commentPull).not.toHaveBeenCalled();
     expect(s.backend.mergePull).not.toHaveBeenCalled();
   });

@@ -30,6 +30,11 @@ describe('CEO merge preflight', () => {
       pull: { ...context().pull, headSha: 'unseen' } })).toThrow('no completed QA report');
   });
 
+  it.each(['queued', 'needs-human'] as const)('does not treat converged attempt/update SHAs as completed QA when %s', (status) => {
+    expect(() => checkMergePr(13, 'owner/repo', { ...context(), qa: { status, testedSha: 'unseen', passedSha: 'unseen' },
+      pull: { ...context().pull, headSha: 'unseen' } })).toThrow('no completed QA report');
+  });
+
   it.each([
     { qa: undefined },
     { qa: { status: 'passed' as const, testedSha: null } },

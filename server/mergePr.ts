@@ -17,8 +17,10 @@ export function checkMergePr(number: number, repo: string, context: {
     throw new HttpError(409, `PR #${number} is mid-QA or mid-fix; wait until it finishes`);
   }
   const sha = context.qa?.testedSha;
-  // testedSha is an attempted head until checkout, session start and a usable report succeed.
-  if (!sha || (context.qa?.passedSha !== sha && context.qa?.failedSha !== sha)) {
+  // A branch update may advance passedSha; a failed QA attempt then advances testedSha without a report.
+  const reported = context.qa?.status === 'passed' ? context.qa.passedSha :
+    context.qa?.status === 'failed' || context.qa?.status === 'needs-human' ? context.qa.failedSha : null;
+  if (!sha || reported !== sha) {
     throw new HttpError(409, `PR #${number} has no completed QA report for its tested head; run QA before merging`);
   }
   if (context.pull.headSha !== sha) throw new HttpError(409, `PR #${number}'s head moved since QA; test the new commits before merging`);
