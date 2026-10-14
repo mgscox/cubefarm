@@ -6,8 +6,9 @@ import type { Backend } from './backend.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
-import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type OfficeTools, type ParkPrRequest, type StartIssueRequest } from './ceo.ts';
+import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type MergePrRequest, type OfficeTools, type ParkPrRequest, type StartIssueRequest } from './ceo.ts';
 import { checkParkPr } from './parkPr.ts';
+import { checkMergePr } from './mergePr.ts';
 import { orphanedQa } from './qaOwnership.ts';
 import { planDevFix, type FixReason } from './fixPlan.ts';
 import { HttpError } from './httpError.ts';
@@ -423,6 +424,7 @@ export class Swarm {
       rerunQa: (a) => this.rerunQa(a),
       sendBackToDev: (a) => this.sendBackToDev(a),
       parkPr: (a) => this.parkPr(a),
+      mergePr: (a) => this.mergePr(a),
     });
   }
   private ceoIssues = new IssueCap(MAX_ISSUES_PER_JOB); // issues filed during the current CEO job
@@ -1393,18 +1395,39 @@ export class Swarm {
     return number;
   }
 
-  async mergePull(repoId: string, number: number, method: 'squash' | 'merge' | 'rebase' = 'squash') {
+  async mergePull(repoId: string, number: number, method: 'squash' | 'merge' | 'rebase' = 'squash', approval?: { reason: string }) {
     const repo = this.repo(repoId);
     const rt = this.repoRt.get(repo.id)!;
     if (rt.parking || rt.merging) throw new HttpError(409, `Wait until PR parking or merging finishes on ${repo.fullName}`);
+    const preflight = (pr: PullInfo | PrDetails | undefined, reserved = false) => checkMergePr(number, repo.fullName, {
+      merging: !reserved && rt.merging, parking: !reserved && !!rt.parking, syncing: rt.syncing,
+      qa: this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number),
+      pull: pr,
+      busy: this.state.agents.some((a) => a.repoId === repo.id && (
+        a.prNumber === number || (pr && (a.branch === pr.headRefName ||
+          (a.task !== 'qa' && a.issueNumber != null && pr.closesIssues.includes(a.issueNumber))))
+      ) && (BUSY.includes(a.status) || !!this.agentRt.get(a.id)?.session)),
+    });
+    const headSha = approval ? preflight(rt.pulls.find((p) => p.number === number)) : undefined;
     rt.merging = true;
+    // The parking reservation also blocks scheduling, refresh and handoffs during a CEO override.
+    if (approval) rt.parking = true;
     try {
-      await this.backend.mergePull(repo.fullName, number, method);
+      if (approval) {
+        const pr = await this.backend.prDetails(repo.fullName, number);
+        preflight(pr, true);
+        await this.backend.commentPull(repo.fullName, number, approval.reason);
+        preflight(pr, true);
+      }
+      if (approval) await this.backend.mergePull(repo.fullName, number, method, headSha);
+      else await this.backend.mergePull(repo.fullName, number, method);
+      if (approval) rt.parking = false; // The normal refresh reconciles merged agents and removes QA.
       this.toast('success', `Merged PR #${number} into ${repo.defaultBranch}`);
       await this.syncRepo(repo.id);
       setTimeout(() => this.schedule(), 200);
     } finally {
       rt.merging = false;
+      if (approval) rt.parking = false;
     }
   }
 
@@ -3709,16 +3732,26 @@ export class Swarm {
     return `Proposed letting ${a.name} go. The manager will decide (request ${req.id}).`;
   }
 
-  private async fileIssue(x: { floor: number; title: string; body: string; specialty?: string }) {
+  private async fileIssue(x: { floor: number; title: string; body: string; specialty?: string; ready_for_human?: boolean }) {
     const repo = this.floorRepo(x.floor);
     this.ceoIssues.check();
     const title = String(x.title ?? '').trim().slice(0, 120);
     if (!title) throw new Error('An issue needs a title.');
     const slug = specialtySlug(x.specialty);
     const body = `${String(x.body ?? '').trim()}\n\n---\n_Filed by ${this.ceo().name}, the cubefarm CEO._`;
-    const n = await this.backend.createIssue(repo.fullName, title, body, slug ? [specialtyLabel(slug)] : []);
+    const labels = [...(slug ? [specialtyLabel(slug)] : []), ...(x.ready_for_human ? [READY_FOR_HUMAN] : [])];
+    const n = await this.backend.createIssue(repo.fullName, title, body, labels);
     this.ceoIssues.record(repo.id);
-    return `Filed #${n} on floor ${repo.floor}: ${title}${slug ? ` (routed to ${slug})` : ''}.`;
+    return `Filed #${n}${x.ready_for_human ? ' for a person' : ''} on floor ${repo.floor}: ${title}${slug ? ` (routed to ${slug})` : ''}.`;
+  }
+
+  /** Explicit manager instruction through the CEO, pinned to the last QA head. */
+  async mergePr(x: MergePrRequest) {
+    const reason = x.reason?.trim();
+    if (!reason || reason.length > 1000) throw new HttpError(400, 'Give a short merge reason (1–1000 characters)');
+    const repo = this.floorRepo(x.floor);
+    await this.mergePull(repo.id, x.number, 'squash', { reason });
+    return `Merged PR #${x.number} on floor ${repo.floor} at the head QA last tested. Report the merge to the manager.`;
   }
 
   private async startIssue(x: StartIssueRequest) {

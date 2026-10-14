@@ -33,12 +33,19 @@ export interface OfficeHandlers {
     effort?: string;
   }): string;
   proposeLetGo(a: { agent_id: string; reason: string }): string;
-  fileIssue(a: { floor: number; title: string; body: string; specialty?: string }): Promise<string>;
+  fileIssue(a: { floor: number; title: string; body: string; specialty?: string; ready_for_human?: boolean }): Promise<string>;
   routeIssue(a: { floor: number; number: number; specialty?: string; depends_on?: number[] }): Promise<string>;
   startIssue(a: StartIssueRequest): Promise<string>;
   rerunQa(a: { floor: number; number: number; note?: string }): Promise<string>;
   sendBackToDev(a: DevFixRequest): Promise<string>;
   parkPr(a: ParkPrRequest): Promise<string>;
+  mergePr(a: MergePrRequest): Promise<string>;
+}
+
+export interface MergePrRequest {
+  floor: number;
+  number: number;
+  reason: string;
 }
 
 export interface ParkPrRequest {
@@ -252,12 +259,13 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
     ),
     tool(
       'file_issue',
-      'File a GitHub issue on a floor. A specialty routes it to that specialist first; when none is free, any free developer takes it. Write "Depends on #N" in the body only when it cannot start until #N is merged: the office will not start it until #N is closed.',
+      'File a GitHub issue on a floor. Set ready_for_human for work reserved for a person; agents never start it. A specialty is a routing hint. Write "Depends on #N" in the body only when it cannot start until #N is merged: the office will not start it until #N is closed.',
       {
         floor: z.number().int(),
         title: z.string().max(120),
         body: z.string().max(6000).describe('Context, what to build, acceptance criteria'),
         specialty: z.string().max(24).optional(),
+        ready_for_human: z.boolean().optional().describe('Reserve this issue for a person at creation'),
       },
       (a) => run(() => h.fileIssue(a)),
     ),
@@ -304,6 +312,16 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
         reason: z.string().trim().min(1).max(1000).describe('Short reason posted as a PR comment'),
       },
       (a) => run(() => h.parkPr(a)),
+    ),
+    tool(
+      'merge_pr',
+      'Merge a PR only when the manager explicitly asks for that PR to be merged; report afterwards. Posts the reason, then merges exactly the head QA last tested. Refuses new commits, conflicts or active QA/fixes.',
+      {
+        floor: z.number().int(),
+        number: z.number().int().positive().describe('The pull request number'),
+        reason: z.string().trim().min(1).max(1000).describe('Manager instruction and follow-up issues, posted as a PR comment'),
+      },
+      (a) => run(() => h.mergePr(a)),
     ),
     tool(
       'rerun_qa',
@@ -363,6 +381,7 @@ export function ceoSystemPrompt(o: {
     '- Use start_issue when the manager asks for an issue to be started; never bypass auto-assign OFF on your own initiative.',
     '- Use send_back_to_dev on your own initiative for needs-human PRs with clear fixes (real QA defects, conflicts or failing checks); report the handoff to the manager afterwards.',
     '- Use park_pr on your own initiative only for placeholder/blocked PRs that cannot pass QA until another issue merges; report it to the manager afterwards.',
+    '- Use merge_pr only when the manager explicitly asks for that PR to be merged; include their instruction and any follow-up issues in the reason, and report afterwards. Use file_issue with ready_for_human for follow-ups reserved for a person.',
     '- Use rerun_qa only when the manager asks for a PR to be re-tested. First check it has new commits since the last QA; otherwise it needs a developer for fixes.',
     '- Titles are specific ("Three.js graphics engineer", not "Developer"). A specialty is a short lowercase slug ("graphics", "gameplay", "frontend", "backend", "content", "a11y", "devops"). Only route an issue to a specialty that someone on the floor has, or that you are proposing to hire.',
     '- Before proposing a hire, check the floor and the pending proposals for someone who already covers it. If the manager declined a similar proposal (recentDecisions), do not propose it again unless something has changed, and say what.',

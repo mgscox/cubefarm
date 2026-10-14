@@ -445,6 +445,119 @@ describe('QA records for PRs the sync no longer lists', () => {
   });
 });
 
+describe('CEO merge_pr', () => {
+  const args = { floor: 1, number: 13, reason: 'Manager requested merge; remaining findings filed as #66' };
+  let pull: PullInfo;
+  beforeEach(() => {
+    Object.assign(repo, { defaultBranch: 'main', links: [] });
+    pull = {
+      number: 13, title: 'Fix recovery', url: '', headRefName: 'swarm/issue-67-ada', state: 'OPEN',
+      isDraft: false, closesIssues: [67], checks: 'failing', mergeable: 'MERGEABLE', headSha: 'tested',
+      reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
+      mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+    };
+    s.repoRt.get(repo.id)!.pulls = [pull];
+    s.backend.prDetails = vi.fn(async () => ({ ...pull, body: '', isCrossRepository: false }));
+    s.backend.listPulls = vi.fn(async () => ({ pulls: [pull] }));
+    s.backend.listIssues = vi.fn(async () => []);
+    vi.spyOn(s.backend, 'commentPull').mockResolvedValue('comment-url');
+    vi.spyOn(s.backend, 'mergePull').mockImplementation(async (_repo, _number, _method, sha) => {
+      if (sha && sha !== pull.headSha) throw new Error('Head branch was modified');
+      pull.state = 'MERGED';
+    });
+    s.state.qa.push({ repoId: repo.id, prNumber: 13, issueNumber: 67, status: 'needs-human', round: 3, sessionFailures: 2,
+      testedSha: 'tested', devAgentId: 'a1', qaAgentId: null, summary: 'Remaining findings', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 });
+    Object.assign(s.state.agents[0], { status: 'done', task: 'issue', issueNumber: 67, prNumber: 13, branch: pull.headRefName });
+  });
+
+  it('posts the reason before merging at the tested SHA and removes QA through the normal refresh', async () => {
+    const events = vi.spyOn(s, 'broadcast');
+    expect(await s.officeTools().call('merge_pr', args)).toContain('Merged PR #13');
+    expect(s.backend.commentPull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, args.reason);
+    expect(s.backend.mergePull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'squash', 'tested');
+    expect(vi.mocked(s.backend.commentPull).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(s.backend.mergePull).mock.invocationCallOrder[0]);
+    expect(s.state.qa).toEqual([]);
+    expect(events).toHaveBeenCalledWith({ type: 'qaRemoved', repoId: repo.id, prNumber: 13 });
+    expect(s.state.agents[0]).toMatchObject({ task: null, prNumber: null });
+    expect(s.repoRt.get(repo.id)).toMatchObject({ merging: false, parking: false });
+  });
+
+  it.each(['head', 'conflicting', 'dirty', 'closed'] as const)('refuses a freshly %s PR despite stale cache', async (condition) => {
+    s.backend.prDetails = vi.fn(async () => ({ ...pull, body: '', isCrossRepository: false,
+      ...(condition === 'head' ? { headSha: 'unseen' } : condition === 'conflicting' ? { mergeable: 'CONFLICTING' } :
+        condition === 'dirty' ? { mergeState: 'DIRTY' } : { state: 'CLOSED' as const }),
+    }));
+    await expect(swarm.mergePr(args)).rejects.toMatchObject({ status: condition === 'closed' ? 404 : 409 });
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.mergePull).not.toHaveBeenCalled();
+    expect(s.state.qa).toHaveLength(1);
+    expect(s.repoRt.get(repo.id)).toMatchObject({ merging: false, parking: false });
+  });
+
+  it.each(['testing', 'fixing', 'busy', 'live-session', 'merging', 'parking', 'syncing', 'untested'] as const)('refuses %s before GitHub work', async (condition) => {
+    if (condition === 'testing' || condition === 'fixing') s.state.qa[0].status = condition;
+    if (condition === 'busy') Object.assign(s.state.agents[0], { prNumber: null, status: 'preparing', task: 'fix' });
+    if (condition === 'live-session') Object.assign(s.agentRt.get('a1')!, { session: {} });
+    if (condition === 'merging' || condition === 'parking' || condition === 'syncing') Object.assign(s.repoRt.get(repo.id)!, { [condition]: true });
+    if (condition === 'untested') s.state.qa[0].testedSha = null;
+    await expect(swarm.mergePr(args)).rejects.toMatchObject({ status: 409 });
+    expect(s.backend.prDetails).not.toHaveBeenCalled();
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.mergePull).not.toHaveBeenCalled();
+  });
+
+  it.each(['', '  ', 'x'.repeat(1001)])('refuses an invalid reason', async (reason) => {
+    await expect(swarm.mergePr({ ...args, reason })).rejects.toMatchObject({ status: 400 });
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.mergePull).not.toHaveBeenCalled();
+  });
+
+  it('holds the reservation across reads/comments and releases it after a failed comment', async () => {
+    s.backend.commentPull = vi.fn(async () => {
+      expect(s.startPipelineWork(repo)).toBe(false);
+      expect(s.startIssueWork(repo)).toBe(false);
+      await expect(swarm.sendToQa(repo.id, 13)).rejects.toMatchObject({ status: 409 });
+      await expect(swarm.parkPr(args)).rejects.toMatchObject({ status: 409 });
+      await expect(swarm.mergePr(args)).rejects.toMatchObject({ status: 409 });
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toMatchObject({ status: 409 });
+      throw new Error('Comment failed');
+    });
+    await expect(swarm.mergePr(args)).rejects.toThrow('Comment failed');
+    expect(s.backend.mergePull).not.toHaveBeenCalled();
+    expect(s.state.qa).toHaveLength(1);
+    expect(s.repoRt.get(repo.id)).toMatchObject({ merging: false, parking: false });
+  });
+
+  it('never merges commits pushed after the comment and keeps QA on merge failure', async () => {
+    s.backend.commentPull = vi.fn(async () => {
+      pull.headSha = 'unseen';
+      return 'comment-url';
+    });
+    await expect(swarm.mergePr(args)).rejects.toThrow('Head branch was modified');
+    expect(s.backend.mergePull).toHaveBeenCalledWith(repo.fullName, 13, 'squash', 'tested');
+    expect(pull.state).toBe('OPEN');
+    expect(s.state.qa).toHaveLength(1);
+    expect(s.repoRt.get(repo.id)).toMatchObject({ merging: false, parking: false });
+  });
+
+  it('preserves manager-facing merge behavior without tested QA or a CEO comment', async () => {
+    s.state.qa = [];
+    await swarm.mergePull(repo.id, 13, 'rebase');
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.mergePull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'rebase');
+  });
+
+  it('lets the demo CEO merge from an explicit manager message', async () => {
+    const finished = vi.fn();
+    const handle = createDemoBackend().startSession({ role: 'ceo', cwd: '', prompt: `Manager asks:\nmerge PR #13 on floor 1 with ${args.reason}`,
+      systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools() },
+      { log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: expect.stringContaining('Merged PR #13') }));
+    handle.stop();
+  });
+});
+
 describe('CEO park_pr', () => {
   const args = { floor: 1, number: 13, reason: 'Placeholder waits on #66' };
   let pull: PullInfo;
@@ -1048,6 +1161,43 @@ describe('native issue dependencies', () => {
 });
 
 describe('ready-for-human issues', () => {
+  it('files for a person with the specialty and human label atomically, never auto-assigning it', async () => {
+    const create = vi.spyOn(s.backend, 'createIssue').mockImplementation(async (_name, _title, _body, labels) => {
+      // Simulate the scheduler seeing the issue immediately on creation, before the tool returns.
+      setIssues(issue(68, labels));
+      expect(s.startIssueWork(repo)).toBe(false);
+      return 68;
+    });
+    const edit = vi.spyOn(s.backend, 'editIssue');
+    expect(await s.officeTools().call('file_issue', { floor: 1, title: 'Verify deployment', body: 'Check hardware', specialty: 'server', ready_for_human: true })).toContain('Filed #68 for a person');
+    expect(create).toHaveBeenCalledExactlyOnceWith(repo.fullName, 'Verify deployment', expect.stringContaining('Check hardware'), ['swarm:server', 'ready-for-human']);
+    expect(edit).not.toHaveBeenCalled();
+    expect(ready()).toEqual([]);
+    expect(runTask).not.toHaveBeenCalled();
+  });
+
+  it.each([false, undefined])('keeps ordinary issue filing schedulable (ready_for_human: %s)', async (ready_for_human) => {
+    const create = vi.spyOn(s.backend, 'createIssue').mockImplementation(async (_name, _title, _body, labels) => {
+      setIssues(issue(68, labels));
+      return 68;
+    });
+    expect(await s.officeTools().call('file_issue', { floor: 1, title: 'Fix recovery', body: 'Implement it', ready_for_human })).not.toContain('for a person');
+    expect(create.mock.calls[0][3]).toEqual([]);
+    expect(ready()).toEqual([68]);
+  });
+
+  it('lets the demo CEO file an issue for a person from a manager message', async () => {
+    const create = vi.spyOn(s.backend, 'createIssue').mockResolvedValue(68);
+    const finished = vi.fn();
+    const handle = createDemoBackend().startSession({ role: 'ceo', cwd: '', prompt: 'Manager asks:\nFile issue on floor 1 titled Verify deployment for a person: Check hardware',
+      systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools() },
+      { log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: expect.stringContaining('Filed #68 for a person') }));
+    expect(create).toHaveBeenCalledWith(repo.fullName, 'Verify deployment', expect.stringContaining('Check hardware'), ['ready-for-human']);
+    handle.stop();
+  });
+
   it('are never ready to start, in any letter case', () => {
     setIssues(issue(1), issue(2, ['ready-for-human']), issue(3, ['swarm:server', 'Ready-For-Human']), issue(4, ['READY-FOR-HUMAN']));
     expect(ready()).toEqual([1]);

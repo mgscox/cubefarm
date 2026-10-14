@@ -936,6 +936,16 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
     async chat(text: string) {
       const s = await status();
       await think('Reading your message.');
+      const merge = text.match(/\bmerge\s+(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))\s+(?:because|with|reason)\s+([^;\n]+)/i);
+      if (merge) {
+        const floor = merge[2] ? Number(merge[2]) : s.floors.find((f) => f.repo.toLowerCase() === merge[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === merge[3].toLowerCase())?.floor;
+        if (floor === undefined) return `Refused: No floor for "${merge[3]}".`;
+        return use('merge_pr', { floor, number: Number(merge[1]), reason: merge[4].trim() });
+      }
+      const humanIssue = text.match(/\bfile\s+(?:an?\s+)?issue\s+on\s+floor\s+(\d+)\s+titled\s+(.+?)\s+for\s+a\s+person:\s*([\s\S]+)/i);
+      if (humanIssue) {
+        return use('file_issue', { floor: Number(humanIssue[1]), title: humanIssue[2].trim(), body: humanIssue[3].trim(), ready_for_human: true });
+      }
       const park = text.match(/\bpark\s+(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))\s+(?:because|with|reason)\s+([^;\n]+)/i);
       if (park) {
         const floor = park[2] ? Number(park[2]) : s.floors.find((f) => f.repo.toLowerCase() === park[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === park[3].toLowerCase())?.floor;
