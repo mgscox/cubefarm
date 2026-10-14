@@ -554,6 +554,7 @@ describe('CEO merge_pr', () => {
       { log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: expect.stringContaining('Merged PR #13') }));
+    expect(s.backend.commentPull).toHaveBeenCalledWith(repo.fullName, 13, args.reason);
     handle.stop();
   });
 });

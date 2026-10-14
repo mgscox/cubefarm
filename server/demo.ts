@@ -936,7 +936,7 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
     async chat(text: string) {
       const s = await status();
       await think('Reading your message.');
-      const merge = text.match(/\bmerge\s+(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))\s+(?:because|with|reason)\s+([^;\n]+)/i);
+      const merge = text.match(/\bmerge\s+(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))\s+(?:because|with|reason)\s+([^\n]+)/i);
       if (merge) {
         const floor = merge[2] ? Number(merge[2]) : s.floors.find((f) => f.repo.toLowerCase() === merge[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === merge[3].toLowerCase())?.floor;
         if (floor === undefined) return `Refused: No floor for "${merge[3]}".`;
