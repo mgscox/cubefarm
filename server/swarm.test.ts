@@ -5,7 +5,9 @@ import { branchAhead, listIssues } from './github.ts';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
 import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
-import type { OfficeTools } from './ceo.ts';
+import { ceoSystemPrompt, type OfficeTools } from './ceo.ts';
+import { ONE_TURN } from './clis.ts';
+import { QA_RESUME_PROMPT } from './qaRetry.ts';
 import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRunner.ts';
 
 // A Swarm that is never init()ed: no state file, scheduler timers or real sessions.
@@ -18,7 +20,7 @@ interface Internals {
   backend: Backend;
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[] };
   repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string }>;
-  agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null; shots?: unknown[] }>;
+  agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null; shots?: unknown[]; qaResume?: unknown }>;
   pausedUntil: number;
   readyIssues(repo: Repo): { issue: IssueInfo }[];
   startIssueWork(repo: Repo): boolean;
@@ -28,7 +30,7 @@ interface Internals {
   advanceMerge(repo: Repo, rec: QaRec, pull: PullInfo): Promise<boolean>;
   runQa(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   runFix(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
-  onQaFinished(agent: unknown, repo: Repo, result: SessionResult): Promise<void>;
+  onQaFinished(agent: unknown, repo: Repo, result: SessionResult, released?: Promise<void>): Promise<void>;
   onFixFinished(agent: unknown, repo: Repo, result: SessionResult): void;
   postMessage(from: string, text: string): void;
   broadcast(event: ServerEvent): void;
@@ -2148,6 +2150,110 @@ describe('QA rounds', () => {
       s.onFixFinished(ada, repo, result(true));
       expect(rec).toMatchObject({ status: 'queued', round: 3, fixCrashes: [] });
     });
+  });
+
+  describe('a QA session that ends without a report', () => {
+    let session: Mock;
+    let tester: Record<string, unknown>;
+    const starts = () => session.mock.calls.length;
+    beforeEach(async () => {
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, body: '', isCrossRepository: false });
+      vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
+      session = vi.spyOn(s, 'startAgentSession').mockImplementation((agent) => {
+        Object.assign(agent as object, { status: 'working', sessionId: 'qa-session' });
+      }) as Mock;
+      tester = addAgent('q2', 'Marple', 'qa', 1);
+      rec.status = 'queued';
+      await s.runQa(tester, repo, rec);
+      s.agentRt.get('q2')!.shots!.push({ data: Buffer.from('png'), mime: 'image/png', url: null, at: 1 });
+    });
+
+    it('is resumed once in the same session, worktree and schema, keeping its screenshots and round', async () => {
+      const [, , cwd, , systemAppend, , schema] = session.mock.calls[0];
+      expect(systemAppend).toContain(ONE_TURN);
+      await s.onQaFinished(tester, repo, result(true));
+      expect(starts()).toBe(2);
+      expect(session.mock.calls[1]).toEqual([tester, repo, cwd, QA_RESUME_PROMPT, systemAppend, 'qa-session', schema]);
+      expect(rec).toMatchObject({ status: 'testing', qaAgentId: 'q2', round: 2, retests: 0, sessionFailures: 0 });
+      expect(tester).toMatchObject({ status: 'working', task: 'qa', endedAt: null });
+      expect(s.agentRt.get('q2')!.shots).toHaveLength(1);
+      const comment = vi.spyOn(s.backend, 'commentPull');
+      await s.onQaFinished(tester, repo, result(true, failReport));
+      expect(rec).toMatchObject({ status: 'failed', round: 2, sessionFailures: 0 });
+      expect(comment).toHaveBeenCalledOnce();
+    });
+
+    it('takes the usual failure path on a second miss, without another resume or round', async () => {
+      await s.onQaFinished(tester, repo, result(true));
+      await s.onQaFinished(tester, repo, result(true));
+      expect(starts()).toBe(2);
+      expect(rec).toMatchObject({ status: 'queued', qaAgentId: null, round: 2, sessionFailures: 1 });
+      expect(tester).toMatchObject({ status: 'error', lastError: 'QA finished without a usable report' });
+    });
+
+    it('hands the PR to a human when the resumed session is stopped', async () => {
+      await s.onQaFinished(tester, repo, result(true));
+      swarm.stopAgent('q2');
+      await s.onQaFinished(tester, repo, result(true));
+      expect(starts()).toBe(2);
+      expect(rec).toMatchObject({ status: 'needs-human', qaAgentId: null, summary: 'QA was stopped by the manager.' });
+      expect(tester).toMatchObject({ status: 'stopped' });
+    });
+
+    it.each([
+      ['stopped', () => { tester.status = 'stopped'; }, false, { status: 'needs-human', sessionFailures: 1 }],
+      ['failed', () => {}, true, { status: 'queued', sessionFailures: 1 }],
+      ['usage-limited', () => { s.pausedUntil = Date.now() + 60_000; }, false, { status: 'queued', sessionFailures: 0 }],
+      ['reassigned', () => { rec.qaAgentId = 'q1'; }, false, { status: 'queued', sessionFailures: 1 }],
+      ['picked up after a restart', () => { delete s.agentRt.get('q2')!.qaResume; }, false, { status: 'queued', sessionFailures: 1 }],
+    ] as const)('is never resumed when %s', async (_why, arrange, crashed, after) => {
+      rec.sessionFailures = 0;
+      arrange();
+      await s.onQaFinished(tester, repo, result(!crashed));
+      expect(starts()).toBe(1);
+      expect(rec).toMatchObject({ ...after, qaAgentId: null, round: 2 });
+    });
+
+    it.each([
+      ['Stop', () => swarm.stopAgent('q2'), { status: 'needs-human', sessionFailures: 0 }],
+      ['Clear desk', () => s.clearTask(tester), { status: 'queued', sessionFailures: 0 }],
+    ] as const)('is not resumed after %s during the desk clean-up', async (_what, act, after) => {
+      let cleaned!: () => void;
+      const finishing = s.onQaFinished(tester, repo, result(true), new Promise<void>((resolve) => { cleaned = resolve; }));
+      await vi.advanceTimersByTimeAsync(0);
+      act();
+      cleaned();
+      await finishing;
+      expect(starts()).toBe(1);
+      expect(rec).toMatchObject({ ...after, qaAgentId: null, round: 2 });
+    });
+
+    it("isn't charged a failure when the usage limit hits during the desk clean-up", async () => {
+      let cleaned!: () => void;
+      const finishing = s.onQaFinished(tester, repo, result(true), new Promise<void>((resolve) => { cleaned = resolve; }));
+      await vi.advanceTimersByTimeAsync(0);
+      s.pausedUntil = Date.now() + 60_000;
+      cleaned();
+      await finishing;
+      expect(starts()).toBe(1);
+      expect(rec).toMatchObject({ status: 'queued', qaAgentId: null, round: 2, sessionFailures: 0 });
+    });
+  });
+});
+
+describe('the line about turns ending', () => {
+  it('is in the developer, fix, QA and CEO prompts exactly once', () => {
+    Object.assign(repo, { links: [], defaultBranch: 'main' });
+    const a = s.state.agents[0];
+    const pr = { number: 13, title: 'Chaser', headRefName: 'swarm/13', url: '' };
+    const p = s as unknown as Record<string, (...args: unknown[]) => string>;
+    const prompts = [
+      p.buildSystemAppend(a, repo, '/desk', 'swarm/issue-1-ada'),
+      p.buildSystemAppend(a, repo, '/desk', 'fix/13', { pr: 13, headRef: 'swarm/13' }),
+      p.buildQaSystemAppend(a, repo, '/desk', 'qa/pr-13-ada', pr),
+      ceoSystemPrompt({ name: 'Joi', company: 'Acme', manager: 'Sam', notesFile: '/notes.md', sessionLimit: 4, teamCap: 5, hiring: 'approve' }),
+    ];
+    for (const prompt of prompts) expect(prompt.split(ONE_TURN)).toHaveLength(2);
   });
 });
 

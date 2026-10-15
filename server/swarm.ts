@@ -10,6 +10,7 @@ import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, p
 import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
 import { orphanedQa } from './qaOwnership.ts';
+import { QA_RESUME_PROMPT, qaRetry } from './qaRetry.ts';
 import { planDevFix, type FixReason } from './fixPlan.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
@@ -20,7 +21,7 @@ import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { officeLifecycle } from './officeLifecycle.ts';
 import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type LastUpdate } from './officeUpdate.ts';
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
-import { isCli } from './clis.ts';
+import { isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { issueBlockers, issueParent, issueWaitReason, forHuman, holdUps, issueSpecialty, READY_FOR_HUMAN } from '../shared/issues.ts';
 import { effectiveModel } from '../shared/models.ts';
@@ -187,6 +188,7 @@ interface AgentRuntime {
   terminal: AgentTerminal | null; // their terminal, once they've run in the terminal runtime
   starting?: number; // reserved while reading an issue session baseline
   generation?: number; // bumped by every new task, cleared task and session: see nextGeneration
+  qaResume?: { cwd: string; systemAppend: string } | null; // the QA run's one resume for a missing report, until used
 }
 
 interface RepoRuntime {
@@ -1785,6 +1787,7 @@ export class Swarm {
       fixing ? '' : '7. End your final message with the pull request URL on its own line.',
       '',
       'Rules: never push to the default branch, never force-push, never merge pull requests yourself (the office merges them once QA and the checks pass), and never edit files outside your worktree. If you cannot finish, open a draft PR (gh pr create --draft) explaining what is left and why. Checks you can\'t run yourself (another operating system, real devices, paid services, live voice or a person\'s judgement) are not unfinished work: list them in the PR body for the manager and open the PR ready for review.',
+      ONE_TURN,
     ]
       .filter((l) => l !== '')
       .join('\n');
@@ -1807,6 +1810,7 @@ export class Swarm {
     rt.screenshot = null;
     rt.browserUrl = null;
     rt.shots = [];
+    rt.qaResume = null;
     void removeScreens(a.id);
     this.appendLog(a, [
       { kind: 'system', text: '' },
@@ -1971,7 +1975,7 @@ export class Swarm {
     const released = this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
     if (result.interrupted) this.interrupted(a);
 
-    if (a.task === 'qa') await this.onQaFinished(a, repo, result);
+    if (a.task === 'qa') await this.onQaFinished(a, repo, result, released);
     else if (a.task === 'fix') this.onFixFinished(a, repo, result);
     else await this.onIssueFinished(a, repo, result, released, generation);
 
@@ -2234,6 +2238,7 @@ export class Swarm {
       '5. You may write throwaway scripts to probe behaviour, but do not commit them.',
       '',
       'Rules: do not modify the code under test, do not commit, push, comment on, review or merge anything on GitHub. The office posts your report on the pull request. Finish with the structured QA report: verdict, summary, the checks you performed, the commands you ran and one caption per screenshot.',
+      ONE_TURN,
     ].join('\n');
   }
 
@@ -2307,7 +2312,10 @@ export class Swarm {
       .join('\n');
 
     try {
-      await this.startAgentSession(a, repo, cwd, prompt, this.buildQaSystemAppend(a, repo, cwd, branch, pr), undefined, QA_SCHEMA);
+      const systemAppend = this.buildQaSystemAppend(a, repo, cwd, branch, pr);
+      const rt = this.agentRt.get(a.id);
+      if (rt) rt.qaResume = { cwd, systemAppend };
+      await this.startAgentSession(a, repo, cwd, prompt, systemAppend, undefined, QA_SCHEMA);
     } catch (err) {
       a.status = 'error';
       a.endedAt = Date.now();
@@ -2318,13 +2326,35 @@ export class Swarm {
     }
   }
 
-  private async onQaFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult) {
+  /** `released`: the clean-up of the desk the session just left, which a resumed session must wait for. */
+  private async onQaFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, released: Promise<void> = Promise.resolve()) {
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
     const rt = this.agentRt.get(a.id)!;
     const generation = rt.generation;
     const gone = () => !this.state.agents.includes(a) || rt.generation !== generation || this.officeUpdate.handedOver ||
       (rec !== undefined && (!this.state.qa.includes(rec) || rec.status !== 'testing' || rec.qaAgentId !== a.id || orphanedQa(rec, this.state.agents)));
     const report = result.ok ? parseReport(result) : null;
+
+    const resume = rt.qaResume;
+    const next = qaRetry({ stopped: a.status === 'stopped', limited: this.limited(), ok: result.ok, report: !!report, owned: !!rec && !gone(), canResume: !!resume && !!a.sessionId });
+    if (next === 'resume' && resume && a.sessionId) {
+      rt.qaResume = null; // one per QA run: a second miss takes the path below
+      await released;
+      // A Stop, Clear desk or reassignment during the clean-up revoked this session's ending, and the resume with it.
+      if (gone()) return;
+      if (!this.limited()) {
+        // Same session, worktree, schema and screenshots: they likely ended a turn to wait on something that never woke them.
+        this.appendLog(a, [{ kind: 'system', text: '↻ The session ended without a QA report. Resuming it once to finish.' }]);
+        a.endedAt = null;
+        try {
+          await this.startAgentSession(a, repo, resume.cwd, QA_RESUME_PROMPT, resume.systemAppend, a.sessionId, QA_SCHEMA);
+          return;
+        } catch (err) {
+          a.endedAt = Date.now();
+          result = { ...result, errors: [(err as Error).message] };
+        }
+      }
+    }
 
     if (a.status === 'stopped' || !report) {
       if (a.status !== 'stopped') this.fail(a, { ...result, errors: result.errors.length ? result.errors : ['QA finished without a usable report'] }, `QA of PR #${a.prNumber}`);

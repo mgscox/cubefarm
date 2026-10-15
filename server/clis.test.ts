@@ -5,7 +5,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { cliExit, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, hookReviewKey, interruptions, launchArgs, NOTIFY_SOURCE, oneAtATime, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { cliExit, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, interruptions, launchArgs, NOTIFY_SOURCE, oneAtATime, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
@@ -108,7 +108,14 @@ describe('launchArgs', () => {
     const { args } = launchArgs('claude', ctx({ resumeId: 'abc', role: 'ceo', files: { settings: 's', mcp: 'mcp.json', system: 'i' } }));
     expect(args.slice(0, 2)).toEqual(['--resume', 'abc']);
     expect(args).toContain('--mcp-config');
-    expect(args.slice(args.indexOf('--disallowedTools'), args.indexOf('--'))).toEqual(['--disallowedTools', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', 'Bash', 'PowerShell', 'NotebookEdit']);
+    expect(args.slice(args.indexOf('--disallowedTools'), args.indexOf('--'))).toEqual(['--disallowedTools', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', ...CROSS_TURN_TOOLS, 'Bash', 'PowerShell', 'NotebookEdit']);
+  });
+
+  it('keeps tools that wait across turns away from Claude Code, but not background shells', () => {
+    const { args } = launchArgs('claude', ctx());
+    expect(CROSS_TURN_TOOLS).toEqual(['Monitor', 'ScheduleWakeup', 'CronCreate', 'CronDelete', 'CronList', 'RemoteTrigger']);
+    expect(args.slice(args.indexOf('--disallowedTools'), args.indexOf('--'))).toEqual(['--disallowedTools', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', ...CROSS_TURN_TOOLS]);
+    for (const cli of ['codex', 'opencode'] as const) expect(launchArgs(cli, ctx()).args.some((a) => a.includes('Monitor') || a.includes('ScheduleWakeup'))).toBe(false);
   });
 
   it("runs Codex without its sandbox or approvals, and resumes Codex's thread", () => {
