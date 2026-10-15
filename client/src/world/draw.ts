@@ -339,11 +339,11 @@ function drawNote(ctx: CanvasRenderingContext2D, x: number, y: number, w: number
   lines.forEach((l, i) => ctx.fillText(l, 14, 38 + i * 21));
 
   ctx.textBaseline = 'middle';
-  ctx.font = `600 17px ${SANS}`;
-  const nameFont = (s: string) => ctx.measureText(s).width;
-  ctx.font = `500 16px ${SANS}`;
-  const noteFont = (s: string) => ctx.measureText(s).width;
-  const foot = noteFooter(w, card.agent?.name ?? null, card.note ?? null, nameFont, noteFont);
+  const widthIn = (font: string) => (s: string) => {
+    ctx.font = font;
+    return ctx.measureText(s).width;
+  };
+  const foot = noteFooter(w, card.agent?.name ?? null, card.note ?? null, widthIn(`600 17px ${SANS}`), widthIn(`500 16px ${SANS}`));
   if (card.agent) {
     ctx.fillStyle = card.agent.color;
     ctx.beginPath();
