@@ -274,12 +274,11 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
 
     const wt = deskDir(fullName, agentSlug);
     await git(['worktree', 'prune'], { cwd: main });
-    let holder = branchHolder(await git(['worktree', 'list', '--porcelain', '-z'], { cwd: main }), branch, wt);
-    // A relocated workspace can have both its old symlink and its real path registered in git.
-    if (holder) {
-      const [heldPath, deskPath] = await Promise.all([fs.realpath(holder).catch(() => holder), fs.realpath(wt).catch(() => wt)]);
-      if (heldPath === deskPath) holder = null;
-    }
+    // Real paths on both sides, or a desk can take itself for the holder: a relocated workspace behind a symlink,
+    // /var vs /private/var on macOS, 8.3 short names on Windows.
+    const listed = parseWorktrees(await git(['worktree', 'list', '--porcelain', '-z'], { cwd: main }));
+    const worktrees = await Promise.all(listed.map(async (w) => ({ ...w, path: await realPath(w.path) })));
+    const holder = branchHolder(worktrees, branch, await realPath(wt));
     const local = holder ? null : branch;
     if (holder) note?.(`${branch} is checked out at ${holder}; this desk uses detached HEAD at ${ref}. Push fixes with git push origin HEAD:${branch}.`);
 
@@ -315,15 +314,39 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
   });
 }
 
-/** Read NUL-delimited porcelain so spaces and quoted paths remain literal. */
-export function branchHolder(listing: string, branch: string, desk: string): string | null {
-  let current: string | null = null;
+/** A path with symlinks, junctions and Windows short names resolved, or the path as given when it can't be. */
+export function realPath(p: string): Promise<string> {
+  return fs.realpath(p).catch(() => p);
+}
+
+export interface ListedWorktree {
+  path: string;
+  /** The branch checked out there (without refs/heads/), or null when detached or bare. */
+  branch: string | null;
+}
+
+/** `git worktree list --porcelain -z`, read NUL-delimited so spaces and quoted paths remain literal. */
+export function parseWorktrees(listing: string): ListedWorktree[] {
+  const out: ListedWorktree[] = [];
+  let current: ListedWorktree | null = null;
   for (const field of listing.split('\0')) {
-    if (field.startsWith('worktree ')) current = field.slice(9);
-    if (field === `branch refs/heads/${branch}` && current && path.resolve(current) !== path.resolve(desk)) return current;
-    if (!field) current = null;
+    if (field.startsWith('worktree ')) out.push((current = { path: field.slice(9), branch: null }));
+    else if (field.startsWith('branch refs/heads/') && current) current.branch = field.slice(18);
+    else if (!field) current = null;
   }
-  return null;
+  return out;
+}
+
+/** Whether two paths name the same folder: resolved, and case-insensitively on Windows. */
+export function samePath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  const norm = (x: string) => (platform === 'win32' ? p.resolve(x).toLowerCase() : p.resolve(x));
+  return norm(a) === norm(b);
+}
+
+/** The worktree other than `desk` that has `branch` checked out, if any. Pass real paths on both sides. */
+export function branchHolder(worktrees: ListedWorktree[], branch: string, desk: string, platform: NodeJS.Platform = process.platform): string | null {
+  return worktrees.find((w) => w.branch === branch && !samePath(w.path, desk, platform))?.path ?? null;
 }
 
 export function removeDesk(fullName: string, agentSlug: string): Promise<void> {

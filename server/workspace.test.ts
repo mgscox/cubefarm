@@ -32,8 +32,9 @@ const gitConfig = path.join(ROOT, 'gitconfig');
 await fs.writeFile(gitConfig, '[user]\n\tname = Sync Test\n\temail = sync-test@example.com\n[init]\n\tdefaultBranch = main\n');
 process.env.GIT_CONFIG_GLOBAL = gitConfig;
 
-const { git } = await import('./exec.ts');
-const { deskDir, leftoversInDesk, mainDir, prepareDesk, repoDir, setLocalPath, syncMain: sync } = await import('./workspace.ts');
+const { git, run } = await import('./exec.ts');
+const { branchHolder, deskDir, leftoversInDesk, mainDir, parseWorktrees, prepareDesk, realPath, repoDir, samePath, setLocalPath, syncMain: sync } =
+  await import('./workspace.ts');
 // Most tests only care about the status line.
 const syncMain = async (...args: Parameters<typeof sync>) => (await sync(...args))?.status ?? null;
 
@@ -312,6 +313,83 @@ describe('prepareDesk', { timeout: 60_000 }, () => {
 
     expect(await prepareDesk(r.fullName, { defaultBranch: 'main' }, slug, branch)).toBe(deskDir(r.fullName, slug));
     expect(await git(['branch', '--show-current'], { cwd: wt })).toBe(branch);
+  });
+
+  it('keeps a desk on its own branch, with no note, when git spells its path differently', async () => {
+    // The workspace sits behind a symlink (a junction on Windows), so git lists real paths the office never uses.
+    const fullName = `sync-test/repo-${seq + 1}`;
+    const real = path.join(ROOT, `aliased workspace ${seq + 1}`);
+    await fs.mkdir(real, { recursive: true });
+    await fs.mkdir(path.dirname(repoDir(fullName)), { recursive: true });
+    await fs.symlink(real, repoDir(fullName), process.platform === 'win32' ? 'junction' : 'dir');
+    const r = await makeRepos();
+    expect(r.fullName).toBe(fullName);
+    const slug = 'barbara-8528';
+    const branch = 'swarm/issue-120-barbara';
+    const wt = await prepareDesk(r.fullName, { defaultBranch: 'main' }, slug, branch);
+    const listed = parseWorktrees(await git(['worktree', 'list', '--porcelain', '-z'], { cwd: r.dir }));
+    expect(listed.find((w) => w.branch === branch)?.path).not.toBe(wt);
+
+    const notes: string[] = [];
+    expect(await prepareDesk(r.fullName, { defaultBranch: 'main' }, slug, branch, (note) => notes.push(note))).toBe(wt);
+    expect(notes).toEqual([]);
+    expect(await git(['branch', '--show-current'], { cwd: wt })).toBe(branch);
+  });
+});
+
+describe('branch holders', () => {
+  const listing = [
+    'worktree /home/me/project', 'HEAD 1111', 'branch refs/heads/main', '',
+    'worktree /home/me/.cubefarm/desks/ken cfe2', 'HEAD 2222', 'branch refs/heads/swarm/issue-120-ken', '',
+    'worktree /home/me/.cubefarm/desks/tester', 'HEAD 3333', 'detached', '',
+  ].join('\0');
+
+  it('reads every worktree and its branch, keeping spaces in paths', () => {
+    expect(parseWorktrees(listing)).toEqual([
+      { path: '/home/me/project', branch: 'main' },
+      { path: '/home/me/.cubefarm/desks/ken cfe2', branch: 'swarm/issue-120-ken' },
+      { path: '/home/me/.cubefarm/desks/tester', branch: null },
+    ]);
+  });
+
+  it('names a different holder, but never the desk itself', () => {
+    const worktrees = parseWorktrees(listing);
+    expect(branchHolder(worktrees, 'swarm/issue-120-ken', '/home/me/.cubefarm/desks/tester', 'linux')).toBe('/home/me/.cubefarm/desks/ken cfe2');
+    expect(branchHolder(worktrees, 'swarm/issue-120-ken', '/home/me/.cubefarm/desks/ken cfe2/', 'linux')).toBeNull();
+    expect(branchHolder(worktrees, 'swarm/unheld', '/home/me/.cubefarm/desks/tester', 'linux')).toBeNull();
+  });
+
+  it('compares Windows paths case-insensitively and with either slash, elsewhere exactly', () => {
+    expect(samePath('C:\\Users\\Runner\\desks\\ken', 'c:/users/runner/DESKS/ken\\', 'win32')).toBe(true);
+    expect(samePath('C:\\Users\\Runner\\desks\\ken', 'C:\\Users\\Runner\\desks\\barbara', 'win32')).toBe(false);
+    expect(samePath('/home/me/desks/ken', '/home/me/desks/./ken/', 'linux')).toBe(true);
+    expect(samePath('/Users/me/desks/ken', '/users/me/desks/ken', 'darwin')).toBe(false);
+    const worktrees = [{ path: 'C:\\Users\\Runner\\.cubefarm\\desks\\ken', branch: 'b' }];
+    expect(branchHolder(worktrees, 'b', 'c:\\users\\runner\\.cubefarm\\desks\\KEN', 'win32')).toBeNull();
+    expect(branchHolder(worktrees, 'b', 'C:\\Users\\Runner\\.cubefarm\\desks\\tester', 'win32')).toBe(worktrees[0].path);
+  });
+
+  it('falls back to the path as given when it cannot be resolved', async () => {
+    const missing = path.join(ROOT, 'no such desk');
+    expect(await realPath(missing)).toBe(missing);
+  });
+
+  it('resolves a symlinked folder to the same real path as its target', async () => {
+    const target = path.join(ROOT, 'link target');
+    const alias = path.join(ROOT, 'link alias');
+    await fs.mkdir(target, { recursive: true });
+    await fs.symlink(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    expect(samePath(await realPath(alias), await realPath(target))).toBe(true);
+  });
+
+  it.runIf(process.platform === 'win32')('resolves a Windows 8.3 short name to the long one', async (ctx) => {
+    const long = await realPath(ROOT);
+    const short = await run('powershell.exe', ['-NoProfile', '-Command', '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:LONG_PATH).ShortPath'], {
+      env: { ...process.env, LONG_PATH: long },
+    }).then((out) => out.trim(), () => '');
+    // 8.3 names can be turned off per volume; nothing to compare then.
+    if (!short || samePath(short, long)) ctx.skip();
+    expect(samePath(await realPath(short), long)).toBe(true);
   });
 });
 
