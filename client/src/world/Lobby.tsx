@@ -359,7 +359,8 @@ function WaitingRoom() {
         <WaitingChair key={z} z={z} req={waiting[i] ?? null} />
       ))}
       <WallSign
-        position={[HALF_W - 0.03, 2.5, (WAITING.seats[0] + WAITING.seats[WAITING.seats.length - 1]) / 2]}
+        // Above the east window's frame (top at y 2.9): at 2.5 it shared the sky plane's depth and z-fought.
+        position={[HALF_W - 0.03, 3.25, (WAITING.seats[0] + WAITING.seats[WAITING.seats.length - 1]) / 2]}
         rotationY={-Math.PI / 2}
         size={[3.6, 0.62]}
         px={[864, 150]}
