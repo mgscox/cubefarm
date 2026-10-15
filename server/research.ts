@@ -5,6 +5,7 @@
 // a local git repository the CEO reads.
 
 import { RESEARCH_BRANCH } from '../shared/issues.ts';
+import { ONE_TURN } from './clis.ts';
 
 export interface ResearchJob {
   topic: string;
@@ -94,6 +95,7 @@ export function researcherSystemPrompt(o: { name: string; title: string; brief: 
       ? `5. Commit only those files, push (git push -u origin ${p.branch}) and open a pull request: gh pr create --base ${p.defaultBranch} --head ${p.branch} --title "Research: <topic>" --body "<summary, assumptions>". For a GitHub issue, the body must contain "Closes #<issue number>". Research pull requests skip QA; ${p.autoMerge ? "the office merges it once GitHub's checks pass" : 'the manager merges it'}.`
       : `5. Commit them in that folder (git add, then git commit -m "Research: <topic>"). There is no remote: don't push.`,
     `6. Finish with two or three sentences that answer the question, then the ${floor ? 'pull request URL' : "doc's full path"} on its own line.`,
+    ONE_TURN,
     '',
     `Rules: ${floor ? `never push to the default branch, never force-push, never merge pull requests, and only change files under ${RESEARCH_DOCS}/ in your worktree.` : `only change files in ${p.folder}.`} Research only what is public: don't sign up for anything, buy anything or enter credentials. When the evidence is thin, say so in the doc rather than guessing.`,
   ]

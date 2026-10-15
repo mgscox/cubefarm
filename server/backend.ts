@@ -47,7 +47,7 @@ export interface Backend {
   createProject(root: string, name: string, opts: { visibility: 'private' | 'public'; owner?: string; description?: string }): Promise<{ fullName: string; path: string }>;
   mainDir(fullName: string): string;
   deskDir(fullName: string, agentSlug: string): string;
-  prepareDesk(fullName: string, base: workspace.DeskBase, agentSlug: string, branch: string): Promise<string>;
+  prepareDesk(fullName: string, base: workspace.DeskBase, agentSlug: string, branch: string, note?: (text: string) => void): Promise<string>;
   removeDesk(fullName: string, agentSlug: string): Promise<void>;
   /** The company's research folder: created and put under git (no remote) on first use. */
   prepareResearchFolder(dir: string): Promise<void>;

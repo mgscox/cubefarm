@@ -268,11 +268,20 @@ export interface QaCheck {
   details: string;
 }
 
+/** Failed preparations for one PR task and head; kept across office restarts. */
+export interface DeskPreparation {
+  headSha: string | null;
+  failures: number;
+  holds: number;
+  holdUntil: number;
+}
+
 export interface QaView {
   repoId: string;
   prNumber: number;
   status: QaStatus;
   round: number; // 1-based QA round
+  preparation?: Partial<Record<'qa' | 'fix', DeskPreparation>>;
   rerunNote?: { round: number; text: string }; // manager's instructions for one QA round
   devAgentId: string | null; // who wrote it (null for PRs opened outside the swarm)
   qaAgentId: string | null; // who is testing / last tested it

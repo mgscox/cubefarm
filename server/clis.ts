@@ -173,10 +173,19 @@ export function codexHookCommand(node: string, script: string, win = WIN): strin
   return win ? `node "${script}"` : [node, script].map((s) => `'${s.replaceAll("'", `'"'"'`)}'`).join(' ');
 }
 
+/**
+ * Claude Code tools whose result arrives in a later turn. An office session ends with its turn, so nothing would wake
+ * the agent. Background shells (run_in_background) stay: agents start dev servers with them.
+ */
+export const CROSS_TURN_TOOLS = ['Monitor', 'ScheduleWakeup', 'CronCreate', 'CronDelete', 'CronList', 'RemoteTrigger'];
+
+/** In every agent's prompt (the CEO's too), whatever their CLI: an office session ends with its turn. */
+export const ONE_TURN = "Your session ends when your turn ends: background tasks and notifications won't wake you. Never end a turn to wait. Wait in the foreground with a timeout, then finish.";
+
 export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
   switch (id) {
     case 'claude': {
-      const disallowed = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', ...(ctx.role === 'ceo' ? ['Bash', 'PowerShell', 'NotebookEdit'] : [])];
+      const disallowed = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', ...CROSS_TURN_TOOLS, ...(ctx.role === 'ceo' ? ['Bash', 'PowerShell', 'NotebookEdit'] : [])];
       const args = [
         ...(ctx.resumeId ? ['--resume', ctx.resumeId] : ['--session-id', ctx.sessionId]),
         ...(ctx.model ? ['--model', ctx.model] : []),
@@ -303,6 +312,49 @@ export function cliExit(cli: AgentCli, x: { code: number; signal?: number; worki
   if (x.working) return { ok: false, error: `${label} exited in the middle of its task.` };
   if (x.lastText !== '' || (cli !== 'claude' && x.ranMs > 20_000)) return { ok: true, error: null };
   return { ok: false, error: `${label} exited before finishing.` };
+}
+
+// ---------- Claude Code's conversation ----------
+
+/** Claude Code was told to resume a conversation that isn't on disk (it says so and exits 1). */
+export const lostConversation = (text: string) => /No conversation found with session ID/i.test(text);
+
+/** Why a session ended when the conversation it resumed was missing. */
+export const LOST_CONVERSATION = "Claude Code couldn't find the conversation it was resuming, so the next session starts a new one.";
+
+/**
+ * The Claude Code session a main-session hook reports, once its conversation is on disk: only then can --resume pick
+ * it up. Claude writes the file during the first turn, after SessionStart and UserPromptSubmit.
+ */
+export function resumableSession(b: Record<string, unknown>, exists: (file: string) => boolean): string | null {
+  if (typeof b.agent_id === 'string' && b.agent_id !== '') return null; // a subagent's
+  const id = typeof b.session_id === 'string' ? b.session_id : '';
+  const file = typeof b.transcript_path === 'string' ? b.transcript_path : '';
+  return id && file && exists(file) ? id : null;
+}
+
+/**
+ * The Claude Code conversation an agent saves to resume next time, in either runtime. A resumed one is already saved;
+ * a new one only once it's on disk (found), so a launch that dies first leaves no ID behind for every later --resume
+ * to fail on. A resume that fails because its conversation is missing (lost) is forgotten: save(null), and the next
+ * session starts a new conversation.
+ */
+export function claudeConversation(resumeId: string | null, save: (id: string | null) => void) {
+  let kept = resumeId;
+  return {
+    found(id: string) {
+      if (!id || id === kept) return;
+      kept = id;
+      save(id);
+    },
+    /** The session ended before it began, saying text: true when its conversation was missing (and is now forgotten). */
+    lost(text: string): boolean {
+      if (!resumeId || kept !== resumeId || !lostConversation(text)) return false;
+      kept = null;
+      save(null);
+      return true;
+    },
+  };
 }
 
 // ---------- prompts the office answers ----------

@@ -2,6 +2,7 @@ import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@
 import { z } from 'zod';
 import { issueBlockers, holdUps, issueSpecialty, RESEARCH, setDependsOn, type IssueRef } from '../shared/issues.ts';
 import type { AgentView, CeoJobKind, IssueInfo, PullInfo, QaView } from '../shared/types.ts';
+import { ONE_TURN } from './clis.ts';
 import type { FixReason } from './fixPlan.ts';
 
 // The CEO: a Claude Code session in the lobby that runs the company instead of writing code.
@@ -396,6 +397,7 @@ export function ceoSystemPrompt(o: {
     '- Read the repositories through their clone paths with Read, Glob and Grep. They are read-only to you. You cannot run shell commands.',
     `- Keep durable notes about the company in ${o.notesFile}: read it at the start, and update it at the end with decisions and anything worth remembering next time.`,
     '- Change things only through the mcp__office__ tools.',
+    `- ${ONE_TURN}`,
     "- Before update_job rewrites someone's job description, read the full one with mcp__office__agent_detail and keep what still applies, especially its safety rules.",
     '',
     'Rules:',

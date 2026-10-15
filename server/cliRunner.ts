@@ -6,7 +6,7 @@ import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { HOME_DIR } from './config.ts';
 import { projectEnv } from './projectEnv.ts';
-import { cliExit, cliLabel, CODEX_HOOK_SOURCE, codexThread, codexTurnThread, commandFor, hookReviewKey, interruptions, isCli, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE, trustKey } from './clis.ts';
+import { claudeConversation, cliExit, cliLabel, CODEX_HOOK_SOURCE, codexThread, codexTurnThread, commandFor, hookReviewKey, interruptions, isCli, launchArgs, LOST_CONVERSATION, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, resumableSession, STATUSLINE_SOURCE, trustKey } from './clis.ts';
 import { adoptPty, discardPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, startKeeper, terminalsAvailable, type Pty } from './ptyClient.ts';
 import {
   clip,
@@ -362,6 +362,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let trustedAt = 0;
 
   const cb: SessionCallbacks = { ...callbacks };
+  const conversation = claudeConversation(opts.resumeSessionId ?? null, (id) => cb.sessionId(id));
   const log = (entries: LogEntry[]) => entries.length && cb.log(entries);
 
   /** Codex and OpenCode don't report tool results: pass on the screenshots their browser saved instead. all: the last look. */
@@ -460,6 +461,10 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const hook = (b: Record<string, unknown>): Record<string, unknown> => {
     const event = String(b.hook_event_name ?? '');
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
+    if (cli === 'claude') {
+      const id = resumableSession(b, fs.existsSync);
+      if (id) conversation.found(id);
+    }
     switch (event) {
       case 'PreToolUse': {
         const name = String(b.tool_name ?? '');
@@ -566,6 +571,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
 
   /** The CLI quit on its own: /exit typed in the terminal, a crash, a signal, or it couldn't start (not signed in, bad flag…). */
   const exited = (code: number, signal?: number) => {
+    if (cli === 'claude' && !begun && conversation.lost(term.screen())) return finish({ ok: false, text: '', errors: [LOST_CONVERSATION] });
     const { ok, error } = cliExit(cli, { code, signal, working, lastText, ranMs: Date.now() - started });
     finish({ ok, text: lastText, errors: error ? [error] : [] });
   };
@@ -595,7 +601,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     live.session = { hook, exited };
     Object.assign(live, { statusLine });
     remember(live);
-    if (live.resumeId) cb.sessionId(live.resumeId);
+    if (live.resumeId && cli !== 'claude') cb.sessionId(live.resumeId); // Claude's hooks say when its conversation is on disk
     if (opts.typed || opts.reattach) busy(); // typed at the prompt, or still at it after a restart: already running
     else handle.send(opts.prompt);
     shotTimer = setInterval(collectShots, 2000);
@@ -679,7 +685,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   }
   Object.assign(env, { TERM: 'xterm-256color', COLORTERM: 'truecolor' }, launch.env);
 
-  if (cli === 'claude') cb.sessionId(sessionId);
+  if (cli === 'claude' && opts.resumeSessionId) cb.sessionId(sessionId); // a new one is saved once it's on disk (see the hooks)
   term.note(`── ${label}${opts.label ? ` · ${opts.label}` : ''} ──`);
   const resumeId = cli === 'claude' ? sessionId : (opts.resumeSessionId ?? null);
   const l: LiveCli = { agentId: opts.agentId ?? '', cli, term, proc: null, token, dir, resumeId, statusLine, shots: new Set(), session: { hook, exited } };
