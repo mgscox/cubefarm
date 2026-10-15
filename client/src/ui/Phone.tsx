@@ -379,6 +379,18 @@ function Company() {
           </div>
         </div>
       ))}
+      <div className="proj" style={{ ['--accent' as string]: '#ff8a5b' }}>
+        <div className="row">
+          <span className="floor-badge">G</span>
+          <div className="grow" style={{ minWidth: 0 }}>
+            <b className="proj-name">Lobby</b>
+            <div className="muted small proj-sum">Manager's office and the CEO</div>
+          </div>
+          <button className="btn btn-small" onClick={() => goToFloor(0)}>
+            Go
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
