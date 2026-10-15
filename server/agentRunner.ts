@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { query, type CanUseTool, type Options, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentCli, AgentRole, EffortLevel, LogKind } from '../shared/types.ts';
+import { claudeConversation, LOST_CONVERSATION } from './clis.ts';
 import type { OfficeTools } from './ceo.ts';
 import type { UsageWarning } from './pacing.ts';
 import type { AgentTerminal } from './terminal.ts';
@@ -60,7 +61,8 @@ export interface SessionResult {
 export interface SessionCallbacks {
   log(entries: LogEntry[]): void;
   tool(name: string | null): void;
-  sessionId(id: string): void;
+  /** The session to resume next time; null: there's none to resume (the next session starts a new one). */
+  sessionId(id: string | null): void;
   browserUrl(url: string): void;
   screenshot(data: Buffer, mime: string): void;
   /** The final text of each turn: the reply to the prompt and to every message sent while it ran. */
@@ -310,6 +312,9 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
   let lastCost = 0;
   let lastTurns = 0;
   const toolNames = new Map<string, string>();
+  const conversation = claudeConversation(opts.resumeSessionId ?? null, (id) => cb.sessionId(id));
+  let startup = ''; // what Claude Code said before it began (a resume with nothing to resume says so there)
+  let begun = false;
 
   input.push(opts.prompt);
 
@@ -348,6 +353,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
     disallowedTools,
     resume: opts.resumeSessionId,
     stderr: (data) => {
+      if (!begun) startup = (startup + data).slice(-2000);
       const line = data.trim();
       if (line && /error|fail/i.test(line)) cb.log([{ kind: 'error', text: clip(line, 200) }]);
     },
@@ -385,7 +391,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
     switch (msg.type) {
       case 'system': {
         if (msg.subtype === 'init') {
-          cb.sessionId(msg.session_id);
+          if (opts.resumeSessionId) conversation.found(msg.session_id); // a new one is saved once it's on disk (its first reply)
           const mcp = msg.mcp_servers.map((s) => `${s.name}:${s.status}`).join(', ');
           cb.log([
             { kind: 'system', text: `✻ Claude Code ${msg.claude_code_version} · ${msg.model} · ${msg.effort ?? opts.effort} effort` },
@@ -412,6 +418,8 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
         break;
       }
       case 'assistant': {
+        begun = true;
+        conversation.found(msg.session_id);
         if (msg.parent_tool_use_id) break; // subagent chatter stays off the main screen
         const out: LogEntry[] = [];
         for (const block of msg.message.content) {
@@ -486,11 +494,13 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
     try {
       for await (const msg of query({ prompt: input, options })) handle(msg);
       if (pendingTurns > 0) {
-        cb.finished({ ok: false, text: '', costUsd: lastCost, turns: lastTurns, errors: [stopped ? 'Stopped by manager' : 'Session ended unexpectedly'] });
+        const lost = !stopped && !begun && conversation.lost(startup);
+        cb.finished({ ok: false, text: '', costUsd: lastCost, turns: lastTurns, errors: [stopped ? 'Stopped by manager' : lost ? LOST_CONVERSATION : 'Session ended unexpectedly'] });
       }
     } catch (err) {
       input.close();
-      const message = stopped ? 'Stopped by manager' : err instanceof Error ? err.message : String(err);
+      let message = stopped ? 'Stopped by manager' : err instanceof Error ? err.message : String(err);
+      if (!stopped && !begun && conversation.lost(`${startup}\n${message}`)) message = LOST_CONVERSATION;
       cb.finished({ ok: false, text: '', costUsd: lastCost, turns: lastTurns, errors: [message] });
     }
   })();

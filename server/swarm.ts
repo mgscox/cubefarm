@@ -1925,7 +1925,7 @@ export class Swarm {
         },
         sessionId: (id) => {
           a.sessionId = id;
-          a.sessionCli = how.cli ?? 'claude';
+          a.sessionCli = id ? (how.cli ?? 'claude') : null;
         },
         browserUrl: (url) => {
           rt.browserUrl = url;
@@ -3266,7 +3266,7 @@ export class Swarm {
         },
         sessionId: (id) => {
           a.sessionId = id;
-          a.sessionCli = 'claude';
+          a.sessionCli = id ? 'claude' : null;
         },
         browserUrl: () => undefined,
         screenshot: () => undefined,

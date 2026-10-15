@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { CommandError, ghJson, run } from './exec.ts';
 import { branchAhead, listIssues } from './github.ts';
+import { LOST_CONVERSATION } from './clis.ts';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
 import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
@@ -1651,6 +1652,15 @@ describe('a developer session that ends without a PR after pushing commits', () 
     expect(await end({ ...cut, ok: true, errors: [] })).toBe(false);
     expect(ada()).toMatchObject({ status: 'idle', task: null });
     expect(f.state.messages.at(-1)?.text).toContain('Its branch swarm/issue-66-ada has 3 pushed commits to pick up from.');
+  });
+
+  it('retries a resume whose conversation went missing as a new conversation', async () => {
+    sessions[0].cb.sessionId('thread-1');
+    expect(ada()).toMatchObject({ sessionId: 'thread-1', sessionCli: 'claude' });
+    sessions[0].cb.sessionId(null); // the runner found Claude Code's conversation missing
+    expect(ada()).toMatchObject({ sessionId: null, sessionCli: null });
+    expect(await end({ ...cut, errors: [LOST_CONVERSATION] })).toBe(true);
+    expect(sessions[1].opts.resumeSessionId).toBeUndefined();
   });
 
   it('starts the retry only once the desk it left is cleaned up', async () => {
