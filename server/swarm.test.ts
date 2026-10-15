@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { CommandError, ghJson, run } from './exec.ts';
 import { branchAhead, listIssues } from './github.ts';
+import { LOST_CONVERSATION } from './clis.ts';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
 import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
@@ -31,6 +32,7 @@ interface Internals {
   runQa(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   runFix(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   onQaFinished(agent: unknown, repo: Repo, result: SessionResult, released?: Promise<void>): Promise<void>;
+  onIssueFinished(agent: unknown, repo: Repo, result: SessionResult, released: Promise<void>, generation: number | undefined): Promise<void>;
   onFixFinished(agent: unknown, repo: Repo, result: SessionResult): void;
   postMessage(from: string, text: string): void;
   broadcast(event: ServerEvent): void;
@@ -81,31 +83,95 @@ afterEach(() => {
 });
 
 describe('PR fixes with an occupied author branch', () => {
-  it.each([false, true])('uses its own local branch and pushes to the PR branch (recorded developer: %s)', async (recordedDeveloper) => {
+  it.each([false, true])('prepares the PR branch and explicitly pushes HEAD (recorded developer: %s)', async (recordedDeveloper) => {
     Object.assign(repo, { links: [] });
     const dev = s.state.agents[0];
     const headRef = 'swarm/issue-120-barbara';
     s.repoRt.get(repo.id)!.pulls = [{ number: 204, headRefName: headRef, title: 'Fix recovery', url: '' } as PullInfo];
     const rec = { repoId: repo.id, prNumber: 204, devAgentId: recordedDeveloper ? 'a1' : 'barbara', devSessionId: null, round: 2, checks: [], status: 'failed' } as unknown as QaRec;
     s.state.qa.push(rec);
-    const prepare = vi.spyOn(s, 'prepare').mockImplementation(async (_agent, _repo, _base, branch) => {
-      if (branch === headRef) throw new Error(`git worktree add -B failed: fatal: '${headRef}' is already used by worktree at Barbara's desk`);
-      return '/fake-desk';
-    });
+    const prepare = vi.spyOn(s, 'prepare').mockResolvedValue('/fake-desk');
     const start = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
 
     await s.runFix(dev, repo, rec);
 
     const localBranch = prepare.mock.calls[0][3];
-    expect(localBranch).not.toBe(headRef);
+    expect(localBranch).toBe(headRef);
     expect(start).toHaveBeenCalledOnce();
     expect(prepare.mock.calls[0][2]).toEqual({ pr: 204 });
-    expect(localBranch).toContain('ada-a1');
     expect(start.mock.calls[0][4]).toContain(`git push origin HEAD:${headRef}`);
     expect(dev.branch).toBe(headRef);
     Object.assign(dev, { sessionId: 'fix-session', status: 'stopped' });
     await swarm.message('a1', 'Continue fixing');
     expect(start.mock.calls[1][4]).toContain(`git push origin HEAD:${headRef}`);
+  });
+});
+
+describe('PR desk preparation recovery', () => {
+  let rec: QaRec;
+  beforeEach(() => {
+    Object.assign(repo, { links: [] });
+    Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready', pulls: [{ number: 204, headRefName: 'feature', headSha: 'sha-1', closesIssues: [] } as unknown as PullInfo] });
+    rec = { repoId: repo.id, prNumber: 204, devAgentId: 'a1', qaAgentId: 'q1', sessionFailures: 0, round: 2,
+      status: 'failed', summary: 'Keep findings', checks: [{ name: 'Bug', result: 'fail', details: 'Fix it' }], fixCrashes: [] } as unknown as QaRec;
+    s.state.qa.push(rec);
+    vi.spyOn(s.backend, 'prepareDesk').mockRejectedValue(new Error('Desk locked'));
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ number: 204, state: 'OPEN', headSha: 'sha-1', closesIssues: [] } as never);
+    vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+  });
+
+  it.each(['fix', 'qa'] as const)('releases failed %s desks, preserves findings and holds repeated failures', async (task) => {
+    const messages = vi.spyOn(s, 'postMessage').mockImplementation(() => {});
+    const events = vi.spyOn(s, 'broadcast');
+    const agent = s.state.agents[0];
+    if (task === 'fix') {
+      const author = { id: 'author', repoId: repo.id, role: 'dev', name: 'Author', status: 'stopped' };
+      s.state.agents.push(author);
+      rec.devAgentId = 'author';
+    }
+    const owner = rec.devAgentId;
+    const run = () => task === 'fix' ? s.runFix(agent, repo, rec) : s.runQa(agent, repo, rec);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await run();
+      expect(agent).toMatchObject({ status: 'idle', task: null, prNumber: null });
+      expect(rec).toMatchObject({ devAgentId: owner, summary: 'Keep findings', checks: [{ name: 'Bug', result: 'fail', details: 'Fix it' }], fixCrashes: [], sessionFailures: 0 });
+      if (attempt === 1) {
+        expect(s.startPipelineWork(repo)).toBe(false);
+        expect(messages).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+      }
+    }
+    expect(rec.status).toBe('needs-human');
+    expect(s.startPipelineWork(repo)).toBe(false);
+    expect(messages).toHaveBeenCalledTimes(2);
+    expect(s.startAgentSession).not.toHaveBeenCalled();
+    expect(rec.preparation?.[task]).toMatchObject({ holds: 2 });
+    expect(events).toHaveBeenCalledWith({ type: 'qa', qa: expect.objectContaining({ preparation: rec.preparation }) });
+  });
+
+  it('clears preparation holds on an explicit QA handoff', async () => {
+    const agent = s.state.agents[0];
+    await s.runFix(agent, repo, rec);
+    await s.runFix(agent, repo, rec);
+    expect(rec.preparation?.fix).toBeDefined();
+    s.repoRt.get(repo.id)!.pulls[0].state = 'OPEN';
+    await swarm.sendToQa(repo.id, rec.prNumber);
+    expect(rec.preparation).toBeUndefined();
+    expect(rec.status).toBe('queued');
+  });
+
+  it('allows a changed head during a hold and clears strikes after successful preparation', async () => {
+    const agent = s.state.agents[0];
+    await s.runFix(agent, repo, rec);
+    await s.runFix(agent, repo, rec);
+    expect(s.startPipelineWork(repo)).toBe(false);
+    s.repoRt.get(repo.id)!.pulls[0].headSha = 'sha-2';
+    const fix = vi.spyOn(s, 'runFix').mockResolvedValue();
+    expect(s.startPipelineWork(repo)).toBe(true);
+    fix.mockRestore();
+    vi.mocked(s.backend.prepareDesk).mockResolvedValue('demo-worktree');
+    await s.runFix(agent, repo, rec);
+    expect(rec.preparation?.fix).toBeUndefined();
   });
 });
 
@@ -600,8 +666,8 @@ describe('CEO merge_pr', () => {
     else start.mockImplementation(() => { throw new Error('Runner could not start'); });
     await s.runQa(tester, repo, rec);
     expect(rec).toMatchObject({ status: 'queued', testedSha: pull.headSha, passedSha: null, failedSha: null });
-    expect(tester).toMatchObject({ status: 'error' });
-    expect(tester).toMatchObject({ lastError: failure === 'checkout' ? 'Checkout failed' : 'Runner could not start' });
+    expect(tester).toMatchObject({ status: failure === 'checkout' ? 'idle' : 'error' });
+    expect(tester).toMatchObject({ lastError: failure === 'checkout' ? null : 'Runner could not start' });
     expect(sessions).toHaveLength(0);
     if (failure === 'checkout') expect(start).not.toHaveBeenCalled();
     else expect(start).toHaveBeenCalledOnce();
@@ -929,6 +995,18 @@ describe('CEO send_back_to_dev', () => {
     expect(prompt).toContain('Recovery loses work');
     expect(prompt).toContain('Preserve recovery');
     expect(prompt).not.toContain('QA passed');
+  });
+
+  it('clears preparation holds on a CEO fix handoff', async () => {
+    s.state.qa[0].preparation = { fix: { headSha: pull.headSha, failures: 0, holds: 2, holdUntil: Date.now() + 600_000 } };
+    await send();
+    expect(s.state.qa[0].preparation).toBeUndefined();
+    expect(s.state.qa[0].status).toBe('failed');
+  });
+
+  it('waits for an author still working on the PR branch before accepting a CEO handoff', async () => {
+    Object.assign(s.state.agents[0], { status: 'working', task: 'issue', prNumber: null, branch: pull.headRefName });
+    await expect(swarm.sendBackToDev({ floor: 1, number: 13 })).rejects.toMatchObject({ status: 409 });
   });
 
   it.each(['testing', 'fixing', 'queued'] as const)('refuses %s with 409', async (status) => {
@@ -1655,6 +1733,15 @@ describe('a developer session that ends without a PR after pushing commits', () 
     expect(f.state.messages.at(-1)?.text).toContain('Its branch swarm/issue-66-ada has 3 pushed commits to pick up from.');
   });
 
+  it('retries a resume whose conversation went missing as a new conversation', async () => {
+    sessions[0].cb.sessionId('thread-1');
+    expect(ada()).toMatchObject({ sessionId: 'thread-1', sessionCli: 'claude' });
+    sessions[0].cb.sessionId(null); // the runner found Claude Code's conversation missing
+    expect(ada()).toMatchObject({ sessionId: null, sessionCli: null });
+    expect(await end({ ...cut, errors: [LOST_CONVERSATION] })).toBe(true);
+    expect(sessions[1].opts.resumeSessionId).toBeUndefined();
+  });
+
   it('starts the retry only once the desk it left is cleaned up', async () => {
     let cleaned!: () => void;
     const release = vi.spyOn(backend, 'releaseDesk').mockReturnValue(new Promise<void>((r) => (cleaned = r)));
@@ -1927,6 +2014,23 @@ describe('QA rounds', () => {
     };
     s.state.qa.push(rec);
     runFix = vi.spyOn(s, 'runFix').mockResolvedValue() as Mock;
+  });
+
+  it.each(['preparing', 'working'])('waits for its %s author, even when another developer is free', (status) => {
+    addAgent('a2', 'Barbara', 'dev', 1);
+    Object.assign(ada, { status, task: 'issue', prNumber: null, branch: pull.headRefName });
+    expect(s.startPipelineWork(repo)).toBe(false);
+    expect(runFix).not.toHaveBeenCalled();
+    ada.status = 'done';
+    expect(s.startPipelineWork(repo)).toBe(true);
+    expect(runFix).toHaveBeenCalledWith(ada, repo, rec);
+  });
+
+  it.each(['failed', 'needs-human'] as const)('retains %s findings when the original issue finishes', async (status) => {
+    Object.assign(ada, { status: 'working', task: 'issue', prNumber: 13, sessionId: 'original-session' });
+    rec.status = status;
+    await s.onIssueFinished(ada, repo, result(true, undefined), Promise.resolve(), undefined);
+    expect(rec).toMatchObject({ status, summary: 'Broken', devAgentId: 'a1', devSessionId: 'original-session', round: 2 });
   });
 
   const qaFails = async (tester: Record<string, unknown>) => {

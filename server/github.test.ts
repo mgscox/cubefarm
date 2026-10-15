@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
-import { branchAhead, isCheckAccessError, listPulls } from './github.ts';
+import { branchAhead, isCheckAccessError, listPulls, readTwice } from './github.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { mergeStep } from './mergeGate.ts';
 
@@ -21,6 +21,38 @@ const run = (status = 'completed', conclusion: string | null = 'success') => ({ 
 const rest = (runs = [run()], statuses: { context: string; state: string; target_url: string | null }[] = []) => vi.fn<Api>(async (args) =>
   args[1].includes('/actions/runs?') ? { workflow_runs: runs, total_count: runs.length } : { statuses, total_count: statuses.length });
 afterEach(() => vi.useRealTimers());
+
+describe('board read retries', () => {
+  it('returns a successful first read without retrying', async () => {
+    const read = vi.fn().mockResolvedValue([1, 2]);
+    await expect(readTwice(read, 0)).resolves.toEqual([1, 2]);
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it('retries once and propagates the second failure', async () => {
+    const first = new Error('first failure');
+    const second = new Error('second failure');
+    const read = vi.fn().mockRejectedValueOnce(first).mockRejectedValue(second);
+    await expect(readTwice(read, 0)).rejects.toBe(second);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['open', 'merged'])('retries only the failed %s PR listing with a bounded timeout', async (state) => {
+    let attempts = 0;
+    const query = vi.fn<Query>(async (args) => {
+      if (!args.includes(state)) return [];
+      if (++attempts === 1) throw error('HTTP 502: Bad Gateway');
+      return [{ ...raw, state: state === 'open' ? 'OPEN' : 'MERGED' }];
+    });
+    const api = rest();
+    const result = await listPulls('demo/repo', query, api);
+    expect(result.pulls).toHaveLength(1);
+    expect(query.mock.calls.filter(([args]) => args.includes(state))).toHaveLength(2);
+    expect(query.mock.calls.filter(([args]) => !args.includes(state))).toHaveLength(1);
+    expect(query.mock.calls.every(([, opts]) => opts?.timeoutMs === 60_000)).toBe(true);
+    expect(api).not.toHaveBeenCalled();
+  });
+});
 
 describe('remote branch commits', () => {
   const branch = 'swarm/issue-66-ada';
@@ -73,6 +105,7 @@ describe('optional PR checks', () => {
     const api = vi.fn<Api>().mockRejectedValue(error('HTTP 403: Resource not accessible by personal access token'));
     const result = await listPulls('demo/repo', query, api);
     expect(query).toHaveBeenCalledTimes(4);
+    expect(query.mock.calls.every(([, opts]) => opts?.timeoutMs === 60_000)).toBe(true);
     expect(result.pulls).toEqual([expect.objectContaining({ number: 12, title: raw.title, headSha: 'abc', closesIssues: [11], checks: 'unavailable', failedChecks: [], pendingChecks: [] })]);
     expect(result.checksError).toContain('REST fallback in use');
     expect(result.checksError).toContain('HTTP 403');
@@ -222,17 +255,23 @@ describe('optional PR checks', () => {
     `GraphQL: ${denial()}\nResource not accessible by personal access token (repository.issues)`,
   ])('does not hide unrelated failures: %s', async (message) => {
     const failure = error(message);
-    const query = vi.fn<Query>().mockRejectedValue(failure);
+    const query = vi.fn<Query>(async (args) => {
+      if (args.includes('merged')) return [];
+      throw failure;
+    });
     await expect(listPulls('demo/repo', query)).rejects.toBe(failure);
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(3);
   });
 
   it('propagates a failed metadata retry', async () => {
     const failure = error('HTTP 403: repository access denied');
     const query = vi.fn<Query>(async (args) => {
+      if (args.includes('merged')) return [];
       throw args.at(-1)!.includes('statusCheckRollup') ? error(`GraphQL: ${denial()}`) : failure;
     });
     await expect(listPulls('demo/repo', query)).rejects.toBe(failure);
+    expect(query.mock.calls.filter(([args]) => args.includes('open'))).toHaveLength(4);
+    expect(query.mock.calls.filter(([args]) => args.includes('merged'))).toHaveLength(1);
   });
 
   it('recognizes repeated gh GraphQL diagnostics, not an arbitrary error mentioning checks', () => {

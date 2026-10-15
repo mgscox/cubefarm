@@ -1,7 +1,21 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import { CommandError, gh, ghJson } from './exec.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo, PullRefresh } from '../shared/types.ts';
 
 // All GitHub access goes through the gh CLI so it reuses the user's existing `gh auth login`.
+
+/** Retry a failed board read once, so a transient GitHub failure needn't wait for the next sync. */
+export async function readTwice<T>(read: () => Promise<T>, pauseMs = 2_000): Promise<T> {
+  try {
+    return await read();
+  } catch {
+    await sleep(pauseMs);
+    return read();
+  }
+}
+
+const SYNC_READ = { timeoutMs: 60_000 };
+type BoardQuery<T> = (args: string[], opts?: { timeoutMs: number }) => Promise<T>;
 
 export async function currentUser(): Promise<string> {
   return gh(['api', 'user', '--jq', '.login']);
@@ -120,8 +134,8 @@ export function dependenciesUnsupported(error: unknown): boolean {
 }
 
 /** Repo sync batches native reads (blockers, sub-issue summaries, owner comments); scheduling uses the resulting IssueInfo cache. */
-export async function listIssues(fullName: string, query: (args: string[]) => Promise<RawIssue[]> = ghJson, api: RestQuery = ghJson): Promise<IssueInfo[]> {
-  const raw = await query(['issue', 'list', '-R', fullName, '--state', 'open', '--limit', '100', '--json', 'number,title,body,url,labels,createdAt']);
+export async function listIssues(fullName: string, query: BoardQuery<RawIssue[]> = ghJson, api: RestQuery = ghJson): Promise<IssueInfo[]> {
+  const raw = await readTwice(() => query(['issue', 'list', '-R', fullName, '--state', 'open', '--limit', '100', '--json', 'number,title,body,url,labels,createdAt'], SYNC_READ));
   const issues: IssueInfo[] = raw
     .map((i) => ({ number: i.number, title: i.title, body: i.body ?? '', url: i.url, labels: i.labels.map((l) => l.name), createdAt: i.createdAt }))
     .sort((a, b) => a.number - b.number);
@@ -319,15 +333,15 @@ async function restChecks(fullName: string, sha: string, api: RestQuery): Promis
   return checks;
 }
 
-export async function listPulls(fullName: string, query: (args: string[]) => Promise<RawPull[]> = ghJson, api: RestQuery = ghJson): Promise<PullRefresh> {
+export async function listPulls(fullName: string, query: BoardQuery<RawPull[]> = ghJson, api: RestQuery = ghJson): Promise<PullRefresh> {
   const list = async (state: string, limit: string): Promise<PullRefresh> => {
     const args = ['pr', 'list', '-R', fullName, '--state', state, '--limit', limit, '--json'];
     try {
-      const raw = await query([...args, `${PR_FIELDS},statusCheckRollup`]);
+      const raw = await query([...args, `${PR_FIELDS},statusCheckRollup`], SYNC_READ);
       return { pulls: raw.map(toPull) };
     } catch (error) {
       if (!isCheckAccessError(error)) throw error;
-      const raw = await query([...args, PR_FIELDS]);
+      const raw = await query([...args, PR_FIELDS], SYNC_READ);
       if (state !== 'open') return { pulls: raw.map(toPull) };
       const bySha = new Map<string, Promise<Check[]>>();
       const pulls: PullInfo[] = new Array(raw.length);
@@ -351,7 +365,8 @@ export async function listPulls(fullName: string, query: (args: string[]) => Pro
       return { pulls, checksError: `Check rollup access denied; REST fallback in use (GitHub Actions and commit statuses).${errors.length ? `\n${errors.join('\n')}` : ''}` };
     }
   };
-  const [open, merged] = await Promise.all([list('open', '50'), list('merged', '8')]);
+  // A check-field denial can still complete through the fallback within the same attempt.
+  const [open, merged] = await Promise.all([readTwice(() => list('open', '50')), readTwice(() => list('merged', '8'))]);
   return { pulls: [...open.pulls, ...merged.pulls], checksError: [open.checksError, merged.checksError].filter(Boolean).join('\n') || undefined };
 }
 

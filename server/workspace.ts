@@ -252,7 +252,7 @@ async function removeDir(dir: string) {
   await fs.rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
 }
 
-export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string, branch: string): Promise<string> {
+export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string, branch: string, note?: (text: string) => void): Promise<string> {
   return withRepoLock(fullName, async () => {
     const main = mainDir(fullName);
     await git(['fetch', 'origin', '--prune'], { cwd: main, timeoutMs: 180_000 });
@@ -273,13 +273,22 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
     }
 
     const wt = deskDir(fullName, agentSlug);
+    await git(['worktree', 'prune'], { cwd: main });
+    let holder = branchHolder(await git(['worktree', 'list', '--porcelain', '-z'], { cwd: main }), branch, wt);
+    // A relocated workspace can have both its old symlink and its real path registered in git.
+    if (holder) {
+      const [heldPath, deskPath] = await Promise.all([fs.realpath(holder).catch(() => holder), fs.realpath(wt).catch(() => wt)]);
+      if (heldPath === deskPath) holder = null;
+    }
+    const local = holder ? null : branch;
+    if (holder) note?.(`${branch} is checked out at ${holder}; this desk uses detached HEAD at ${ref}. Push fixes with git push origin HEAD:${branch}.`);
 
     // Reuse the desk's worktree in place. Deleting it fails on Windows while any process (a dev server
     // the agent left running, a browser) still has its working directory inside, and reuse keeps
     // node_modules warm between tasks.
     if (await exists(path.join(wt, '.git'))) {
       try {
-        await git(['checkout', '--force', '-B', branch, ref], { cwd: wt });
+        await git(local ? ['checkout', '--force', '-B', local, ref] : ['checkout', '--force', '--detach', ref], { cwd: wt });
         await git(['reset', '--hard', ref], { cwd: wt });
         // Untracked leftovers from the last task go; ignored files (node_modules, build caches) stay.
         await git(['clean', '-fd'], { cwd: wt }).catch(() => undefined);
@@ -301,9 +310,20 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
     }
     await git(['worktree', 'prune'], { cwd: main });
     await fs.mkdir(path.dirname(wt), { recursive: true });
-    await git(['worktree', 'add', '-B', branch, wt, ref], { cwd: main });
+    await git(['worktree', 'add', ...(local ? ['-B', local] : ['--detach']), wt, ref], { cwd: main });
     return wt;
   });
+}
+
+/** Read NUL-delimited porcelain so spaces and quoted paths remain literal. */
+export function branchHolder(listing: string, branch: string, desk: string): string | null {
+  let current: string | null = null;
+  for (const field of listing.split('\0')) {
+    if (field.startsWith('worktree ')) current = field.slice(9);
+    if (field === `branch refs/heads/${branch}` && current && path.resolve(current) !== path.resolve(desk)) return current;
+    if (!field) current = null;
+  }
+  return null;
 }
 
 export function removeDesk(fullName: string, agentSlug: string): Promise<void> {

@@ -386,6 +386,7 @@ function fakeUsageWarning(cb: SessionCallbacks) {
 export function createDemoBackend(): Backend {
   // Tie each fake session back to its repo via the desk directory name.
   const deskRepo = new Map<string, string>();
+  const deskBranches = new Map<string, string | null>();
   // A pretend projects folder: the demo repos, one git folder that isn't on GitHub yet, and one plain folder.
   const folders = new Map<string, LocalFolder>();
   const addFolder = (name: string, github: string | null, git = true) =>
@@ -515,9 +516,12 @@ export function createDemoBackend(): Backend {
     },
     mainDir: (fullName) => `/demo/${fullName}/main`,
     deskDir: (fullName, slug) => `/demo/${fullName}/desks/${slug}`,
-    prepareDesk: async (fullName, _base, slug) => {
+    prepareDesk: async (fullName, base, slug, branch, note) => {
       await new Promise((r) => setTimeout(r, 900));
       const dir = `/demo/${fullName}/desks/${slug}`;
+      const holder = [...deskBranches].find(([d, b]) => b === branch && d !== dir && deskRepo.get(d) === fullName)?.[0];
+      if (holder) note?.(`${branch} is checked out at ${holder}; this desk uses detached HEAD at origin/pr/${base.pr}. Push fixes with git push origin HEAD:${branch}.`);
+      deskBranches.set(dir, holder ? null : branch);
       deskRepo.set(dir, fullName);
       return dir;
     },
