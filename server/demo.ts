@@ -158,13 +158,15 @@ function qaScript(cb: SessionCallbacks, pr: number, title: string, round: number
   ];
 }
 
-function fixScript(pr: number): Step[] {
+function fixScript(pr: number, pushes: boolean): Step[] {
   return [
     [{ kind: 'text', text: `● Reading the QA report for PR #${pr}. The toolbar overflows on phones; I'll let it wrap.` }],
     [{ kind: 'tool', tool: 'Read', text: '⏺ Read src/styles.css' }, { kind: 'result', text: '  ⎿ Read 212 lines' }],
     [{ kind: 'tool', tool: 'Edit', text: '⏺ Edit src/styles.css' }, { kind: 'result', text: '  ⎿ Updated' }],
     [{ kind: 'tool', tool: 'Bash', text: '⏺ $ npm test -- --run' }, { kind: 'result', text: '  ⎿ Test Files  8 passed (8)' }],
-    [{ kind: 'tool', tool: 'Bash', text: '⏺ $ git commit -am "fix: wrap toolbar on narrow screens" && git push origin HEAD' }, { kind: 'result', text: '  ⎿ pushed' }],
+    pushes
+      ? [{ kind: 'tool', tool: 'Bash', text: '⏺ $ git commit -am "fix: wrap toolbar on narrow screens" && git push origin HEAD' }, { kind: 'result', text: '  ⎿ pushed' }]
+      : [{ kind: 'tool', tool: 'Bash', text: '⏺ $ git status --short' }, { kind: 'result', text: '  ⎿  M src/styles.css' }],
   ];
 }
 
@@ -177,12 +179,14 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
   const number = Number((kind === 'issue' ? issueMatch?.[1] : prMatch?.[1]) ?? 0);
   const title = (kind === 'issue' ? issueMatch?.[2] : prMatch?.[2])?.trim() ?? 'follow-up';
   const round = Number(opts.prompt.match(/QA round (\d+)/)?.[1] ?? 1);
+  // Now and then a QA fix ends without pushing, so the office's "no new commits" check can be seen.
+  const pushes = kind !== 'fix' || !/^Fix your pull request|taking over pull request/.test(opts.prompt) || Math.random() > 0.25;
 
   const header: Step = [
     { kind: 'system', text: `✻ Claude Code (demo) · ${opts.model} · ${opts.effort} effort` },
     { kind: 'system', text: `  cwd ${opts.cwd}` },
   ];
-  const body = kind === 'qa' ? qaScript(cb, number, title, round) : kind === 'fix' ? fixScript(number) : devScript(opts, cb, number, title);
+  const body = kind === 'qa' ? qaScript(cb, number, title, round) : kind === 'fix' ? fixScript(number, pushes) : devScript(opts, cb, number, title);
   const script = [header, ...body];
 
   const finish = () => {
@@ -223,13 +227,13 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
     }
     if (kind === 'fix') {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
-      if (pr) {
+      if (pr && pushes) {
         pr.headSha = fakeSha();
         pr.mergeState = 'CLEAN';
         pr.mergeable = 'MERGEABLE';
         runChecks(pr, false);
       }
-      cb.log([{ kind: 'text', text: `● Fixed PR #${number} and pushed. Ready for another QA round.` }]);
+      cb.log([{ kind: 'text', text: pushes ? `● Fixed PR #${number} and pushed. Ready for another QA round.` : '● The toolbar wraps on narrow screens now. Ready for another QA round.' }]);
       cb.finished({ ok: true, text: '', costUsd, turns, errors: [] });
       return;
     }
@@ -386,6 +390,7 @@ function fakeUsageWarning(cb: SessionCallbacks) {
 export function createDemoBackend(): Backend {
   // Tie each fake session back to its repo via the desk directory name.
   const deskRepo = new Map<string, string>();
+  const deskBranches = new Map<string, string | null>();
   // A pretend projects folder: the demo repos, one git folder that isn't on GitHub yet, and one plain folder.
   const folders = new Map<string, LocalFolder>();
   const addFolder = (name: string, github: string | null, git = true) =>
@@ -515,9 +520,12 @@ export function createDemoBackend(): Backend {
     },
     mainDir: (fullName) => `/demo/${fullName}/main`,
     deskDir: (fullName, slug) => `/demo/${fullName}/desks/${slug}`,
-    prepareDesk: async (fullName, _base, slug) => {
+    prepareDesk: async (fullName, base, slug, branch, note) => {
       await new Promise((r) => setTimeout(r, 900));
       const dir = `/demo/${fullName}/desks/${slug}`;
+      const holder = [...deskBranches].find(([d, b]) => b === branch && d !== dir && deskRepo.get(d) === fullName)?.[0];
+      if (holder) note?.(`${branch} is checked out at ${holder}; this desk uses detached HEAD at origin/pr/${base.pr}. Push fixes with git push origin HEAD:${branch}.`);
+      deskBranches.set(dir, holder ? null : branch);
       deskRepo.set(dir, fullName);
       return dir;
     },
