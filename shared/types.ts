@@ -166,11 +166,18 @@ export interface ProjectFolderView {
   floor: number | null; // already a floor in the office
 }
 
-/** dev and qa are the two pipeline lanes on every floor; the one CEO works in the lobby and runs the company. */
-export type AgentRole = 'dev' | 'qa' | 'ceo';
+/**
+ * dev and qa are the two pipeline lanes on every floor; the one CEO works in the lobby and runs the company.
+ * Researchers do web research and file it as docs: one always works in the lobby for the company (RESEARCHER_ID), and
+ * floors can have their own at developer desks, taking swarm:research issues.
+ */
+export type AgentRole = 'dev' | 'qa' | 'ceo' | 'researcher';
 
 /** Fixed id of the CEO agent. */
 export const CEO_ID = 'ceo';
+
+/** Fixed id of the lobby researcher, who researches for the whole company. */
+export const RESEARCHER_ID = 'researcher';
 
 /** How the cartoon character is drawn. Picked from the agent's name when hired; the manager can change it. */
 export type AgentLook = 'feminine' | 'masculine';
@@ -334,7 +341,7 @@ export interface HireRequestView {
   id: string;
   kind: 'hire' | 'let-go';
   repoId: string;
-  role: 'dev' | 'qa';
+  role: 'dev' | 'qa' | 'researcher';
   agentId: string | null; // let-go: who; hire: who was hired once approved
   name: string; // the candidate's name (let-go: the agent's name)
   title: string;
@@ -372,6 +379,19 @@ export interface CeoInfo {
   nextReviewAt: number | null; // null when the heartbeat is off
 }
 
+/** The lobby researcher's work: briefs from the CEO or the manager, and the docs filed lately. */
+export interface ResearchInfo {
+  queue: { label: string }[];
+  job: { label: string } | null;
+  done: ResearchDoc[]; // newest last
+}
+
+export interface ResearchDoc {
+  topic: string;
+  where: string; // a pull request URL, or the doc's path in the company research folder
+  at: number;
+}
+
 export interface WorldSnapshot {
   user: string | null; // gh login
   ghReady: boolean;
@@ -384,6 +404,7 @@ export interface WorldSnapshot {
   qa: QaView[];
   requests: HireRequestView[];
   ceo: CeoInfo;
+  research: ResearchInfo;
   messages: PhoneMessage[];
   phoneReadAt: number; // CEO messages newer than this are unread
   officeCommit?: string | null; // short sha the server started on (absent on servers without self-update)
@@ -406,6 +427,7 @@ export type ServerEvent =
   | { type: 'settings'; settings: SwarmSettings }
   | { type: 'request'; request: HireRequestView }
   | { type: 'ceo'; ceo: CeoInfo }
+  | { type: 'research'; research: ResearchInfo }
   | { type: 'message'; message: PhoneMessage }
   | { type: 'phoneRead'; at: number }
   | { type: 'officeLifecycle'; officeLifecycle: OfficeLifecycleView }

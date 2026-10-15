@@ -49,6 +49,8 @@ export interface Backend {
   deskDir(fullName: string, agentSlug: string): string;
   prepareDesk(fullName: string, base: workspace.DeskBase, agentSlug: string, branch: string, note?: (text: string) => void): Promise<string>;
   removeDesk(fullName: string, agentSlug: string): Promise<void>;
+  /** The company's research folder: created and put under git (no remote) on first use. */
+  prepareResearchFolder(dir: string): Promise<void>;
   /** Stop processes an agent left running (dev servers on its port, anything started in its desk). */
   releaseDesk(fullName: string, agentSlug: string, port: number): Promise<void>;
   /** An agent session: the real CLI in the agent's terminal when opts.terminal is set, else an Agent SDK session. */
@@ -102,6 +104,7 @@ export const realBackend: Backend = {
   deskDir: workspace.deskDir,
   prepareDesk: workspace.prepareDesk,
   removeDesk: workspace.removeDesk,
+  prepareResearchFolder: workspace.ensureLocalRepo,
   releaseDesk: (fullName, agentSlug, port) => workspace.releaseDesk(fullName, agentSlug, port, officeProcesses()),
   startSession: (opts, cb) => (opts.terminal ? startCliSession(opts, cb) : startSession(opts, cb)),
   terminals: terminalsAvailable,

@@ -1,6 +1,6 @@
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { issueBlockers, holdUps, issueSpecialty, setDependsOn, type IssueRef } from '../shared/issues.ts';
+import { issueBlockers, holdUps, issueSpecialty, RESEARCH, setDependsOn, type IssueRef } from '../shared/issues.ts';
 import type { AgentView, CeoJobKind, IssueInfo, PullInfo, QaView } from '../shared/types.ts';
 import { ONE_TURN } from './clis.ts';
 import type { FixReason } from './fixPlan.ts';
@@ -25,7 +25,7 @@ export interface OfficeHandlers {
   updateJob(a: { agent_id: string; title?: string; specialty?: string; job_description?: string }): string;
   proposeHire(a: {
     floor: number;
-    role: 'dev' | 'qa';
+    role: 'dev' | 'qa' | 'researcher';
     title: string;
     specialty: string;
     job_description: string;
@@ -41,6 +41,13 @@ export interface OfficeHandlers {
   sendBackToDev(a: DevFixRequest): Promise<string>;
   parkPr(a: ParkPrRequest): Promise<string>;
   mergePr(a: MergePrRequest): Promise<string>;
+  requestResearch(a: ResearchRequest): string;
+}
+
+export interface ResearchRequest {
+  topic: string;
+  brief: string;
+  floor?: number;
 }
 
 export interface MergePrRequest {
@@ -104,13 +111,16 @@ export function planStartIssue<A extends StartAgent>(x: StartIssueRequest, conte
     agent = context.agents.find((a) => a.id === x.agent) ?? context.agents.find((a) => a.repoId === context.repoId && a.name.toLowerCase() === ref)
       ?? context.agents.find((a) => a.name.toLowerCase() === ref);
     if (!agent) throw new Error(`No agent "${x.agent}". Use the ids from company_status.`);
-    if (agent.role !== 'dev') throw new Error(`${agent.name} is ${agent.role === 'qa' ? 'a QA tester' : 'the CEO'}; give issues to developers.`);
+    if (agent.role === 'qa' || agent.role === 'ceo') throw new Error(`${agent.name} is ${agent.role === 'qa' ? 'a QA tester' : 'the CEO'}; give issues to developers.`);
     if (agent.repoId !== context.repoId) throw new Error(`${agent.name} is not on floor ${x.floor}.`);
+    if (agent.role === 'researcher' && issueSpecialty(issue.labels) !== RESEARCH) throw new Error(`${agent.name} is a researcher; they only take swarm:${RESEARCH} issues.`);
     if (agent.status === 'preparing' || agent.status === 'working') throw new Error(`${agent.name} is busy; wait for them to finish.`);
   } else {
     const want = issueSpecialty(issue.labels);
-    agent = pickDeveloper(context.available, (a) => a.specialty.toLowerCase() === want, context.ready, context.issues.map((i) => issueSpecialty(i.labels)));
-    if (!agent) throw new Error(`No free developer on floor ${x.floor}.`);
+    // Research issues go to the floor's researchers, everything else to its developers.
+    const pool = context.available.filter((a) => (a.role === 'researcher') === (want === RESEARCH));
+    agent = pickDeveloper(pool, (a) => a.specialty.toLowerCase() === want, context.ready, context.issues.map((i) => issueSpecialty(i.labels)));
+    if (!agent) throw new Error(want === RESEARCH ? `No free researcher on floor ${x.floor}. Use request_research for the lobby researcher, or propose hiring one.` : `No free developer on floor ${x.floor}.`);
   }
   return { agent, issue };
 }
@@ -239,10 +249,10 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
     ),
     tool(
       'propose_hire',
-      'Propose hiring a developer or QA tester for a floor. The manager approves or declines (or it is auto-approved if hiring is set to auto and the floor is under its team cap).',
+      'Propose hiring a developer, QA tester or researcher for a floor. The manager approves or declines (or it is auto-approved if hiring is set to auto and the floor is under its team cap).',
       {
         floor: z.number().int(),
-        role: z.enum(['dev', 'qa']).describe('dev = builds issues into pull requests; qa = tests pull requests'),
+        role: z.enum(['dev', 'qa', 'researcher']).describe(`dev = builds issues into pull requests; qa = tests pull requests; researcher = web research on swarm:${RESEARCH} issues, filed as docs (specialty is always ${RESEARCH})`),
         title: z.string().max(60).describe('Specific job title, e.g. "Three.js graphics engineer"'),
         specialty: z.string().max(24).describe('Short lowercase slug used to label issues swarm:<specialty>, e.g. "graphics"'),
         job_description: z.string().max(2500).describe('What this person owns on this project and how they should work. Written to them, second person.'),
@@ -334,6 +344,16 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
       },
       (a) => run(() => h.rerunQa(a)),
     ),
+    tool(
+      'request_research',
+      `Brief the lobby researcher: web research written up as a Markdown doc. With floor, the doc goes into that repo's docs/research/ by pull request; without, into the company research folder. For a floor with its own researcher, file_issue with specialty "${RESEARCH}" instead.`,
+      {
+        topic: z.string().trim().min(1).max(120).describe('e.g. "Pricing of hosted Postgres providers"'),
+        brief: z.string().trim().min(1).max(3000).describe('The questions to answer, why they matter and what decision they inform'),
+        floor: z.number().int().optional().describe('The floor the research is for; omit for company-wide research'),
+      },
+      (a) => run(() => h.requestResearch(a)),
+    ),
   ];
   const server = createSdkMcpServer({ name: 'office', version: '1.0.0', tools: defs });
   return {
@@ -355,6 +375,7 @@ export function ceoSystemPrompt(o: {
   company: string;
   manager: string;
   notesFile: string;
+  researchFolder: string;
   sessionLimit: number;
   teamCap: number;
   hiring: 'approve' | 'auto';
@@ -368,6 +389,7 @@ export function ceoSystemPrompt(o: {
     '- Understand each project: what it is, its stack, how far along it is, and what kind of people it needs. Projects differ a lot. A static marketing site, a 3D browser game and a REST API need different specialists and different QA.',
     `- Shape each floor's team. Propose specialists with a specific title and a job description written for this project. Keep teams lean: agents on the same coding agent share one subscription's usage limits${o.sessionLimit ? ` and at most ${o.sessionLimit} sessions run at once` : ''}, so a floor rarely needs more than ${o.teamCap} people. Propose letting people go when a floor is clearly overstaffed or a specialty is no longer needed.`,
     "- Plan the work: turn a floor's brief into small, well-specified GitHub issues, one agent-session each, with acceptance criteria. Route each to a specialty. The office hands issues out itself: a free specialist gets first pick of their specialty, and otherwise any free developer takes the next issue that can start, so a specialty is a preference, not a lock.",
+    `- Get research done before deciding what you can't know from the code (markets, competitors, pricing, APIs, regulations). The lobby researcher is always there: brief them with request_research. A floor that needs research often can have its own researchers (propose_hire role researcher); they take swarm:${RESEARCH} issues. Docs land in the company research folder (${o.researchFolder}) or a repo's docs/research/: read them before planning.`,
     "- Write each floor's QA brief: what QA testers must check for this kind of project (for a 3D game: the canvas renders, controls respond, frame rate is smooth; for a website: links, phone layout, accessibility; for an API: status codes, validation, error cases).",
     '',
     'How you work:',

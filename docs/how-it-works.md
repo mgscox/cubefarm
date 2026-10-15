@@ -39,11 +39,18 @@ You can message an agent at any time. While they're working, the message is inje
 
 - Every floor always has at least one QA tester: one is hired when a repo is connected, and the last one can't be let go. You can hire up to 3 per floor (manager's console → Team, or press `E` on an empty QA station).
 - QA testers use the same model and effort settings as everyone else. Their instructions tell them not to push, comment on, review, merge or edit PRs or issues: the office posts their report for them.
-- QA is automatic for every PR from a `swarm/` branch, whether or not auto-assign is on.
+- QA is automatic for every PR from a `swarm/` branch, whether or not auto-assign is on, except research docs (`swarm/research-` branches): there's nothing to test, so they count as passed and merge like any other PR once GitHub's checks are green.
+
+## Researchers
+
+- Researchers do web research (Claude Code's WebSearch and WebFetch) and write it up as Markdown docs: the question, the answer first, findings, recommendations, open questions and numbered sources. They always run Claude Code, and they never change code.
+- **The lobby researcher** is always there, at the desk by the lobby's east windows, and works for the whole company from a queue of briefs: the CEO's `request_research` tool, or yours (press `E` at their desk; the first line of a brief is its topic). Company research is committed to `~/.cubefarm/research/`, a local git repository with no remote, which the CEO reads. A brief for a floor goes into that repo's `docs/research/` by pull request instead.
+- **Floor researchers** sit at free developer desks (they share the floor's 12 desks with developers). Hire them in the manager's console → Team, or the CEO proposes them. They take issues labelled `swarm:research`, and nothing else; developers never get those issues automatically. Their docs go into `docs/research/` by pull request, which closes the issue.
+- New research waits while Claude's usage is pacing or paused, like new issues.
 
 ## The team
 
-Agents get names from a pool of computing pioneers (developers) and fictional detectives (QA testers). Each character's look is picked from their name, so Ada, Grace and Marple are drawn with long hair, a ponytail or a bun. You can change any agent's name or look in the manager's console → Team.
+Agents get names from a pool of computing pioneers (developers), fictional detectives (QA testers) and scientists (researchers). Each character's look is picked from their name, so Ada, Grace and Marple are drawn with long hair, a ponytail or a bun. You can change any agent's name or look in the manager's console → Team.
 
 ## Models and usage
 
@@ -77,6 +84,7 @@ Agents can do anything your own coding agent in a terminal can. Run the office w
 - `~/.cubefarm/sessions/<token>/`: a running CLI session's settings, MCP config and instructions (removed when it ends); `~/.cubefarm/bin/`: the small scripts the CLIs call back to the office with
 - `~/.cubefarm/workspaces/<owner>__<repo>/main`: a clone of each repo
 - `~/.cubefarm/workspaces/<owner>__<repo>/desks/<agent>`: one worktree per agent
+- `~/.cubefarm/research/`: the company's research docs, committed by the lobby researcher
 
 Workspaces live outside this project on purpose: agents working in them never pick up this project's `CLAUDE.md`.
 

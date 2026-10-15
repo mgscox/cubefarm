@@ -4,6 +4,7 @@ import { isBusy, kanbanFor, agentsOnRepo, useStore } from '../store';
 import { confirmDialog } from './Confirm';
 import { LiveTerminal } from './LiveTerminal';
 import { effectiveModel } from '../../../shared/models';
+import { isResearchIssue } from '../../../shared/issues';
 import { Markdown } from './Markdown';
 import { MessageBox } from './MessageBox';
 import { closeOverlay, Panel } from './Overlays';
@@ -55,8 +56,10 @@ export function TerminalView({ agentId }: { agentId: string }) {
   const qaRecords = useStore((s) => s.qa);
   const cols = useMemo(() => (repo ? kanbanFor(repo, agentsOnRepo(allAgents, repo.id), qaRecords) : null), [repo, allAgents, qaRecords]);
   const isQa = agent?.role === 'qa';
-  // Devs pick issues from the backlog; QA testers pick untested pull requests.
-  const choices = !cols ? [] : isQa ? cols.qa.filter((c) => !c.qa || c.qa.status === 'needs-human' || c.qa.status === 'queued') : cols.backlog;
+  const isResearcher = agent?.role === 'researcher';
+  // Devs pick issues from the backlog, researchers only its research issues; QA testers pick untested pull requests.
+  const research = (n: number) => isResearchIssue(repo?.issues.find((i) => i.number === n)?.labels ?? []);
+  const choices = !cols ? [] : isQa ? cols.qa.filter((c) => !c.qa || c.qa.status === 'needs-human' || c.qa.status === 'queued') : cols.backlog.filter((c) => !isResearcher || research(c.number));
 
   if (!agent || !repo) {
     return (
@@ -77,7 +80,7 @@ export function TerminalView({ agentId }: { agentId: string }) {
     }
   };
   const working = isBusy(agent);
-  const cli = agent.role === 'ceo' ? 'claude' : agent.cli || settings.defaultCli;
+  const cli = agent.role === 'ceo' || isResearcher ? 'claude' : agent.cli || settings.defaultCli;
   const cliName = clis.find((c) => c.id === cli)?.label ?? cli;
   const issueUrl = agent.issueNumber ? `https://github.com/${repo.fullName}/issues/${agent.issueNumber}` : null;
   const canMessage = working || (!isQa && !!agent.branch && agent.status !== 'idle');
@@ -94,7 +97,7 @@ export function TerminalView({ agentId }: { agentId: string }) {
           </span>
           <span>{agent.name}</span>
           <span className="chip" title={agent.brief || undefined}>
-            {isQa ? '🔍' : '💻'} {agent.title || (isQa ? 'QA tester' : 'Developer')}
+            {isQa ? '🔍' : isResearcher ? '📚' : '💻'} {agent.title || (isQa ? 'QA tester' : isResearcher ? 'Researcher' : 'Developer')}
             {agent.specialty ? ` · 🎯 ${agent.specialty}` : ''}
           </span>
           <StatusPill status={agent.status} />
@@ -222,7 +225,7 @@ export function TerminalView({ agentId }: { agentId: string }) {
         ) : (
           <>
             <select value={issue} onChange={(e) => setIssue(e.target.value)}>
-              <option value="">{isQa ? 'Pick a pull request to test…' : 'Pick an issue from the backlog…'}</option>
+              <option value="">{isQa ? 'Pick a pull request to test…' : isResearcher ? `Pick a swarm:research issue…` : 'Pick an issue from the backlog…'}</option>
               {choices.map((c) => (
                 <option key={c.key} value={c.number}>
                   {isQa ? 'PR ' : ''}#{c.number} {c.title}

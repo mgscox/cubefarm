@@ -64,7 +64,7 @@ export function Resume({ req, highlight }: { req: HireRequestView; highlight?: b
           Floor {repo?.floor ?? '?'}
         </span>
         <span className="muted small">{repo?.fullName.split('/')[1] ?? 'removed floor'}</span>
-        <span className="chip">{req.role === 'qa' ? '🔍 QA' : '💻 Dev'}</span>
+        <span className="chip">{req.role === 'qa' ? '🔍 QA' : req.role === 'researcher' ? '📚 Research' : '💻 Dev'}</span>
         {req.specialty && <span className="chip">🎯 {req.specialty}</span>}
       </div>
       {req.reason && <Markdown className="resume-reason" text={req.reason} />}

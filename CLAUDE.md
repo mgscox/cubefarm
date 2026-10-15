@@ -74,6 +74,9 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
 - `terminal.ts`: `AgentTerminal`, a headless xterm mirror per agent (replay for late viewers, saved to disk), its
   `/ws/term` viewers, and keystrokes/resizes to the running CLI.
 - `ceo.ts`: the CEO's office MCP tools (`createOfficeTools`, zod-validated), `ceoSystemPrompt`, `ceoJobPrompt`.
+- `research.ts`: researchers' prompts, branches and briefs. The lobby researcher (always present) takes briefs into
+  the company research folder (`<SWARM_HOME>/research`, local git) or a floor's `docs/research/`; floor researchers take
+  `swarm:research` issues. Research PRs skip QA.
 - `backend.ts`: the `Backend` interface (everything touching GitHub, git, disk and sessions) and `realBackend`.
 - `demo.ts`: `createDemoBackend()`: fake GitHub, fake sessions (drawn into the agent's terminal in the terminal runtime), fake previews for `--demo`.
 - `github.ts`: all GitHub access through the `gh` CLI.
