@@ -11,6 +11,7 @@ import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
 import { orphanedQa } from './qaOwnership.ts';
 import { planDevFix, type FixReason } from './fixPlan.ts';
+import { fixGoesTo, prepFailure, prepHeld, PREP_HOLD_MS } from './handOut.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
@@ -142,6 +143,8 @@ interface QaRecord extends QaView {
   mergeRetryAt: number | null; // GitHub refused the merge: try again after this
   alerted: boolean; // the manager has been told it's stuck
 }
+
+type PrepJob = { rec: QaRecord; task: 'qa' } | { rec: QaRecord; task: 'fix'; author: string | null };
 
 /** Choices made when a project moves into the office. */
 interface FloorOptions {
@@ -743,6 +746,7 @@ export class Swarm {
       commentUrl: q.commentUrl,
       mergeNote: q.mergeNote,
       rerunNote: q.rerunNote,
+      preparation: q.preparation,
       updatedAt: q.updatedAt,
     };
   }
@@ -1817,14 +1821,22 @@ export class Swarm {
     this.save();
   }
 
-  private async prepare(a: PersistedAgent, repo: PersistedRepo, base: { pr?: number }, branch: string): Promise<string | null> {
+  private async prepare(a: PersistedAgent, repo: PersistedRepo, base: { pr?: number }, branch: string, job?: PrepJob): Promise<string | null> {
+    const generation = this.agentRt.get(a.id)?.generation;
+    const gone = () => a.status !== 'preparing' || this.agentRt.get(a.id)?.generation !== generation;
     try {
       if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') await this.cloneRepo(repo.id);
       await this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
-      const cwd = await this.backend.prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch);
+      const cwd = await this.backend.prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch, (text) => this.appendLog(a, [{ kind: 'system', text }]));
+      if (gone()) return null;
+      if (job) this.setQa(job.rec, { preparation: { ...job.rec.preparation, [job.task]: undefined } });
       return a.status === 'preparing' ? cwd : null; // null: stopped or fired while preparing
     } catch (err) {
-      if (a.status !== 'preparing') return null;
+      if (gone()) return null;
+      if (job) {
+        this.jobDeskFailed(a, repo, job, (err as Error).message);
+        return null;
+      }
       a.status = 'error';
       a.endedAt = Date.now();
       a.lastError = (err as Error).message;
@@ -1833,6 +1845,28 @@ export class Swarm {
       this.save();
       return null;
     }
+  }
+
+  /** Nothing ran: free the agent and keep the PR's findings and original owner. */
+  private jobDeskFailed(a: PersistedAgent, repo: PersistedRepo, job: PrepJob, error: string) {
+    const { rec, task } = job;
+    this.appendLog(a, [{ kind: 'error', text: `✗ ${error}` }, { kind: 'system', text: 'Desk preparation failed; free for other work.' }]);
+    if (!this.state.qa.includes(rec)) {
+      this.clearTask(a);
+      this.save();
+      return;
+    }
+    const headSha = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headSha ?? null;
+    const step = prepFailure(rec.preparation?.[task], headSha, Date.now());
+    this.setQa(rec, {
+      status: step.next === 'needs-human' ? 'needs-human' : task === 'fix' ? 'failed' : 'queued',
+      ...(task === 'fix' ? { devAgentId: job.author && this.state.agents.some((x) => x.id === job.author) ? job.author : null } : { qaAgentId: null }),
+      preparation: { ...rec.preparation, [task]: step.strikes },
+      ...(step.next === 'needs-human' ? { mergeNote: "its desk couldn't be set up" } : {}),
+    });
+    this.clearTask(a);
+    this.save();
+    if (step.next !== 'retry') this.postMessage('office', `⚠️ PR #${rec.prNumber} on ${repo.fullName} ${step.next === 'needs-human' ? 'needs an explicit handoff' : `waits ${PREP_HOLD_MS / 60_000} minutes`}: desks couldn't be set up for ${task} twice in a row: ${error.slice(0, 240)}`);
   }
 
   private async runTask(a: PersistedAgent, repo: PersistedRepo, issue: IssueInfo, note?: string) {
@@ -2070,7 +2104,13 @@ export class Swarm {
     this.issueFailures.delete(`${repo.id}#${a.issueNumber}`);
     a.status = 'done';
     this.appendLog(a, [{ kind: 'done', text: `✔ Finished in ${this.minutes(a)}m · ${a.turns} turns${a.prNumber ? ` · PR #${a.prNumber}` : ' · no PR found'}` }]);
-    if (a.prNumber) {
+    const failedEarly = a.prNumber ? this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber && ['failed', 'needs-human', 'fixing'].includes(q.status)) : undefined;
+    if (failedEarly) {
+      if (failedEarly.status !== 'fixing' && (!failedEarly.devAgentId || failedEarly.devAgentId === a.id)) {
+        this.setQa(failedEarly, { devAgentId: a.id, devSessionId: a.sessionId ?? failedEarly.devSessionId });
+      }
+      this.appendLog(a, [{ kind: 'system', text: `📨 QA findings for PR #${a.prNumber} are retained for its fix.` }]);
+    } else if (a.prNumber) {
       this.queueQa(repo, a.prNumber, a, a.issueNumber);
       this.appendLog(a, [{ kind: 'system', text: `📨 Handed PR #${a.prNumber} to QA.` }]);
       this.toast('success', `${a.name} opened PR #${a.prNumber} for #${a.issueNumber}; it's off to QA`);
@@ -2207,6 +2247,7 @@ export class Swarm {
       rec.sessionFailures = 0;
     }
     const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && (a.prNumber === prNumber || a.branch === pr.headRefName));
+    if (rec) this.setQa(rec, { preparation: undefined });
     this.queueQa(repo, prNumber, dev ?? null, pr.closesIssues[0] ?? null);
     this.toast('info', `PR #${prNumber} is queued for QA`);
   }
@@ -2222,7 +2263,7 @@ export class Swarm {
       ...(repo.mission ? [`What the team is building (the manager's brief): ${repo.mission}`] : []),
       ...(repo.qaBrief ? [`What to check on this project (from the CEO):\n${repo.qaBrief}`] : []),
       `Pull request #${pr.number} "${pr.title}" from branch ${pr.headRefName}: ${pr.url}`,
-      `Your worktree: ${cwd}. It has the pull request's code checked out on local branch ${branch}.`,
+      `Your worktree: ${cwd}. It has the pull request's code at HEAD (local branch ${branch}, or detached if another worktree holds it).`,
       '',
       'How to test:',
       '1. Read the PR description and the linked issue, and work out the acceptance criteria.',
@@ -2279,7 +2320,7 @@ export class Swarm {
     if (rec.failedSha === pr.headSha) return this.skipUnchangedQa(a, rec, lastTester);
     rec.testedSha = pr.headSha;
 
-    const cwd = await this.prepare(a, repo, { pr: rec.prNumber }, branch);
+    const cwd = await this.prepare(a, repo, { pr: rec.prNumber }, branch, { rec, task: 'qa' });
     if (!cwd) {
       if (this.state.qa.includes(rec) && rec.status === 'testing') this.setQa(rec, { status: 'queued', qaAgentId: null });
       return;
@@ -2446,6 +2487,7 @@ export class Swarm {
     const pull = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber);
     const headRef = pull?.headRefName ?? dev.branch ?? `pr-${rec.prNumber}`;
     const qaAgent = rec.qaAgentId ? this.state.agents.find((x) => x.id === rec.qaAgentId) : null;
+    const author = rec.devAgentId;
     this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
     this.beginTask(
       dev,
@@ -2453,9 +2495,7 @@ export class Swarm {
       rec.fixReason === 'conflict' ? `Resolving conflicts on PR #${rec.prNumber}` : rec.fixReason === 'checks' ? `Fixing checks on PR #${rec.prNumber}` : `Fixing PR #${rec.prNumber} after QA round ${rec.round}`,
       `Checking out PR #${rec.prNumber}…`,
     );
-    // The author's branch may still be checked out at another desk, including after a restart.
-    const localBranch = `fix/pr-${rec.prNumber}-${this.agentSlug(dev)}`;
-    const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, localBranch);
+    const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, headRef, { rec, task: 'fix', author });
     if (!cwd) {
       if (rec.status === 'fixing') this.setQa(rec, { status: 'failed' });
       return;
@@ -2497,7 +2537,7 @@ export class Swarm {
     const mergeEnd = 'Then reply with a short summary of what you did. Do not open a new pull request; the office merges it once the checks pass, after another QA round if the code changed.';
     const prompt = (mergeFix ? [...mergeFix, '', mergeEnd] : qaFix).filter((l) => l !== '').join('\n');
     const resume = original && rec.devSessionId ? rec.devSessionId : undefined;
-    await this.startAgentSession(dev, repo, cwd, prompt, this.buildSystemAppend(dev, repo, cwd, localBranch, { pr: rec.prNumber, headRef }), resume);
+    await this.startAgentSession(dev, repo, cwd, prompt, this.buildSystemAppend(dev, repo, cwd, headRef, { pr: rec.prNumber, headRef }), resume);
   }
 
   private onFixFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult) {
@@ -2649,15 +2689,16 @@ export class Swarm {
   /**
    * Finish work in flight: test queued PRs (oldest first) and get failed ones fixed. Returns true if work started.
    * QA testers test; when they're all busy, a free developer who didn't write the PR covers for them, so QA never
-   * holds up the floor. A failed PR goes back to its author when they're free, and otherwise to any free developer.
+   * holds up the floor. A failed PR waits for its author while they are still working on it; unavailable authors can hand off.
    */
   private startPipelineWork(repo: PersistedRepo): boolean {
     if (this.state.officeHeld) return false;
     if (this.repoRt.get(repo.id)?.parking) return false;
     const devs = this.available(repo, 'dev');
     const testers = this.available(repo, 'qa');
-    const waiting = (status: QaRecord['status']) => this.state.qa.filter((q) => q.repoId === repo.id && q.status === status).sort((x, y) => x.updatedAt - y.updatedAt);
-    for (const rec of waiting('queued')) {
+    const waiting = (status: QaRecord['status'], task: PrepJob['task']) => this.state.qa.filter((q) => q.repoId === repo.id && q.status === status &&
+      !prepHeld(q.preparation?.[task], this.repoRt.get(repo.id)?.pulls.find((p) => p.number === q.prNumber)?.headSha ?? null, Date.now())).sort((x, y) => x.updatedAt - y.updatedAt);
+    for (const rec of waiting('queued', 'qa')) {
       const tester =
         testers[0] ??
         this.pickDev(
@@ -2669,14 +2710,18 @@ export class Swarm {
       void this.runQa(tester, repo, rec);
       return true;
     }
-    for (const rec of waiting('failed')) {
+    for (const rec of waiting('failed', 'fix')) {
       const issue = this.repoRt.get(repo.id)!.issues.find((i) => i.number === rec.issueNumber);
       const want = issue ? issueSpecialty(issue.labels) : null;
       // A fix that crashed waits for a developer who hasn't crashed on it, if the floor has one.
       const fresh = (a: PersistedAgent) => !rec.fixCrashes.includes(a.id);
       const freshOnFloor = this.state.agents.some((a) => a.repoId === repo.id && a.role === 'dev' && fresh(a));
       const pool = freshOnFloor ? devs.filter(fresh) : devs;
-      const dev = pool.find((a) => a.id === rec.devAgentId) ?? this.pickDev(repo, pool, (a) => a.specialty.toLowerCase() === want);
+      const author = this.state.agents.find((a) => a.id === rec.devAgentId && a.repoId === repo.id && a.role === 'dev') ?? null;
+      const headRef = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headRefName ?? null;
+      const to = fixGoesTo(author, !!author && pool.includes(author), rec.prNumber, headRef);
+      if (to === 'wait') continue;
+      const dev = to === 'author' ? author : this.pickDev(repo, pool, (a) => a.specialty.toLowerCase() === want);
       if (!dev) continue;
       void this.runFix(dev, repo, rec);
       return true;
@@ -3840,8 +3885,10 @@ export class Swarm {
     const getRecord = () => {
       if (rt.parking) throw new HttpError(409, 'Wait until PR parking finishes');
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number);
-      const busy = this.state.agents.some((a) => a.repoId === repo.id && a.prNumber === x.number &&
-        (a.task === 'qa' || a.task === 'fix') && (BUSY.includes(a.status) || !!this.agentRt.get(a.id)?.session));
+      const busy = this.state.agents.some((a) => a.repoId === repo.id &&
+        ((a.prNumber === x.number && (a.task === 'qa' || a.task === 'fix')) ||
+          (a.id === rec?.devAgentId && (a.prNumber === x.number || a.branch === pull.headRefName))) &&
+        (BUSY.includes(a.status) || !!this.agentRt.get(a.id)?.session));
       if (!rec || busy || !['needs-human', 'failed', 'passed', 'testing', 'fixing'].includes(rec.status)) {
         throw new HttpError(409, `PR #${x.number} is ${rec?.status ?? 'not in QA'}; wait until QA or its fix finishes`);
       }
@@ -3863,6 +3910,7 @@ export class Swarm {
     const dev = free.find((a) => a.id === preferred) ?? free[0];
     const chosen = dev?.id ?? preferred;
     this.setQa(rec, {
+      preparation: undefined,
       ...planDevFix(rec, { ...pull, mergeable: pr.mergeable, mergeState: pr.mergeState }, repo.defaultBranch, x.note?.slice(0, 1500), x.reason),
       status: 'failed',
       qaAgentId: rec.status === 'testing' ? null : rec.qaAgentId,

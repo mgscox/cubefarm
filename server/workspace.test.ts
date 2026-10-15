@@ -263,6 +263,39 @@ describe('prepareDesk', { timeout: 60_000 }, () => {
     expect(await git(['branch', '--show-current'], { cwd: original })).toBe(branch);
   });
 
+  it.each([['author', false], ['author', true], ['manager', false], ['manager', true]] as const)(
+    'uses detached HEAD when the %s holds the PR branch (reused desk: %s)', async (holder, reused) => {
+      const r = await makeRepos();
+      const branch = 'swarm/shared-branch';
+      const original = holder === 'author'
+        ? await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'author', branch)
+        : r.dir;
+      if (holder === 'manager') await git(['checkout', '-b', branch], { cwd: original });
+      await commitFile(original, 'feature.txt', 'feature\n');
+      await git(['push', 'origin', branch, 'HEAD:refs/pull/198/head'], { cwd: original });
+      const before = await head(original);
+      await fs.writeFile(path.join(original, 'README.md'), '# Work in progress\n');
+      await fs.writeFile(path.join(original, 'untracked.txt'), 'untracked\n');
+      if (reused) await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'fixer', 'previous-task');
+      // Both QA and fixes can request a branch held elsewhere.
+      for (const slug of ['fixer', 'tester']) {
+        const notes: string[] = [];
+        const desk = await prepareDesk(r.fullName, { defaultBranch: 'main', pr: 198 }, slug, branch, (note) => notes.push(note));
+        expect(await git(['branch', '--show-current'], { cwd: desk })).toBe('');
+        expect(await head(desk)).toBe(await git(['rev-parse', `origin/${branch}`], { cwd: r.dir }));
+        expect(notes).toEqual([expect.stringContaining(`git push origin HEAD:${branch}`)]);
+        await commitFile(desk, `${slug}.txt`, 'fixed\n');
+        await git(['push', 'origin', `HEAD:${branch}`, 'HEAD:refs/pull/198/head'], { cwd: desk });
+        expect(await git(['ls-remote', 'origin', `refs/heads/${branch}`], { cwd: desk })).toContain(await head(desk));
+      }
+      expect(await head(original)).toBe(before);
+      expect(await git(['rev-parse', branch], { cwd: r.dir })).toBe(before);
+      expect(await git(['branch', '--show-current'], { cwd: original })).toBe(branch);
+      expect(await fs.readFile(path.join(original, 'README.md'), 'utf8')).toBe('# Work in progress\n');
+      expect(await fs.readFile(path.join(original, 'untracked.txt'), 'utf8')).toBe('untracked\n');
+    },
+  );
+
   it('reuses a desk after its workspace is relocated behind a symlink', async () => {
     const r = await makeRepos();
     const slug = 'barbara-8528';
