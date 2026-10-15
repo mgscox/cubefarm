@@ -6,6 +6,7 @@ import { claudeConversation, LOST_CONVERSATION } from './clis.ts';
 import type { OfficeTools } from './ceo.ts';
 import type { UsageWarning } from './pacing.ts';
 import type { AgentTerminal } from './terminal.ts';
+import { CROSS_TURN_TOOLS } from './clis.ts';
 import { VERSION } from './config.ts';
 import { projectEnv } from './projectEnv.ts';
 
@@ -336,7 +337,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
   }
   if (opts.office) mcpServers.office = opts.office.server;
   // The CEO reads repositories and acts through the office tools; it never runs commands.
-  const disallowedTools = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
+  const disallowedTools = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', ...CROSS_TURN_TOOLS];
   if (opts.role === 'ceo') disallowedTools.push('Bash', 'PowerShell', 'NotebookEdit');
 
   const options: Options = {
