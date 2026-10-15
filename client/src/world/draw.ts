@@ -286,6 +286,37 @@ export function drawKanban(ctx: CanvasRenderingContext2D, w: number, h: number, 
   });
 }
 
+const NAME_X = 36; // after the developer's colour dot
+const NOTE_PAD = 12; // right margin of a note's footer
+const NOTE_GAP = 10; // between the name and the status
+
+/**
+ * Text cut to maxWidth: whole if it fits, else its leading " · " parts (the status before its explanation), else cut
+ * short with an ellipsis; '' when not even that fits.
+ */
+export function fitStatus(text: string, maxWidth: number, measure: (s: string) => number): string {
+  const parts = text.split(' · ');
+  for (let n = parts.length; n > 0; n--) {
+    const t = parts.slice(0, n).join(' · ');
+    if (measure(t) <= maxWidth) return t;
+  }
+  const chars = Array.from(parts[0]); // whole emoji, not half a surrogate pair
+  while (chars.length > 1 && measure(`${chars.join('')}…`) > maxWidth) chars.pop();
+  const cut = `${chars.join('')}…`;
+  return measure(cut) <= maxWidth ? cut : '';
+}
+
+/**
+ * A sticky note's footer on a card w wide: the developer's name from the left and the status from the right, each
+ * fitted so neither crosses the other or the card's edges. The name keeps at most two thirds of the card.
+ */
+export function noteFooter(w: number, name: string | null, note: string | null, nameWidth: (s: string) => number, noteWidth: (s: string) => number) {
+  const shownName = name ? fitStatus(name, ((w - NAME_X) * 2) / 3, nameWidth) : '';
+  const nameRight = shownName ? NAME_X + nameWidth(shownName) : 0;
+  const room = w - NOTE_PAD - (shownName ? nameRight + NOTE_GAP : 14);
+  return { name: shownName, nameRight, note: note ? fitStatus(note, room, noteWidth) : '' };
+}
+
 function drawNote(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, card: KanbanCard, color: string) {
   const tilt = (((card.number * 37) % 7) - 3) * 0.006;
   ctx.save();
@@ -308,6 +339,11 @@ function drawNote(ctx: CanvasRenderingContext2D, x: number, y: number, w: number
   lines.forEach((l, i) => ctx.fillText(l, 14, 38 + i * 21));
 
   ctx.textBaseline = 'middle';
+  const widthIn = (font: string) => (s: string) => {
+    ctx.font = font;
+    return ctx.measureText(s).width;
+  };
+  const foot = noteFooter(w, card.agent?.name ?? null, card.note ?? null, widthIn(`600 17px ${SANS}`), widthIn(`500 16px ${SANS}`));
   if (card.agent) {
     ctx.fillStyle = card.agent.color;
     ctx.beginPath();
@@ -315,13 +351,13 @@ function drawNote(ctx: CanvasRenderingContext2D, x: number, y: number, w: number
     ctx.fill();
     ctx.fillStyle = '#2d3142';
     ctx.font = `600 17px ${SANS}`;
-    ctx.fillText(card.agent.name, 36, h - 14);
+    ctx.fillText(foot.name, NAME_X, h - 14);
   }
-  if (card.note) {
+  if (foot.note) {
     ctx.font = `500 16px ${SANS}`;
     ctx.fillStyle = '#5c6078';
     ctx.textAlign = 'right';
-    ctx.fillText(card.note, w - 12, h - 14);
+    ctx.fillText(foot.note, w - NOTE_PAD, h - 14);
     ctx.textAlign = 'left';
   }
   ctx.restore();
