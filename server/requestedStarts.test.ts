@@ -32,6 +32,13 @@ describe('selecting an explicit restart', () => {
     expect(pickRequestedStart([request], [barbara], () => false)?.agent).toBe(barbara);
   });
 
+  it('only hands a restart to someone who may take that issue, and moves on to the next request', () => {
+    const second = { ...request, issueNumber: request.issueNumber + 1 };
+    const fits = (a: { id: string }, n: number) => a.id !== 'barbara' || n === second.issueNumber;
+    expect(pickRequestedStart([request], [barbara], () => false, fits)).toBeNull();
+    expect(pickRequestedStart([request, second], [barbara], () => false, fits)).toEqual({ request: second, agent: barbara });
+  });
+
   it('waits when no desk is free, the issue is taken, or no restart is pending', () => {
     expect(pickRequestedStart([request], [], () => false)).toBeNull();
     expect(pickRequestedStart([request], [ada], () => true)).toBeNull();

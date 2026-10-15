@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { run } from './exec.ts';
-import type { AgentCli, CliView, EffortLevel } from '../shared/types.ts';
+import type { AgentCli, AgentRole, CliView, EffortLevel } from '../shared/types.ts';
 
 // The coding-agent CLIs an agent can run in its terminal, how to find them on this machine, and how to start one on
 // a task. Claude Code is fully wired in: its hooks report every tool call to the office.
@@ -139,7 +139,7 @@ export interface LaunchContext {
   resumeId?: string;
   sessionId: string; // the id the office gives a new Claude Code session
   name: string; // shown in Claude Code's prompt box and the terminal title
-  role: 'dev' | 'qa' | 'ceo';
+  role: AgentRole;
   additionalDirectories: string[];
   /** Files the office wrote for this session (settings, MCP config, instructions). */
   files: { settings: string; mcp: string | null; system: string };

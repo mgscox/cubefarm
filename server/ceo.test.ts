@@ -86,6 +86,7 @@ describe('office tools', () => {
       sendBackToDev,
       parkPr,
       mergePr,
+      requestResearch: (a) => `queued ${a.topic}`,
     });
     const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
     await office.server.instance.connect(serverSide);
@@ -97,7 +98,7 @@ describe('office tools', () => {
   it('lists every tool the CEO relies on', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'merge_pr', 'park_pr', 'propose_hire', 'propose_let_go', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'merge_pr', 'park_pr', 'propose_hire', 'propose_let_go', 'request_research', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
   });
 
   it('validates merge arguments and surfaces actionable refusals', async () => {
@@ -326,6 +327,15 @@ describe('planStartIssue', () => {
     expect(pickDeveloper([other, dev], () => false, ['frontend'], [])?.id).toBe('ada');
     expect(pickDeveloper([other, dev], () => false, [], ['frontend'])?.id).toBe('ada');
     expect(pickDeveloper([dev, other], () => false, [], [])?.id).toBe('bob');
+  });
+
+  it('gives research issues only to researchers, and researchers only research issues', () => {
+    const darwin = { ...dev, id: 'darwin', name: 'Darwin', role: 'researcher' as const, specialty: 'research', desk: 2 };
+    const research = { ...context, issues: [{ number: 4, title: 'Compare apps', body: '', labels: ['swarm:research'] }], agents: [other, dev, darwin], available: [other, dev, darwin] };
+    expect(planStartIssue(request, research).agent.id).toBe('darwin');
+    expect(() => planStartIssue(request, { ...research, available: [other, dev] })).toThrow('No free researcher on floor 1.');
+    expect(planStartIssue(request, { ...context, agents: [other, dev, darwin], available: [darwin, other] }).agent.id).toBe('bob');
+    expect(() => planStartIssue({ ...request, agent: 'darwin' }, { ...context, agents: [other, dev, darwin] })).toThrow('Darwin is a researcher; they only take swarm:research issues.');
   });
 
   it('accepts an explicit id or case-insensitive name over specialty preference', () => {

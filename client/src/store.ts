@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CEO_ID, type AgentView, type CeoInfo, type CliView, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type AgentView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { issueBlockers, issueWorkNote } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
@@ -53,6 +53,7 @@ interface State {
   qa: Record<string, QaView>; // `${repoId}#${prNumber}`
   requests: HireRequestView[];
   ceo: CeoInfo;
+  research: ResearchInfo;
   messages: PhoneMessage[];
   phoneReadAt: number;
   officeCommit?: string | null; // undefined: the server can't update itself
@@ -152,6 +153,7 @@ export const useStore = create<State>((set, get) => ({
   qa: {},
   requests: [],
   ceo: { queue: [], job: null, lastReviewAt: null, nextReviewAt: null },
+  research: { queue: [], job: null, done: [] },
   messages: [],
   phoneReadAt: 0,
   usage: { state: 'normal', until: null },
@@ -201,6 +203,7 @@ export const useStore = create<State>((set, get) => ({
           qa,
           requests: d.requests,
           ceo: d.ceo,
+          research: d.research ?? { queue: [], job: null, done: [] },
           messages: d.messages,
           phoneReadAt: d.phoneReadAt,
           officeCommit: d.officeCommit,
@@ -283,6 +286,9 @@ export const useStore = create<State>((set, get) => ({
       }
       case 'ceo':
         set({ ceo: ev.ceo });
+        break;
+      case 'research':
+        set({ research: ev.research });
         break;
       case 'message': {
         set({ messages: [...get().messages.slice(-199), ev.message] });
@@ -408,7 +414,7 @@ export interface KanbanColumns {
 export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<string, QaView>): KanbanColumns {
   const openPulls = repo.pulls.filter((p) => p.state === 'OPEN');
   const byId = new Map(agents.map((a) => [a.id, a]));
-  const devs = agents.filter((a) => a.role === 'dev');
+  const devs = agents.filter((a) => a.role === 'dev' || a.role === 'researcher');
   const authorOf = (n: number, head: string) => devs.find((a) => a.prNumber === n) ?? devs.find((a) => a.branch && a.branch === head);
 
   const progress: KanbanCard[] = [];

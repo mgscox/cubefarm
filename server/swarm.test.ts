@@ -2547,3 +2547,81 @@ describe('manual office closure', () => {
     expect(f.officeLifecycleView()).toEqual({ state: 'closed', running: 0 });
   });
 });
+
+describe('researchers', () => {
+  type Research = {
+    state: { research: { queue: unknown[]; job: unknown; done: { topic: string; where: string }[] } };
+    ensureResearcher(interrupted: unknown[]): void;
+    reconcilePulls(repo: Repo, pulls: PullInfo[]): void;
+    startResearchWork(): void;
+  };
+  const r = () => s as unknown as Research & Internals;
+  const pull = (headRefName: string): PullInfo => ({
+    number: 21, title: 'Research: due dates', url: '', headRefName, state: 'OPEN',
+    isDraft: false, closesIssues: [5], checks: 'pending', mergeable: 'MERGEABLE', headSha: 'abc',
+    reviewDecision: null, createdAt: '', mergedAt: null, additions: 80, deletions: 0,
+    mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+  });
+  beforeEach(() => {
+    s.state.agents.push({ id: 'd1', name: 'Darwin', repoId: repo.id, role: 'researcher', specialty: 'research', status: 'idle', task: null, issueNumber: null, desk: 1, endedAt: null });
+    s.agentRt.set('d1', { log: [], pending: [], terminal: null });
+  });
+
+  it('hands research issues to researchers and everything else to developers', () => {
+    setIssues(issue(5, ['swarm:research']), issue(6));
+    expect(s.startIssueWork(repo)).toBe(false); // the mocked task leaves them free; what matters is who got what
+    expect(runTask.mock.calls.map(([a, , i]) => [(a as { id: string }).id, i.number])).toEqual([['d1', 5]]);
+    s.state.agents.find((a) => a.id === 'd1')!.status = 'working';
+    s.startIssueWork(repo);
+    expect(runTask.mock.calls.map(([a, , i]) => [(a as { id: string }).id, i.number])).toEqual([['d1', 5], ['a1', 6]]);
+  });
+
+  it('leaves research issues waiting on a floor without a free researcher', () => {
+    s.state.agents.find((a) => a.id === 'd1')!.status = 'working';
+    setIssues(issue(5, ['swarm:research']));
+    s.startIssueWork(repo);
+    expect(runTask).not.toHaveBeenCalled();
+  });
+
+  it("won't give a researcher a code issue", async () => {
+    setIssues(issue(6));
+    await expect(swarm.assign('d1', 6)).rejects.toThrow('Darwin is a researcher: they take swarm:research issues.');
+  });
+
+  it('passes research pull requests without QA', () => {
+    r().reconcilePulls(repo, [pull('swarm/research-5-darwin')]);
+    expect(s.state.qa).toEqual([expect.objectContaining({ prNumber: 21, status: 'passed', qaAgentId: null, passedSha: 'abc' })]);
+    s.state.qa = [];
+    r().reconcilePulls(repo, [pull('swarm/issue-5-ada')]);
+    expect(s.state.qa).toEqual([expect.objectContaining({ prNumber: 21, status: 'queued' })]);
+  });
+
+  it('keeps a research PR passed when more research is pushed', async () => {
+    r().reconcilePulls(repo, [pull('swarm/research-5-darwin')]);
+    const rec = s.state.qa[0];
+    await s.advanceMerge(repo, rec, { ...pull('swarm/research-5-darwin'), headSha: 'def', checks: 'passing' });
+    expect(rec).toEqual(expect.objectContaining({ status: 'passed', passedSha: 'def' }));
+  });
+
+  it('always has a lobby researcher, who takes briefs and files company research', async () => {
+    r().ensureResearcher([]);
+    const lobby = s.state.agents.find((a) => a.id === 'researcher')!;
+    expect(lobby).toEqual(expect.objectContaining({ role: 'researcher', repoId: '', name: 'Hypatia' }));
+    expect(() => swarm.fireAgent('researcher')).toThrow("Hypatia researches for the whole company and can't be let go.");
+    await expect(swarm.assign('researcher', 6)).rejects.toThrow('send them a brief instead of an issue');
+
+    const out = await s.officeTools().call('request_research', { topic: 'Todo app pricing', brief: 'What do the big apps charge?' });
+    expect(out).toContain('Queued for Hypatia (1 waiting)');
+    expect(await s.officeTools().call('request_research', { topic: 'todo app pricing', brief: 'again' })).toContain('already on Hypatia');
+    expect(JSON.parse(s.companyStatus()).research.queue).toEqual(['Researching "Todo app pricing"']);
+
+    vi.spyOn(s.backend, 'prepareResearchFolder').mockResolvedValue(); // no disk
+    const start = vi.spyOn(s.backend, 'startSession');
+    r().startResearchWork();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ role: 'researcher', prompt: expect.stringContaining('company research folder') }), expect.anything());
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(r().state.research.done).toEqual([expect.objectContaining({ topic: 'Todo app pricing', where: expect.stringMatching(/todo-app-pricing\.md$/) })]);
+    expect(lobby.status).toBe('done');
+  });
+});

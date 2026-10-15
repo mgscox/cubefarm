@@ -3,13 +3,13 @@ import * as THREE from 'three';
 import { Billboard } from '@react-three/drei';
 import { pendingRequests, useStore, type Agent } from '../store';
 import { qaCounts } from '../qaCounts';
-import { CEO_ID, type HireRequestView } from '../../../shared/types';
+import { CEO_ID, RESEARCHER_ID, type HireRequestView } from '../../../shared/types';
 import { Character } from './Character';
 import { Desk } from './Desk';
 import { drawCandidateTag, drawSign, roundRect, SANS } from './draw';
 import { Elevator } from './Elevator';
 import { useCanvasTexture, useInteractable } from './interact';
-import { CEO_DESK, CEO_ROOM, HALF_D, HALF_W, MANAGER_DESK, MANAGER_ROOM, RECEPTION, WAITING, WAITING_ROTATION } from './layout';
+import { CEO_DESK, CEO_ROOM, HALF_D, HALF_W, MANAGER_DESK, MANAGER_ROOM, QA_ROTATION, RECEPTION, RESEARCH_DESK, WAITING, WAITING_ROTATION } from './layout';
 import { glow, shade } from './materials';
 import { WallSign } from './OfficeFloor';
 import { Bookshelf, Couch, CoffeeTable, GlassWall, Plant, Rug, WallClock } from './Props';
@@ -246,6 +246,42 @@ function CeoBoard() {
   );
 }
 
+const RESEARCH_ACCENT = '#2a9d8f';
+
+/** The lobby researcher's corner: their desk, and a board with what they're researching. */
+function ResearchCorner() {
+  const agent = useStore((s) => s.agents[RESEARCHER_ID]);
+  const info = useStore((s) => s.research);
+  const now = agent?.status === 'working' || agent?.status === 'preparing' ? (info.job?.label ?? 'Researching') : 'Free · brief them at the desk';
+  const next = info.queue.length ? `${info.queue[0].label}${info.queue.length > 1 ? ` (+${info.queue.length - 1})` : ''}` : 'nothing queued';
+  return (
+    <group>
+      {agent && <Desk agent={agent} accent={RESEARCH_ACCENT} repoId="" rotationY={QA_ROTATION} position={[RESEARCH_DESK.x, 0, RESEARCH_DESK.z]} />}
+      <WallSign
+        // Between the two east windows, which end at z 0.75 and 3.25.
+        position={[HALF_W - 0.03, 2.3, 2]}
+        rotationY={-Math.PI / 2}
+        size={[2.3, 1.3]}
+        px={[552, 312]}
+        draw={(ctx) =>
+          drawSign(
+            ctx,
+            552,
+            312,
+            [
+              { text: `📚 Research · ${agent?.name ?? ''}`, size: 40 },
+              { text: `Now: ${now}`, size: 26, weight: 600 },
+              { text: `Next: ${next}`, size: 24, weight: 500, color: 'rgba(255,255,255,0.8)' },
+            ],
+            RESEARCH_ACCENT,
+          )
+        }
+        deps={[agent?.name, now, next]}
+      />
+    </group>
+  );
+}
+
 function CeoOffice() {
   const c = CEO_ROOM;
   const ceo = useStore((s) => s.agents[CEO_ID]);
@@ -453,6 +489,7 @@ export function Lobby() {
       />
 
       <CeoOffice />
+      <ResearchCorner />
       <WaitingRoom />
       <Elevator floorLabel="▲ G · Lobby" accent={ACCENT} />
       <Toys floor="lobby" />

@@ -7,6 +7,14 @@ export function issueSpecialty(labels: string[]) {
   return l ? l.slice(6).toLowerCase() : '';
 }
 
+/** The specialty of research issues (swarm:research): only a floor's researchers take them, and only them. */
+export const RESEARCH = 'research';
+
+/** Branches of research docs. Their pull requests skip QA: there is nothing to test. */
+export const RESEARCH_BRANCH = 'swarm/research-';
+
+export const isResearchIssue = (labels: string[]) => issueSpecialty(labels) === RESEARCH;
+
 /** The label the manager puts on issues that need a person (hardware, live servers, accounts, sign-off). */
 export const READY_FOR_HUMAN = 'ready-for-human';
 

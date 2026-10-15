@@ -425,7 +425,7 @@ function TeamTab() {
               <input value={names[repo.id] ?? ''} onChange={(e) => setNames({ ...names, [repo.id]: e.target.value })} placeholder="Name (optional)" style={{ maxWidth: 160 }} />
               <button
                 className="btn btn-small btn-good"
-                disabled={team.filter((a) => a.role === 'dev').length >= 12}
+                disabled={team.filter((a) => a.role === 'dev' || a.role === 'researcher').length >= 12}
                 onClick={() =>
                   void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'dev' })).then(() => setNames({ ...names, [repo.id]: '' }))
                 }
@@ -440,6 +440,16 @@ function TeamTab() {
                 }
               >
                 + QA tester
+              </button>
+              <button
+                className="btn btn-small"
+                disabled={team.filter((a) => a.role === 'dev' || a.role === 'researcher').length >= 12}
+                title="Takes swarm:research issues: web research filed as docs in this repo"
+                onClick={() =>
+                  void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'researcher' })).then(() => setNames({ ...names, [repo.id]: '' }))
+                }
+              >
+                + Researcher
               </button>
             </div>
             {team.length === 0 && <div className="muted small">No one works here yet.</div>}
@@ -460,7 +470,7 @@ function TeamTab() {
                     </td>
                     <td className="nowrap">
                       <span className="chip" title={a.hiredBy === 'ceo' ? 'Hired on the CEO\'s proposal' : undefined}>
-                        {a.role === 'qa' ? '🔍 QA' : '💻 Dev'}
+                        {a.role === 'qa' ? '🔍 QA' : a.role === 'researcher' ? '📚 Research' : '💻 Dev'}
                         {a.hiredBy === 'ceo' ? ' · 🧠' : ''}
                       </span>
                     </td>
@@ -469,7 +479,7 @@ function TeamTab() {
                         key={`t-${a.title}`}
                         className="inline"
                         defaultValue={a.title}
-                        placeholder={a.role === 'qa' ? 'QA tester' : 'Developer'}
+                        placeholder={a.role === 'qa' ? 'QA tester' : a.role === 'researcher' ? 'Researcher' : 'Developer'}
                         title="Job title"
                         onBlur={(e) => e.target.value !== a.title && void attempt(() => api.updateAgent(a.id, { title: e.target.value }))}
                       />
@@ -610,7 +620,7 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
           {repo?.issues.length === 0 && <div className="muted small">None. Nice.</div>}
           {repo?.issues.map((i) => {
             const note = issueWorkNote(i);
-            const holder = agents.find((a) => a.role === 'dev' && a.issueNumber === i.number && a.status !== 'idle');
+            const holder = agents.find((a) => (a.role === 'dev' || a.role === 'researcher') && a.issueNumber === i.number && a.status !== 'idle');
             return (
               <div key={i.number} className="repo-row">
                 <div>
@@ -630,7 +640,7 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
                   <select value="" onChange={(e) => e.target.value && void attempt(() => api.assign(e.target.value, i.number))}>
                     <option value="">Assign…</option>
                     {agents
-                      .filter((a) => a.role === 'dev' && a.status !== 'working' && a.status !== 'preparing')
+                      .filter((a) => (a.role === 'dev' || a.role === 'researcher') && a.status !== 'working' && a.status !== 'preparing')
                       .map((a) => (
                         <option key={a.id} value={a.id}>
                           {a.name}

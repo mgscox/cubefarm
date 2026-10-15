@@ -239,7 +239,7 @@ export function describeOfficeTool(action: string, input: Record<string, unknown
     case 'update_job':
       return `🪪 update_job ${input.title ? `"${clip(String(input.title), 60)}"` : String(input.agent_id ?? '')}`;
     case 'propose_hire':
-      return `🤝 propose_hire ${input.role === 'qa' ? 'QA ' : ''}"${clip(String(input.title ?? ''), 60)}"${floor}`;
+      return `🤝 propose_hire ${input.role === 'qa' ? 'QA ' : input.role === 'researcher' ? 'researcher ' : ''}"${clip(String(input.title ?? ''), 60)}"${floor}`;
     case 'propose_let_go':
       return `👋 propose_let_go ${String(input.agent_id ?? '')}`;
     case 'file_issue':
@@ -250,6 +250,8 @@ export function describeOfficeTool(action: string, input: Record<string, unknown
       return `▶ rerun_qa PR #${String(input.number ?? '?')}${input.floor != null ? ` · floor ${input.floor}` : ''}`;
     case 'send_back_to_dev':
       return `▶ send_back_to_dev PR #${String(input.number ?? '?')}${input.floor != null ? ` · floor ${input.floor}` : ''}`;
+    case 'request_research':
+      return `📚 request_research "${clip(String(input.topic ?? ''), 70)}"${floor}`;
     case 'route_issue':
       return `🔀 route_issue #${String(input.number ?? '?')}${floor}${input.specialty !== undefined ? ` · ${input.specialty || 'no specialty'}` : ''}${Array.isArray(input.depends_on) ? ` · depends on ${input.depends_on.map((n) => `#${n}`).join(', ') || 'nothing'}` : ''}`;
   }

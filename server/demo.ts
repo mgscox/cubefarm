@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import type { Backend } from './backend.ts';
@@ -6,7 +7,7 @@ import type { PreviewBackend } from './previewRunner.ts';
 import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
 import { CLIS } from './clis.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
-import { READY_FOR_HUMAN } from '../shared/issues.ts';
+import { READY_FOR_HUMAN, RESEARCH } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR } from './config.ts';
 import { takeLastUpdate, underLauncher, type OfficeHost } from './officeUpdate.ts';
@@ -62,6 +63,7 @@ seed('demo-co/pixel-todo', 'A cheerful todo app', [
   ['Empty state illustration', 'Show a friendly illustration when the list is empty.'],
   ['Keyboard shortcuts', 'N for new todo, / to search, ? for help.'],
   ['Fix: completed count off by one', 'The footer shows one more completed item than there is.'],
+  ['How do popular todo apps handle due dates?', 'Compare three or four well-known todo apps: how they set, show and remind about due dates. Recommend an approach for us.', [`swarm:${RESEARCH}`]],
   // Needs a person: the office never hands it out, however many developers are free.
   ['Register the app in the App Store', 'Needs the company account and a signed agreement.', [READY_FOR_HUMAN]],
 ]);
@@ -158,6 +160,24 @@ function qaScript(cb: SessionCallbacks, pr: number, title: string, round: number
   ];
 }
 
+function researchScript(topic: string, doc: string, floor: boolean): Step[] {
+  const q = topic.length > 50 ? `${topic.slice(0, 49)}…` : topic;
+  return [
+    [{ kind: 'text', text: `● Researching "${q}". First, what we already know.` }],
+    [{ kind: 'tool', tool: 'Glob', text: `⏺ Glob ${floor ? 'docs/research/*.md' : '*.md'}` }, { kind: 'result', text: '  ⎿ Found 2 files' }],
+    [{ kind: 'tool', tool: 'WebSearch', text: `⏺ Web Search("${q} ${new Date().getFullYear()}")` }, { kind: 'result', text: '  ⎿ Did 1 search in 2s' }],
+    [{ kind: 'tool', tool: 'WebFetch', text: '⏺ Fetch(https://example.com/guide)' }, { kind: 'result', text: '  ⎿ Received 48.2KB (200 OK)' }],
+    [{ kind: 'thinking', text: '✻ Thinking…' }],
+    [{ kind: 'tool', tool: 'WebSearch', text: `⏺ Web Search("${q} comparison")` }, { kind: 'result', text: '  ⎿ Did 1 search in 3s' }],
+    [{ kind: 'tool', tool: 'WebFetch', text: '⏺ Fetch(https://example.org/review)' }, { kind: 'result', text: '  ⎿ Received 31.7KB (200 OK)' }],
+    [{ kind: 'text', text: '● Three independent sources agree on the main point; one disagrees on pricing. Writing it up with both.' }],
+    [{ kind: 'tool', tool: 'Write', text: `⏺ Write ${doc}` }, { kind: 'result', text: '  ⎿ Wrote 86 lines' }],
+    [{ kind: 'tool', tool: 'Edit', text: `⏺ Edit ${floor ? 'docs/research/README.md' : 'README.md'}` }, { kind: 'result', text: '  ⎿ Updated' }],
+    [{ kind: 'tool', tool: 'Bash', text: `⏺ $ git add -A && git commit -m "Research: ${q}"` }, { kind: 'result', text: '  ⎿ 2 files changed, 87 insertions(+)' }],
+    ...(floor ? [[{ kind: 'tool' as const, tool: 'Bash', text: '⏺ $ git push -u origin HEAD && gh pr create' }]] : []),
+  ];
+}
+
 function fixScript(pr: number): Step[] {
   return [
     [{ kind: 'text', text: `● Reading the QA report for PR #${pr}. The toolbar overflows on phones; I'll let it wrap.` }],
@@ -171,7 +191,7 @@ function fixScript(pr: number): Step[] {
 function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: string): SessionHandle {
   const timers: NodeJS.Timeout[] = [];
   let stopped = false;
-  const kind = opts.role === 'qa' ? 'qa' : /FAILED|taking over pull request|git push origin HEAD:/.test(opts.prompt) ? 'fix' : 'issue';
+  const kind = opts.role === 'qa' ? 'qa' : /FAILED|taking over pull request|git push origin HEAD:/.test(opts.prompt) ? 'fix' : opts.role === 'researcher' ? 'research' : 'issue';
   const prMatch = opts.prompt.match(/pull request #(\d+)(?::\s*(.+))?/);
   const issueMatch = opts.prompt.match(/#(\d+):\s*(.+)/);
   const number = Number((kind === 'issue' ? issueMatch?.[1] : prMatch?.[1]) ?? 0);
@@ -182,7 +202,11 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
     { kind: 'system', text: `✻ Claude Code (demo) · ${opts.model} · ${opts.effort} effort` },
     { kind: 'system', text: `  cwd ${opts.cwd}` },
   ];
-  const body = kind === 'qa' ? qaScript(cb, number, title, round) : kind === 'fix' ? fixScript(number) : devScript(opts, cb, number, title);
+  // Research: an issue on a floor, or a brief (fullName '' = for the company research folder).
+  const topic = (issueMatch?.[2] ?? opts.prompt.match(/Topic: (.+)/)?.[1] ?? 'the brief').trim();
+  const docName = `${new Date().toISOString().slice(0, 10)}-${topic.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)}.md`;
+  const doc = fullName ? `docs/research/${docName}` : path.join(opts.cwd, docName);
+  const body = kind === 'qa' ? qaScript(cb, number, title, round) : kind === 'fix' ? fixScript(number) : kind === 'research' ? researchScript(topic, doc, !!fullName) : devScript(opts, cb, number, title);
   const script = [header, ...body];
 
   const finish = () => {
@@ -231,6 +255,44 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
       }
       cb.log([{ kind: 'text', text: `● Fixed PR #${number} and pushed. Ready for another QA round.` }]);
       cb.finished({ ok: true, text: '', costUsd, turns, errors: [] });
+      return;
+    }
+    if (kind === 'research') {
+      const repo = repos.get(fullName);
+      const branch = opts.systemAppend.match(/Your branch: (\S+)/)?.[1];
+      const answer = `Three of four sources agree on the main point, so I recommend following them; the doc compares all four, with links, and lists what is still open.`;
+      if (!repo || !branch) {
+        // the company research folder is real, so the CEO can read what the demo filed
+        void fs.writeFile(doc, `# ${topic}\n\n_Demo research: no web was searched._\n\n## Summary\n\n${answer}\n`).catch(() => undefined);
+        cb.log([{ kind: 'text', text: `● ${answer}` }]);
+        cb.finished({ ok: true, text: `${answer}\n${doc}`, costUsd, turns, errors: [] });
+        return;
+      }
+      const n = repo.nextNumber++;
+      const url = `https://github.com/${fullName}/pull/${n}`;
+      repo.pulls.unshift({
+        number: n,
+        title: `Research: ${topic}`,
+        url,
+        headRefName: branch,
+        state: 'OPEN',
+        isDraft: false,
+        mergeable: 'MERGEABLE',
+        reviewDecision: null,
+        closesIssues: number ? [number] : [],
+        createdAt: now(),
+        mergedAt: null,
+        additions: 87,
+        deletions: 0,
+        checks: 'pending',
+        headSha: fakeSha(),
+        mergeState: 'CLEAN',
+        failedChecks: [],
+        pendingChecks: [],
+      });
+      runChecks(repo.pulls[0], false);
+      cb.log([{ kind: 'result', text: `  ⎿ ${url}` }, { kind: 'text', text: `● ${answer}` }]);
+      cb.finished({ ok: true, text: `${answer}\n${url}`, costUsd, turns, errors: [] });
       return;
     }
     const repo = repos.get(fullName);
@@ -522,10 +584,14 @@ export function createDemoBackend(): Backend {
       return dir;
     },
     removeDesk: async () => undefined,
+    prepareResearchFolder: async (dir) => {
+      await fs.mkdir(dir, { recursive: true });
+    },
     releaseDesk: async () => undefined,
     startSession: (opts, cb) => {
       if (++sessionsStarted === USAGE_WARNING_AT) fakeUsageWarning(cb);
-      return inTerminal(opts, cb, (c) => (opts.role === 'ceo' ? ceoSession(opts, c) : fakeSession(opts, c, deskRepo.get(opts.cwd) ?? [...repos.keys()][0])));
+      const fullName = deskRepo.get(opts.cwd) ?? (opts.role === 'researcher' ? '' : [...repos.keys()][0]);
+      return inTerminal(opts, cb, (c) => (opts.role === 'ceo' ? ceoSession(opts, c) : fakeSession(opts, c, fullName)));
     },
     terminals: true,
     reconnectClis: async () => [], // fake sessions end with the office
@@ -874,6 +940,7 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
       await read('package.json', 36);
       await think(`${p.summary}. Let me shape the team around that.`);
       await use('set_floor_profile', { floor, summary: p.summary, qa_brief: p.qa });
+      await use('request_research', { floor, topic: `What similar ${p.summary.split(' · ')[0].toLowerCase()} projects do well`, brief: 'Find three or four comparable projects. What do users praise and complain about? What should we copy or avoid?' });
       const qa = f.team.find((a) => a.role === 'qa');
       if (qa) {
         await step([{ kind: 'tool', tool: 'mcp__office__agent_detail', text: `⏺ ${describeOfficeTool('agent_detail', { agent_id: qa.id })}` }]);
@@ -941,6 +1008,10 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
         const floor = merge[2] ? Number(merge[2]) : s.floors.find((f) => f.repo.toLowerCase() === merge[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === merge[3].toLowerCase())?.floor;
         if (floor === undefined) return `Refused: No floor for "${merge[3]}".`;
         return use('merge_pr', { floor, number: Number(merge[1]), reason: merge[4].trim() });
+      }
+      const research = text.match(/\bresearch\s+(.+?)(?:\s+for\s+floor\s+(\d+))?\s*$/i);
+      if (research) {
+        return use('request_research', { topic: research[1].trim().slice(0, 120), brief: text.trim(), ...(research[2] && { floor: Number(research[2]) }) });
       }
       const humanIssue = text.match(/\bfile\s+(?:an?\s+)?issue\s+on\s+floor\s+(\d+)\s+titled\s+(.+?)\s+for\s+a\s+person:\s*([\s\S]+)/i);
       if (humanIssue) {

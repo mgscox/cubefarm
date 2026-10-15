@@ -25,7 +25,7 @@ function latest(log: LogLine[]): { text: string; kind: LogLine['kind']; t: numbe
 }
 
 function doing(a: Agent) {
-  if (a.role === 'ceo') return a.issueTitle;
+  if (a.role === 'ceo' || !a.repoId) return a.issueTitle;
   if (a.task === 'qa') return `QA · PR #${a.prNumber}`;
   if (a.task === 'fix') return `fixing PR #${a.prNumber}`;
   return a.issueNumber ? `#${a.issueNumber}` : null;

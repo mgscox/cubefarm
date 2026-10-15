@@ -112,6 +112,8 @@ export const CEO_DESK = { x: 12, z: -7.4 };
 // Candidates the CEO wants to hire wait on a row of chairs along the east wall, facing into the lobby.
 export const WAITING = { x: HALF_W - 1.4, seats: [6.6, 7.9, 9.2, 10.4] };
 export const WAITING_ROTATION = Math.PI / 2;
+// The lobby researcher's desk stands against the east wall between the CEO's office and the sofa, facing the wall like a QA station.
+export const RESEARCH_DESK = { x: HALF_W - 2.0, z: 1 };
 
 export function lobbyColliders(): Rect[] {
   const out = shellColliders();
@@ -127,6 +129,8 @@ export function lobbyColliders(): Rect[] {
   out.push(rect(CEO_DESK.x, CEO_DESK.z, DESK.w + 0.1, DESK.d + 0.1, SOLID_H.desk));
   out.push(rect(CEO_DESK.x, CEO_DESK.z + 0.8, 0.7, 0.6, SOLID_H.seated)); // CEO chair
   for (const z of WAITING.seats) out.push(rect(WAITING.x, z, 0.7, 0.7, SOLID_H.seated));
+  out.push(rect(RESEARCH_DESK.x, RESEARCH_DESK.z, DESK.d + 0.1, DESK.w + 0.1, SOLID_H.desk));
+  out.push(rect(RESEARCH_DESK.x - 0.8, RESEARCH_DESK.z, 0.6, 0.7, SOLID_H.seated)); // researcher's chair
   out.push(rect(MANAGER_DESK.x, MANAGER_DESK.z, MANAGER_DESK.w, MANAGER_DESK.d, SOLID_H.desk));
   out.push(rect(MANAGER_DESK.x, MANAGER_DESK.z - 1.1, 0.8, 0.8, SOLID_H.seated)); // manager chair
   out.push(rect(-HALF_W + 0.4, -8, 0.8, 5, SOLID_H.bookshelf)); // bookshelf

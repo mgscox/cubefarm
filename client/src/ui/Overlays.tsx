@@ -1,13 +1,14 @@
 import { useEffect, useSyncExternalStore, type ReactNode } from 'react';
 import { useStore } from '../store';
 import { SENSITIVITY_MAX, SENSITIVITY_MIN, useLookPrefs } from '../world/look';
-import { CEO_ID } from '../../../shared/types';
+import { CEO_ID, RESEARCHER_ID } from '../../../shared/types';
 import { AppViewer } from './AppViewer';
 import { ElevatorPanel } from './ElevatorPanel';
 import { KanbanView } from './KanbanView';
 import { ManagerConsole } from './ManagerConsole';
 import { Phone } from './Phone';
 import { TerminalView } from './TerminalView';
+import { ResearchDesk } from './ResearchDesk';
 import { getAudioPrefs, setAudioPrefs, subscribeAudio } from './sfx';
 
 // Closing a panel grabs the mouse again right away (world/lookLock.ts; "Grab the mouse when panels
@@ -146,6 +147,11 @@ function Help() {
           The CEO studies every new floor, writes its QA brief, gives each agent a job that fits the project, turns your project briefs into issues and proposes hires. Hires wait for your approval unless you switch hiring to
           auto in the manager's console.
         </p>
+        <h3>Research</h3>
+        <p>
+          The researcher at the desk by the lobby's east windows searches the web for you or the CEO and writes up what they find: company research goes into the office's research folder, research for a floor into its
+          repo's <code>docs/research/</code> by pull request (no QA needed). Floors can hire their own researchers; they take issues labelled <code>swarm:research</code>.
+        </p>
         <h3>Your team</h3>
         <p>
           Each agent is a real coding agent running in its own terminal, working in its own git worktree. Walk up behind them to read their laptop, or press <kbd>E</kbd> (or click) on a desk to open their terminal: watch it live, type into it, send them instructions, stop them or hand them another issue. Aim at an empty desk and press <kbd>E</kbd> to hire, or click it and confirm.
@@ -170,7 +176,7 @@ export function Overlays() {
   if (!overlay) return null;
   switch (overlay.kind) {
     case 'terminal':
-      return overlay.agentId === CEO_ID ? <ManagerConsole initialTab="ceo" /> : <TerminalView agentId={overlay.agentId} />;
+      return overlay.agentId === CEO_ID ? <ManagerConsole initialTab="ceo" /> : overlay.agentId === RESEARCHER_ID ? <ResearchDesk /> : <TerminalView agentId={overlay.agentId} />;
     case 'phone':
       return <Phone tab={overlay.tab} requestId={overlay.requestId} />;
     case 'kanban':

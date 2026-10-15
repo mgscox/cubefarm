@@ -20,7 +20,7 @@ export function IssueForm({ repoId, agents, onDone }: { repoId: string; agents: 
   const [body, setBody] = useState('');
   const [assignTo, setAssignTo] = useState('');
   const [busy, setBusy] = useState(false);
-  const free = agents.filter((a) => a.role === 'dev' && a.status !== 'working' && a.status !== 'preparing');
+  const free = agents.filter((a) => (a.role === 'dev' || a.role === 'researcher') && a.status !== 'working' && a.status !== 'preparing');
   return (
     <form
       className="issue-form"
@@ -97,7 +97,7 @@ export function KanbanView({ repoId }: { repoId: string }) {
       setPending(null);
     }
   };
-  const devs = agents.filter((a) => a.role === 'dev');
+  const devs = agents.filter((a) => a.role === 'dev' || a.role === 'researcher');
   const free = devs.filter((a) => a.status === 'idle' || a.status === 'done' || a.status === 'stopped' || a.status === 'error');
   const merge = async (c: KanbanCard) => {
     const passed = c.qa?.status === 'passed';

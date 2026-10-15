@@ -230,7 +230,12 @@ export function Desk({
     agent
       ? {
           id: `agent-${agent.id}`,
-          label: agent.role === 'ceo' ? `Open ${agent.name}'s desk (CEO) · P texts them from anywhere` : `View ${agent.name}'s ${qa ? 'test run' : 'terminal'}`,
+          label:
+            agent.role === 'ceo'
+              ? `Open ${agent.name}'s desk (CEO) · P texts them from anywhere`
+              : agent.role === 'researcher' && !agent.repoId
+                ? `Open ${agent.name}'s research desk · brief them`
+                : `View ${agent.name}'s ${qa ? 'test run' : agent.role === 'researcher' ? 'research' : 'terminal'}`,
           action: { kind: 'terminal', agentId: agent.id },
         }
       : {
@@ -273,6 +278,13 @@ export function Desk({
           <Box size={[0.3, 0.05, 0.1]} position={[0, 0.06, 0]} color="#adb5bd" outline />
           {['#ff6b6b', '#4cc9f0', '#80ed99'].map((c, i) => (
             <Cyl key={c} r={0.022} h={0.16} position={[-0.09 + i * 0.09, 0.1, 0]} color={c} outline />
+          ))}
+        </group>
+      ) : agent?.role === 'researcher' ? (
+        // a researcher's stack of books
+        <group position={[-0.72, 0.77, -0.2]}>
+          {['#9b5de5', '#2a9d8f', '#e76f51', '#457b9d'].map((c, i) => (
+            <Box key={c} size={[0.3 - i * 0.02, 0.05, 0.22 - i * 0.01]} position={[0, 0.025 + i * 0.05, 0]} rotation={[0, (i % 2 ? 0.18 : -0.1), 0]} color={c} outline />
           ))}
         </group>
       ) : (

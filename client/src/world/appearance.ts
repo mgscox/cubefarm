@@ -99,9 +99,9 @@ export function appearanceFor(agent: { id: string; look: AgentLook; role: AgentR
         ['moustache', 1],
       ])
     : 'none';
-  // QA keep their inspector glasses, so only developers and the CEO get their own pair.
+  // QA keep their inspector glasses, so only the others get their own pair; researchers always wear one.
   const glasses = agent.role === 'qa' ? 'none' : pick<Glasses>(rGlasses, [
-    ['none', 6],
+    ['none', agent.role === 'researcher' ? 0 : 6],
     ['round', 2],
     ['square', 2],
   ]);
@@ -122,7 +122,9 @@ export function appearanceFor(agent: { id: string; look: AgentLook; role: AgentR
         ['stripe', 1],
         ['sweater', 1],
       ])
-    : 'tee';
+    : agent.role === 'researcher'
+      ? 'sweater'
+      : 'tee';
 
   return {
     hair,
