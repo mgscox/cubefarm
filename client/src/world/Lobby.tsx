@@ -193,13 +193,17 @@ function TrophyCabinet() {
     [stats.merged],
   );
   const cups = Math.min(8, stats.merged);
+  // Built as an open-front frame: a solid body hid the cups and its shelf shared the inner panel's front face.
   return (
     <group position={[12, 0, -HALF_D + 0.55]}>
-      <Box size={[4.4, 2.1, 1]} position={[0, 1.05, 0]} color="#b08968" outline />
-      <Box size={[4.1, 1.2, 0.8]} position={[0, 1.2, 0.12]} color="#fdf6e3" shadow={false} />
-      <Box size={[4.1, 0.04, 0.8]} position={[0, 1.2, 0.12]} color="#b08968" shadow={false} />
+      <Box size={[4.4, 0.6, 1]} position={[0, 0.3, 0]} color="#b08968" outline />
+      <Box size={[4.4, 0.3, 1]} position={[0, 1.95, 0]} color="#b08968" outline />
+      <Box size={[0.15, 1.2, 1]} position={[-2.125, 1.2, 0]} color="#b08968" />
+      <Box size={[0.15, 1.2, 1]} position={[2.125, 1.2, 0]} color="#b08968" />
+      <Box size={[4.1, 1.2, 0.1]} position={[0, 1.2, -0.45]} color="#fdf6e3" shadow={false} />
+      <Box size={[4.1, 0.04, 0.8]} position={[0, 1.2, 0]} color="#b08968" shadow={false} />
       {Array.from({ length: cups }, (_, i) => (
-        <group key={i} position={[-1.7 + (i % 4) * 1.1, i < 4 ? 0.62 : 1.22, 0.2]}>
+        <group key={i} position={[-1.65 + (i % 4) * 1.1, i < 4 ? 0.62 : 1.22, 0.1]}>
           <Cyl r={0.08} rTop={0.16} h={0.22} position={[0, 0.2, 0]} color="#ffd43b" outline />
           <Cyl r={0.03} h={0.1} position={[0, 0.05, 0]} color="#ffd43b" />
           <Box size={[0.2, 0.04, 0.2]} position={[0, 0.01, 0]} color="#495057" />
