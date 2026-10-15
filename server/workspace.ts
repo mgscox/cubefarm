@@ -252,7 +252,7 @@ async function removeDir(dir: string) {
   await fs.rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
 }
 
-export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string, branch: string): Promise<string> {
+export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string, branch: string, note?: (text: string) => void): Promise<string> {
   return withRepoLock(fullName, async () => {
     const main = mainDir(fullName);
     await git(['fetch', 'origin', '--prune'], { cwd: main, timeoutMs: 180_000 });
@@ -273,13 +273,21 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
     }
 
     const wt = deskDir(fullName, agentSlug);
+    await git(['worktree', 'prune'], { cwd: main });
+    // Real paths on both sides, or a desk can take itself for the holder: a relocated workspace behind a symlink,
+    // /var vs /private/var on macOS, 8.3 short names on Windows.
+    const listed = parseWorktrees(await git(['worktree', 'list', '--porcelain', '-z'], { cwd: main }));
+    const worktrees = await Promise.all(listed.map(async (w) => ({ ...w, path: await realPath(w.path) })));
+    const holder = branchHolder(worktrees, branch, await realPath(wt));
+    const local = holder ? null : branch;
+    if (holder) note?.(`${branch} is checked out at ${holder}; this desk uses detached HEAD at ${ref}. Push fixes with git push origin HEAD:${branch}.`);
 
     // Reuse the desk's worktree in place. Deleting it fails on Windows while any process (a dev server
     // the agent left running, a browser) still has its working directory inside, and reuse keeps
     // node_modules warm between tasks.
     if (await exists(path.join(wt, '.git'))) {
       try {
-        await git(['checkout', '--force', '-B', branch, ref], { cwd: wt });
+        await git(local ? ['checkout', '--force', '-B', local, ref] : ['checkout', '--force', '--detach', ref], { cwd: wt });
         await git(['reset', '--hard', ref], { cwd: wt });
         // Untracked leftovers from the last task go; ignored files (node_modules, build caches) stay.
         await git(['clean', '-fd'], { cwd: wt }).catch(() => undefined);
@@ -301,9 +309,44 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
     }
     await git(['worktree', 'prune'], { cwd: main });
     await fs.mkdir(path.dirname(wt), { recursive: true });
-    await git(['worktree', 'add', '-B', branch, wt, ref], { cwd: main });
+    await git(['worktree', 'add', ...(local ? ['-B', local] : ['--detach']), wt, ref], { cwd: main });
     return wt;
   });
+}
+
+/** A path with symlinks, junctions and Windows short names resolved, or the path as given when it can't be. */
+export function realPath(p: string): Promise<string> {
+  return fs.realpath(p).catch(() => p);
+}
+
+export interface ListedWorktree {
+  path: string;
+  /** The branch checked out there (without refs/heads/), or null when detached or bare. */
+  branch: string | null;
+}
+
+/** `git worktree list --porcelain -z`, read NUL-delimited so spaces and quoted paths remain literal. */
+export function parseWorktrees(listing: string): ListedWorktree[] {
+  const out: ListedWorktree[] = [];
+  let current: ListedWorktree | null = null;
+  for (const field of listing.split('\0')) {
+    if (field.startsWith('worktree ')) out.push((current = { path: field.slice(9), branch: null }));
+    else if (field.startsWith('branch refs/heads/') && current) current.branch = field.slice(18);
+    else if (!field) current = null;
+  }
+  return out;
+}
+
+/** Whether two paths name the same folder: resolved, and case-insensitively on Windows. */
+export function samePath(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  const norm = (x: string) => (platform === 'win32' ? p.resolve(x).toLowerCase() : p.resolve(x));
+  return norm(a) === norm(b);
+}
+
+/** The worktree other than `desk` that has `branch` checked out, if any. Pass real paths on both sides. */
+export function branchHolder(worktrees: ListedWorktree[], branch: string, desk: string, platform: NodeJS.Platform = process.platform): string | null {
+  return worktrees.find((w) => w.branch === branch && !samePath(w.path, desk, platform))?.path ?? null;
 }
 
 export function removeDesk(fullName: string, agentSlug: string): Promise<void> {

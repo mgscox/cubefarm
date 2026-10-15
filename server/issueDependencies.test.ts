@@ -11,6 +11,24 @@ const result = (blockedBy = connection()) => ({ data: { repository: { i2: { bloc
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('native dependency sync', () => {
+  it('retries a failed board listing before enriching native blockers', async () => {
+    const query = vi.fn<Query>().mockRejectedValueOnce(new Error('HTTP 502')).mockResolvedValue([raw(2)]);
+    const api = vi.fn<Api>().mockResolvedValue(result());
+    expect((await listIssues('demo/repo', query, api))[0].nativeBlockers).toEqual([{ number: 1, state: 'OPEN' }]);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls.every(([, opts]) => opts?.timeoutMs === 60_000)).toBe(true);
+    expect(api).toHaveBeenCalledOnce();
+  });
+
+  it('propagates the second listing failure without querying native fields', async () => {
+    const failure = new Error('still unavailable');
+    const query = vi.fn<Query>().mockRejectedValueOnce(new Error('HTTP 502')).mockRejectedValue(failure);
+    const api = vi.fn<Api>();
+    await expect(listIssues('demo/repo', query, api)).rejects.toBe(failure);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(api).not.toHaveBeenCalled();
+  });
+
   it('reads native blockers using an issues-only GraphQL query and refreshes their state on each sync', async () => {
     const query = vi.fn<Query>().mockResolvedValue([raw(2)]);
     const api = vi.fn<Api>().mockResolvedValueOnce(result()).mockResolvedValueOnce(result(connection([blocker('CLOSED')])));

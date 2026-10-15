@@ -5,7 +5,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { cliExit, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, hookReviewKey, interruptions, launchArgs, NOTIFY_SOURCE, oneAtATime, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { claudeConversation, cliExit, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, interruptions, launchArgs, lostConversation, NOTIFY_SOURCE, oneAtATime, resumableSession, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
@@ -108,7 +108,14 @@ describe('launchArgs', () => {
     const { args } = launchArgs('claude', ctx({ resumeId: 'abc', role: 'ceo', files: { settings: 's', mcp: 'mcp.json', system: 'i' } }));
     expect(args.slice(0, 2)).toEqual(['--resume', 'abc']);
     expect(args).toContain('--mcp-config');
-    expect(args.slice(args.indexOf('--disallowedTools'), args.indexOf('--'))).toEqual(['--disallowedTools', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', 'Bash', 'PowerShell', 'NotebookEdit']);
+    expect(args.slice(args.indexOf('--disallowedTools'), args.indexOf('--'))).toEqual(['--disallowedTools', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', ...CROSS_TURN_TOOLS, 'Bash', 'PowerShell', 'NotebookEdit']);
+  });
+
+  it('keeps tools that wait across turns away from Claude Code, but not background shells', () => {
+    const { args } = launchArgs('claude', ctx());
+    expect(CROSS_TURN_TOOLS).toEqual(['Monitor', 'ScheduleWakeup', 'CronCreate', 'CronDelete', 'CronList', 'RemoteTrigger']);
+    expect(args.slice(args.indexOf('--disallowedTools'), args.indexOf('--'))).toEqual(['--disallowedTools', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', ...CROSS_TURN_TOOLS]);
+    for (const cli of ['codex', 'opencode'] as const) expect(launchArgs(cli, ctx()).args.some((a) => a.includes('Monitor') || a.includes('ScheduleWakeup'))).toBe(false);
   });
 
   it("runs Codex without its sandbox or approvals, and resumes Codex's thread", () => {
@@ -240,6 +247,71 @@ describe('cliExit', () => {
   it("fails one that couldn't start or crashed", () => {
     expect(cliExit('codex', { code: 0, working: false, lastText: '', ranMs: 5_000 })).toEqual({ ok: false, error: 'Codex exited before finishing.' });
     expect(cliExit('opencode', { code: 1, working: true, lastText: '', ranMs: 2_000 }).error).toBe('OpenCode exited with code 1 before finishing.');
+  });
+});
+
+describe("Claude Code's conversation", () => {
+  const onDisk = (files: string[]) => (file: string) => files.includes(file);
+  const hook = { hook_event_name: 'PreToolUse', session_id: 'new', transcript_path: 'new.jsonl' };
+  const MISSING = '\n No conversation found with session ID: 6cc74c7e-0c81-4bff-a140-cc8307c1d11b\n';
+  /** A session as the runtimes drive it: hooks while it runs, then lost() if it quit before it began. */
+  const run = (resumeId: string | null, hooks: Record<string, unknown>[], files: string[], exitScreen?: string) => {
+    const saved: (string | null)[] = [];
+    const c = claudeConversation(resumeId, (id) => saved.push(id));
+    for (const b of hooks) {
+      const id = resumableSession(b, onDisk(files));
+      if (id) c.found(id);
+    }
+    const lost = exitScreen === undefined ? false : c.lost(exitScreen);
+    return { saved, lost };
+  };
+
+  it("saves nothing when a new session's launch fails before its conversation is written", () => {
+    expect(run(null, [], [], 'Error: something went wrong\n')).toEqual({ saved: [], lost: false });
+    const early = [{ ...hook, hook_event_name: 'SessionStart' }, { ...hook, hook_event_name: 'UserPromptSubmit' }];
+    expect(run(null, early, [], '')).toEqual({ saved: [], lost: false });
+  });
+
+  it('saves a new session once a hook reports its transcript on disk, and only once', () => {
+    const turn = [{ ...hook, hook_event_name: 'UserPromptSubmit' }, hook, { ...hook, hook_event_name: 'Stop' }];
+    expect(run(null, turn, ['new.jsonl']).saved).toEqual(['new']);
+    // Written during the first turn: the hooks before it don't count, the next one does.
+    const saved: string[] = [];
+    const c = claudeConversation(null, (id) => saved.push(id!));
+    const files: string[] = [];
+    for (const event of ['SessionStart', 'UserPromptSubmit']) {
+      const id = resumableSession({ ...hook, hook_event_name: event }, onDisk(files));
+      if (id) c.found(id);
+    }
+    expect(saved).toEqual([]);
+    files.push('new.jsonl');
+    const id = resumableSession(hook, onDisk(files));
+    if (id) c.found(id);
+    expect(saved).toEqual(['new']);
+  });
+
+  it("ignores subagents and calls with no transcript path (the status line) or no session", () => {
+    expect(resumableSession({ ...hook, agent_id: 'sub-1' }, () => true)).toBeNull();
+    expect(resumableSession({ hook_event_name: 'StatusLine', session_id: 'new' }, () => true)).toBeNull();
+    expect(resumableSession({ hook_event_name: 'Stop', transcript_path: 'new.jsonl' }, () => true)).toBeNull();
+  });
+
+  it('keeps a resumed conversation that is there', () => {
+    const resumed = [{ ...hook, session_id: 'old', transcript_path: 'old.jsonl' }];
+    expect(run('old', resumed, ['old.jsonl'], 'Claude Code v2.1.280\n❯ ')).toEqual({ saved: [], lost: false });
+  });
+
+  it('forgets a resumed conversation Claude Code can\'t find, so the next session starts a new one', () => {
+    expect(run('old', [], [], MISSING)).toEqual({ saved: [null], lost: true });
+    // Nothing to forget for a new session, or once a conversation was found after all.
+    expect(run(null, [], [], MISSING)).toEqual({ saved: [], lost: false });
+    expect(run('old', [{ ...hook, session_id: 'other' }], ['new.jsonl'], MISSING)).toEqual({ saved: ['other'], lost: false });
+  });
+
+  it("spots Claude Code's message for a resume with nothing to resume (also in the SDK's error)", () => {
+    expect(lostConversation(MISSING)).toBe(true);
+    expect(lostConversation(`Claude Code process exited with code 1${MISSING}`)).toBe(true);
+    expect(lostConversation('Claude Code v2.1.280\n❯ ')).toBe(false);
   });
 });
 
