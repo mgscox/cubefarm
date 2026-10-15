@@ -2183,6 +2183,44 @@ describe('QA rounds', () => {
       expect(rec).toMatchObject({ status: 'queued', round: 3, mergeNote: null });
     });
 
+    // Save the state file, then start a new office from it (no floors or people, so nothing else loads).
+    const restartFromDisk = async () => {
+      vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+      const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+      vi.spyOn(fs, 'rename').mockResolvedValue();
+      await (s as unknown as { writeState(): Promise<void> }).writeState();
+      const persisted = JSON.parse(String(write.mock.calls.at(-1)![1]));
+      Object.assign(persisted, { repos: [], agents: [] });
+      const fresh = new Swarm(createDemoBackend());
+      const restored = fresh as unknown as Internals;
+      restored.backend.demo = false;
+      vi.spyOn(restored, 'save').mockImplementation(() => {});
+      vi.spyOn(fs, 'readFile').mockResolvedValueOnce(JSON.stringify(persisted));
+      await fresh.init();
+      return restored.state.qa;
+    };
+
+    it.each([
+      ['qa', 'the fix was never pushed'],
+      ['conflict', 'the conflict was never resolved'],
+    ] as const)('keeps why an unpushed %s fix needs the manager through a restart', async (fixReason, note) => {
+      addAgent('a2', 'Barbara', 'dev', 1);
+      head('sha-0');
+      Object.assign(rec, { passedSha: fixReason === 'conflict' ? 'sha-0' : null, fixCrashes: ['a2'] });
+      Object.assign(ada, { status: 'working', task: 'fix', prNumber: 13 });
+      Object.assign(rec, { status: 'fixing', devAgentId: 'a1', fixReason });
+      await s.onFixFinished(ada, repo, result(true));
+      expect(rec).toMatchObject({ status: 'needs-human', mergeNote: note });
+      const [loaded] = await restartFromDisk();
+      expect(loaded).toMatchObject({ status: 'needs-human', round: 2, fixCrashes: ['a2', 'a1'], mergeNote: note });
+    });
+
+    it('still forgets merge progress on a restart', async () => {
+      Object.assign(rec, { status: 'passed', passedSha: 'sha-1', mergeNote: 'waiting for checks: CI' });
+      const [loaded] = await restartFromDisk();
+      expect(loaded).toMatchObject({ status: 'passed', mergeNote: null });
+    });
+
     it("takes the session at its word when the PR's head can't be read", async () => {
       vi.spyOn(s.backend, 'prDetails').mockRejectedValue(new Error('gh: HTTP 502'));
       vi.spyOn(console, 'warn').mockImplementation(() => {});

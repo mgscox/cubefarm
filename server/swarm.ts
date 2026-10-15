@@ -513,7 +513,8 @@ export class Swarm {
           pendingSince: q.pendingSince ?? null,
           mergeRetryAt: q.mergeRetryAt ?? null,
           alerted: q.alerted ?? false,
-          mergeNote: null,
+          // Merge progress is re-read after a restart; why a PR needs the manager isn't.
+          mergeNote: q.status === 'needs-human' ? (q.mergeNote ?? null) : null,
         })),
         requests: loaded.requests ?? [],
         ceo: { ...this.state.ceo, ...loaded.ceo },
