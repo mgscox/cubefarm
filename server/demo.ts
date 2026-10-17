@@ -460,6 +460,7 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
   let status: 'connecting' | 'online' | 'offline' = 'connecting';
   let running = 0;
   const offline = /^offline/i.test(opts.box.destination);
+  const claudeOnly = /^claude-only/i.test(opts.box.destination);
   const timer = setTimeout(() => {
     status = offline ? 'offline' : 'online';
     opts.changed();
@@ -488,7 +489,8 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
       status,
       error: offline && status === 'offline' ? 'ssh: connect to host: Connection timed out (demo)' : null,
       info: status === 'online' ? { platform: 'linux', version: 'demo', git: 'git version 2.47.0 (demo)', ghReady: true, workspaces, sep: '/' } : null,
-      clis: status === 'online' ? fakeClis() : [],
+      // A box whose destination starts with "claude-only" has just Claude Code: other agents can't move there.
+      clis: status === 'online' ? fakeClis().map((c) => (claudeOnly && c.id !== 'claude' ? { ...c, installed: false, version: null } : c)) : [],
       running,
     }),
     reconnected: Promise.resolve([]), // fake sessions end with the office

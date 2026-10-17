@@ -2626,3 +2626,32 @@ input.inline:focus {
     display: none;
   }
 }
+
+/* ---------- fleet ---------- */
+
+.fleet-card .row + .small,
+.fleet-card > .small {
+  margin-top: 6px;
+}
+.fleet-clis {
+  gap: 4px;
+  margin-top: 4px;
+}
+.fleet-missing {
+  color: #9c4f00;
+}
+.fleet-add {
+  display: grid;
+  gap: 8px;
+}
+.fleet-add label {
+  display: grid;
+  gap: 3px;
+}
+.fleet-help ul {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+.fleet-help p {
+  margin: 8px 0 0;
+}

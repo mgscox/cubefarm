@@ -16,7 +16,7 @@ export type Overlay =
   | { kind: 'phone'; tab?: PhoneTab; requestId?: string }
   | { kind: 'help' };
 
-export type ManagerTab = 'floors' | 'ceo' | 'team' | 'issues' | 'settings';
+export type ManagerTab = 'floors' | 'ceo' | 'team' | 'fleet' | 'issues' | 'settings';
 
 export interface Focus {
   id: string;
