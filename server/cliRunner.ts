@@ -434,7 +434,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     const event = String(b.hook_event_name ?? '');
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
     if (cli === 'claude') {
-      const id = resumableSession(b, host.hasFile);
+      const id = resumableSession(b, (file) => host.hasFile(file));
       if (id) conversation.found(id);
     }
     switch (event) {
