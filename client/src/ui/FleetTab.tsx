@@ -69,7 +69,7 @@ function OfficeMachine({ agents, repos }: { agents: Agent[]; repos: RepoView[] }
 }
 
 function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos: RepoView[] }) {
-  const { info, missing } = boxNotes(box);
+  const { info, missing, hooks } = boxNotes(box);
   const [checking, setChecking] = useState(false);
   const check = () => {
     setChecking(true);
@@ -102,6 +102,7 @@ function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos:
       </div>
       {box.error && <div className="term-error small">{box.error}</div>}
       {missing.length > 0 && <div className="small fleet-missing">⚠ Set up on the box: {missing.join(', ')}</div>}
+      {hooks && <div className="small fleet-missing">⚠ {hooks}</div>}
       <Workers id={box.id} agents={agents} repos={repos} />
       <div className="row">
         <span className="muted small grow">{box.running ? `${box.running} CLI${box.running === 1 ? '' : 's'} running there` : 'Nothing running there'}</span>

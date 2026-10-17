@@ -218,6 +218,7 @@ export interface BoxView {
   version: string | null; // cubefarm on the box
   git: string | null;
   ghReady: boolean;
+  hookError: string | null; // why its CLIs can't reach the office's hook URL (null: they can, or not known yet)
   clis: CliView[];
   running: number; // CLIs running there now
 }
@@ -269,8 +270,12 @@ export interface AgentView {
   lastError: string | null;
   box: string | null; // their own box, overriding the floor's (null = the floor's)
   deskBox: string; // where their current task's desk and CLI are ('' = the office's machine)
+  boot: AgentBoot | null; // a new CLI the office hasn't heard from yet (null: it has, or none is starting)
   log: LogLine[]; // tail of the terminal log (full buffer on snapshot)
 }
+
+/** A new Claude CLI with no hook after a minute: 'waiting' to start on the task, or 'no-hooks' (working, but its hooks don't reach the office). */
+export type AgentBoot = 'waiting' | 'no-hooks';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 

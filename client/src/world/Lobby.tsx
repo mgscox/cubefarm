@@ -347,6 +347,7 @@ function candidateAgent(r: HireRequestView): Agent {
     lastError: null,
     box: null,
     deskBox: '',
+    boot: null,
   };
 }
 

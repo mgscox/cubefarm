@@ -91,7 +91,7 @@ function useTerminalTexture(agent: Agent, anchor: React.RefObject<THREE.Object3D
 }
 
 function NameTag({ agent }: { agent: Agent }) {
-  const tex = useCanvasTexture(512, 96, (ctx) => drawTag(ctx, 512, 96, agent), [agent.name, agent.status, agent.issueNumber, agent.currentTool, agent.color]);
+  const tex = useCanvasTexture(512, 96, (ctx) => drawTag(ctx, 512, 96, agent), [agent.name, agent.status, agent.issueNumber, agent.currentTool, agent.color, agent.boot]);
   return (
     <Billboard position={[0, 1.98, -0.32]}>
       <mesh>

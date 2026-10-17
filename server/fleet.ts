@@ -23,6 +23,8 @@ export interface BoxInfo extends BoxLayout {
   version: string;
   git: string | null;
   ghReady: boolean;
+  /** Why its CLIs can't reach the hook URL they post to (null: they can; missing: a box from before it was checked). */
+  hookError?: string | null;
 }
 
 /** The box an agent works on: their own, else their floor's. '' is the office's own machine. */
@@ -94,6 +96,24 @@ export const boxMainDir = (l: BoxLayout, fullName: string) => [l.workspaces, rep
 
 /** An agent's desk on a box. */
 export const boxDeskDir = (l: BoxLayout, fullName: string, agentSlug: string) => [l.workspaces, repoFolder(fullName), 'desks', agentSlug].join(l.sep);
+
+/** The token a hook probe posts with: no session has it, so the hook is answered at once and changes nothing. */
+const PROBE_TOKEN = 'cubefarm-probe';
+
+/**
+ * Whether the hook URL a box's CLIs post to answers, the way their hooks call it: null when it does, else why not.
+ * fetcher: fetch (a fake in tests).
+ */
+export async function probeHookUrl(base: string, fetcher: typeof fetch = fetch, timeoutMs = 5000): Promise<string | null> {
+  const url = `${base}/api/hooks/${PROBE_TOKEN}`;
+  try {
+    const res = await fetcher(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', signal: AbortSignal.timeout(timeoutMs) });
+    return res.ok ? null : `${url} answered ${res.status}`;
+  } catch (err) {
+    const e = err as Error & { cause?: { code?: string; message?: string } };
+    return `${url}: ${e.name === 'TimeoutError' ? 'no answer' : (e.cause?.code ?? e.cause?.message ?? e.message)}`;
+  }
+}
 
 /** Redial delays after a box's link drops: quick at first, then once a minute. */
 export const redialDelay = (attempt: number) => [2_000, 5_000, 10_000, 30_000][attempt] ?? 60_000;
