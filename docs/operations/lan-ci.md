@@ -1,6 +1,6 @@
 # LAN CI runners and artifacts
 
-CI uses repository-scoped self-hosted runners and no GitHub Actions caches or artifact uploads. macOS jobs target the Mac mini M2 (`mac-mini-m2-cubefarm`); Windows jobs target Tower's Windows_10 VM (`tower-windows-cubefarm`). These provide native OS-family coverage; the matrix display names preserve the existing check names and do not specify the installed OS version. macOS runner startup awaits Xcode license acceptance.
+CI uses repository-scoped self-hosted runners and no GitHub Actions caches or artifact uploads. macOS jobs target the Mac mini M2 (`mac-mini-m2-cubefarm`); Windows jobs target Tower's Windows_10 VM (`tower-windows-cubefarm`). These provide native OS-family coverage; the matrix display names preserve the existing check names and do not specify the installed OS version. The M2 runs macOS 26.6.2 on Apple silicon; Tower's VM runs Windows 10 Pro 22H2 x64. Xcode/Swift and both runner services were verified on 2026-10-17.
 
 Linux jobs target `tower-cubefarm`, using `tower-actions-runner:2026-10-17`. Chromium system libraries are baked into that image; the workflow installs the browser. Public fork PRs do not execute on LAN runners.
 
