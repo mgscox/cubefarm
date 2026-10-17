@@ -772,6 +772,83 @@ describe('CEO park_pr', () => {
     expect(ready()).toContain(67);
   });
 
+  it('writes gate dependencies before releasing an auto-assign issue to a free developer', async () => {
+    setIssues(issue(66, ['ready-for-human']), issue(67, [], 'Keep the brief'), issue(68, [], 'Depends on #67'), issue(69, [], 'Depends on #68'));
+    let edited = false;
+    const edit = vi.spyOn(s.backend, 'editIssue').mockImplementation(async () => {
+      expect(s.startIssueWork(repo)).toBe(false);
+      expect(pull.state).toBe('OPEN');
+      expect(s.state.qa).toHaveLength(1);
+      edited = true;
+    });
+    vi.mocked(s.backend.closePull).mockImplementation(async () => {
+      expect(edited).toBe(true);
+      expect(s.repoRt.get(repo.id)!.issues.find((i) => i.number === 67)?.body).toBe('Depends on #66\n\nKeep the brief');
+      expect(s.startIssueWork(repo)).toBe(false);
+    });
+    expect(await s.officeTools().call('park_pr', { ...args, depends_on: [66] })).toContain('is parked');
+    expect(edit).toHaveBeenCalledExactlyOnceWith(repo.fullName, 67, { body: 'Depends on #66\n\nKeep the brief' });
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', issueNumber: null });
+    expect(s.startIssueWork(repo)).toBe(false);
+    expect(runTask).not.toHaveBeenCalled();
+    const parked = JSON.parse(s.companyStatus()).floors[0].backlog.find((i: { number: number }) => i.number === 67);
+    expect(parked).toMatchObject({ waitsFor: [66] });
+    expect(parked.inProgress).toBeUndefined();
+  });
+
+  it('routes a backlog issue behind a human gate while refusing the equivalent ordinary chain', async () => {
+    s.state.qa = [];
+    s.repoRt.get(repo.id)!.pulls = [];
+    Object.assign(s.state.agents[0], { status: 'idle', task: null, issueNumber: null, prNumber: null, branch: null });
+    setIssues(issue(66), issue(67), issue(68, [], 'Depends on #67'), issue(69, [], 'Depends on #68'));
+    const edit = vi.spyOn(s.backend, 'editIssue').mockResolvedValue();
+    vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 67, depends_on: [66] })).toContain('3 steps deep');
+    expect(edit).not.toHaveBeenCalled();
+    s.repoRt.get(repo.id)!.issues[0].labels = ['ready-for-human'];
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 67, depends_on: [66] })).toContain('depends on #66');
+    expect(edit).toHaveBeenCalledWith(repo.fullName, 67, expect.objectContaining({ body: 'Depends on #66' }));
+  });
+
+  it('refuses invalid parking dependencies before editing or closing anything', async () => {
+    const edit = vi.spyOn(s.backend, 'editIssue');
+    expect(await s.officeTools().call('park_pr', { ...args, depends_on: [67] })).toContain("can't depend on itself");
+    expect(edit).not.toHaveBeenCalled();
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.closePull).not.toHaveBeenCalled();
+    expect(s.state.qa).toHaveLength(1);
+  });
+
+  it('refuses parking with an ordinary dependency that would make a three-step chain', async () => {
+    setIssues(issue(66), issue(67), issue(68, [], 'Depends on #67'), issue(69, [], 'Depends on #68'));
+    const edit = vi.spyOn(s.backend, 'editIssue');
+    await expect(swarm.parkPr({ ...args, depends_on: [66] })).rejects.toThrow('3 steps deep');
+    expect(edit).not.toHaveBeenCalled();
+    expect(s.backend.closePull).not.toHaveBeenCalled();
+  });
+
+  it('keeps saved dependencies and the PR assignment if closing fails', async () => {
+    setIssues(issue(66, ['ready-for-human']), issue(67));
+    vi.spyOn(s.backend, 'editIssue').mockResolvedValue();
+    vi.mocked(s.backend.closePull).mockRejectedValueOnce(new Error('Close failed'));
+    await expect(swarm.parkPr({ ...args, depends_on: [66] })).rejects.toThrow('Close failed');
+    expect(s.repoRt.get(repo.id)!.issues[1].body).toBe('Depends on #66');
+    expect(pull.state).toBe('OPEN');
+    expect(s.state.agents[0].issueNumber).toBe(67);
+    await swarm.parkPr({ ...args, depends_on: [66] });
+    expect(s.startIssueWork(repo)).toBe(false);
+  });
+
+  it('keeps the PR and assignment when saving the dependencies fails', async () => {
+    vi.spyOn(s.backend, 'editIssue').mockRejectedValue(new Error('Edit failed'));
+    await expect(swarm.parkPr({ ...args, depends_on: [66] })).rejects.toThrow('Edit failed');
+    expect(pull.state).toBe('OPEN');
+    expect(s.backend.closePull).not.toHaveBeenCalled();
+    expect(s.state.qa).toHaveLength(1);
+    expect(s.state.agents[0].issueNumber).toBe(67);
+    expect(s.repoRt.get(repo.id)).toMatchObject({ parking: false });
+  });
+
   it.each(['queued', 'failed', 'fixing', 'passed', 'needs-human'] as const)('allows %s without a live session', async (status) => {
     s.state.qa[0].status = status;
     await swarm.parkPr(args);
@@ -932,14 +1009,16 @@ describe('CEO park_pr', () => {
     expect(s.repoView(restored)).toMatchObject({ parkedBranches: repo.parkedBranches });
   });
 
-  it('lets the demo CEO park from a manager message', async () => {
+  it('lets the demo CEO park with dependencies from a manager message', async () => {
+    const edit = vi.spyOn(s.backend, 'editIssue').mockResolvedValue();
     const finished = vi.fn();
-    const handle = createDemoBackend().startSession({ role: 'ceo', cwd: '', prompt: 'Manager asks:\nPark PR #13 on floor 1 because Placeholder waits on #66',
+    const handle = createDemoBackend().startSession({ role: 'ceo', cwd: '', prompt: 'Manager asks:\nPark PR #13 on floor 1 because Placeholder waits on #66; depends on #66',
       systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools() },
     { log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: expect.stringContaining('is parked') }));
     expect(s.state.qa).toEqual([]);
+    expect(edit).toHaveBeenCalledWith(repo.fullName, 67, { body: 'Depends on #66' });
     handle.stop();
   });
 });

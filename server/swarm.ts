@@ -4686,6 +4686,20 @@ export class Swarm {
         ...agents.filter((a) => a.task !== 'qa' && a.issueNumber != null).map((a) => a.issueNumber!)]);
       const branchIssue = pr.headRefName.match(/^swarm\/issue-(\d+)-/);
       if (branchIssue) issues.add(Number(branchIssue[1]));
+      if (x.depends_on !== undefined) {
+        if (!issues.size) throw new HttpError(409, 'This PR has no linked issue to hold; link an issue before parking with depends_on');
+        const plans = [];
+        for (const number of issues) plans.push({ number, plan: await this.planIssueRoute({ floor: repo.floor, number, depends_on: x.depends_on }, false) });
+        preflight(pr, true);
+        for (const { number, plan } of plans) {
+          const body = plan.body;
+          if (body === null) continue;
+          await this.backend.editIssue(repo.fullName, number, { body });
+          // Refresh is reserved out while parking; the scheduler must see the saved dependency on release.
+          rt.issues = rt.issues.map((i) => i.number === number ? { ...i, body } : i);
+          this.emitRepo(repo);
+        }
+      }
       await this.backend.commentPull(repo.fullName, x.number, reason);
       preflight(pr, true);
       await this.backend.closePull(repo.fullName, x.number); // closePull never deletes the branch.
@@ -4754,8 +4768,8 @@ export class Swarm {
     return `PR #${x.number} on floor ${repo.floor} is queued for fixes with ${target}: ${rec.fixReason}.`;
   }
 
-  /** Change an open issue's specialty and/or dependencies (see planRoute for what is refused). */
-  private async routeIssue(x: { floor: number; number: number; specialty?: string; depends_on?: number[] }) {
+  /** Shared routing validation; parking has already reserved and checked its linked agents. */
+  private async planIssueRoute(x: { floor: number; number: number; specialty?: string; depends_on?: number[] }, inProgress?: boolean) {
     const repo = this.floorRepo(x.floor);
     const issues = this.repoRt.get(repo.id)?.issues ?? [];
     const asked = [Number(x.number), ...(x.depends_on ?? []).map(Number)].filter((n) => !issues.some((i) => i.number === n));
@@ -4764,16 +4778,27 @@ export class Swarm {
       ...this.state.agents.filter((a) => a.repoId === repo.id && a.specialty).map((a) => a.specialty.toLowerCase()),
       ...this.state.requests.filter((r) => r.status === 'pending' && r.kind === 'hire' && r.repoId === repo.id && r.specialty).map((r) => r.specialty),
     ];
-    const plan = planRoute({
+    return planRoute({
       floor: repo.floor,
       number: Number(x.number),
       specialty: x.specialty,
       dependsOn: x.depends_on,
       issues,
       closed: (n) => states.get(n) === 'CLOSED',
-      inProgress: this.issueTaken(repo, Number(x.number)),
+      inProgress: inProgress ?? this.issueTaken(repo, Number(x.number)),
       specialties,
     });
+  }
+
+  /** Change an open issue's specialty and/or dependencies (see planRoute for what is refused). */
+  private async routeIssue(x: { floor: number; number: number; specialty?: string; depends_on?: number[] }) {
+    const repo = this.floorRepo(x.floor);
+    const check = () => {
+      if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
+    };
+    check();
+    const plan = await this.planIssueRoute(x);
+    check();
     if (plan.body !== null || plan.addLabels.length || plan.removeLabels.length) {
       await this.backend.editIssue(repo.fullName, Number(x.number), { body: plan.body ?? undefined, addLabels: plan.addLabels, removeLabels: plan.removeLabels });
       await this.syncRepo(repo.id); // the scheduler sees the new routing right away

@@ -136,9 +136,9 @@ describe('office tools', () => {
       if (a.number === 14) throw new Error('PR #14 is mid-QA; wait until it finishes');
       return 'parked';
     });
-    const args = { floor: 1, number: 13, reason: 'Waits on #12' };
+    const args = { floor: 1, number: 13, reason: 'Waits on #12', depends_on: [12] };
     expect(await client.callTool({ name: 'park_pr', arguments: { ...args, reason: '  Waits on #12  ' } })).toMatchObject({ content: [{ text: 'parked' }] });
-    for (const invalid of [{ floor: 1, number: 13 }, { ...args, floor: 1.5 }, { ...args, number: 0 }, { ...args, reason: '  ' }, { ...args, reason: 'x'.repeat(1001) }]) {
+    for (const invalid of [{ floor: 1, number: 13 }, { ...args, floor: 1.5 }, { ...args, number: 0 }, { ...args, reason: '  ' }, { ...args, reason: 'x'.repeat(1001) }, { ...args, depends_on: [0] }, { ...args, depends_on: [1.5] }, { ...args, depends_on: ['12'] }, { ...args, depends_on: Array(11).fill(12) }]) {
       expect(await client.callTool({ name: 'park_pr', arguments: invalid })).toMatchObject({ isError: true });
     }
     expect(requests).toEqual([args]);
@@ -266,6 +266,27 @@ describe('planRoute (route_issue)', () => {
     expect(() => route({ number: 1, dependsOn: [6] })).toThrow('That makes a dependency chain 3 steps deep through #1.');
     expect(() => route({ number: 6, dependsOn: [3] })).toThrow(/3 steps deep/);
     expect(route({ number: 6, dependsOn: [2] }).body).toBe('Depends on #2\n\nFree');
+  });
+
+  it('allows a three-edge chain when one step is a human gate, including mixed dependencies', () => {
+    const issues = base.issues.map((i) => i.number === 6 ? { ...i, labels: ['Ready-For-Human'] } : i);
+    expect(route({ issues, number: 1, dependsOn: [6] }).body).toContain('Depends on #6');
+    expect(route({ issues, number: 4, dependsOn: [6, 1] }).body).toContain('Depends on #6, #1');
+    // The ordinary branch still exceeds the limit even alongside a gate.
+    expect(() => route({ issues, number: 1, dependsOn: [6, 4] })).toThrow(/3 steps deep/);
+  });
+
+  it('counts human gates as zero on the waiter side and in native blockers', () => {
+    const waiterGate = base.issues.map((i) => i.number === 2 ? { ...i, labels: ['ready-for-human'] } : i);
+    expect(route({ issues: waiterGate, number: 1, dependsOn: [6] }).body).toContain('Depends on #6');
+    const nativeGate = base.issues.map((i) => i.number === 6 ? { ...i, labels: ['ready-for-human'] } :
+      i.number === 1 ? { ...i, nativeBlockers: [{ number: 6, state: 'OPEN' as const }] } : i);
+    expect(route({ issues: nativeGate, number: 1, dependsOn: [] }).summary).toContain('depends on #6');
+  });
+
+  it('still refuses cycles through human gates', () => {
+    const issues = base.issues.map((i) => i.number === 3 ? { ...i, labels: ['ready-for-human'] } : i);
+    expect(() => route({ issues, number: 1, dependsOn: [3] })).toThrow(/cycle/);
   });
 
   it('keeps the specialty but not the dependencies of an issue in progress', () => {
