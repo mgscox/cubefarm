@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { run } from './exec.ts';
-import type { AgentCli, AgentRole, CliView, EffortLevel } from '../shared/types.ts';
+import type { AgentBoot, AgentCli, AgentRole, CliView, EffortLevel } from '../shared/types.ts';
 
 // The coding-agent CLIs an agent can run in its terminal, how to find them on this machine, and how to start one on
 // a task. Claude Code is fully wired in: its hooks report every tool call to the office.
@@ -357,6 +357,91 @@ export function claudeConversation(resumeId: string | null, save: (id: string | 
   };
 }
 
+/** Where a Claude Code conversation stands, from its transcript: how the office follows a CLI whose hooks don't reach it. */
+export interface ClaudeTurn {
+  /** The transcript's size: it grows while the CLI works. */
+  bytes: number;
+  /** The last turn has ended (Claude's last message didn't call a tool, or the turn's duration was written). */
+  ended: boolean;
+  /** Tells turns apart: the last finished message's id ('' before any). */
+  mark: string;
+  /** What Claude said last, as the Stop hook's last_assistant_message. */
+  text: string;
+}
+
+/** A transcript's tail read this far back is enough for its last message. */
+const TRANSCRIPT_TAIL = 512 * 1024;
+
+/** Where a transcript's tail (JSON lines; the first may be cut) says the main conversation stands. */
+export function claudeTurn(tail: string, bytes: number): ClaudeTurn {
+  let ended = false;
+  let mark = '';
+  let lastId = '';
+  let parts: string[] = [];
+  for (const line of tail.split('\n')) {
+    let e: Record<string, unknown>;
+    try {
+      e = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue; // the cut first line, or one being written
+    }
+    if (!e || typeof e !== 'object' || e.isSidechain === true) continue;
+    if (e.type === 'user' && e.isMeta !== true) ended = false;
+    else if (e.type === 'system' && e.subtype === 'turn_duration') {
+      ended = true;
+      mark = lastId || String(e.uuid ?? '');
+    }
+    else if (e.type === 'assistant') {
+      const msg = (e.message ?? {}) as { id?: unknown; content?: unknown; stop_reason?: unknown };
+      const blocks = Array.isArray(msg.content) ? (msg.content as { type?: unknown; text?: unknown }[]) : [];
+      const id = String(msg.id ?? e.uuid ?? '');
+      if (id !== lastId) parts = [];
+      lastId = id;
+      for (const b of blocks) if (b?.type === 'text' && typeof b.text === 'string') parts.push(b.text);
+      const calls = blocks.some((b) => b?.type === 'tool_use') || msg.stop_reason === 'tool_use';
+      ended = !calls && msg.stop_reason != null;
+      if (ended) mark = id;
+    }
+  }
+  return { bytes, ended, mark, text: parts.join('\n').trim() };
+}
+
+/** Claude Code's folder for a project: its path with everything but letters and digits as dashes. */
+const projectFolder = (cwd: string) => path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-');
+
+/** A Claude Code conversation's transcript on this machine: where it stands, or null when it isn't there (yet). */
+export function readClaudeTurn(cwd: string, sessionId: string, home = os.homedir()): ClaudeTurn | null {
+  if (!/^[\w-]{1,100}$/.test(sessionId)) return null;
+  const projects = path.join(home, '.claude', 'projects');
+  const name = `${sessionId}.jsonl`;
+  let file = path.join(projects, projectFolder(cwd), name);
+  if (!fs.existsSync(file)) {
+    const dir = (() => {
+      try {
+        return fs.readdirSync(projects).find((d) => fs.existsSync(path.join(projects, d, name)));
+      } catch {
+        return undefined;
+      }
+    })();
+    if (!dir) return null;
+    file = path.join(projects, dir, name);
+  }
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const bytes = fs.fstatSync(fd).size;
+      const start = Math.max(0, bytes - TRANSCRIPT_TAIL);
+      const buf = Buffer.alloc(bytes - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      return claudeTurn(buf.toString('utf8'), bytes);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
 // ---------- prompts the office answers ----------
 
 const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|trust this folder|allow Codex to work in this folder/i;
@@ -391,6 +476,29 @@ export function hookReviewKey(screen: string): 'enter' | 'down' | null {
  */
 export function interruptions(screen: string): number {
   return screen.split('\n').filter((l) => /\binterrupted\b/i.test(l)).length;
+}
+
+/**
+ * Claude Code at work on a turn, by its screen: its spinner ("esc to interrupt"), a tool call ("● Bash(…)") or a
+ * tool's output ("⎿"). Its startup screens (welcome, folder trust, sign-in, setup) show none of them.
+ */
+export function claudeWorking(screen: string): boolean {
+  return /esc to interrupt/i.test(screen) || /^\s*[●⏺] [^\n(]+\(/m.test(screen) || /^\s*⎿/m.test(screen);
+}
+
+/**
+ * What the office says about a Claude CLI it hasn't had a hook from since it started: working (on the screen, or its
+ * transcript moved) means its hooks don't reach the office (untrusted, or the hook URL is out of its reach), and the
+ * office follows its transcript instead; otherwise it hasn't started.
+ */
+export function bootNotice(label: string, screen: string, hookUrl: string, moved = false): { boot: AgentBoot; text: string } {
+  if (moved || claudeWorking(screen)) {
+    return {
+      boot: 'no-hooks',
+      text: `⚠ ${label} is working but the office isn't receiving its hooks. On a box, check it can reach ${hookUrl}; otherwise type /hooks in the terminal and press t. Meanwhile the office follows its transcript to see when it's done.`,
+    };
+  }
+  return { boot: 'waiting', text: `⚠ ${label} hasn't started on the task yet. Open the terminal to see what it's waiting for.` };
 }
 
 // ---------- helper scripts the CLIs run ----------

@@ -34,6 +34,7 @@ import { effectiveModel } from '../shared/models.ts';
 import { CEO_ID, RESEARCHER_ID } from '../shared/types.ts';
 import { isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchFiledAt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
 import type {
+  AgentBoot,
   AgentCli,
   AgentLook,
   AgentRole,
@@ -215,6 +216,7 @@ interface AgentRuntime {
   generation?: number; // bumped by every new task, cleared task and session: see nextGeneration
   qaResume?: { cwd: string; systemAppend: string } | null; // the QA run's one resume for a missing report, until used
   deskMoved?: boolean; // the task's desk had to move off a removed box: its conversation can't be resumed
+  boot?: AgentBoot | null; // a new CLI the office hasn't heard from (see SessionCallbacks.boot)
 }
 
 interface RepoRuntime {
@@ -801,6 +803,7 @@ export class Swarm {
       lastError: a.lastError,
       box: a.box,
       deskBox: a.deskBox,
+      boot: rt.boot ?? null,
       log: withLog ? rt.log : [],
     };
   }
@@ -1064,6 +1067,7 @@ export class Swarm {
       version: st?.info?.version ?? null,
       git: st?.info?.git ?? null,
       ghReady: st?.info?.ghReady ?? false,
+      hookError: st?.info?.hookError ?? null,
       clis: st?.clis ?? [],
       running: st?.running ?? 0,
     };
@@ -2304,9 +2308,16 @@ export class Swarm {
         },
         limited: (at) => this.pauseForLimit(at),
         usageWarning: (info) => this.paceForWarning(info),
+        boot: (state) => this.setBoot(a, rt, state),
         finished: (result) => void this.onFinished(a, repo, result, generation, session),
       },
     );
+  }
+
+  private setBoot(a: PersistedAgent, rt: AgentRuntime, state: AgentBoot | null) {
+    if ((rt.boot ?? null) === state) return;
+    rt.boot = state;
+    this.emitAgent(a);
   }
 
   /** `generation`: the agent's when this session started. A session that ends after its task was cleared or replaced changes nothing. */
@@ -3738,6 +3749,7 @@ export class Swarm {
         turn: (text) => this.postMessage('ceo', text),
         limited: (at) => this.pauseForLimit(at),
         usageWarning: (info) => this.paceForWarning(info),
+        boot: (state) => this.setBoot(a, rt, state),
         finished: (result) => this.onCeoFinished(a, result),
       },
     );
@@ -4062,6 +4074,7 @@ export class Swarm {
         screenshot: () => undefined,
         limited: (at) => this.pauseForLimit(at),
         usageWarning: (info) => this.paceForWarning(info),
+        boot: (state) => this.setBoot(a, rt, state),
         finished: (result) => void this.trackOfficeActivity(a.id, () => this.recordResearchFinished(a, job, repo, result)),
       },
     );

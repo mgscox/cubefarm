@@ -39,13 +39,13 @@ describe('floorMove', () => {
 });
 
 describe('boxNotes', () => {
-  const box: Pick<BoxView, 'status' | 'platform' | 'version' | 'git' | 'ghReady' | 'clis'> = {
-    status: 'online', platform: 'darwin', version: '0.3.19', git: '2.47', ghReady: true,
+  const box: Pick<BoxView, 'status' | 'platform' | 'version' | 'git' | 'ghReady' | 'hookError' | 'clis'> = {
+    status: 'online', platform: 'darwin', version: '0.3.19', git: '2.47', ghReady: true, hookError: null,
     clis: [{ id: 'claude', label: 'Claude Code', installed: true, version: '2.1', integrated: true }],
   };
 
   it('lists what the box runs', () => {
-    expect(boxNotes(box)).toEqual({ info: 'darwin · cubefarm 0.3.19 · git 2.47', missing: [] });
+    expect(boxNotes(box)).toEqual({ info: 'darwin · cubefarm 0.3.19 · git 2.47', missing: [], hooks: null });
     expect(boxNotes({ ...box, git: 'git version 2.47.0' }).info).toBe('darwin · cubefarm 0.3.19 · git version 2.47.0');
   });
 
@@ -53,8 +53,14 @@ describe('boxNotes', () => {
     expect(boxNotes({ ...box, git: null, ghReady: false, clis: [] }).missing).toEqual(['git', 'gh auth login', 'a coding-agent CLI']);
   });
 
+  it("says when its CLIs can't reach the office's hook URL", () => {
+    expect(boxNotes({ ...box, hookError: 'http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED' }).hooks).toBe(
+      "Can't reach the office's hook URL (http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED): its agents' steps won't reach the office, which follows their transcripts to see when they're done.",
+    );
+  });
+
   it("doesn't guess while it's offline", () => {
-    expect(boxNotes({ ...box, status: 'offline', ghReady: false }).missing).toEqual([]);
+    expect(boxNotes({ ...box, status: 'offline', ghReady: false, hookError: 'stale' })).toMatchObject({ missing: [], hooks: null });
   });
 });
 

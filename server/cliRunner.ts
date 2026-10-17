@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { claudeConversation, cliExit, cliLabel, codexTurnThread, hookReviewKey, interruptions, isCli, LOST_CONVERSATION, resumableSession, trustKey } from './clis.ts';
+import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, codexTurnThread, hookReviewKey, interruptions, isCli, LOST_CONVERSATION, resumableSession, trustKey } from './clis.ts';
 import { terminalsAvailable, type Pty } from './ptyClient.ts';
 import { ALLOW } from './ptyProtocol.ts';
 import { localCliHost } from './localCliHost.ts';
@@ -22,7 +22,7 @@ import {
 } from './agentRunner.ts';
 import type { OfficeTools } from './ceo.ts';
 import type { AgentTerminal } from './terminal.ts';
-import type { AgentCli } from '../shared/types.ts';
+import type { AgentBoot, AgentCli } from '../shared/types.ts';
 
 // One agent session as the real CLI in a pseudo-terminal: the same contract as the Agent SDK runner (log lines, the
 // current tool, the final text, finished), so the rest of the office doesn't care which runtime an agent uses.
@@ -42,6 +42,10 @@ export { terminalsAvailable };
 const FINISH_GRACE_MS = 3000;
 /** Starting up: how long before the office says the CLI seems to be waiting on something. */
 const BOOT_MS = 60_000;
+/** Still not heard from after BOOT_MS: how often the office looks at its screen again (it may start working, hookless). */
+const BOOT_LOOK_MS = 10_000;
+/** Working with no hooks reaching the office: how often it reads the CLI's transcript for the end of its turn. */
+const HOOKLESS_LOOK_MS = 5000;
 /** Claude's usage warning, the way the SDK's allowed_warning is used: pace new work from here. */
 const USAGE_WARN_PCT = 90;
 
@@ -145,6 +149,10 @@ interface LiveCli {
   /** The office session driving it; null while it waits at its prompt. */
   session: { hook(b: Record<string, unknown>): Record<string, unknown>; exited(code: number, signal?: number): void } | null;
   idleTimer?: NodeJS.Timeout;
+  /** Where its hooks post (said when they don't arrive). */
+  hookUrl?: string;
+  /** Its Claude hooks didn't reach the office: a session that picks it up follows its transcript from the start. */
+  hookless?: boolean;
 }
 const lives = new Map<AgentTerminal, LiveCli>();
 /** How to trust Codex's hooks was said once this run (Codex asks at the start of every session until they are). */
@@ -320,6 +328,9 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let lastText = '';
   let turnError: string | null = null; // the turn failed (OpenCode reports errors separately from going idle)
   let begun = false; // the CLI took its first prompt
+  let boot: AgentBoot | null = null; // what the office said about a CLI it hasn't heard from (see bootNotice)
+  let heard = false; // a hook from the CLI's main session reached the office
+  let turnBase: ClaudeTurn | null = null; // its transcript when this session took it on: turns ending after are this session's
   let working = true; // a prompt is in hand and its turn hasn't ended (a new CLI starts on the one it's launched with)
   let finishTimer: NodeJS.Timeout | undefined;
   let bootTimer: NodeJS.Timeout | undefined;
@@ -332,6 +343,12 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const cb: SessionCallbacks = { ...callbacks };
   const conversation = claudeConversation(opts.resumeSessionId ?? null, (id) => cb.sessionId(id));
   const log = (entries: LogEntry[]) => entries.length && cb.log(entries);
+  const setBoot = (state: AgentBoot | null) => {
+    if (boot === state) return;
+    boot = state;
+    if (state === 'no-hooks' && live) live.hookless = true;
+    cb.boot?.(state);
+  };
 
   /**
    * Codex and OpenCode don't report tool results: pass on the screenshots their browser saved instead. all: the last
@@ -355,6 +372,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     done = true;
     for (const t of [finishTimer, bootTimer]) clearTimeout(t);
     clearInterval(screenTimer);
+    setBoot(null);
     clearInterval(shotTimer);
     const lastShots = collectShots(true);
     if (term.onInput === watchKeys) term.onInput = null;
@@ -380,6 +398,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   };
   const busy = () => {
     begun = true;
+    if (heard) setBoot(null);
     working = true;
     clearTimeout(finishTimer);
   };
@@ -433,6 +452,12 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const hook = (b: Record<string, unknown>): Record<string, unknown> => {
     const event = String(b.hook_event_name ?? '');
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
+    if (!sub && event !== 'StatusLine' && !heard) {
+      heard = true;
+      if (live) live.hookless = false;
+      if (boot === 'no-hooks') log([{ kind: 'system', text: `✓ The office is receiving ${label}'s hooks now.` }]);
+      setBoot(null);
+    }
     if (cli === 'claude') {
       const id = resumableSession(b, host.hasFile);
       if (id) conversation.found(id);
@@ -549,6 +574,47 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     finish({ ok, text: lastText, errors: error ? [error] : [] });
   };
 
+  /** Claude's transcript for this session on its machine (null: not there yet, or not Claude). */
+  const readTurn = async (): Promise<ClaudeTurn | null> => (cli === 'claude' ? ((await host.claudeTurn(opts.cwd, live?.resumeId ?? sessionId)) ?? null) : null);
+
+  /**
+   * Claude's hooks may never reach the office (untrusted, or a box's CLI can't reach its hook URL), and without Stop
+   * the session would never end. From first ms on, until a hook arrives, the office looks at the CLI's screen and
+   * transcript: it says whether the CLI is working or still waiting, and a turn its transcript says has ended ends
+   * like a Stop hook would, so the work still goes on to QA. base: read the transcript now (its earlier turns).
+   */
+  const watchHookless = (first: number, base: boolean) => {
+    if (cli !== 'claude') return;
+    if (base) void readTurn().then((t) => (turnBase = t), () => undefined);
+    const look = async () => {
+      if (done || (heard && begun)) return;
+      const t = heard ? null : await readTurn().catch(() => null);
+      if (done || (heard && begun)) return;
+      const notice = bootNotice(label, heard ? '' : term.screen(), live?.hookUrl ?? `${officeUrl}/api/hooks`, !!t && t.bytes !== (turnBase?.bytes ?? 0));
+      if (notice.boot !== boot) {
+        log([{ kind: 'error', text: notice.text }]);
+        setBoot(notice.boot);
+      }
+      if (boot === 'no-hooks' && t) {
+        if (t.ended && t.mark && t.mark !== turnBase?.mark) {
+          turnBase = t;
+          turns += 1;
+          if (t.text) {
+            log(assistantLines(t.text));
+            cb.turn?.(t.text);
+          }
+          turnEnded(t.text);
+        } else if (!t.ended && !working && t.bytes !== turnBase?.bytes) {
+          // It picked up another prompt within the grace period after its turn: not finished after all.
+          working = true;
+          clearTimeout(finishTimer);
+        }
+      }
+      bootTimer = setTimeout(() => void look(), boot === 'no-hooks' ? HOOKLESS_LOOK_MS : BOOT_LOOK_MS);
+    };
+    bootTimer = setTimeout(() => void look(), first);
+  };
+
   const handle: SessionHandle = {
     send(text) {
       const proc = live?.proc;
@@ -578,6 +644,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     if (opts.typed || opts.reattach) busy(); // typed at the prompt, or still at it after a restart: already running
     else handle.send(opts.prompt);
     shotTimer = setInterval(collectShots, 2000);
+    watchHookless(live.hookless ? HOOKLESS_LOOK_MS : BOOT_MS, true);
     return handle;
   }
   if (opts.reattach) {
@@ -613,7 +680,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     if (cli === 'claude' && opts.resumeSessionId) cb.sessionId(sessionId); // a new one is saved once it's on disk (see the hooks)
     term.note(`── ${label}${opts.label ? ` · ${opts.label}` : ''} ──`);
     const resumeId = cli === 'claude' ? sessionId : (opts.resumeSessionId ?? null);
-    const l: LiveCli = { agentId: opts.agentId ?? '', cli, term, host, proc: null, token, dir: prepared.dir, resumeId, statusLine, shots: new Set(), session: { hook, exited } };
+    const l: LiveCli = { agentId: opts.agentId ?? '', cli, term, host, proc: null, token, dir: prepared.dir, resumeId, statusLine, shots: new Set(), session: { hook, exited }, hookUrl: prepared.hookUrl };
+    watchHookless(BOOT_MS, cli === 'claude' && !!opts.resumeSessionId); // a resumed conversation's earlier turns aren't this session's
     const begin = () => {
       if (done) return; // stopped while its thread was being unarchived
       let p: Pty;
@@ -657,9 +725,6 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
           log([{ kind: 'error', text: `⚠ ${label} is waiting on a setup screen: open the terminal to answer it.` }]);
         }
       }, 1000);
-      bootTimer = setTimeout(() => {
-        if (!done && !begun && cli === 'claude') log([{ kind: 'error', text: `⚠ ${label} hasn't started on the task yet. Open the terminal to see what it's waiting for.` }]);
-      }, BOOT_MS);
     };
     // Codex won't resume a thread the office archived (see codexThread): it's unarchived first.
     if (cli === 'codex' && opts.resumeSessionId) void host.codexThread('unarchive', opts.resumeSessionId).then(begin);

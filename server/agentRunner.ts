@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { query, type CanUseTool, type Options, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentCli, AgentRole, EffortLevel, LogKind } from '../shared/types.ts';
+import type { AgentBoot, AgentCli, AgentRole, EffortLevel, LogKind } from '../shared/types.ts';
 import { claudeConversation, LOST_CONVERSATION } from './clis.ts';
 import type { OfficeTools } from './ceo.ts';
 import type { UsageWarning } from './pacing.ts';
@@ -72,6 +72,8 @@ export interface SessionCallbacks {
   limited?(resetsAt: number | null): void;
   /** Claude warned that the subscription's usage is getting high (not while on overage). */
   usageWarning?(info: UsageWarning): void;
+  /** A new CLI the office hasn't heard from (see AgentBoot); null once it has, or the session ends. */
+  boot?(state: AgentBoot | null): void;
   finished(result: SessionResult): void;
 }
 

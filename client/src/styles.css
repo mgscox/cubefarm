@@ -609,6 +609,9 @@ input.inline:focus {
   font-weight: 500;
   color: var(--muted);
 }
+.wk-task.wk-boot {
+  color: var(--warn);
+}
 .wk-line {
   display: flex;
   gap: 6px;
