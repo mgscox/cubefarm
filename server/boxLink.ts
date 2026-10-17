@@ -4,6 +4,7 @@ import { VERSION } from './config.ts';
 import { KeeperPty, terminalMessage } from './ptyClient.ts';
 import { encode, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
 import { reconnectClis, startCliSession } from './cliRunner.ts';
+import type { ClaudeTurn } from './clis.ts';
 import { boxCommand, boxDeskDir, boxMainDir, boxUpdateCommand, parseUpdateResult, redialDelay, retryForm, type BoxInfo, type BoxLayout, type BoxUpdateResult } from './fleet.ts';
 import type { BoxConnection, BoxOptions, CliHost, CliPlan, Machine, PreparedCli } from './machine.ts';
 import type { SessionHandle } from './agentRunner.ts';
@@ -299,10 +300,11 @@ class BoxLink implements CliHost {
   // ---------- CliHost ----------
 
   async prepare(plan: CliPlan): Promise<PreparedCli> {
-    const { dir, prompt } = await this.call<{ dir: string; prompt: string }>('prepare', plan);
+    const { dir, prompt, hookUrl } = await this.call<{ dir: string; prompt: string; hookUrl?: string }>('prepare', plan);
     return {
       dir,
       prompt,
+      hookUrl,
       start: ({ cols, rows }, meta) => {
         if (this.status !== 'online') throw new Error(`Could not start the CLI: ${this.name} went ${this.status}.`);
         const p = new KeeperPty(crypto.randomUUID(), this.send, this.ptys);
@@ -315,6 +317,10 @@ class BoxLink implements CliHost {
 
   hasFile(file: string) {
     return this.transcripts.has(file);
+  }
+
+  claudeTurn(cwd: string, sessionId: string) {
+    return this.call<ClaudeTurn | null>('claudeTurn', cwd, sessionId).catch(() => null);
   }
 
   async newShots(dir: string, seen: Set<string>, now: number) {

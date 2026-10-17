@@ -609,6 +609,9 @@ input.inline:focus {
   font-weight: 500;
   color: var(--muted);
 }
+.wk-task.wk-boot {
+  color: var(--warn);
+}
 .wk-line {
   display: flex;
   gap: 6px;
@@ -1029,8 +1032,14 @@ input.inline:focus {
 
 .term-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+  white-space: normal;
+}
+.term-title > * {
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .avatar {
   display: grid;
@@ -2211,6 +2220,18 @@ input.inline:focus {
   display: flex;
   flex-direction: column;
 }
+.telegram-settings {
+  flex-shrink: 0;
+  max-height: 48%;
+  overflow: auto;
+  padding: 8px 12px;
+  background: #fff;
+  border-top: 1px solid #ddd;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.telegram-settings summary { cursor: pointer; }
+.telegram-settings input { min-width: 0; width: 100%; }
 .chat-head {
   display: flex;
   align-items: center;

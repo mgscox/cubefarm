@@ -3,6 +3,7 @@ import type { Pty } from './ptyClient.ts';
 import type { SessionCallbacks, SessionHandle, SessionOptions } from './agentRunner.ts';
 import type { DeskBase } from './workspace.ts';
 import type { ReconnectedCli } from './cliRunner.ts';
+import type { ClaudeTurn } from './clis.ts';
 import type { BoxInfo, BoxUpdateResult, PersistedBox } from './fleet.ts';
 import type { AgentTerminal } from './terminal.ts';
 import type { AgentCli, AgentRole, BoxStatus, CliView, EffortLevel } from '../shared/types.ts';
@@ -87,6 +88,8 @@ export interface PreparedCli {
   dir: string;
   /** The prompt as the CLI is given it (a long one is a pointer to its file). */
   prompt: string;
+  /** Where its hooks post on its machine, when not the office's own address (a box's): said when none arrive. */
+  hookUrl?: string;
   /** Start it in a new pseudo-terminal. Throws, with a message for the manager, if it can't. */
   start(size: { cols: number; rows: number }, meta: unknown): Pty;
 }
@@ -99,6 +102,8 @@ export interface CliHost {
   prepare(plan: CliPlan): PreparedCli | Promise<PreparedCli>;
   /** A file exists on this machine (a Claude Code transcript a hook names). */
   hasFile(file: string): boolean;
+  /** Where a Claude Code conversation stands by its transcript here (see clis.readClaudeTurn); null when it isn't there. */
+  claudeTurn(cwd: string, sessionId: string): ClaudeTurn | null | Promise<ClaudeTurn | null>;
   /** Browser screenshots new in a session's browser folder (dir: the session's), each then added to seen (Codex and OpenCode don't report tool results). */
   newShots(dir: string, seen: Set<string>, now: number): (Shot & { name: string })[] | Promise<(Shot & { name: string })[]>;
   /** The screenshot a Playwright result names (relative to the CLI's folder). */

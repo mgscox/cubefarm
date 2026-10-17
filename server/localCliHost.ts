@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { HOME_DIR } from './config.ts';
-import { cliLabel, codexThread } from './clis.ts';
+import { cliLabel, codexThread, readClaudeTurn } from './clis.ts';
 import { adoptPty, discardPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, startKeeper, terminalsAvailable } from './ptyClient.ts';
 import { screenshotFile } from './agentRunner.ts';
 import { BIN_DIR, removeSessionDir, SESSIONS_DIR, sessionShots, writeCliSession } from './cliFiles.ts';
@@ -18,6 +18,7 @@ function prepare(plan: CliPlan): PreparedCli {
   return {
     dir: launch.dir,
     prompt: launch.prompt,
+    hookUrl: `${keeper ?? plan.officeUrl}/api/hooks`,
     start({ cols, rows }, meta) {
       try {
         return spawnPty(launch.file, launch.args, { cols, rows, cwd: launch.cwd, env: launch.env }, meta);
@@ -31,6 +32,7 @@ function prepare(plan: CliPlan): PreparedCli {
 export const localCliHost: CliHost = {
   prepare,
   hasFile: (file) => fs.existsSync(file),
+  claudeTurn: (cwd, sessionId) => readClaudeTurn(cwd, sessionId),
   newShots: sessionShots,
   savedShot: screenshotFile,
   codexThread,

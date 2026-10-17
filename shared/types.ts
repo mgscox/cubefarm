@@ -218,6 +218,7 @@ export interface BoxView {
   version: string | null; // cubefarm on the box
   git: string | null;
   ghReady: boolean;
+  hookError: string | null; // why its CLIs can't reach the office's hook URL (null: they can, or not known yet)
   clis: CliView[];
   running: number; // CLIs running there now
   sync: { text: string; failed: boolean } | null; // moving to the office's version (#94), or why it couldn't
@@ -270,8 +271,12 @@ export interface AgentView {
   lastError: string | null;
   box: string | null; // their own box, overriding the floor's (null = the floor's)
   deskBox: string; // where their current task's desk and CLI are ('' = the office's machine)
+  boot: AgentBoot | null; // a new CLI the office hasn't heard from yet (null: it has, or none is starting)
   log: LogLine[]; // tail of the terminal log (full buffer on snapshot)
 }
+
+/** A new Claude CLI with no hook after a minute: 'waiting' to start on the task, or 'no-hooks' (working, but its hooks don't reach the office). */
+export type AgentBoot = 'waiting' | 'no-hooks';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -389,6 +394,20 @@ export interface PhoneMessage {
   text: string;
   at: number;
   requestId?: string; // a hire / let-go proposal this message is about
+  origin?: 'web' | 'telegram';
+  telegram?: { updateId: number; chatId: number; messageId: number };
+}
+
+/** Non-secret Telegram connection state; delivery never changes phone read state. */
+export interface TelegramView {
+  configured: boolean;
+  state: 'unconfigured' | 'unpaired' | 'connected' | 'reconnecting' | 'error';
+  detail: string;
+  paired: { userId: number; chatId: number } | null;
+  pairing: { code: string; expiresAt: number; candidate: { userId: number; chatId: number } | null } | null;
+  pending: number;
+  uncertain: boolean;
+  demo?: { sent: { text: string; buttons?: string[] }[]; offline: boolean };
 }
 
 export type CeoJobKind = 'onboard' | 'plan' | 'review' | 'chat';
@@ -428,6 +447,7 @@ export interface WorldSnapshot {
   research: ResearchInfo;
   messages: PhoneMessage[];
   phoneReadAt: number; // CEO messages newer than this are unread
+  telegram?: TelegramView;
   officeCommit?: string | null; // short sha the server started on (absent on servers without self-update)
   officeLifecycle: OfficeLifecycleView;
   officeUpdate?: OfficeUpdateView;
@@ -452,6 +472,7 @@ export type ServerEvent =
   | { type: 'research'; research: ResearchInfo }
   | { type: 'message'; message: PhoneMessage }
   | { type: 'phoneRead'; at: number }
+  | { type: 'telegram'; telegram: TelegramView }
   | { type: 'officeLifecycle'; officeLifecycle: OfficeLifecycleView }
   | { type: 'officeUpdate'; officeUpdate: OfficeUpdateView }
   | { type: 'usage'; usage: UsageView }

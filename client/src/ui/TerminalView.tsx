@@ -8,7 +8,7 @@ import { isResearchIssue } from '../../../shared/issues';
 import { Markdown } from './Markdown';
 import { MessageBox } from './MessageBox';
 import { closeOverlay, Panel } from './Overlays';
-import { toolVerb } from '../world/draw';
+import { BOOT_TEXT, toolVerb } from '../world/draw';
 
 const STATUS_LABEL: Record<string, string> = {
   idle: 'free',
@@ -101,6 +101,11 @@ export function TerminalView({ agentId }: { agentId: string }) {
             {agent.specialty ? ` · 🎯 ${agent.specialty}` : ''}
           </span>
           <StatusPill status={agent.status} />
+          {working && agent.boot && (
+            <span className="chip chip-warn" title={agent.boot === 'no-hooks' ? "Working in its terminal, but its hooks don't reach the office: it follows the session's transcript to see when it's done" : "Its CLI hasn't taken the task yet: see the terminal"}>
+              ⚠ {BOOT_TEXT[agent.boot]}
+            </span>
+          )}
           {working && agent.currentTool && <span className="muted small">{toolVerb(agent.currentTool)}…</span>}
         </div>
       }

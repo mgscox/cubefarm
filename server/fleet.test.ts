@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { agentBox, boxCommand, boxDeskDir, boxMainDir, boxSync, boxSyncText, boxUpdateCommand, loginShell, notPosix, parseUpdateResult, redialDelay, retryForm, startPlace, validDestination, type BoxInfo } from './fleet.ts';
+import { agentBox, boxCommand, boxDeskDir, boxMainDir, boxSync, boxSyncText, boxUpdateCommand, loginShell, notPosix, parseUpdateResult, probeHookUrl, redialDelay, retryForm, startPlace, validDestination, type BoxInfo } from './fleet.ts';
 
 describe('agentBox', () => {
   it("is the agent's own box, else the floor's, else the office's machine", () => {
@@ -189,5 +189,23 @@ describe('following the office (#94)', () => {
     expect(boxSyncText({ target: '0.4.0', step: 'restart', state: 'restarting' }, 0)).toBe('Restarting on v0.4.0…');
     expect(boxSyncText({ target: '0.4.0', step: 'update', state: 'updating' }, 0)).toBe("Updating to the office's v0.4.0…");
     expect(boxSyncText({ target, step: 'update', state: 'failed', error: 'no network' }, 0)).toBe("Couldn't move to the office's c0ffee0: no network");
+  });
+});
+
+describe('probeHookUrl', () => {
+  const base = 'http://127.0.0.1:41234';
+
+  it('posts an empty hook for no session and is happy with any answer that is OK', async () => {
+    const fetcher = vi.fn(async () => new Response('{}', { status: 200 }));
+    expect(await probeHookUrl(base, fetcher as unknown as typeof fetch)).toBeNull();
+    expect(fetcher).toHaveBeenCalledWith(`${base}/api/hooks/cubefarm-probe`, expect.objectContaining({ method: 'POST', body: '{}' }));
+  });
+
+  it("says why the hook URL can't be reached", async () => {
+    const refused = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+    expect(await probeHookUrl(base, (async () => Promise.reject(refused)) as unknown as typeof fetch)).toBe(`${base}/api/hooks/cubefarm-probe: ECONNREFUSED`);
+    expect(await probeHookUrl(base, (async () => new Response('', { status: 404 })) as unknown as typeof fetch)).toBe(`${base}/api/hooks/cubefarm-probe answered 404`);
+    const slow = Object.assign(new Error('timed out'), { name: 'TimeoutError' });
+    expect(await probeHookUrl(base, (async () => Promise.reject(slow)) as unknown as typeof fetch)).toBe(`${base}/api/hooks/cubefarm-probe: no answer`);
   });
 });

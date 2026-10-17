@@ -1,4 +1,4 @@
-import type { LogLine, PreviewStatus, PreviewView, RepoView } from '../../../shared/types';
+import type { AgentBoot, LogLine, PreviewStatus, PreviewView, RepoView } from '../../../shared/types';
 import type { Agent, KanbanCard, KanbanColumns } from '../store';
 
 // 2D canvas painters for everything in the office that shows text: laptop terminals,
@@ -51,6 +51,10 @@ const TERM = {
 
 const SPINNER = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
 const VERBS = ['Crafting', 'Pondering', 'Tinkering', 'Brewing', 'Noodling', 'Scheming', 'Assembling', 'Percolating'];
+
+/** A new CLI the office hasn't heard from (AgentView.boot), as its card and desk say it. */
+export const BOOT_TEXT: Record<AgentBoot, string> = { waiting: "Hasn't started yet", 'no-hooks': 'Hooks not reaching the office' };
+const BOOT_ICON: Record<AgentBoot, string> = { waiting: '⏳', 'no-hooks': '📡' };
 
 export function toolVerb(tool: string | null): string {
   if (!tool) return '';
@@ -151,7 +155,7 @@ export function drawTerminal(
 
   if (agent.status === 'working' || agent.status === 'preparing') {
     const frame = Math.floor(now / 120) % SPINNER.length;
-    const verb = agent.status === 'preparing' ? 'Setting up worktree' : toolVerb(agent.currentTool) || VERBS[Math.floor(now / 6000) % VERBS.length];
+    const verb = agent.status === 'preparing' ? 'Setting up worktree' : agent.boot ? BOOT_TEXT[agent.boot] : toolVerb(agent.currentTool) || VERBS[Math.floor(now / 6000) % VERBS.length];
     const secs = agent.startedAt ? Math.floor((Date.now() - agent.startedAt) / 1000) : 0;
     const mm = Math.floor(secs / 60);
     ctx.fillStyle = '#ff9e64';
@@ -406,7 +410,7 @@ export function drawTag(ctx: CanvasRenderingContext2D, w: number, h: number, age
   ctx.stroke();
   ctx.textBaseline = 'middle';
   ctx.font = `38px ${SANS}`;
-  ctx.fillText(icon, 22, h / 2 + 2);
+  ctx.fillText(agent.status === 'working' && agent.boot ? BOOT_ICON[agent.boot] : icon, 22, h / 2 + 2);
   ctx.fillStyle = '#23263a';
   ctx.font = `700 40px ${SANS}`;
   const busy = agent.status !== 'idle';

@@ -6,7 +6,7 @@ import type { Backend } from './backend.ts';
 import type { BoxConnection, BoxOptions, Machine } from './machine.ts';
 import type { PreviewBackend } from './previewRunner.ts';
 import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
-import { CLIS } from './clis.ts';
+import { bootNotice, CLIS } from './clis.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
 import { READY_FOR_HUMAN, RESEARCH } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
@@ -453,15 +453,17 @@ function fakeUsageWarning(cb: SessionCallbacks) {
 const fakeClis = () => CLIS.map((c) => ({ id: c.id, label: c.label, installed: true, version: 'demo', integrated: c.integrated }));
 
 /**
- * A pretend box: it "connects" after a moment (one whose destination starts with "offline" never does), and its desks
- * and fake sessions are the demo's own under its folder, labelled with its name in the terminal. One whose destination
- * starts with "stale" runs an older commit than the office, so it's brought up to date.
+ * A pretend box: it "connects" after a moment (one whose destination starts with "offline" never does; "no-hooks": its
+ * CLIs can't reach its hook URL), and its desks and fake sessions are the demo's own under its folder, labelled with
+ * its name in the terminal. One whose destination starts with "stale" runs an older commit than the office, so it's
+ * brought up to date.
  */
 function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
   let status: 'connecting' | 'online' | 'offline' = 'connecting';
   let running = 0;
   const offline = /^offline/i.test(opts.box.destination);
   const claudeOnly = /^claude-only/i.test(opts.box.destination);
+  const noHooks = /^no-hooks/i.test(opts.box.destination);
   let commit = /^stale/i.test(opts.box.destination) ? `5ta1e00${'0'.repeat(33)}` : DEMO_HEAD;
   let pulled = commit;
   let timer = setTimeout(() => {
@@ -474,11 +476,22 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
     startSession: (o, cb) => {
       running += 1;
       opts.changed();
+      let over = false;
+      // Hooks that never reach the office: said a moment in; the office follows the transcript until the session ends.
+      if (noHooks) {
+        setTimeout(() => {
+          if (over) return;
+          cb.log([{ kind: 'error', text: `${bootNotice('Claude Code', 'esc to interrupt', 'http://127.0.0.1:41234/api/hooks').text} (demo)` }]);
+          cb.boot?.('no-hooks');
+        }, 2000);
+      }
       return start({ ...o, label: `${o.label ?? ''} @ ${opts.box.name}`.trim() }, {
         ...cb,
         finished: (r) => {
+          over = true;
           running -= 1;
           opts.changed();
+          if (noHooks) cb.boot?.(null);
           cb.finished(r);
         },
       });
@@ -491,7 +504,7 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
     state: () => ({
       status,
       error: offline && status === 'offline' ? 'ssh: connect to host: Connection timed out (demo)' : null,
-      info: status === 'online' ? { platform: 'linux', version: 'demo', commit, git: 'git version 2.47.0 (demo)', ghReady: true, workspaces, sep: '/' } : null,
+      info: status === 'online' ? { platform: 'linux', version: 'demo', commit, git: 'git version 2.47.0 (demo)', ghReady: true, hookError: noHooks ? 'http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED (demo)' : null, workspaces, sep: '/' } : null,
       // A box whose destination starts with "claude-only" has just Claude Code: other agents can't move there.
       clis: status === 'online' ? fakeClis().map((c) => (claudeOnly && c.id !== 'claude' ? { ...c, installed: false, version: null } : c)) : [],
       running,
@@ -1224,4 +1237,32 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
       finish(false, '', 'Stopped by manager');
     },
   };
+}
+
+/** Local Telegram Bot API simulation. It never reads credentials or opens a network connection. */
+export function createDemoTelegram(): import('./telegram.ts').TelegramTransport & { offline: boolean; ambiguous: boolean } {
+  let nextId = 1;
+  const sent = new Map<number, { text: string; buttons?: string[] }>();
+  const fake = {
+    identity: 'demo-telegram', offline: false, ambiguous: false,
+    preview: () => ({ sent: structuredClone([...sent.values()].slice(-20)), offline: fake.offline }),
+    async call(method: string, body: Record<string, unknown>) {
+      const { TelegramFailure } = await import('./telegram.ts');
+      if (fake.offline) throw new TelegramFailure('retry', 'Demo Telegram disconnected.', 1);
+      if (fake.ambiguous) { fake.ambiguous = false; throw new TelegramFailure('uncertain', 'Demo Telegram send result unknown.'); }
+      if (method === 'answerCallbackQuery') return true;
+      const keyboard = body.reply_markup as { inline_keyboard?: { callback_data: string }[][] } | undefined;
+      const message = { text: String(body.text ?? ''), buttons: keyboard?.inline_keyboard?.flat().map((b) => b.callback_data) };
+      if (method === 'editMessageText') {
+        const previous = sent.get(Number(body.message_id));
+        if (previous) Object.assign(previous, message);
+        return { message_id: body.message_id };
+      }
+      const id = nextId++;
+      sent.set(id, message);
+      if (sent.size > 200) sent.delete(sent.keys().next().value!);
+      return { message_id: id };
+    },
+  };
+  return fake;
 }

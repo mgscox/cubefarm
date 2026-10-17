@@ -236,6 +236,45 @@ test('a long agent desks path wraps inside the Settings card on narrow screens',
   }
 });
 
+test('hook warnings and status fit the terminal header at phone width', async ({ page }, testInfo) => {
+  let agentId = '';
+  let name = '';
+  await page.routeWebSocket('**/ws', (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((message) => {
+      const event = JSON.parse(message.toString()) as ServerEvent;
+      if (event.type === 'snapshot') {
+        event.data.settings.tutorialStep = -1;
+        const agent = event.data.agents.find((a) => a.role === 'dev' && a.repoId)!;
+        agentId = agent.id;
+        name = agent.name;
+        agent.status = 'working';
+        agent.boot = 'no-hooks';
+      } else if (event.type === 'agent' && event.agent.id === agentId) {
+        event.agent.status = 'working';
+        event.agent.boot = 'no-hooks';
+      }
+      ws.send(JSON.stringify(event));
+    });
+  });
+  await enterOffice(page);
+  await releaseMouse(page);
+  await page.getByTitle(`Watch ${name}'s screen`, { exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const title = page.locator('.term-title');
+  await expect(title.locator('.chip-warn')).toHaveText('⚠ Hooks not reaching the office');
+  await expect(title.locator('.status')).toHaveText('working');
+  const fits = await title.evaluate((el) => {
+    const bounds = el.getBoundingClientRect();
+    return [...el.children].every((child) => {
+      const rect = child.getBoundingClientRect();
+      return rect.left >= bounds.left && rect.right <= bounds.right && rect.top >= bounds.top && rect.bottom <= bounds.bottom;
+    });
+  });
+  expect(fits, 'every header item fits within the visible title').toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('hook-warning-phone.png') });
+});
+
 test('repository refresh distinguishes unavailable checks, REST fallback, stale data, failure and recovery', async ({ page }, testInfo) => {
   let phase: 'checks' | 'fallback' | 'stale' | 'failed' | 'success' = 'checks';
   const diagnostic = 'GraphQL: Resource not accessible by personal access token (repository.pullRequests.nodes.0.statusCheckRollup.contexts.nodes.0)';
