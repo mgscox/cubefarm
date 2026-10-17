@@ -8,7 +8,7 @@ import { effectiveModel } from '../../../shared/models';
 import { canPostpone, canUpdateNow, drainDeadline, officeUpdateText } from '../officeUpdate';
 import { confirmDialog } from './Confirm';
 import { FleetTab } from './FleetTab';
-import { boxName, busy, movable } from '../fleet';
+import { boxName, busy, missingClis, movable } from '../fleet';
 import { IssueForm } from './KanbanView';
 import { LiveTerminal } from './LiveTerminal';
 import { MouseSettings, Panel } from './Overlays';
@@ -536,11 +536,15 @@ function TeamTab() {
                           >
                             <option value={FLOOR_BOX}>Floor's box</option>
                             <option value="">This machine</option>
-                            {boxes.map((b) => (
-                              <option key={b.id} value={b.id}>
-                                {b.name}
-                              </option>
-                            ))}
+                            {boxes.map((b) => {
+                              const lacks = missingClis([a], b, settings.defaultCli).length > 0; // their task there wouldn't start
+                              return (
+                                <option key={b.id} value={b.id} disabled={lacks && a.box !== b.id}>
+                                  {b.name}
+                                  {lacks ? ` (no ${cliName(clis, workerCli(a))})` : ''}
+                                </option>
+                              );
+                            })}
                           </select>
                         )}
                       </td>

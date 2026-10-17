@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api';
-import { agentBox, boxName, boxNotes, busy, floorMove, floorMoveText, movable } from '../fleet';
+import { agentBox, boxName, boxNotes, busy, floorMove, floorMoveText, missingClis, movable } from '../fleet';
 import { agentsOnRepo, useStore, type Agent } from '../store';
 import type { BoxView, CliView, RepoView } from '../../../shared/types';
 import { confirmDialog } from './Confirm';
@@ -32,11 +32,12 @@ function Clis({ clis }: { clis: CliView[] }) {
   );
 }
 
-/** Who works on a machine: agents whose next task starts there, and how many CLIs run there now. */
+/** Who works on a machine: agents whose next task starts there (all on the office's in the SDK runtime), and who is finishing one there. */
 function Workers({ id, agents, repos }: { id: string; agents: Agent[]; repos: RepoView[] }) {
-  const floorOf = (a: Agent) => repos.find((r) => r.id === a.repoId);
-  const here = agents.filter((a) => movable(a) && agentBox(a, floorOf(a)) === id);
-  const elsewhere = agents.filter((a) => movable(a) && a.deskBox === id && agentBox(a, floorOf(a)) !== id && busy(a));
+  const terminal = useStore((s) => s.settings.runtime === 'terminal');
+  const next = (a: Agent) => (terminal ? agentBox(a, repos.find((r) => r.id === a.repoId)) : '');
+  const here = agents.filter((a) => movable(a) && next(a) === id);
+  const elsewhere = agents.filter((a) => movable(a) && a.deskBox === id && next(a) !== id && busy(a));
   if (!here.length && !elsewhere.length) return <div className="muted small">Nobody is assigned here.</div>;
   return (
     <div className="small">
@@ -110,9 +111,16 @@ function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos:
 /** A floor's machine, and the one-click move of everyone on it. */
 function FloorMachine({ repo, boxes, agents }: { repo: RepoView; boxes: BoxView[]; agents: Record<string, Agent> }) {
   const [to, setTo] = useState(repo.box);
+  const terminal = useStore((s) => s.settings.runtime === 'terminal');
+  const defaultCli = useStore((s) => s.settings.defaultCli);
+  const clis = useStore((s) => s.clis);
   const team = agentsOnRepo(agents, repo.id).filter(movable);
   const target = boxes.some((b) => b.id === to) ? to : '';
   const text = floorMoveText(floorMove(repo, team, target), boxName(boxes, target));
+  // Their next task there wouldn't start: the box hasn't got their coding agent.
+  const lacking = missingClis(team, boxes.find((b) => b.id === target), defaultCli);
+  const cliLabel = (a: Agent) => clis.find((c) => c.id === (a.cli || defaultCli))?.label ?? (a.cli || defaultCli);
+  const blocked = !terminal ? 'Boxes need the terminal runtime' : lacking.length ? `${boxName(boxes, target)} hasn't got ${lacking.map((a) => `${cliLabel(a)} for ${a.name}`).join(', ')}` : null;
   const own = team.filter((a) => a.box !== null);
   const move = () =>
     void confirmDialog({ icon: '🖥', title: `Move floor ${repo.floor} to ${boxName(boxes, target)}?`, body: text ?? '', confirm: 'Move the floor' }).then(
@@ -125,14 +133,15 @@ function FloorMachine({ repo, boxes, agents }: { repo: RepoView; boxes: BoxView[
         <div className="grow">
           <b>{repo.fullName}</b>
           <div className="muted small">
-            Works on {boxName(boxes, repo.box)} · {team.length} developer{team.length === 1 ? '' : 's'} and QA
+            Works on {boxName(boxes, terminal ? repo.box : '')} · {team.length} developer{team.length === 1 ? '' : 's'} and QA
           </div>
         </div>
         <select
-          value={target}
+          value={terminal ? target : ''}
           title="The machine for the whole floor"
           aria-label={`Machine for floor ${repo.floor}`}
           style={{ width: 'auto', minWidth: 150 }}
+          disabled={!terminal}
           onChange={(e) => setTo(e.target.value)}
         >
           <option value="">This machine</option>
@@ -143,11 +152,16 @@ function FloorMachine({ repo, boxes, agents }: { repo: RepoView; boxes: BoxView[
             </option>
           ))}
         </select>
-        <button className="btn btn-small btn-good" disabled={!text} title={text ?? 'Everyone here already works there'} onClick={move}>
+        <button className="btn btn-small btn-good" disabled={!text || !!blocked} title={blocked ?? text ?? 'Everyone here already works there'} onClick={move}>
           Move the whole floor
         </button>
       </div>
-      {own.length > 0 && (
+      {terminal && lacking.length > 0 && (
+        <div className="small fleet-missing">
+          ⚠ {blocked}: install it there, or change their coding agent on the Team tab first.
+        </div>
+      )}
+      {terminal && own.length > 0 && (
         <div className="muted small">
           Own box: {own.map((a) => `${a.name} on ${boxName(boxes, a.box ?? '')}`).join(', ')}
         </div>

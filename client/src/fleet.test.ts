@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agentBox, boxName, boxNotes, floorMove, floorMoveText } from './fleet';
+import { agentBox, boxName, boxNotes, floorMove, floorMoveText, missingClis } from './fleet';
 import type { AgentStatus, BoxView } from '../../shared/types';
 
 const boxes = [{ id: 'b1', name: 'Tower' }];
@@ -55,5 +55,20 @@ describe('boxNotes', () => {
 
   it("doesn't guess while it's offline", () => {
     expect(boxNotes({ ...box, status: 'offline', ghReady: false }).missing).toEqual([]);
+  });
+});
+
+describe('missingClis', () => {
+  const claudeOnly = { status: 'online' as const, clis: [{ id: 'claude' as const, label: 'Claude Code', installed: true, version: '2.1', integrated: true }, { id: 'codex' as const, label: 'Codex', installed: false, version: null, integrated: true }] };
+  const team = [{ name: 'Ada', cli: '' as const }, { name: 'Ken', cli: 'codex' as const }];
+
+  it("names the agents whose coding agent an online box hasn't got", () => {
+    expect(missingClis(team, claudeOnly, 'claude').map((a) => a.name)).toEqual(['Ken']);
+    expect(missingClis(team, claudeOnly, 'codex').map((a) => a.name)).toEqual(['Ada', 'Ken']);
+  });
+
+  it("can't tell for a box that isn't online, or the office's own machine", () => {
+    expect(missingClis(team, { ...claudeOnly, status: 'offline' }, 'claude')).toEqual([]);
+    expect(missingClis(team, undefined, 'claude')).toEqual([]);
   });
 });

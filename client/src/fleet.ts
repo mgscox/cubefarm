@@ -1,4 +1,4 @@
-import type { AgentStatus, AgentView, BoxView, RepoView } from '../../shared/types';
+import type { AgentCli, AgentStatus, AgentView, BoxView, RepoView } from '../../shared/types';
 
 // The fleet as the manager's console shows it: which machine each agent works on, and what moving a floor does.
 
@@ -32,6 +32,15 @@ export function floorMoveText(move: ReturnType<typeof floorMove>, where: string)
   if (move.busy) parts.push(move.busy === 1 ? '1 of them is mid-task and moves once that task is done.' : `${move.busy} of them are mid-task and move once their tasks are done.`);
   if (move.overrides) parts.push(`Clears ${move.overrides} agent${move.overrides === 1 ? "'s own box" : "s' own boxes"}, so the whole floor follows it.`);
   return parts.join(' ');
+}
+
+/**
+ * Agents whose coding agent a box doesn't have: their next task there would fail to start. Only an online box says what
+ * it has; one that isn't online is waited for, and the office's own machine is checked where agents are hired.
+ */
+export function missingClis<A extends Pick<AgentView, 'name' | 'cli'>>(agents: A[], box: Pick<BoxView, 'status' | 'clis'> | undefined, defaultCli: AgentCli): A[] {
+  if (!box || box.status !== 'online') return [];
+  return agents.filter((a) => !box.clis.some((c) => c.id === (a.cli || defaultCli) && c.installed));
 }
 
 /** A box's status line: what it runs and what's missing before agents can work there. */
