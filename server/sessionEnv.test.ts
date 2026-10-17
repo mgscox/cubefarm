@@ -11,7 +11,8 @@ vi.mock('./clis.ts', async (importOriginal) => ({
   ...await importOriginal<typeof import('./clis.ts')>(),
   commandFor: vi.fn(() => ({ file: 'fake-agent', args: [] })),
 }));
-vi.mock('./ptyClient.ts', () => ({
+vi.mock('./ptyClient.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./ptyClient.ts')>(),
   terminalsAvailable: true,
   hooksReady: false,
   keeperHookUrl: () => null,

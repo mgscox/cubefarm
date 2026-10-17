@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
+import type { Machine } from './machine.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
@@ -634,7 +635,7 @@ export class Swarm {
       ...this.state.agents.map((a) => {
         const repo = this.state.repos.find((r) => r.id === a.repoId);
         if (!repo || back.some((c) => c.agentId === a.id)) return undefined;
-        return this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
+        return this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
       }),
       this.previews.clearOrphans(this.state.repos),
     ]);
@@ -932,6 +933,11 @@ export class Swarm {
 
   private agentSlug(a: PersistedAgent) {
     return `${slugify(a.name)}-${a.id.slice(0, 4)}`;
+  }
+
+  /** The machine an agent's desk and sessions are on. Always the office's own, for now (see docs/fleet-design.md). */
+  private machineFor(_a: PersistedAgent): Machine {
+    return this.backend;
   }
 
   /** The agent's task or session changes: a session end still being handled for the old one must not act on it. */
@@ -1630,9 +1636,10 @@ export class Swarm {
     const repo = this.state.repos.find((r) => r.id === a.repoId);
     if (repo) {
       const slug = this.agentSlug(a);
-      void this.backend
+      const machine = this.machineFor(a);
+      void machine
         .releaseDesk(repo.fullName, slug, this.port(a))
-        .then(() => this.backend.removeDesk(repo.fullName, slug))
+        .then(() => machine.removeDesk(repo.fullName, slug))
         .catch(() => undefined);
     }
     this.state.agents = this.state.agents.filter((x) => x.id !== id);
@@ -1666,7 +1673,7 @@ export class Swarm {
     const repo = this.state.repos.find((r) => r.id === a.repoId);
     if (!repo) return;
     this.appendLog(a, [{ kind: 'system', text: '↻ The office restarted; their CLI kept working and the office is following it again.' }]);
-    this.startAgentSession(a, repo, this.backend.deskDir(repo.fullName, this.agentSlug(a)), '', '', a.sessionId ?? undefined, undefined, 'reattach');
+    this.startAgentSession(a, repo, this.machineFor(a).deskDir(repo.fullName, this.agentSlug(a)), '', '', a.sessionId ?? undefined, undefined, 'reattach');
   }
 
   /** The manager pressed Esc in the agent's terminal and the CLI stopped its turn: a Stop that leaves the CLI to them. */
@@ -1756,7 +1763,7 @@ export class Swarm {
    * SDK. A session can only be resumed by the CLI that made it, so a follow-up stays with that CLI.
    */
   private sessionRuntime(a: PersistedAgent, resume?: string): { terminal?: AgentTerminal; cli?: AgentCli; label?: string; resumeSessionId?: string } {
-    const inTerminal = this.state.settings.runtime === 'terminal' && this.backend.terminals;
+    const inTerminal = this.state.settings.runtime === 'terminal' && this.machineFor(a).terminals;
     // Researchers run Claude Code too: its web search is what they work with.
     let cli: AgentCli = a.role === 'ceo' || a.role === 'researcher' ? 'claude' : a.cli || this.state.settings.defaultCli;
     if (resume && a.sessionCli && a.sessionCli !== cli) {
@@ -1819,7 +1826,7 @@ export class Swarm {
 
   private buildSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, fixing?: { pr: number; headRef: string }) {
     if (a.role === 'researcher' && !fixing) return this.researcherSystemAppend(a, { kind: 'floor', repo: repo.fullName, defaultBranch: repo.defaultBranch, summary: repo.summary, mission: repo.mission, cwd, branch, autoMerge: repo.autoMerge });
-    const linked = this.linkedRepos(repo).map((r) => `- ${r.fullName}: read-only reference clone at ${this.backend.mainDir(r.fullName)}`);
+    const linked = this.linkedRepos(repo).map((r) => `- ${r.fullName}: read-only reference clone at ${this.machineFor(a).mainDir(r.fullName)}`);
     const push = fixing ? `git push origin HEAD:${fixing.headRef}` : `git push -u origin ${branch}`;
     return [
       `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a software engineer'} on an autonomous agent team ("cubefarm"). Several teammates work in parallel on other issues of the same repository, each in their own git worktree. Nobody is watching live to answer questions, so make sensible decisions yourself and record assumptions in the PR description. The manager may occasionally send you messages; follow their instructions.`,
@@ -1888,8 +1895,8 @@ export class Swarm {
     const gone = () => a.status !== 'preparing' || this.agentRt.get(a.id)?.generation !== generation;
     try {
       if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') await this.cloneRepo(repo.id);
-      await this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
-      const cwd = await this.backend.prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch, (text) => this.appendLog(a, [{ kind: 'system', text }]));
+      await this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
+      const cwd = await this.machineFor(a).prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch, (text) => this.appendLog(a, [{ kind: 'system', text }]));
       if (gone()) return null;
       if (job) this.setQa(job.rec, { preparation: { ...job.rec.preparation, [job.task]: undefined } });
       return a.status === 'preparing' ? cwd : null; // null: stopped or fired while preparing
@@ -1986,7 +1993,7 @@ export class Swarm {
     if (a.task === 'issue' && mode !== 'reattach') {
       rt.starting = generation;
       a.issueStartHead = null;
-      const head = await this.backend.deskHead(repo.fullName, this.agentSlug(a)).catch(() => null);
+      const head = await this.machineFor(a).deskHead(repo.fullName, this.agentSlug(a)).catch(() => null);
       if (rt.starting === generation) delete rt.starting;
       if (!this.state.agents.includes(a) || this.officeUpdate.handedOver || rt.generation !== generation || a.status !== 'working') return;
       if (this.state.officeHeld) return this.deferPrepared(a, repo);
@@ -1995,7 +2002,7 @@ export class Swarm {
       this.save();
     }
     let session: SessionHandle | undefined; // undefined while startSession runs, should a runner finish synchronously
-    session = rt.session = this.backend.startSession(
+    session = rt.session = this.machineFor(a).startSession(
       {
         cwd,
         prompt,
@@ -2003,7 +2010,7 @@ export class Swarm {
         model: this.modelFor(a, how.cli),
         effort: a.effort || this.state.settings.defaultEffort,
         browserTesting: repo.browserTesting,
-        additionalDirectories: [...this.linkedRepos(repo).map((r) => this.backend.mainDir(r.fullName)), ...(a.role === 'researcher' ? [RESEARCH_DIR] : [])],
+        additionalDirectories: [...this.linkedRepos(repo).map((r) => this.machineFor(a).mainDir(r.fullName)), ...(a.role === 'researcher' ? [RESEARCH_DIR] : [])],
         role: a.task === 'qa' ? 'qa' : a.role, // a developer covering QA works under QA's rules
         outputSchema,
         // A developer's CLI stays at its prompt afterwards, for the manager and for follow-ups; QA's closes.
@@ -2065,7 +2072,7 @@ export class Swarm {
     a.costUsd += result.costUsd;
     a.turns += result.turns;
     // Dev servers the agent forgot to stop would otherwise keep its port and lock its desk folder.
-    const released = this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
+    const released = this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
     if (result.interrupted) this.interrupted(a);
 
     if (a.task === 'qa') await this.onQaFinished(a, repo, result, released);
@@ -2120,9 +2127,9 @@ export class Swarm {
       return 0;
     }) : 0;
     if (gone()) return;
-    const localAhead = !a.prNumber && !result.interrupted ? await this.backend.deskAhead(repo.fullName, this.agentSlug(a), repo.defaultBranch).catch(() => null) : null;
+    const localAhead = !a.prNumber && !result.interrupted ? await this.machineFor(a).deskAhead(repo.fullName, this.agentSlug(a), repo.defaultBranch).catch(() => null) : null;
     if (gone()) return;
-    const head = !a.prNumber && !result.interrupted ? await this.backend.deskHead(repo.fullName, this.agentSlug(a)).catch(() => null) : null;
+    const head = !a.prNumber && !result.interrupted ? await this.machineFor(a).deskHead(repo.fullName, this.agentSlug(a)).catch(() => null) : null;
     if (gone()) return;
     const work = issueSessionWork({ startHead: a.issueStartHead, head, localAhead, remoteAhead: aheadKnown ? ahead : null });
     if (a.prNumber || work === 'commits') this.setNoWorkEndings(repo, (repo.noWorkEndings ?? []).filter((r) => r.issueNumber !== a.issueNumber));
@@ -2200,7 +2207,7 @@ export class Swarm {
   private finishPushedWork(a: PersistedAgent, repo: PersistedRepo, why: string, ahead: number) {
     this.nudged.add(`${repo.id}#${a.issueNumber}`);
     this.appendLog(a, [{ kind: 'system', text: `↻ The session ${why}, but ${a.branch} has ${this.commits(ahead)}. Starting one more to finish it.` }]);
-    const cwd = this.backend.deskDir(repo.fullName, this.agentSlug(a));
+    const cwd = this.machineFor(a).deskDir(repo.fullName, this.agentSlug(a));
     const prompt = [
       `Your last session on GitHub issue #${a.issueNumber} (${a.issueTitle}) ${why}. Its branch ${a.branch} has ${this.commits(ahead)} ahead of ${repo.defaultBranch}, and this worktree may hold more.`,
       `Check git status and git log origin/${repo.defaultBranch}..HEAD, finish what is left (run the checks), push, and open the PR with "Closes #${a.issueNumber}" in its body. If the issue can't be done, open a draft PR that explains why. Checks you can't run yourself (another operating system, real devices, paid services, live voice or a person's judgement) are not unfinished work: list them in the PR body for the manager and open the PR ready for review.`,
@@ -2724,7 +2731,7 @@ export class Swarm {
     if (!a.sessionId || !a.branch || a.task === 'qa') throw new HttpError(409, `${a.name} has no session to continue. Assign an issue instead.`);
     this.ensureSlot();
     this.appendLog(a, [{ kind: 'manager', text: `▶ Manager: ${text}` }]);
-    const cwd = this.backend.deskDir(repo.fullName, this.agentSlug(a));
+    const cwd = this.machineFor(a).deskDir(repo.fullName, this.agentSlug(a));
     a.lastError = null;
     a.startedAt = Date.now();
     if (a.task === null) a.task = 'issue';
@@ -3431,7 +3438,7 @@ export class Swarm {
     const s = this.state.settings;
     // A chat carries on from the CEO's last session, so "why did you propose that?" has an answer.
     const how = this.sessionRuntime(a, job.kind === 'chat' ? (a.sessionId ?? undefined) : undefined);
-    rt.session = this.backend.startSession(
+    rt.session = this.machineFor(a).startSession(
       {
         cwd: CEO_DIR,
         prompt: ceoJobPrompt(job, floor),
@@ -3764,7 +3771,7 @@ export class Swarm {
     const place: ResearchPlace = repo && branch
       ? { kind: 'floor', repo: repo.fullName, defaultBranch: repo.defaultBranch, summary: repo.summary, mission: repo.mission, cwd, branch, autoMerge: repo.autoMerge }
       : { kind: 'company', folder: RESEARCH_DIR };
-    rt.session = this.backend.startSession(
+    rt.session = this.machineFor(a).startSession(
       {
         cwd,
         prompt: researchJobPrompt(job, repo),
@@ -3806,7 +3813,7 @@ export class Swarm {
     a.turns += result.turns;
     this.state.research.job = null;
     if (result.interrupted) this.interrupted(a);
-    if (repo) await this.backend.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
+    if (repo) await this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
     if (a.status === 'stopped') {
       // the manager already logged the stop
     } else if (!result.ok) {

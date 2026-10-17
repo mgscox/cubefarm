@@ -1,15 +1,16 @@
 import * as github from './github.ts';
 import * as workspace from './workspace.ts';
-import { startSession, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
+import { startSession } from './agentRunner.ts';
 import { hooksReady, officeProcesses, reconnectClis, releaseClis, startCliSession, terminalsAvailable, type ReconnectedCli } from './cliRunner.ts';
 import { detectClis } from './clis.ts';
 import { realPreviews, type PreviewBackend } from './previewRunner.ts';
 import { realOffice, type OfficeHost } from './officeUpdate.ts';
+import type { Machine } from './machine.ts';
 import type { AgentTerminal } from './terminal.ts';
-import type { CliView, GhRepoSummary, IssueInfo, PullRefresh } from '../shared/types.ts';
+import type { GhRepoSummary, IssueInfo, PullRefresh } from '../shared/types.ts';
 
-/** Everything the swarm needs from the outside world. The demo backend fakes all of it. */
-export interface Backend {
+/** Everything the swarm needs from the outside world, the office's own machine included. The demo backend fakes all of it. */
+export interface Backend extends Machine {
   demo: boolean;
   user(): Promise<string>;
   listMyRepos(owner?: string): Promise<GhRepoSummary[]>;
@@ -28,10 +29,6 @@ export interface Backend {
   prForBranch(fullName: string, branch: string): Promise<{ number: number; url: string } | null>;
   /** Commits a branch has on GitHub ahead of the base branch (throws when the branch was never pushed). */
   branchAhead(fullName: string, base: string, branch: string): Promise<number>;
-  /** Current local HEAD, captured before an issue session starts. */
-  deskHead(fullName: string, agentSlug: string): Promise<string>;
-  /** Local commits ahead of the desk base, including unpushed work. */
-  deskAhead(fullName: string, agentSlug: string, base: string): Promise<number>;
   prDetails(fullName: string, number: number): Promise<github.PrDetails>;
   issueDetails(fullName: string, number: number): Promise<{ title: string; body: string }>;
   commentPull(fullName: string, number: number, body: string): Promise<string>;
@@ -45,26 +42,14 @@ export interface Backend {
   inspectFolder(dir: string): Promise<workspace.LocalFolder>;
   publishFolder(dir: string, opts: { name: string; visibility: 'private' | 'public'; owner?: string; description?: string }): Promise<string>;
   createProject(root: string, name: string, opts: { visibility: 'private' | 'public'; owner?: string; description?: string }): Promise<{ fullName: string; path: string }>;
-  mainDir(fullName: string): string;
-  deskDir(fullName: string, agentSlug: string): string;
-  prepareDesk(fullName: string, base: workspace.DeskBase, agentSlug: string, branch: string, note?: (text: string) => void): Promise<string>;
-  removeDesk(fullName: string, agentSlug: string): Promise<void>;
   /** The company's research folder: created and put under git (no remote) on first use. */
   prepareResearchFolder(dir: string): Promise<void>;
-  /** Stop processes an agent left running (dev servers on its port, anything started in its desk). */
-  releaseDesk(fullName: string, agentSlug: string, port: number): Promise<void>;
-  /** An agent session: the real CLI in the agent's terminal when opts.terminal is set, else an Agent SDK session. */
-  startSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle;
-  /** Terminals can run here (the native pseudo-terminal module loaded). */
-  terminals: boolean;
   /** The office started: the CLIs its terminal keeper kept running through a restart, back in their agents' terminals. */
   reconnectClis(terminalFor: (agentId: string) => AgentTerminal | null): Promise<ReconnectedCli[]>;
   /** The office follows those CLIs' sessions again: hooks that waited for it can come in. */
   hooksReady(): void;
   /** The office is stopping: its CLIs carry on in the keeper through a restart (true), or stop with it. */
   releaseClis(restart: boolean): Promise<void>;
-  /** The coding-agent CLIs installed on this machine. */
-  detectClis(): Promise<CliView[]>;
   /** Run a floor's app for the preview monitor (its own worktree, its own port). */
   previews: PreviewBackend;
   /** The running office's own folder and its launcher, for the office's self-update. */
