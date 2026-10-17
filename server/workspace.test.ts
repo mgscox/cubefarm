@@ -208,8 +208,9 @@ describe('syncMain', { timeout: 60_000 }, () => {
     const env = npmRuns[0]!.env;
     expect(env).toBeDefined();
     expect(Object.keys(env!).some((name) => name.toLowerCase() === 'npm_config_allow_scripts')).toBe(false);
-    // Windows: a variable the runner already set (NPM_CONFIG_CACHE) keeps its own case when the test sets it.
-    expect(Object.fromEntries(Object.entries(env!).map(([name, value]) => [name.toLowerCase(), value]))).toMatchObject({
+    // Windows preserves the original spelling of existing environment keys.
+    const normalizedEnv = Object.fromEntries(Object.entries(env!).map(([name, value]) => [name.toLowerCase(), value]));
+    expect(normalizedEnv).toMatchObject({
       npm_config_registry: 'https://registry.npmjs.org/',
       npm_config_proxy: 'http://proxy.example:8080',
       npm_config_cache: path.join(ROOT, 'npm cache'),
