@@ -64,6 +64,9 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
   call); Codex reports turn endings (notify) and, once the manager trusts them, its steps (`-c hooks.*`); OpenCode
   only turn endings. Codex/OpenCode screenshots are collected from the session's Playwright output folder. Esc in a
   terminal ends the session as `interrupted`. The CEO's office tools are served over MCP (`/api/mcp/:token`).
+- `machine.ts`: the `Machine` seam (an agent's desk and sessions; `Backend` is the office's own) and `CliHost`, the
+  machine-side half of a CLI session: `planCli` (pure) → `prepare` (session files, command line) → `start` (a pty).
+  `localCliHost.ts` is the office's own. Groundwork for running agents on other machines (`docs/fleet-design.md`).
 - `ptyHost.ts`: the terminal keeper, a detached process of its own (`launch` re-spawns it outside the office's process
   tree) holding the CLIs' pseudo-terminals and relaying their hooks, so agents keep working through office restarts.
   `ptyClient.ts` is the office's side (start/connect, spawn, adopt after a restart, local fallback); `ptyProtocol.ts`
