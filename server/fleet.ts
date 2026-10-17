@@ -136,13 +136,14 @@ export function parseUpdateResult(stdout: string): BoxUpdateResult | null {
  * What a box needs to run the office's own cubefarm, or null when it does (or can't be told). A checkout follows the
  * office's commit, or its release (target) when the office runs from npm, then its host restarts; one run by npx only
  * needs its host restarted, as its next link already runs the office's version. A box from before #94 doesn't say
- * which it is: it's asked to update, which also tells an old one apart. A box refused for another protocol runs an
+ * which it is: it's asked to update whatever its version, which also tells an old one apart. A box refused for another protocol runs an
  * old checkout (npx would run the office's version), so it's updated.
  */
 export function boxSync(office: { version: string; commit: string | null }, box: { info: BoxInfo | null; refused: boolean }): { target: string; step: 'update' | 'restart' } | null {
   if (box.refused) return { target: office.commit ?? office.version, step: 'update' };
   const info = box.info;
   if (!info) return null;
+  if (info.commit === undefined) return { target: office.commit ?? office.version, step: 'update' }; // its version alone doesn't say it runs the same code
   if (info.commit === null || !office.commit) {
     if (info.version === office.version) return null;
     return { target: office.version, step: info.commit === null ? 'restart' : 'update' };

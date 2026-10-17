@@ -5,6 +5,7 @@ import { branchAhead, listIssues } from './github.ts';
 import { LOST_CONVERSATION } from './clis.ts';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
+import { VERSION } from './config.ts';
 import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
 import { ceoSystemPrompt, type OfficeTools } from './ceo.ts';
 import { researcherSystemPrompt } from './research.ts';
@@ -3133,6 +3134,29 @@ describe('boxes', () => {
     expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
     expect(conn.state().info?.commit).toBe(head);
     expect(update).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks a box from before #94 on the npm office's own version to update, and says when it can't", async () => {
+    const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
+    Object.assign(office, { scheduling: true, officeHead: null }); // run from npm
+    vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
+    const events = vi.spyOn(s, 'broadcast');
+    const box = swarm.addBox('Tower', 'ada@tower');
+    const conn = internals().boxConns.get(box.id) as unknown as import('./machine.ts').BoxConnection;
+    const real = conn.state.bind(conn);
+    vi.spyOn(conn, 'state').mockImplementation(() => {
+      const st = real();
+      return { ...st, info: st.info && { ...st.info, version: VERSION, commit: undefined } }; // the office's version, no commit
+    });
+    // Its cubefarm doesn't know --update.
+    const update = vi.spyOn(conn, 'update').mockRejectedValue(new Error('cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>'));
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(update).toHaveBeenCalledWith(VERSION);
+    expect(office.boxView(box).sync).toEqual({ text: `Couldn't move to the office's v${VERSION}: cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>`, failed: true });
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'toast', level: 'error', text: expect.stringMatching(/^Tower couldn't move to the office's version/) }));
+    office.syncBoxes();
+    expect(update).toHaveBeenCalledTimes(1); // not retried for the same version
+    expect(internals().available(repo, 'dev').length).toBeGreaterThan(0); // agents can still work there
   });
 
   it('refuses bad boxes', () => {

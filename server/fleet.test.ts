@@ -151,6 +151,8 @@ describe('following the office (#94)', () => {
     const npmOffice = { version: '0.3.19', commit: null };
     expect(boxSync(npmOffice, { info: info({ commit: 'b'.repeat(40), version: '0.3.18' }), refused: false })).toEqual({ target: '0.3.19', step: 'update' });
     expect(boxSync(npmOffice, { info: info({ version: '0.3.18' }), refused: false })).toEqual({ target: '0.3.19', step: 'update' });
+    expect(boxSync(npmOffice, { info: info({ version: '0.3.19' }), refused: false })).toEqual({ target: '0.3.19', step: 'update' }); // from before #94: same version, maybe not the same code
+    expect(boxSync(npmOffice, { info: info({ commit: null, version: '0.3.19' }), refused: false })).toBeNull();
     expect(boxSync(npmOffice, { info: info({ commit: null, version: '0.3.18' }), refused: false })).toEqual({ target: '0.3.19', step: 'restart' });
     expect(boxSync(npmOffice, { info: info({ commit: 'b'.repeat(40), version: '0.3.19' }), refused: false })).toBeNull();
   });
