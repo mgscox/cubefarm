@@ -509,6 +509,7 @@ export class Swarm {
   private demoTelegram: ReturnType<typeof createDemoTelegram> | null = null;
   private managerCommands: Promise<void> = Promise.resolve();
   private acceptingManager = 0;
+  private managerHandoffPending = false;
 
   constructor(private backend: Backend, transport?: TelegramTransport | null) {
     this.demoTelegram = backend.demo ? createDemoTelegram() : null;
@@ -3668,7 +3669,7 @@ export class Swarm {
 
   /** Start the CEO's next job when they're free and a session slot is open. Replies to the manager go first. */
   private startCeoWork(): void {
-    if (this.state.officeHeld || this.acceptingManager || this.state.managerInputs.length) return;
+    if (this.state.officeHeld || this.acceptingManager || this.managerHandoffPending || this.state.managerInputs.length) return;
     const a = this.state.agents.find((x) => x.id === CEO_ID);
     const c = this.state.ceo;
     if (!a || BUSY.includes(a.status) || c.job || c.queue.length === 0) return;
@@ -3842,7 +3843,11 @@ export class Swarm {
   }
 
   private recoverManagerInputs() {
-    const run = this.managerCommands.then(async () => { await this.writeState(); await this.dispatchManagerInputs(); });
+    const run = this.managerCommands.then(async () => {
+      await this.writeState();
+      this.managerHandoffPending = false;
+      await this.dispatchManagerInputs();
+    });
     this.managerCommands = run.catch(() => undefined);
     return run;
   }
@@ -3865,8 +3870,11 @@ export class Swarm {
             rt.session.send(`Message from the manager (they read your reply on their phone, so keep it short):\n${input.text}`);
           } else this.enqueueCeo({ kind: 'chat', text: input.text, at: Date.now() });
         } else this.enqueueCeo({ kind: 'chat', text: input.text, at: Date.now() });
+        // A failed save leaves disk holding the input, so the in-memory job must remain unschedulable.
+        this.managerHandoffPending = true;
         this.state.managerInputs.splice(this.state.managerInputs.indexOf(input), 1);
         await this.writeState();
+        this.managerHandoffPending = false;
       }
     } finally { this.acceptingManager--; }
   }

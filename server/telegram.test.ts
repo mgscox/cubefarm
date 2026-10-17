@@ -10,6 +10,7 @@ import type { SessionHandle } from './agentRunner.ts';
 
 type TestState = {
   officeHeld: boolean;
+  settings: { runtime: 'sdk' | 'terminal'; ceoHeartbeatMin: number };
   agents: { id: string; role: string; name: string; status: string; repoId: string }[];
   repos: { id: string; fullName: string; floor: number; autoAssign: boolean }[];
   requests: HireRequestView[];
@@ -19,6 +20,7 @@ type TestState = {
   ceo: { queue: { text?: string }[]; job: unknown };
 };
 type Harness = {
+  backend: ReturnType<typeof createDemoBackend>;
   state: TestState;
   agentRt: Map<string, { log: unknown[]; pending: unknown[]; session: SessionHandle | null; terminal: null }>;
   repoRt: Map<string, unknown>;
@@ -415,4 +417,53 @@ it('recovers a failed write-ahead commit before sending and a failed confirmed-p
   await flush();
   expect(sent().filter((m) => m.text === 'Joi: Persist confirmed progress')).toHaveLength(1);
   expect(saved.telegram.outbox).toEqual([]);
+});
+
+it.each([false, true])('submits an accepted Telegram update once after a failed idle handoff (restart: %s)', async (restart) => {
+  s.state.settings.runtime = 'sdk';
+  s.state.settings.ceoHeartbeatMin = 0;
+  vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+  const starts: string[] = [];
+  const enableScheduler = () => {
+    vi.spyOn(s.backend, 'startSession').mockImplementation((opts) => {
+      starts.push(opts.prompt);
+      return { send: vi.fn(), stop: vi.fn() };
+    });
+    vi.mocked(s.schedule).mockRestore();
+  };
+  await pair();
+  let accepted!: TestState;
+  vi.mocked(s.writeState).mockImplementation(async () => {
+    if (accepted) throw new Error('handoff disk failure');
+    accepted = structuredClone(s.state);
+    saved = accepted;
+  });
+  const incoming = update('One durable Telegram request');
+  await expect(swarm.telegram.receive(incoming)).rejects.toThrow('handoff disk failure');
+  expect(accepted.managerInputs).toMatchObject([{ text: 'One durable Telegram request', status: 'pending' }]);
+  expect(accepted.ceo.queue).toEqual([]);
+  enableScheduler();
+  s.schedule();
+  await vi.advanceTimersByTimeAsync(0);
+  await expect(swarm.telegram.receive(incoming)).rejects.toThrow('handoff disk failure');
+  s.schedule();
+  await vi.advanceTimersByTimeAsync(0);
+  const startsBeforeRecovery = starts.length;
+
+  if (restart) {
+    await swarm.telegram.stop();
+    await setup(undefined, structuredClone(accepted));
+    enableScheduler();
+  } else {
+    vi.mocked(s.writeState).mockImplementation(async () => { saved = structuredClone(s.state); });
+  }
+  // The polling/replay recovery command commits pending handoff state before permitting scheduling.
+  await swarm.telegram.receive(incoming);
+  s.schedule();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(starts).toHaveLength(1);
+  expect(startsBeforeRecovery).toBe(0);
+  expect(starts[0]).toContain('One durable Telegram request');
+  expect(saved.managerInputs).toEqual([]);
+  expect(saved.messages.filter((m) => m.from === 'manager')).toHaveLength(1);
 });
