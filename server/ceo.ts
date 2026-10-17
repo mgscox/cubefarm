@@ -1,6 +1,6 @@
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { issueBlockers, holdUps, issueSpecialty, RESEARCH, setDependsOn, type IssueRef } from '../shared/issues.ts';
+import { issueBlockers, forHuman, issueSpecialty, RESEARCH, setDependsOn, type IssueRef } from '../shared/issues.ts';
 import type { AgentView, CeoJobKind, IssueInfo, PullInfo, QaView } from '../shared/types.ts';
 import { ONE_TURN } from './clis.ts';
 import type { FixReason } from './fixPlan.ts';
@@ -60,6 +60,7 @@ export interface ParkPrRequest {
   floor: number;
   number: number;
   reason: string;
+  depends_on?: number[];
 }
 
 export interface DevFixRequest {
@@ -287,7 +288,7 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
         floor: z.number().int(),
         number: z.number().int().positive().describe('The issue number'),
         specialty: z.string().max(24).optional().describe('Sets swarm:<specialty> and removes any other; "" for none. Someone on the floor, or a pending proposal, must have it.'),
-        depends_on: z.array(z.number().int().positive()).max(10).optional().describe('Body dependencies; [] clears the body line. Native GitHub blockers remain. Not for an issue in progress.'),
+        depends_on: z.array(z.number().int().positive()).max(10).optional().describe('Body dependencies; [] clears the body line. Native GitHub blockers remain. Human gates count as zero chain steps. Not for an issue in progress.'),
       },
       (a) => run(() => h.routeIssue(a)),
     ),
@@ -316,11 +317,12 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
     ),
     tool(
       'park_pr',
-      'Comment and close a placeholder or blocked PR, keeping its branch for reuse. Returns its issue to the backlog. Wait until QA or a live fix session finishes.',
+      'Comment and close a placeholder or blocked PR, keeping its branch for reuse. Optionally set issue dependencies before returning it to the backlog, so auto-assign cannot restart blocked work. Wait until QA or a live fix session finishes.',
       {
         floor: z.number().int(),
         number: z.number().int().positive().describe('The pull request number'),
         reason: z.string().trim().min(1).max(1000).describe('Short reason posted as a PR comment'),
+        depends_on: z.array(z.number().int().positive()).max(10).optional().describe('Replace body dependencies on all linked issues before releasing them; [] clears the line. Native blockers remain. Human gates count as zero chain steps.'),
       },
       (a) => run(() => h.parkPr(a)),
     ),
@@ -404,13 +406,13 @@ export function ceoSystemPrompt(o: {
     '- Every floor keeps at least one QA tester.',
     '- Use start_issue when the manager asks for an issue to be started; never bypass auto-assign OFF on your own initiative.',
     '- Use send_back_to_dev on your own initiative for needs-human PRs with clear fixes (real QA defects, conflicts or failing checks); report the handoff to the manager afterwards.',
-    '- Use park_pr on your own initiative only for placeholder/blocked PRs that cannot pass QA until another issue merges; report it to the manager afterwards.',
+    '- Use park_pr on your own initiative only for placeholder/blocked PRs that cannot pass QA until upstream work ships; pass depends_on to hold their issues behind upstream issues or ready-for-human gates, then report to the manager.',
     '- Use merge_pr only when the manager explicitly asks for that PR to be merged; include their instruction and any follow-up issues in the reason, and report afterwards. Use file_issue with ready_for_human for follow-ups reserved for a person.',
     '- Use rerun_qa only when the manager asks for a PR to be re-tested. First check it has new commits since the last QA; otherwise it needs a developer for fixes.',
     '- Titles are specific ("Three.js graphics engineer", not "Developer"). A specialty is a short lowercase slug ("graphics", "gameplay", "frontend", "backend", "content", "a11y", "devops"). Only route an issue to a specialty that someone on the floor has, or that you are proposing to hire.',
     '- Before proposing a hire, check the floor and the pending proposals for someone who already covers it. If the manager declined a similar proposal (recentDecisions), do not propose it again unless something has changed, and say what.',
     `- ${o.hiring === 'auto' ? 'Hiring is on auto: proposals within the team cap are approved immediately, so be deliberate.' : 'The manager approves every hire, so explain each reason in a sentence or two they can decide on.'}`,
-    '- Issues: plan for parallel work. What keeps a floor busy is the number of issues that can start right now (capacity.issuesReadyToStart in company_status); aim for at least one per developer. Write "Depends on #N" only when an issue truly cannot start until #N\'s code is merged, because it waits until #N is closed. Keep dependency chains to two steps at most, keep foundation issues small, and split big pieces into parts that can be built side by side. The office starts the issues that hold up others first. Backlog issues marked parent or stalled are not ready capacity; review or close parents and clarify stalled work. Backlog issues marked readyForHuman are reserved for a person: they never start, so do not plan agent work around them. Do not duplicate open issues: fix an existing issue\'s specialty or dependencies with route_issue. File at most 12 issues per job, or per message from the manager.',
+    '- Issues: plan for parallel work. What keeps a floor busy is the number of issues that can start right now (capacity.issuesReadyToStart in company_status); aim for at least one per developer. Write "Depends on #N" only when an issue truly cannot start until #N\'s code is merged, because it waits until #N is closed. Keep agent dependency chains to two steps at most (ready-for-human gates count as zero), keep foundation issues small, and split big pieces into parts that can be built side by side. The office starts the issues that hold up others first. Backlog issues marked parent or stalled are not ready capacity; review or close parents and clarify stalled work. Backlog issues marked readyForHuman are reserved for a person: they never start; dependent agent work waits until the person closes the gate. Do not duplicate open issues: fix an existing issue\'s specialty or dependencies with route_issue. File at most 12 issues per job, or per message from the manager.',
     "- When company.usage in company_status says pacing or paused, Claude's usage is running low and the office is finishing open work first: file only what is needed next, not a whole milestone.",
     '- Your final message goes straight to the manager\'s phone. Keep it short and plain: what you found, what you proposed, what you filed, and any question you need answered. No headings, no tables.',
   ].join('\n');
@@ -518,11 +520,11 @@ export interface RoutePlan {
   summary: string;
 }
 
-/** Longest chain of open body or native dependencies this issue waits for. */
-function waitsDepth(n: IssueRef, deps: Map<number, IssueRef[]>, seen = new Set<IssueRef>()): number {
+/** Longest chain of agent work; human gates add no work steps. */
+function waitsDepth(n: IssueRef, deps: Map<IssueRef, IssueRef[]>, gates: Set<IssueRef>, seen = new Set<IssueRef>()): number {
   if (seen.has(n)) return 0;
   seen.add(n);
-  const depth = Math.max(0, ...((typeof n === 'number' ? deps.get(n) : undefined) ?? []).map((d) => waitsDepth(d, deps, seen) + 1));
+  const depth = Math.max(0, ...(deps.get(n) ?? []).map((d) => waitsDepth(d, deps, gates, seen) + (gates.has(d) ? 0 : 1)));
   seen.delete(n);
   return depth;
 }
@@ -565,7 +567,10 @@ export function planRoute(r: RouteRequest): RoutePlan {
     const waits = new Map(after.map((i) => [i.number, issueBlockers(i, open)]));
     const loop = deps.find((d) => reaches(d, r.number, waits));
     if (loop !== undefined) throw new Error(`#${loop} already waits for #${r.number}, directly or through other issues, so that would be a cycle.`);
-    const depth = waitsDepth(r.number, waits) + (holdUps(after).get(r.number)?.chain ?? 0);
+    const gates = new Set<IssueRef>(after.filter((i) => forHuman(i.labels)).map((i) => i.number));
+    const waiters = new Map<IssueRef, IssueRef[]>();
+    for (const [n, deps] of waits) for (const d of deps) waiters.set(d, [...(waiters.get(d) ?? []), n]);
+    const depth = Math.max(0, waitsDepth(r.number, waits, gates) + waitsDepth(r.number, waiters, gates) - (gates.has(r.number) ? 1 : 0));
     if (depth > 2) throw new Error(`That makes a dependency chain ${depth} steps deep through #${r.number}. Keep chains to 2 steps at most: split the work so more of it can start side by side.`);
     if (body !== issue.body) plan.body = body;
     const merged = issueBlockers({ ...issue, body }, open);
