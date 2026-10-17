@@ -208,7 +208,9 @@ describe('syncMain', { timeout: 60_000 }, () => {
     const env = npmRuns[0]!.env;
     expect(env).toBeDefined();
     expect(Object.keys(env!).some((name) => name.toLowerCase() === 'npm_config_allow_scripts')).toBe(false);
-    expect(env).toMatchObject({
+    // Windows' variable names ignore case, and a runner may already have one of these as NPM_CONFIG_CACHE, say.
+    const names = Object.fromEntries(Object.entries(env!).map(([k, v]) => [process.platform === 'win32' ? k.toLowerCase() : k, v]));
+    expect(names).toMatchObject({
       npm_config_registry: 'https://registry.npmjs.org/',
       npm_config_proxy: 'http://proxy.example:8080',
       npm_config_cache: path.join(ROOT, 'npm cache'),
