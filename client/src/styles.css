@@ -1032,8 +1032,14 @@ input.inline:focus {
 
 .term-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+  white-space: normal;
+}
+.term-title > * {
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .avatar {
   display: grid;

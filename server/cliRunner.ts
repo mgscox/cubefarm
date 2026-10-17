@@ -156,6 +156,10 @@ interface LiveCli {
    * its transcript, from the start. One whose hooks work can go quiet for minutes on a long command.
    */
   hookless?: boolean;
+  /** Last handled (or follow-up baseline) transcript, retained through keeper restarts. */
+  transcriptBase?: ClaudeTurn | null;
+  /** Its reply was delivered, but the finish grace has not elapsed. */
+  transcriptPending?: boolean;
 }
 const lives = new Map<AgentTerminal, LiveCli>();
 /** How to trust Codex's hooks was said once this run (Codex asks at the start of every session until they are). */
@@ -199,9 +203,11 @@ interface CliMeta {
   busy: boolean;
   hookUrl?: string;
   hookless?: boolean;
+  transcriptBase?: ClaudeTurn | null;
+  transcriptPending?: boolean;
 }
 
-const metaOf = (l: LiveCli): CliMeta => ({ agentId: l.agentId, cli: l.cli, token: l.token, dir: l.dir, resumeId: l.resumeId, busy: !!l.session, hookUrl: l.hookUrl, hookless: l.hookless });
+const metaOf = (l: LiveCli): CliMeta => ({ agentId: l.agentId, cli: l.cli, token: l.token, dir: l.dir, resumeId: l.resumeId, busy: !!l.session, hookUrl: l.hookUrl, hookless: l.hookless, transcriptBase: l.transcriptBase, transcriptPending: l.transcriptPending });
 const remember = (l: LiveCli) => l.proc?.setMeta(metaOf(l));
 
 /** A hook from a CLI's main session (not a subagent's, not its status line, which runs untrusted): its hooks reach the office. */
@@ -264,7 +270,7 @@ export async function reconnectClis(terminalFor: (agentId: string) => AgentTermi
       if (meta.cli === 'codex' && meta.resumeId) void host.codexThread('archive', meta.resumeId, h.exit === null ? new Promise((r) => setTimeout(r, 5000)) : undefined);
       continue;
     }
-    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, host, proc: host.adopt(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null, hookUrl: meta.hookUrl, hookless: meta.hookless === true };
+    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, host, proc: host.adopt(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null, hookUrl: meta.hookUrl, hookless: meta.hookless === true, transcriptBase: meta.transcriptBase, transcriptPending: meta.transcriptPending };
     wire(l);
     waitAtPrompt(l);
     // Resizing makes the CLI draw its whole screen again, over whatever the saved copy of the terminal missed.
@@ -339,14 +345,14 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const warned = new Set<string>();
   let done = false;
   let costUsd = 0;
-  let turns = 0;
-  let lastText = '';
+  let turns = opts.reattach && live?.transcriptPending ? 1 : 0;
+  let lastText = opts.reattach && live?.transcriptPending ? live.transcriptBase?.text ?? '' : '';
   let turnError: string | null = null; // the turn failed (OpenCode reports errors separately from going idle)
   let begun = false; // the CLI took its first prompt
   let boot: AgentBoot | null = null; // what the office said about a CLI it hasn't heard from (see bootNotice)
   let heard = false; // a hook from the CLI's main session reached the office
-  let turnBase: ClaudeTurn | null = null; // its transcript when this session took it on: turns ending after are this session's
-  let transcriptEnded = false; // the transcript ended the current turn: its Stop, arriving late, isn't handled again
+  let turnBase: ClaudeTurn | null = live?.transcriptBase ?? null;
+  let transcriptEnded = !!(opts.reattach && live?.transcriptPending); // a late Stop must not deliver the same reply again
   let working = true; // a prompt is in hand and its turn hasn't ended (a new CLI starts on the one it's launched with)
   let finishTimer: NodeJS.Timeout | undefined;
   let bootTimer: NodeJS.Timeout | undefined;
@@ -397,6 +403,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     if (term.onInput === watchKeys) term.onInput = null;
     const l = live;
     if (l && lives.get(term) === l) {
+      l.transcriptPending = false;
       l.session = null;
       if (keep && opts.keepAlive && l.proc) waitAtPrompt(l);
       else endLive(l);
@@ -413,13 +420,27 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     working = false;
     cb.tool(null);
     clearTimeout(finishTimer);
-    finishTimer = setTimeout(() => finish({ ok: !turnError, text: lastText, errors: turnError ? [turnError] : [] }, true), FINISH_GRACE_MS);
+    const timer = setTimeout(async () => {
+      if (live?.hookless && !heard) {
+        const t = await readTurn().catch(() => null);
+        if (done || working || finishTimer !== timer) return;
+        // A box may be temporarily unavailable. Keep following it rather than finish from a stale reply.
+        if (!t) return turnEnded(lastText);
+        if (followTurn(t)) return;
+      }
+      if (!done && !working && finishTimer === timer) finish({ ok: !turnError, text: lastText, errors: turnError ? [turnError] : [] }, true);
+    }, FINISH_GRACE_MS);
+    finishTimer = timer;
   };
   const busy = () => {
     begun = true;
     if (heard) setBoot(null);
     working = true;
     clearTimeout(finishTimer);
+    if (live?.transcriptPending) {
+      live.transcriptPending = false;
+      remember(live);
+    }
   };
 
   /** The turn was interrupted from the terminal: the office treats it like Stop, and the CLI waits for the manager. */
@@ -602,6 +623,42 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   /** Claude's transcript for this session on its machine (null: not there yet, or not Claude). */
   const readTurn = async (): Promise<ClaudeTurn | null> => (cli === 'claude' ? ((await host.claudeTurn(opts.cwd, live?.resumeId ?? sessionId)) ?? null) : null);
 
+  const saveTurn = (t: ClaudeTurn | null, pending: boolean) => {
+    turnBase = t;
+    if (live) {
+      live.transcriptBase = t;
+      live.transcriptPending = pending;
+      remember(live);
+    }
+  };
+
+  /** True when this reading starts another turn or replaces the pending finish. */
+  const followTurn = (t: ClaudeTurn): boolean => {
+    begun = true; // confirmed hookless activity also enables terminal Esc interruption
+    if (t.ended && t.mark && t.mark !== turnBase?.mark) {
+      saveTurn(t, true);
+      transcriptEnded = true;
+      turns += 1;
+      if (t.text) {
+        log(assistantLines(t.text));
+        cb.turn?.(t.text);
+      }
+      turnEnded(t.text);
+      return true;
+    }
+    if (!t.ended && t.bytes !== turnBase?.bytes) {
+      transcriptEnded = false;
+      busy();
+      return true;
+    }
+    if (t.ended && working && live?.transcriptPending) {
+      // Restart during grace: the reply was already delivered, but its session still needs to finish.
+      turnEnded(t.text);
+      return true;
+    }
+    return false;
+  };
+
   /**
    * Claude's hooks may never reach the office (untrusted, or a box's CLI can't reach its hook URL), and without Stop
    * the session would never end. From first ms on, until a hook arrives, the office looks at the CLI's screen and
@@ -610,31 +667,20 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
    */
   const watchHookless = (first: number, base: boolean) => {
     if (cli !== 'claude') return;
-    if (base) void readTurn().then((t) => (turnBase = t), () => undefined);
+    const baseline = base ? readTurn().then((t) => saveTurn(t, false), () => undefined) : Promise.resolve();
     const look = async () => {
+      await baseline;
       if (done || (heard && begun)) return;
       const t = heard ? null : await readTurn().catch(() => null);
       if (done || (heard && begun)) return;
-      const notice = bootNotice(label, heard ? '' : term.screen(), live?.hookUrl ?? `${officeUrl}/api/hooks`, !!t && t.bytes !== (turnBase?.bytes ?? 0));
+      const notice = bootNotice(label, heard ? '' : term.screen(), live?.hookUrl ?? `${officeUrl}/api/hooks`, !!live?.hookless || (!!t && t.bytes !== (turnBase?.bytes ?? 0)));
       if (notice.boot !== boot) {
         log([{ kind: 'error', text: notice.text }]);
         setBoot(notice.boot);
       }
-      if (boot === 'no-hooks' && t) {
-        if (t.ended && t.mark && t.mark !== turnBase?.mark) {
-          turnBase = t;
-          transcriptEnded = true;
-          turns += 1;
-          if (t.text) {
-            log(assistantLines(t.text));
-            cb.turn?.(t.text);
-          }
-          turnEnded(t.text);
-        } else if (!t.ended && !working && t.bytes !== turnBase?.bytes) {
-          // It picked up another prompt within the grace period after its turn: not finished after all.
-          working = true;
-          clearTimeout(finishTimer);
-        }
+      if (boot === 'no-hooks') {
+        begun = true;
+        if (t) followTurn(t);
       }
       bootTimer = setTimeout(() => void look(), boot === 'no-hooks' ? HOOKLESS_LOOK_MS : BOOT_LOOK_MS);
     };
@@ -667,10 +713,11 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     Object.assign(live, { statusLine });
     remember(live);
     if (live.resumeId && cli !== 'claude') cb.sessionId(live.resumeId); // Claude's hooks say when its conversation is on disk
-    if (opts.typed || opts.reattach) busy(); // typed at the prompt, or still at it after a restart: already running
+    if (opts.reattach) begun = true; // preserve a pending transcript finish from before the restart
+    else if (opts.typed) busy();
     else handle.send(opts.prompt);
     shotTimer = setInterval(collectShots, 2000);
-    if (live.hookless) watchHookless(HOOKLESS_LOOK_MS, true); // otherwise its hooks worked, or aren't known yet: as before
+    if (live.hookless) watchHookless(HOOKLESS_LOOK_MS, !opts.reattach && !live.transcriptBase); // a restart must catch completions written while away
     return handle;
   }
   if (opts.reattach) {

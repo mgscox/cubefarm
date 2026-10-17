@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { planCli, type CliHost } from './machine.ts';
-import { handleHook, startCliSession } from './cliRunner.ts';
+import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
 import type { ClaudeTurn } from './clis.ts';
 import type { SessionCallbacks, SessionOptions } from './agentRunner.ts';
 import type { AgentTerminal } from './terminal.ts';
@@ -88,7 +88,7 @@ describe('startCliSession on a host', () => {
       const cb = claudeCallbacks();
       return { cb, session: startCliSession({ ...opts, ...later, terminal: term }, cb, h) };
     };
-    return { cb, session, again, hook: (body: Record<string, unknown>) => handleHook(token, body) };
+    return { cb, session, again, term, hook: (body: Record<string, unknown>) => handleHook(token, body) };
   };
   const errors = (cb: SessionCallbacks) => vi.mocked(cb.log).mock.calls.flat(2).filter((e) => e.kind === 'error').map((e) => e.text);
   const turn = (t: Partial<ClaudeTurn>): ClaudeTurn => ({ bytes: 100, ended: false, mark: '', text: '', ...t });
@@ -193,11 +193,62 @@ describe('startCliSession on a host', () => {
     expect(first.cb.finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: 'Opened the PR' }));
 
     const { cb, session } = first.again({ typed: true, keepAlive: true, resumeSessionId: 'sess-1' });
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(8000);
     expect(cb.boot).toHaveBeenLastCalledWith('no-hooks');
+    expect(cb.finished).not.toHaveBeenCalled(); // the earlier reply is not this follow-up's completion
     now = turn({ bytes: 12_000, ended: true, mark: 'msg_3', text: 'Fixed' });
     await vi.advanceTimersByTimeAsync(5000 + 3000);
     expect(cb.finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: 'Fixed' }));
     session.stop();
+  });
+
+  for (const handledBeforeRestart of [false, true]) {
+    it(`recovers a hookless completion across a keeper restart exactly once (already handled: ${handledBeforeRestart})`, async () => {
+      let now = turn({ bytes: 2000, ended: true, mark: 'msg_1', text: 'Earlier reply' });
+      const first = claude(() => 'esc to interrupt', async () => now, { keepAlive: true, resumeSessionId: 'sess-1', agentId: 'ada' });
+      await vi.advanceTimersByTimeAsync(60_000);
+      if (handledBeforeRestart) {
+        now = turn({ bytes: 9000, ended: true, mark: 'msg_2', text: 'Opened the PR' });
+        await vi.advanceTimersByTimeAsync(5000);
+      }
+      const meta = vi.mocked(pty.setMeta).mock.calls.at(-1)![0];
+      vi.clearAllTimers(); // the old office is gone; the keeper and CLI keep running
+      now = turn({ bytes: 9000, ended: true, mark: 'msg_2', text: 'Opened the PR' });
+      const term = { ...terminal(), screen: () => '❯' } as unknown as AgentTerminal;
+      const h = { ...host(vi.fn()), claudeTurn: async () => now, reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+      expect(await reconnectClis(() => term, h)).toEqual([{ agentId: 'ada', cli: 'claude', resumeId: 'sess-1', busy: true }]);
+      const cb = claudeCallbacks();
+      startCliSession({ ...opts, terminal: term, reattach: true, keepAlive: true, resumeSessionId: 'sess-1' }, cb, h);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'Opened the PR', turns: 1 }));
+      expect(vi.mocked(first.cb.turn).mock.calls.length + cb.turn.mock.calls.length).toBe(1);
+      expect(replies(first.cb, 'Opened the PR') + replies(cb, 'Opened the PR')).toBe(1);
+      term.releaseIdle?.();
+    });
+  }
+
+  it('cancels hookless completion when a prompt starts inside the finish grace period', async () => {
+    let now = turn({ bytes: 2000 });
+    const { cb } = claude(() => 'esc to interrupt', async () => now);
+    await vi.advanceTimersByTimeAsync(60_000);
+    now = turn({ bytes: 9000, ended: true, mark: 'msg_2', text: 'First reply' });
+    await vi.advanceTimersByTimeAsync(6000); // the end was observed at 65 s, next prompt at 66 s
+    now = turn({ bytes: 10_000, mark: 'msg_2' });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(cb.finished).not.toHaveBeenCalled();
+    now = turn({ bytes: 12_000, ended: true, mark: 'msg_3', text: 'Follow-up reply' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'Follow-up reply', turns: 2 }));
+  });
+
+  it('recognizes terminal interruption after confirmed hookless activity', async () => {
+    let screen = 'esc to interrupt';
+    const { cb, term } = claude(() => screen, async () => turn({ bytes: 2000 }));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(cb.boot).toHaveBeenLastCalledWith('no-hooks');
+    term.onInput?.('\x1b');
+    screen = 'Interrupted · What should Claude do instead?';
+    await vi.advanceTimersByTimeAsync(800);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, interrupted: true, errors: ['Interrupted in the terminal'] }));
   });
 });
