@@ -111,15 +111,22 @@ interface BoxView {
   status: 'connecting' | 'online' | 'offline' | 'removing';
   platform?: string; clis: CliView[]; ghReady: boolean; running: number; error?: string;
 }
+// persisted floor
+box: string;         // the floor's box: where its developers and QA testers work by default; '' = this machine
 // persisted agent
-box: string;      // assigned box id; '' = this machine
-deskBox: string;  // where the current task's desk (worktree + CLI conversation) actually is
+box: string | null;  // the agent's own box, overriding the floor's; null = follow the floor
+deskBox: string;     // where the current task's desk (worktree + CLI conversation) actually is
 ```
 
-Snapshot gets `boxes`; a new `box` server event carries changes; REST: `POST /api/boxes` (name, destination),
-`DELETE /api/boxes/:id`, `PATCH /api/agents/:id { box }`.
+An agent's box is `a.box ?? floor.box`. New hires follow the floor, so a floor moves as one unless someone on it was
+given a box of their own.
 
-When the agent's **task starts** (new issue, QA run): if `a.box` is online and has the agent's CLI, `deskBox = a.box`;
+Snapshot gets `boxes`; a new `box` server event carries changes; REST: `POST /api/boxes` (name, destination),
+`DELETE /api/boxes/:id`, `PATCH /api/agents/:id { box }` (`null`: follow the floor again),
+`PATCH /api/repos/:id { box, everyone? }`. With `everyone: true` the whole floor moves to that box: the floor's box is
+set and every override on the floor is cleared.
+
+When the agent's **task starts** (new issue, QA run): if the agent's box is online and has the agent's CLI, `deskBox = a.box`;
 if it is offline, the agent waits ("waiting for <box>") and the scheduler retries (offline is usually transient); if
 it was removed, the agent falls back to the office machine with a log line. Everything inside a task (fix rounds,
 follow-ups, `finishPushedWork`, typed prompts, reattach after a restart) uses `deskBox`, because the worktree,
@@ -144,8 +151,9 @@ Pacing (`pacing.ts`) is per CLI account; boxes signed into other accounts should
 
 ### 6. UI
 
-Manager's console: a Fleet tab (boxes, status, CLIs, running count, add/remove). Agent panel: a box picker. In the
-building: the box name on the desk's monitor; a small server rack in the lobby with one light per box would fit
+Manager's console: a Fleet tab (boxes, status, CLIs, running count, add/remove), and per floor a box picker with a
+"Move the whole floor" button (the floor's box, overrides cleared; it says how many agents finish their current task
+first). Agent panel: a box picker whose first entry is "Floor's box (<name>)". In the building: the box name on the desk's monitor; a small server rack in the lobby with one light per box would fit
 the style.
 
 ## Demo parity and tests
@@ -159,5 +167,5 @@ OS.
 
 1. `Machine` seam and `localMachine`, plan/launch split in `cliRunner` (no behaviour change; reviewable alone).
 2. Box host and SSH transport, one box, assignment via REST.
-3. Fleet state, events, console UI, demo boxes, removal drain.
+3. Fleet state, events, console UI (the floor-wide box assignment included), demo boxes, removal drain.
 4. Optional: `--listen` transport for boxes without sshd; per-account pacing.
