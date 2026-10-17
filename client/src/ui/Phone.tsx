@@ -7,6 +7,7 @@ import { MessageBox } from './MessageBox';
 import { closeOverlay } from './Overlays';
 import { Games, type GameId } from './games/Games';
 import { effectiveModel } from '../../../shared/models';
+import { TelegramSettings } from './Telegram';
 
 // The manager's phone: text the CEO, decide on hires, see the whole company at a glance
 // without walking anywhere, and play a game while the team works. Press P anywhere in the office.
@@ -241,6 +242,7 @@ function Chat() {
           Send
         </button>
       </form>
+      <TelegramSettings />
     </div>
   );
 }

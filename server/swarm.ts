@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { emptyTelegram, TelegramMirror, telegramTransport, type TelegramState, type TelegramTransport } from './telegram.ts';
+import { createDemoTelegram } from './demo.ts';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
 import type { BoxConnection, Machine } from './machine.ts';
@@ -190,6 +192,8 @@ interface Persisted {
   research: ResearchState;
   messages: PhoneMessage[];
   phoneReadAt: number;
+  telegram: TelegramState;
+  managerInputs: { id: number; text: string; status: 'pending' | 'sending' }[];
   /** Names this office to its boxes (each keeps a home per office). */
   officeId: string;
   boxes: PersistedBox[];
@@ -446,6 +450,8 @@ export class Swarm {
     research: { queue: [], job: null, done: [] },
     messages: [],
     phoneReadAt: 0,
+    telegram: emptyTelegram(),
+    managerInputs: [],
     officeId: '',
     boxes: [],
   };
@@ -499,7 +505,26 @@ export class Swarm {
   private lastOfficeView = '';
   private clis: CliView[] = []; // coding-agent CLIs found on this machine (detected at startup)
 
-  constructor(private backend: Backend) {
+  readonly telegram: TelegramMirror;
+  private demoTelegram: ReturnType<typeof createDemoTelegram> | null = null;
+  private managerCommands: Promise<void> = Promise.resolve();
+  private acceptingManager = 0;
+  private managerHandoffPending = false;
+  private handoffRetry: ReturnType<typeof setTimeout> | null = null;
+  private handoffRetryMs = 1000;
+
+  constructor(private backend: Backend, transport?: TelegramTransport | null) {
+    this.demoTelegram = backend.demo ? createDemoTelegram() : null;
+    this.telegram = new TelegramMirror(transport === undefined ? this.demoTelegram ?? (process.env.CUBEFARM_TELEGRAM_TOKEN ? telegramTransport(process.env.CUBEFARM_TELEGRAM_TOKEN) : null) : transport, {
+      state: () => this.state.telegram,
+      commit: () => this.writeState(),
+      recover: () => this.recoverManagerInputs(),
+      emit: (telegram) => this.broadcast({ type: 'telegram', telegram }),
+      manager: (text, source, accepted) => this.messageCeo(text, source, accepted),
+      decide: (id, approve) => approve ? this.approveRequest(id) : this.rejectRequest(id),
+      request: (id) => this.state.requests.find((r) => r.id === id),
+      ceoName: () => this.ceo()?.name ?? 'Joi',
+    });
     this.previews = new Previews(backend, {
       emit: (id) => {
         const r = this.state.repos.find((x) => x.id === id);
@@ -568,6 +593,8 @@ export class Swarm {
         research: { ...this.state.research, ...loaded.research },
         messages: loaded.messages ?? [],
         phoneReadAt: loaded.phoneReadAt ?? 0,
+        telegram: loaded.telegram ?? emptyTelegram(),
+        managerInputs: loaded.managerInputs ?? [],
         officeId: typeof loaded.officeId === 'string' ? loaded.officeId : '',
         boxes: (loaded.boxes ?? []).filter((b) => b && typeof b.id === 'string' && typeof b.destination === 'string'),
       };
@@ -651,6 +678,13 @@ export class Swarm {
     for (const r of this.state.repos) this.ensureQaTester(r);
     this.ensureCeo(interrupted);
     this.ensureResearcher(interrupted);
+    // A crash between recording dispatch and sending to a CLI cannot be resolved automatically without duplication.
+    for (const input of this.state.managerInputs.filter((i) => i.status === 'sending')) {
+      this.postMessage('office', `An accepted manager message has an uncertain CEO submission after restart. Check Joi's context before resending: ${input.text}`);
+    }
+    this.state.managerInputs = this.state.managerInputs.filter((i) => i.status === 'pending');
+    await this.dispatchManagerInputs();
+    await this.telegram.start();
 
     for (const r of this.state.repos) void this.cloneRepo(r.id);
     await this.backend.prepareResearchFolder(RESEARCH_DIR).catch((err) => console.warn('could not set up the research folder', err));
@@ -839,6 +873,7 @@ export class Swarm {
       research: this.researchInfo(),
       messages: this.state.messages.slice(-100),
       phoneReadAt: this.state.phoneReadAt,
+      telegram: this.telegram.view(),
       usage: this.usageNow(),
       clis: this.clis,
       boxes: this.state.boxes.map((b) => this.boxView(b)),
@@ -1528,6 +1563,10 @@ export class Swarm {
    * through a restart (the terminal keeper holds them for the next start) and stop when the office quits.
    */
   async shutdown(restart = false): Promise<void> {
+    await this.telegram.stop();
+    if (this.handoffRetry) clearTimeout(this.handoffRetry);
+    this.handoffRetry = null;
+    await this.managerCommands;
     await this.writeState().catch((err) => console.warn('could not save the state', err));
     await this.backend.releaseClis(restart); // before the terminals are saved: whatever they print next waits in the keeper
     for (const c of this.boxConns.values()) c.close();
@@ -3634,7 +3673,7 @@ export class Swarm {
 
   /** Start the CEO's next job when they're free and a session slot is open. Replies to the manager go first. */
   private startCeoWork(): void {
-    if (this.state.officeHeld) return;
+    if (this.state.officeHeld || this.acceptingManager || this.managerHandoffPending || this.state.managerInputs.length) return;
     const a = this.state.agents.find((x) => x.id === CEO_ID);
     const c = this.state.ceo;
     if (!a || BUSY.includes(a.status) || c.job || c.queue.length === 0) return;
@@ -3779,20 +3818,107 @@ export class Swarm {
   }
 
   /** The manager's phone → the CEO. Injected into a running session, otherwise the CEO picks it up next. */
-  async messageCeo(text: string) {
-    const t = text.trim().slice(0, 4000);
-    if (!t) throw new HttpError(400, 'Empty message');
-    const a = this.ceo();
-    if (!this.agentRt.get(a.id)?.session) this.ensureOfficeOpen();
-    this.postMessage('manager', t);
-    const rt = this.agentRt.get(a.id)!;
-    if (rt.session) {
-      this.appendLog(a, [{ kind: 'manager', text: `▶ Manager: ${t}` }]);
-      this.ceoIssues.managerMessage(); // a new request: the issue cap counts from here
-      rt.session.send(`Message from the manager (they read your reply on their phone, so keep it short):\n${t}`);
-      return;
+  messageCeo(text: string, source?: NonNullable<PhoneMessage['telegram']>, accepted?: () => void): Promise<void> {
+    const run = this.managerCommands.then(async () => {
+      if (source && source.updateId < this.state.telegram.offset) {
+        await this.writeState();
+        await this.dispatchManagerInputs();
+        return;
+      }
+      const t = text.trim();
+      if (!t || t.length > 4000) throw new HttpError(400, 'Send between 1 and 4000 characters. Nothing was submitted.');
+      const a = this.ceo();
+      if (!this.agentRt.get(a.id)?.session) this.ensureOfficeOpen();
+      if (this.state.managerInputs.length >= 1000) throw new HttpError(409, 'Manager input queue is full. Try again after Joi catches up.');
+      this.acceptingManager++;
+      try {
+        accepted?.();
+        const m = this.postMessage('manager', t, undefined, source, false);
+        this.state.managerInputs.push({ id: m.id, text: t, status: 'pending' });
+        // Message, source deduplication offset, pending CEO input and outbound mirror share one atomic file rename.
+        await this.writeState();
+        this.broadcast({ type: 'message', message: m });
+        await this.dispatchManagerInputs();
+      } finally { this.acceptingManager--; }
+      setTimeout(() => this.schedule(), 150);
+    });
+    this.managerCommands = run.catch(() => this.retryManagerInputs());
+    return run;
+  }
+
+  private recoverManagerInputs() {
+    const run = this.managerCommands.then(async () => {
+      await this.writeState();
+      this.managerHandoffPending = false;
+      await this.dispatchManagerInputs();
+      this.handoffRetryMs = 1000;
+      setTimeout(() => this.schedule(), 150);
+    });
+    this.managerCommands = run.catch(() => this.retryManagerInputs());
+    return run;
+  }
+
+  /** Inputs left behind by a failed save block CEO work, so retry on a capped backoff without waiting for another message. */
+  private retryManagerInputs() {
+    if (this.handoffRetry || (!this.managerHandoffPending && !this.state.managerInputs.length)) return;
+    const delay = this.handoffRetryMs;
+    this.handoffRetryMs = Math.min(delay * 2, 60_000);
+    this.handoffRetry = setTimeout(() => {
+      this.handoffRetry = null;
+      this.recoverManagerInputs().catch((err) => console.warn('could not hand the manager\'s message to the CEO', err));
+    }, delay);
+  }
+
+  private async dispatchManagerInputs() {
+    this.acceptingManager++;
+    try {
+      for (const input of [...this.state.managerInputs]) {
+        if (input.status !== 'pending') continue;
+        const a = this.ceo();
+        const rt = this.agentRt.get(a.id)!;
+        if (rt.session) {
+          input.status = 'sending';
+          try { await this.writeState(); }
+          catch (err) { input.status = 'pending'; throw err; }
+          // Session may have ended while the disk commit was in flight; fall back to the ordinary queue.
+          if (rt.session) {
+            this.appendLog(a, [{ kind: 'manager', text: `▶ Manager: ${input.text}` }]);
+            this.ceoIssues.managerMessage();
+            rt.session.send(`Message from the manager (they read your reply on their phone, so keep it short):\n${input.text}`);
+          } else this.enqueueCeo({ kind: 'chat', text: input.text, at: Date.now() });
+        } else this.enqueueCeo({ kind: 'chat', text: input.text, at: Date.now() });
+        // A failed save leaves disk holding the input, so the in-memory job must remain unschedulable.
+        this.managerHandoffPending = true;
+        this.state.managerInputs.splice(this.state.managerInputs.indexOf(input), 1);
+        await this.writeState();
+        this.managerHandoffPending = false;
+      }
+    } finally { this.acceptingManager--; }
+  }
+
+  async telegramCommand(action: string, body: Record<string, unknown> = {}) {
+    if (action !== 'demo') return this.telegram.command(action, body);
+    if (!this.backend.demo || !this.demoTelegram) throw new HttpError(404, 'Demo simulator unavailable');
+    const text = typeof body.text === 'string' ? body.text : '';
+    if (text === '/offline') this.demoTelegram.offline = true;
+    else if (text === '/online') this.demoTelegram.offline = false;
+    else if (text === '/uncertain') this.demoTelegram.ambiguous = true;
+    else if (text.startsWith('/reply ')) this.postMessage('ceo', text.slice(7));
+    else if (text.startsWith('/notice ')) this.postMessage('office', text.slice(8));
+    else if (text === '/proposal') {
+      const repo = this.state.repos[0];
+      if (repo) this.proposeHire({ floor: repo.floor, role: 'dev', title: 'Demo developer', specialty: '', job_description: 'Test demo work', reason: 'Test a shared decision.' });
+    } else {
+      const p = this.state.telegram.paired ?? { userId: 12345, chatId: 12345 };
+      if (/^(approve|reject):/.test(text)) {
+        const id = text.split(':')[1];
+        await this.telegram.receive({ update_id: this.state.telegram.offset, callback_query: { id: 'demo', from: { id: p.userId }, message: { message_id: this.state.telegram.proposals[id] ?? 0, chat: { id: p.chatId, type: 'private' } }, data: text } });
+      } else await this.telegram.receive({ update_id: this.state.telegram.offset, message: { message_id: this.state.telegram.offset + 1, from: { id: p.userId }, chat: { id: p.chatId, type: 'private' }, text } });
     }
-    this.enqueueCeo({ kind: 'chat', text: t, at: Date.now() });
+    await this.writeState();
+    await this.telegram.flush();
+    this.broadcast({ type: 'telegram', telegram: this.telegram.view() });
+    return this.telegram.view();
   }
 
   requestReview() {
@@ -4109,11 +4235,12 @@ export class Swarm {
 
   // ---------- the phone ----------
 
-  private postMessage(from: PhoneMessage['from'], text: string, requestId?: string) {
-    const m: PhoneMessage = { id: this.messageSeq++, from, text: text.trim().slice(0, 6000), at: Date.now(), ...(requestId ? { requestId } : {}) };
+  private postMessage(from: PhoneMessage['from'], text: string, requestId?: string, source?: PhoneMessage['telegram'], publish = true) {
+    const m: PhoneMessage = { id: this.messageSeq++, from, text: text.trim(), at: Date.now(), ...(from === 'manager' ? { origin: source ? 'telegram' as const : 'web' as const, ...(source ? { telegram: source } : {}) } : {}), ...(requestId ? { requestId } : {}) };
     this.state.messages.push(m);
     if (this.state.messages.length > KEEP_MESSAGES) this.state.messages.splice(0, this.state.messages.length - KEEP_MESSAGES);
-    this.broadcast({ type: 'message', message: m });
+    this.telegram.message(m);
+    if (publish) this.broadcast({ type: 'message', message: m });
     this.save();
     return m;
   }
@@ -4141,6 +4268,7 @@ export class Swarm {
 
   private decide(req: HireRequestView, patch: Pick<HireRequestView, 'status' | 'note' | 'decidedBy'>) {
     Object.assign(req, patch, { decidedAt: Date.now() });
+    this.telegram.proposal(req);
     this.broadcast({ type: 'request', request: req });
     this.save();
   }

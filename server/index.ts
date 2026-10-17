@@ -156,6 +156,7 @@ app.patch('/api/settings', route((req) => swarm.updateSettings(req.body ?? {})))
 app.post('/api/office/update', route((req) => swarm.updateOffice(req.body?.action)));
 
 // The CEO and the manager's phone
+app.post('/api/telegram', route((req) => swarm.telegramCommand(str(req.body?.action), req.body ?? {})));
 app.post('/api/ceo/message', route((req) => swarm.messageCeo(str(req.body.text))));
 app.post('/api/ceo/review', route(() => swarm.requestReview()));
 app.post('/api/research', route((req) => swarm.briefResearcher(str(req.body.text), str(req.body.repoId) || undefined)));
