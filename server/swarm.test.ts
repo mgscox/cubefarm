@@ -3087,6 +3087,29 @@ describe('boxes', () => {
     await expect(swarm.checkBox('box-gone')).rejects.toThrow(HttpError);
   });
 
+  it("moves a box to the office's commit once its agents finish, and nothing new starts there meanwhile", async () => {
+    const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
+    Object.assign(office, { scheduling: true, officeHead: `0ff1ce5${'0'.repeat(33)}` }); // the demo office's commit
+    vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
+    const box = swarm.addBox('Tower', 'stale-tower');
+    const ada = s.state.agents[0];
+    Object.assign(ada, { box: box.id, deskBox: box.id, status: 'working' });
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(office.boxView(box).sync).toEqual({ text: "Moving to the office's 0ff1ce5 once its 1 agent finishes: nothing new starts there.", failed: false });
+    ada.status = 'done';
+    expect(internals().available(repo, 'dev')).toEqual([]);
+    s.repoRt.get(repo.id)!.issues = [issue(9)];
+    expect(((await swarm.assign('a1', 9)) as { warning?: string }).warning).toBe("waiting: Tower is moving to the office's version");
+
+    office.syncBoxes();
+    expect(office.boxView(box).sync?.text).toBe("Updating to the office's 0ff1ce5…");
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(office.boxView(box)).toMatchObject({ status: 'connecting', sync: { text: 'Restarting on 0ff1ce5…' } });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
+    expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
+  });
+
   it('refuses bad boxes', () => {
     expect(() => swarm.addBox('x', '-oProxyCommand=evil')).toThrow(HttpError);
     expect(() => swarm.updateAgent('a1', { box: 'nope' })).toThrow(/No box/);

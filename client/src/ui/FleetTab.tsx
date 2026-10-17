@@ -101,6 +101,7 @@ function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos:
         <span className={`status ${STATUS_CLASS[box.status]}`}>{box.status}</span>
       </div>
       {box.error && <div className="term-error small">{box.error}</div>}
+      {box.sync && <div className={`small ${box.sync.failed ? 'term-error' : 'muted'}`}>⬆ {box.sync.text}</div>}
       {missing.length > 0 && <div className="small fleet-missing">⚠ Set up on the box: {missing.join(', ')}</div>}
       <Workers id={box.id} agents={agents} repos={repos} />
       <div className="row">

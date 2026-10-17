@@ -4,7 +4,7 @@ import { VERSION } from './config.ts';
 import { KeeperPty, terminalMessage } from './ptyClient.ts';
 import { encode, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
 import { reconnectClis, startCliSession } from './cliRunner.ts';
-import { boxCommand, boxDeskDir, boxMainDir, redialDelay, retryForm, type BoxInfo, type BoxLayout } from './fleet.ts';
+import { boxCommand, boxDeskDir, boxMainDir, boxUpdateCommand, parseUpdateResult, redialDelay, retryForm, type BoxInfo, type BoxLayout, type BoxUpdateResult } from './fleet.ts';
 import type { BoxConnection, BoxOptions, CliHost, CliPlan, Machine, PreparedCli } from './machine.ts';
 import type { SessionHandle } from './agentRunner.ts';
 import type { BoxStatus, CliView } from '../shared/types.ts';
@@ -20,6 +20,8 @@ const READY_MS = 180_000;
 const CALL_MS = 120_000;
 const SLOW_CALL_MS = 15 * 60_000;
 const SLOW = new Set(['prepareDesk', 'detectClis', 'info']);
+/** Updating a box's cubefarm: a fetch, maybe an npm install, and a build. */
+const UPDATE_MS = 20 * 60_000;
 
 class BoxLink implements CliHost {
   status: BoxStatus = 'connecting';
@@ -51,6 +53,10 @@ class BoxLink implements CliHost {
   private dialWaiters: { resolve(): void; reject(e: Error): void }[] = [];
   /** Transcripts the box said are on its disk (see hasFile). */
   private transcripts = new Set<string>();
+  /** info and clis are from the link that's up now. */
+  reported = false;
+  /** The host was told to shut down to restart: the link closing is expected, and redialled at once. */
+  private restarting = false;
 
   constructor(
     private readonly opts: BoxOptions,
@@ -112,12 +118,18 @@ class BoxLink implements CliHost {
       clearTimeout(timer);
       if (this.child !== child) return;
       this.child = null;
+      this.reported = false;
       for (const [rid, c] of this.calls) {
         clearTimeout(c.timer);
         c.reject(new Error(`Lost the link to ${this.name}.`));
         this.calls.delete(rid);
       }
       if (this.closed) return;
+      if (this.restarting) {
+        this.restarting = false;
+        this.set('connecting', null);
+        return void (this.redial = setTimeout(() => this.dial(), 1000));
+      }
       if (!ready && !this.pinned && !this.opts.box.layout) {
         const next = retryForm(this.plain, this.stderr);
         this.plain = next.plain;
@@ -175,8 +187,51 @@ class BoxLink implements CliHost {
       })
       .then((clis) => {
         this.clis = clis;
+        this.reported = true;
         this.onChange();
       });
+  }
+
+  get isRefused() {
+    return this.refused !== null;
+  }
+
+  /** `cubefarm box --update <commit>` on the box, over an ssh of its own (it works whatever protocol the host speaks). */
+  update(commit: string): Promise<BoxUpdateResult> {
+    let cmd: { file: string; args: string[] };
+    try {
+      cmd = boxUpdateCommand(this.opts.box.destination, VERSION, commit, undefined, this.opts.box.layout ? this.opts.box.layout.sep === '\\' : this.plain);
+    } catch (err) {
+      return Promise.reject(err as Error);
+    }
+    return new Promise((resolve, reject) => {
+      const child = spawn(cmd.file, cmd.args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      let out = '';
+      let err = '';
+      const timer = setTimeout(() => child.kill(), UPDATE_MS);
+      child.stdout.setEncoding('utf8').on('data', (d: string) => (out = (out + d).slice(-20_000)));
+      child.stderr.setEncoding('utf8').on('data', (d: string) => (err = (err + d).slice(-2000)));
+      child.on('error', (e) => (err += `\n${e.message}`));
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        const result = parseUpdateResult(out);
+        if (result) return resolve(result);
+        const said = err.trim().split('\n').filter(Boolean).pop();
+        reject(new Error(said ?? `ssh exited (${code})`));
+      });
+    });
+  }
+
+  /** Shut the host down and dial again: the box's next host runs the cubefarm now on its disk. One that's offline is dialled now. */
+  restart(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    const child = this.child;
+    if (this.status !== 'online' || !child) return this.check();
+    const back = new Promise<void>((resolve, reject) => this.dialWaiters.push({ resolve, reject }));
+    this.restarting = true;
+    this.send({ op: 'shutdown' });
+    setTimeout(() => this.child === child && child.kill(), 15_000).unref(); // a host that never went: the link goes instead
+    return back;
   }
 
   /**
@@ -344,10 +399,12 @@ export function connectBox(opts: BoxOptions): BoxConnection {
   };
   return {
     machine,
-    state: () => ({ status: link.status, error: link.error, info: link.info, clis: link.clis, running: link.ptys.size }),
+    state: () => ({ status: link.status, error: link.error, info: link.info, clis: link.clis, running: link.ptys.size, reported: link.reported, refused: link.isRefused }),
     reconnected: Promise.resolve().then(() => reconnectClis(opts.terminalFor, link)), // dials once the caller has the connection
     hooksReady: () => link.hooksReady(),
     check: () => link.check(),
+    update: (commit) => link.update(commit),
+    restart: () => link.restart(),
     close: () => link.close(),
   };
 }

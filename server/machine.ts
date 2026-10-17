@@ -3,7 +3,7 @@ import type { Pty } from './ptyClient.ts';
 import type { SessionCallbacks, SessionHandle, SessionOptions } from './agentRunner.ts';
 import type { DeskBase } from './workspace.ts';
 import type { ReconnectedCli } from './cliRunner.ts';
-import type { BoxInfo, PersistedBox } from './fleet.ts';
+import type { BoxInfo, BoxUpdateResult, PersistedBox } from './fleet.ts';
 import type { AgentTerminal } from './terminal.ts';
 import type { AgentCli, AgentRole, BoxStatus, CliView, EffortLevel } from '../shared/types.ts';
 
@@ -123,7 +123,8 @@ export interface CliHost {
 /** The office's link to one of its boxes: the box as a Machine, and how it stands. */
 export interface BoxConnection {
   machine: Machine;
-  state(): { status: BoxStatus; error: string | null; info: BoxInfo | null; clis: CliView[]; running: number };
+  /** reported: info and clis are from the link that's up now. refused: it runs another protocol version. */
+  state(): { status: BoxStatus; error: string | null; info: BoxInfo | null; clis: CliView[]; running: number; reported: boolean; refused: boolean };
   /**
    * The CLIs the box kept running while the office was away, back in their agents' terminals: resolves the first
    * time the box connects (which may be long after the office starts). Call hooksReady() once they're followed again.
@@ -132,6 +133,10 @@ export interface BoxConnection {
   hooksReady(): void;
   /** Ask again: an online box reports what it has set up (the manager fixed something there); one that isn't is dialled now. */
   check(): Promise<void>;
+  /** Bring the box's cubefarm to the office's commit (`cubefarm box --update`, over ssh of its own). */
+  update(commit: string): Promise<BoxUpdateResult>;
+  /** Restart the box's host on the cubefarm now on its disk (its terminals stop); settles once it's back and has reported. */
+  restart(): Promise<void>;
   /** Close the link: the box's CLIs carry on there (they were stopped first when the office quits for good). */
   close(): void;
 }

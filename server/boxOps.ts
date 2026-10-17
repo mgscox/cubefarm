@@ -4,6 +4,7 @@ import { run } from './exec.ts';
 import * as workspace from './workspace.ts';
 import { codexThread, detectClis } from './clis.ts';
 import { screenshotFile } from './agentRunner.ts';
+import { checkoutCommit } from './boxUpdate.ts';
 import { BIN_DIR, removeSessionDir, SESSIONS_DIR, sessionShots, writeCliSession, type CliLaunch } from './cliFiles.ts';
 import type { BoxInfo } from './fleet.ts';
 import type { CliPlan } from './machine.ts';
@@ -33,7 +34,7 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[] 
     async info(): Promise<BoxInfo> {
       const git = await run('git', ['--version'], { timeoutMs: 10_000 }).catch(() => null);
       const gh = await run('gh', ['auth', 'status'], { timeoutMs: 20_000 }).then(() => true, () => false);
-      return { platform: process.platform, version: VERSION, git: git?.trim() || null, ghReady: gh, workspaces: WORKSPACE_ROOT, sep: path.sep as '/' | '\\' };
+      return { platform: process.platform, version: VERSION, commit: await checkoutCommit(), git: git?.trim() || null, ghReady: gh, workspaces: WORKSPACE_ROOT, sep: path.sep as '/' | '\\' };
     },
     detectClis: () => detectClis(),
     async prepareDesk(fullName, base, slug, branch) {

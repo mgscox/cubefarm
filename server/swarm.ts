@@ -4,11 +4,11 @@ import crypto from 'node:crypto';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
 import type { BoxConnection, Machine } from './machine.ts';
-import { agentBox, startPlace, validDestination, type PersistedBox, type StartPlace } from './fleet.ts';
+import { agentBox, boxSync, boxSyncText, startPlace, validDestination, type BoxSyncState, type PersistedBox, type StartPlace } from './fleet.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { ReconnectedCli } from './cliRunner.ts';
 import type { PrDetails } from './github.ts';
-import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
+import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, VERSION, WORKSPACE_ROOT } from './config.ts';
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type MergePrRequest, type OfficeTools, type ParkPrRequest, type ResearchRequest, type StartIssueRequest } from './ceo.ts';
 import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
@@ -984,7 +984,7 @@ export class Swarm {
       a.deskBox,
       (id) => {
         if (!this.state.boxes.some((b) => b.id === id)) return null;
-        return this.boxConns.get(id)?.state().status === 'online';
+        return this.boxConns.get(id)?.state().status === 'online' && !this.boxMoving(id);
       },
       (id) => {
         // Its CLIs are looked for once it connects: until they're known, a new task waits for the list.
@@ -997,6 +997,7 @@ export class Swarm {
   /** Why an agent waits for a box. */
   private waitReason(where: { wait: string; lacks?: string }) {
     const name = this.boxName(where.wait);
+    if (this.boxMoving(where.wait)) return `${name} is moving to the office's version`;
     if (!where.lacks) return `${name} is offline`;
     return this.boxConns.get(where.wait)?.state().clis.length ? `${name} hasn't got ${where.lacks}` : `${name} is still looking for its coding agents`;
   }
@@ -1054,6 +1055,7 @@ export class Swarm {
 
   private boxView(b: PersistedBox): BoxView {
     const st = this.boxConns.get(b.id)?.state();
+    const sync = this.boxSyncs.get(b.id);
     return {
       id: b.id,
       name: b.name,
@@ -1066,6 +1068,7 @@ export class Swarm {
       ghReady: st?.info?.ghReady ?? false,
       clis: st?.clis ?? [],
       running: st?.running ?? 0,
+      sync: sync ? { text: boxSyncText(sync, this.boxBusy(b.id)), failed: sync.state === 'failed' } : null,
     };
   }
 
@@ -1091,8 +1094,87 @@ export class Swarm {
     this.boxStatus.set(id, now);
     this.broadcast({ type: 'box', box: this.boxView(b) });
     if (now === 'online' && was !== 'online' && this.scheduling) setTimeout(() => this.schedule(), 200); // agents waiting for it can start
+    this.syncBoxes();
   }
   private boxStatus = new Map<string, string>();
+
+  // ---------- boxes following the office's version (#94) ----------
+
+  /** Boxes moving to the office's version, or that failed to (not retried for the same target until the office restarts). */
+  private boxSyncs = new Map<string, BoxSyncState>();
+
+  /** Nothing new starts on a box while it moves to the office's version. */
+  private boxMoving(id: string) {
+    const s = this.boxSyncs.get(id);
+    return !!s && s.state !== 'failed';
+  }
+
+  /** Agents at work on a box. */
+  private boxBusy(id: string) {
+    return this.state.agents.filter((a) => a.deskBox === id && BUSY.includes(a.status) && a.role !== 'ceo' && a.role !== 'researcher').length;
+  }
+
+  /**
+   * Keep every box on the office's own cubefarm: when the office runs another commit (or version) than a box, nothing
+   * new starts there, and once its agents have finished it updates and its host restarts. Runs whenever a box changes
+   * and with the scheduler.
+   */
+  private syncBoxes() {
+    if (!this.scheduling) return;
+    const office = { version: VERSION, commit: this.officeHead };
+    for (const b of this.state.boxes) {
+      const conn = this.boxConns.get(b.id);
+      const s = this.boxSyncs.get(b.id);
+      if (!conn || (s && s.state !== 'draining' && s.state !== 'failed')) continue; // updating or restarting
+      const st = conn.state();
+      if (!st.refused && !(st.status === 'online' && st.reported)) continue;
+      const want = boxSync(office, st);
+      if (!want) {
+        if (s) {
+          this.boxSyncs.delete(b.id);
+          this.broadcast({ type: 'box', box: this.boxView(b) });
+        }
+        continue;
+      }
+      if (s?.target === want.target && s.state === 'failed') continue;
+      if (!s || s.target !== want.target) {
+        this.boxSyncs.set(b.id, { ...want, state: 'draining' });
+        console.log(`  box ${b.name}: moving to the office's ${want.target.slice(0, 7)} once nothing runs there`);
+      }
+      if (this.boxBusy(b.id) === 0) void this.moveBox(b, conn, want);
+      this.broadcast({ type: 'box', box: this.boxView(b) });
+    }
+  }
+
+  /** Update a drained box to the office's version and restart its host. */
+  private async moveBox(b: PersistedBox, conn: BoxConnection, want: { target: string; step: 'update' | 'restart' }) {
+    const set = (state: BoxSyncState['state'], error?: string) => {
+      if (this.boxConns.get(b.id) !== conn) return;
+      this.boxSyncs.set(b.id, { ...want, state, error });
+      if (this.state.boxes.includes(b)) this.broadcast({ type: 'box', box: this.boxView(b) });
+    };
+    try {
+      if (want.step === 'update') {
+        set('updating');
+        const r = await conn.update(want.target);
+        if (!r.ok) throw new Error(r.error ?? 'the update failed');
+      }
+      set('restarting');
+      await conn.restart();
+      const still = boxSync({ version: VERSION, commit: this.officeHead }, conn.state());
+      if (still?.target === want.target) throw new Error(`it still runs ${conn.state().info?.commit?.slice(0, 7) ?? `v${conn.state().info?.version ?? '?'}`}`);
+      if (this.boxConns.get(b.id) !== conn) return;
+      this.boxSyncs.delete(b.id);
+      if (this.state.boxes.includes(b)) this.broadcast({ type: 'box', box: this.boxView(b) });
+      console.log(`  box ${b.name}: now on the office's ${want.target.slice(0, 7)}`);
+      if (this.scheduling) setTimeout(() => this.schedule(), 200); // agents waiting for it can start
+    } catch (err) {
+      const why = (err as Error).message;
+      console.warn(`  box ${b.name}: couldn't move to the office's ${want.target.slice(0, 7)}: ${why}`);
+      set('failed', why);
+      if (this.state.boxes.includes(b)) this.toast('error', `${b.name} couldn't move to the office's version: ${why}`);
+    }
+  }
   /** init() is done: the scheduler runs. */
   private scheduling = false;
 
@@ -1127,6 +1209,7 @@ export class Swarm {
     if (!box) throw new HttpError(404, 'No such box');
     this.state.boxes = this.state.boxes.filter((b) => b !== box);
     this.removedBoxes.set(id, box.name);
+    this.boxSyncs.delete(id);
     for (const r of this.state.repos.filter((x) => x.box === id)) {
       r.box = '';
       this.emitRepo(r);
@@ -3244,6 +3327,7 @@ export class Swarm {
    */
   private schedule() {
     this.reconcileOrphanedQa();
+    this.syncBoxes();
     this.tickUsage();
     if (this.state.officeHeld) {
       void this.refreshOfficeLifecycle().catch((err) => console.warn('could not save closing office state', err));
