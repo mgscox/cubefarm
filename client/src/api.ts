@@ -75,6 +75,7 @@ export const api = {
   fireAgent: (id: string) => call('DELETE', `/api/agents/${id}`),
   addBox: (name: string, destination: string) => call<BoxView>('POST', '/api/boxes', { name, destination }),
   removeBox: (id: string) => call('DELETE', `/api/boxes/${id}`),
+  checkBox: (id: string) => call<BoxView>('POST', `/api/boxes/${id}/check`),
   assign: (id: string, issueNumber: number, note?: string) => call('POST', `/api/agents/${id}/assign`, { issueNumber, note }),
   stop: (id: string) => call('POST', `/api/agents/${id}/stop`),
   reset: (id: string) => call('POST', `/api/agents/${id}/reset`),

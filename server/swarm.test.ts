@@ -3074,6 +3074,19 @@ describe('boxes', () => {
     expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
   });
 
+  it('asks a box again, or connects to an offline one now', async () => {
+    const online = swarm.addBox('Mac mini', 'ada@mini');
+    const attic = swarm.addBox('Attic', 'offline-attic');
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(await swarm.checkBox(online.id)).toMatchObject({ status: 'online' });
+    const again = swarm.checkBox(attic.id);
+    expect((swarm as unknown as { boxView(b: unknown): { status: string } }).boxView(attic).status).toBe('connecting');
+    const failed = expect(again).rejects.toThrow(/Attic didn't answer: ssh: connect to host/);
+    await vi.advanceTimersByTimeAsync(1000);
+    await failed;
+    await expect(swarm.checkBox('box-gone')).rejects.toThrow(HttpError);
+  });
+
   it('refuses bad boxes', () => {
     expect(() => swarm.addBox('x', '-oProxyCommand=evil')).toThrow(HttpError);
     expect(() => swarm.updateAgent('a1', { box: 'nope' })).toThrow(/No box/);

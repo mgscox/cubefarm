@@ -130,6 +130,8 @@ export interface BoxConnection {
    */
   reconnected: Promise<ReconnectedCli[]>;
   hooksReady(): void;
+  /** Ask again: an online box reports what it has set up (the manager fixed something there); one that isn't is dialled now. */
+  check(): Promise<void>;
   /** Close the link: the box's CLIs carry on there (they were stopped first when the office quits for good). */
   close(): void;
 }
