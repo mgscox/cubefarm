@@ -42,7 +42,8 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 24
+          node-version: 'lts/*'
+          check-latest: true
 
       - run: npm ci
       - run: npm run typecheck
@@ -63,7 +64,8 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 24
+          node-version: 'lts/*'
+          check-latest: true
       - run: npm ci
       - run: npx playwright install chromium
 
