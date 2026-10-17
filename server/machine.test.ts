@@ -72,18 +72,23 @@ describe('startCliSession on a host', () => {
 
   // ---------- a Claude CLI whose hooks never reach the office ----------
 
-  const claude = (screen: () => string, claudeTurn: CliHost['claudeTurn']) => {
-    const cb = callbacks();
-    cb.boot = vi.fn();
-    cb.turn = vi.fn();
+  const claudeCallbacks = () => ({ ...callbacks(), boot: vi.fn(), turn: vi.fn() });
+  /** A Claude session in a new CLI; again(): a later session in the same terminal, on the same host (picking the CLI up if it waits). */
+  const claude = (screen: () => string, claudeTurn: CliHost['claudeTurn'], more: Partial<SessionOptions> = {}) => {
+    const cb = claudeCallbacks();
     let token = '';
     const prepare = vi.fn((plan: { token: string }) => {
       token = plan.token;
       return { dir: 'sessions/t', prompt: 'Fix #12', hookUrl: 'http://127.0.0.1:41234/api/hooks', start: () => pty };
     });
     const term = { ...terminal(), screen } as unknown as AgentTerminal;
-    const session = startCliSession({ ...opts, terminal: term }, cb, { ...host(prepare as CliHost['prepare']), claudeTurn });
-    return { cb, session, hook: (body: Record<string, unknown>) => handleHook(token, body) };
+    const h = { ...host(prepare as CliHost['prepare']), claudeTurn };
+    const session = startCliSession({ ...opts, ...more, terminal: term }, cb, h);
+    const again = (later: Partial<SessionOptions>) => {
+      const cb = claudeCallbacks();
+      return { cb, session: startCliSession({ ...opts, ...later, terminal: term }, cb, h) };
+    };
+    return { cb, session, again, hook: (body: Record<string, unknown>) => handleHook(token, body) };
   };
   const errors = (cb: SessionCallbacks) => vi.mocked(cb.log).mock.calls.flat(2).filter((e) => e.kind === 'error').map((e) => e.text);
   const turn = (t: Partial<ClaudeTurn>): ClaudeTurn => ({ bytes: 100, ended: false, mark: '', text: '', ...t });
@@ -136,5 +141,63 @@ describe('startCliSession on a host', () => {
     hook({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } });
     expect(cb.boot).toHaveBeenLastCalledWith(null);
     expect(vi.mocked(cb.log).mock.calls.flat(2).some((e) => /receiving Claude Code's hooks now/.test(e.text))).toBe(true);
+  });
+
+  const replies = (cb: SessionCallbacks, text: string) => vi.mocked(cb.log).mock.calls.flat(2).filter((e) => e.text === `● ${text}`).length;
+
+  it('handles a turn its transcript ended once, when its Stop hook arrives after all', async () => {
+    let now: ClaudeTurn | null = turn({ bytes: 2000 });
+    const { cb, hook } = claude(() => 'esc to interrupt', async () => now);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(cb.boot).toHaveBeenLastCalledWith('no-hooks');
+    now = turn({ bytes: 9000, ended: true, mark: 'msg_2', text: 'Done' });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(cb.turn).toHaveBeenCalledTimes(1);
+    hook({ hook_event_name: 'Stop', last_assistant_message: 'Done' });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(cb.turn).toHaveBeenCalledTimes(1);
+    expect(replies(cb, 'Done')).toBe(1);
+    expect(cb.finished).toHaveBeenCalledTimes(1);
+    expect(cb.finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: 'Done', turns: 1 }));
+  });
+
+  for (const later of [{ reattach: true }, { typed: true }]) {
+    it(`leaves a CLI whose hooks worked alone when it's picked up again (${Object.keys(later)[0]}), however long it goes quiet`, async () => {
+      const claudeTurn = vi.fn(async () => turn({ bytes: 500 }));
+      const first = claude(() => '● Bash(npm run test:e2e)\n✻ Running… (esc to interrupt)', claudeTurn, { keepAlive: true, resumeSessionId: 'sess-1' });
+      first.hook({ hook_event_name: 'UserPromptSubmit', prompt: 'Fix #12' });
+      first.hook({ hook_event_name: 'Stop', last_assistant_message: 'Opened the PR' });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(first.cb.finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true }));
+      claudeTurn.mockClear();
+
+      const { cb, session } = first.again({ ...later, keepAlive: true, resumeSessionId: 'sess-1', prompt: 'Address the review' });
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(errors(cb)).toEqual([]);
+      expect(cb.boot).not.toHaveBeenCalled();
+      expect(claudeTurn).not.toHaveBeenCalled();
+      expect(cb.finished).not.toHaveBeenCalled();
+      first.hook({ hook_event_name: 'Stop', last_assistant_message: 'Fixed' });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(cb.finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: 'Fixed' }));
+      session.stop();
+    });
+  }
+
+  it('follows the transcript of a CLI picked up again whose hooks never reached the office, from the start', async () => {
+    let now: ClaudeTurn | null = turn({ bytes: 2000 });
+    const first = claude(() => 'esc to interrupt', async () => now, { keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    now = turn({ bytes: 9000, ended: true, mark: 'msg_2', text: 'Opened the PR' });
+    await vi.advanceTimersByTimeAsync(5000 + 3000);
+    expect(first.cb.finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: 'Opened the PR' }));
+
+    const { cb, session } = first.again({ typed: true, keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(cb.boot).toHaveBeenLastCalledWith('no-hooks');
+    now = turn({ bytes: 12_000, ended: true, mark: 'msg_3', text: 'Fixed' });
+    await vi.advanceTimersByTimeAsync(5000 + 3000);
+    expect(cb.finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: 'Fixed' }));
+    session.stop();
   });
 });

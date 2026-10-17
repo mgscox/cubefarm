@@ -151,7 +151,10 @@ interface LiveCli {
   idleTimer?: NodeJS.Timeout;
   /** Where its hooks post (said when they don't arrive). */
   hookUrl?: string;
-  /** Its Claude hooks didn't reach the office: a session that picks it up follows its transcript from the start. */
+  /**
+   * Its Claude hooks didn't reach the office (cleared once one does): only then does a session that picks it up follow
+   * its transcript, from the start. One whose hooks work can go quiet for minutes on a long command.
+   */
   hookless?: boolean;
 }
 const lives = new Map<AgentTerminal, LiveCli>();
@@ -194,16 +197,28 @@ interface CliMeta {
   resumeId: string | null;
   /** An office session was driving it (not waiting at its prompt). */
   busy: boolean;
+  hookUrl?: string;
+  hookless?: boolean;
 }
 
-const metaOf = (l: LiveCli): CliMeta => ({ agentId: l.agentId, cli: l.cli, token: l.token, dir: l.dir, resumeId: l.resumeId, busy: !!l.session });
+const metaOf = (l: LiveCli): CliMeta => ({ agentId: l.agentId, cli: l.cli, token: l.token, dir: l.dir, resumeId: l.resumeId, busy: !!l.session, hookUrl: l.hookUrl, hookless: l.hookless });
 const remember = (l: LiveCli) => l.proc?.setMeta(metaOf(l));
+
+/** A hook from a CLI's main session (not a subagent's, not its status line, which runs untrusted): its hooks reach the office. */
+const fromMain = (b: Record<string, unknown>) => b.hook_event_name !== 'StatusLine' && !(typeof b.agent_id === 'string' && b.agent_id !== '');
 
 /** A CLI is running in its terminal: its output, its keys and its hooks are connected. */
 function wire(l: LiveCli, office?: OfficeTools) {
   const p = l.proc!;
   lives.set(l.term, l);
-  routes.set(l.token, { hook: (b) => (l.session ? l.session.hook(b) : idleHook(l, b)), office });
+  const hook = (b: Record<string, unknown>) => {
+    if (l.hookless && fromMain(b)) {
+      l.hookless = false;
+      remember(l);
+    }
+    return l.session ? l.session.hook(b) : idleHook(l, b);
+  };
+  routes.set(l.token, { hook, office });
   l.term.bind({ write: (d) => quietly(() => p.write(d)), resize: (c, r) => quietly(() => p.resize(c, r)) });
   p.onData((data) => {
     if (lives.get(l.term) === l) l.term.write(data);
@@ -249,7 +264,7 @@ export async function reconnectClis(terminalFor: (agentId: string) => AgentTermi
       if (meta.cli === 'codex' && meta.resumeId) void host.codexThread('archive', meta.resumeId, h.exit === null ? new Promise((r) => setTimeout(r, 5000)) : undefined);
       continue;
     }
-    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, host, proc: host.adopt(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null };
+    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, host, proc: host.adopt(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null, hookUrl: meta.hookUrl, hookless: meta.hookless === true };
     wire(l);
     waitAtPrompt(l);
     // Resizing makes the CLI draw its whole screen again, over whatever the saved copy of the terminal missed.
@@ -331,6 +346,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let boot: AgentBoot | null = null; // what the office said about a CLI it hasn't heard from (see bootNotice)
   let heard = false; // a hook from the CLI's main session reached the office
   let turnBase: ClaudeTurn | null = null; // its transcript when this session took it on: turns ending after are this session's
+  let transcriptEnded = false; // the transcript ended the current turn: its Stop, arriving late, isn't handled again
   let working = true; // a prompt is in hand and its turn hasn't ended (a new CLI starts on the one it's launched with)
   let finishTimer: NodeJS.Timeout | undefined;
   let bootTimer: NodeJS.Timeout | undefined;
@@ -346,7 +362,10 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const setBoot = (state: AgentBoot | null) => {
     if (boot === state) return;
     boot = state;
-    if (state === 'no-hooks' && live) live.hookless = true;
+    if (state === 'no-hooks' && live && !live.hookless) {
+      live.hookless = true;
+      remember(live);
+    }
     cb.boot?.(state);
   };
 
@@ -452,9 +471,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const hook = (b: Record<string, unknown>): Record<string, unknown> => {
     const event = String(b.hook_event_name ?? '');
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
-    if (!sub && event !== 'StatusLine' && !heard) {
+    if (fromMain(b) && !heard) {
       heard = true;
-      if (live) live.hookless = false;
       if (boot === 'no-hooks') log([{ kind: 'system', text: `✓ The office is receiving ${label}'s hooks now.` }]);
       setBoot(null);
     }
@@ -502,6 +520,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         if (sub) return {};
         pinMain(b);
         busy();
+        transcriptEnded = false;
         const prompt = String(b.prompt ?? '').trim();
         const i = officePrompts.findIndex((p) => p.slice(0, 60) === prompt.slice(0, 60));
         if (i >= 0) officePrompts.splice(i, 1);
@@ -510,6 +529,12 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       }
       case 'Stop': {
         const text = String(b.last_assistant_message ?? '').trim();
+        if (transcriptEnded) {
+          // Its transcript already ended this turn (the hooks were only quiet): just make sure it finishes.
+          transcriptEnded = false;
+          if (working) turnEnded(text || lastText);
+          return {};
+        }
         turns += 1;
         if (text) {
           log(assistantLines(text));
@@ -598,6 +623,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       if (boot === 'no-hooks' && t) {
         if (t.ended && t.mark && t.mark !== turnBase?.mark) {
           turnBase = t;
+          transcriptEnded = true;
           turns += 1;
           if (t.text) {
             log(assistantLines(t.text));
@@ -644,7 +670,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     if (opts.typed || opts.reattach) busy(); // typed at the prompt, or still at it after a restart: already running
     else handle.send(opts.prompt);
     shotTimer = setInterval(collectShots, 2000);
-    watchHookless(live.hookless ? HOOKLESS_LOOK_MS : BOOT_MS, true);
+    if (live.hookless) watchHookless(HOOKLESS_LOOK_MS, true); // otherwise its hooks worked, or aren't known yet: as before
     return handle;
   }
   if (opts.reattach) {
