@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fitStatus, noteFooter } from './draw';
+import { directoryRowPitch, fitStatus, noteFooter } from './draw';
 
 // Roughly the whiteboard's 16-17px Fredoka: 8px a character, 18px an emoji.
 const measure = (s: string) => Array.from(s).reduce((n, c) => n + (c.codePointAt(0)! > 0x2000 ? 18 : 8), 0);
@@ -33,5 +33,15 @@ describe('noteFooter', () => {
   it('shows the whole status when it fits, and uses the whole width with nobody on it', () => {
     expect(noteFooter(CARD, 'Ada', 'waiting for QA', measure, measure).note).toBe('waiting for QA');
     expect(noteFooter(CARD, null, '⚠️ needs you · the fix was never pushed', measure, measure)).toEqual({ name: '', nameRight: 0, note: '⚠️ needs you' });
+  });
+});
+
+describe('directoryRowPitch', () => {
+  it('keeps full-size rows while they fit, then squeezes every row in', () => {
+    expect(directoryRowPitch(1, 118, 524, 58)).toBe(58);
+    expect(directoryRowPitch(3, 118, 524, 58)).toBe(58);
+    expect(directoryRowPitch(8, 118, 524, 58)).toBe(58);
+    expect(directoryRowPitch(10, 118, 524, 58)).toBeCloseTo(406 / 9);
+    for (const rows of [2, 10, 25, 60]) expect(118 + (rows - 1) * directoryRowPitch(rows, 118, 524, 58)).toBeLessThanOrEqual(524);
   });
 });

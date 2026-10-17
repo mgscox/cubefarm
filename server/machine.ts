@@ -2,11 +2,14 @@ import type { HeldPty } from './ptyProtocol.ts';
 import type { Pty } from './ptyClient.ts';
 import type { SessionCallbacks, SessionHandle, SessionOptions } from './agentRunner.ts';
 import type { DeskBase } from './workspace.ts';
-import type { AgentCli, AgentRole, CliView, EffortLevel } from '../shared/types.ts';
+import type { ReconnectedCli } from './cliRunner.ts';
+import type { BoxInfo, PersistedBox } from './fleet.ts';
+import type { AgentTerminal } from './terminal.ts';
+import type { AgentCli, AgentRole, BoxStatus, CliView, EffortLevel } from '../shared/types.ts';
 
-// Where an agent works: its desk (a worktree), its sessions and the CLIs it runs. Today that's always the office's own
-// machine; the seam is here so a desk and its CLI can live on another one (see docs/fleet-design.md). Paths a machine
-// hands out are its own: the office passes them back to it, and into the agent's prompts, as they are.
+// Where an agent works: its desk (a worktree), its sessions and the CLIs it runs: the office's own machine, or a box
+// (another machine, reached over ssh: see docs/fleet-design.md). Paths a machine hands out are its own: the office
+// passes them back to it, and into the agent's prompts, as they are (a box may run another OS).
 
 /** The machine-side half of an agent's work: its desk and its sessions. */
 export interface Machine {
@@ -88,16 +91,18 @@ export interface PreparedCli {
   start(size: { cols: number; rows: number }, meta: unknown): Pty;
 }
 
-/** Where a CLI runs: writes its files, starts it, and reads back what it leaves on disk. */
+type Shot = { data: Buffer; mime: string };
+
+/** Where a CLI runs: writes its files, starts it, and reads back what it leaves on disk. A box answers asynchronously. */
 export interface CliHost {
-  /** Throws, with a message for the manager, when the CLI can't be prepared (not installed, files not written). */
-  prepare(plan: CliPlan): PreparedCli;
+  /** Throws (or rejects), with a message for the manager, when the CLI can't be prepared (not installed, files not written). */
+  prepare(plan: CliPlan): PreparedCli | Promise<PreparedCli>;
   /** A file exists on this machine (a Claude Code transcript a hook names). */
   hasFile(file: string): boolean;
   /** Browser screenshots new in a session's browser folder (dir: the session's), each then added to seen (Codex and OpenCode don't report tool results). */
-  newShots(dir: string, seen: Set<string>, now: number): { name: string; data: Buffer; mime: string }[];
+  newShots(dir: string, seen: Set<string>, now: number): (Shot & { name: string })[] | Promise<(Shot & { name: string })[]>;
   /** The screenshot a Playwright result names (relative to the CLI's folder). */
-  savedShot(cwd: string, text: string): { data: Buffer; mime: string } | null;
+  savedShot(cwd: string, text: string): Shot | null | Promise<Shot | null>;
   /** Archive or unarchive a Codex thread (see clis.codexThread). */
   codexThread(action: 'archive' | 'unarchive', id: string, after?: Promise<unknown>): Promise<void>;
   /** A session is over: its folder goes. */
@@ -111,4 +116,28 @@ export interface CliHost {
   leave(): void;
   /** What a desk clean-up must leave alone here: the keeper, and the session files' folders. */
   protect(): { pids: number[]; markers: string[] };
+}
+
+// ---------- boxes ----------
+
+/** The office's link to one of its boxes: the box as a Machine, and how it stands. */
+export interface BoxConnection {
+  machine: Machine;
+  state(): { status: BoxStatus; error: string | null; info: BoxInfo | null; clis: CliView[]; running: number };
+  /**
+   * The CLIs the box kept running while the office was away, back in their agents' terminals: resolves the first
+   * time the box connects (which may be long after the office starts). Call hooksReady() once they're followed again.
+   */
+  reconnected: Promise<ReconnectedCli[]>;
+  hooksReady(): void;
+  /** Close the link: the box's CLIs carry on there (they were stopped first when the office quits for good). */
+  close(): void;
+}
+
+/** What the office gives a box link: the box, and who to tell when it changes. */
+export interface BoxOptions {
+  box: PersistedBox;
+  officeId: string;
+  changed(): void;
+  terminalFor(agentId: string): AgentTerminal | null;
 }
