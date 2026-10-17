@@ -155,4 +155,4 @@ Client (`client/`, Vite root; React 19, R3F, drei, zustand):
 - Many PRs merge in parallel and auto-merge sends conflicts back: don't reformat, reorder or rename code you aren't
   changing, and don't touch unrelated files.
 - Say how you verified it and list your assumptions. UI changes get screenshots from the demo office.
-- Never push to `main`, never force-push, never merge your own PR.
+- **Unless running in interactive Desktop mode** never push to `main`, never force-push, never merge your own PR.
