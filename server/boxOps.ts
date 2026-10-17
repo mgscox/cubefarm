@@ -2,10 +2,10 @@ import path from 'node:path';
 import { VERSION, WORKSPACE_ROOT } from './config.ts';
 import { run } from './exec.ts';
 import * as workspace from './workspace.ts';
-import { codexThread, detectClis } from './clis.ts';
+import { codexThread, detectClis, readClaudeTurn } from './clis.ts';
 import { screenshotFile } from './agentRunner.ts';
 import { BIN_DIR, removeSessionDir, SESSIONS_DIR, sessionShots, writeCliSession, type CliLaunch } from './cliFiles.ts';
-import type { BoxInfo } from './fleet.ts';
+import { probeHookUrl, type BoxInfo } from './fleet.ts';
 import type { CliPlan } from './machine.ts';
 import type { DeskBase } from './workspace.ts';
 
@@ -33,7 +33,10 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[] 
     async info(): Promise<BoxInfo> {
       const git = await run('git', ['--version'], { timeoutMs: 10_000 }).catch(() => null);
       const gh = await run('gh', ['auth', 'status'], { timeoutMs: 20_000 }).then(() => true, () => false);
-      return { platform: process.platform, version: VERSION, git: git?.trim() || null, ghReady: gh, workspaces: WORKSPACE_ROOT, sep: path.sep as '/' | '\\' };
+      const hookError = await Promise.resolve()
+        .then(() => probeHookUrl(ctx.hookUrl()))
+        .catch((err: Error) => err.message);
+      return { platform: process.platform, version: VERSION, git: git?.trim() || null, ghReady: gh, hookError, workspaces: WORKSPACE_ROOT, sep: path.sep as '/' | '\\' };
     },
     detectClis: () => detectClis(),
     async prepareDesk(fullName, base, slug, branch) {
@@ -51,13 +54,14 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[] 
       for (const [t, p] of prepared) if (now - p.at > PREPARED_MS) prepared.delete(t);
       const cli = writeCliSession(plan as CliPlan, { url: ctx.hookUrl(), held: true });
       prepared.set((plan as CliPlan).token, { cli, at: now });
-      return { dir: cli.dir, prompt: cli.prompt };
+      return { dir: cli.dir, prompt: cli.prompt, hookUrl: `${ctx.hookUrl()}/api/hooks` };
     },
     newShots: (dir, seen, now) => sessionShots(sessionDir(dir), new Set(seen as string[]), Number(now) || Infinity).map(shot),
     savedShot(cwd, text) {
       const s = screenshotFile(str(cwd), str(text));
       return s ? shot(s) : null;
     },
+    claudeTurn: (cwd, sessionId) => readClaudeTurn(str(cwd), str(sessionId)),
     codexThread: (action, id) => codexThread(action === 'archive' ? 'archive' : 'unarchive', str(id)),
     removeDir: (dir) => removeSessionDir(sessionDir(dir)),
   };

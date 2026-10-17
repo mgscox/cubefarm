@@ -5,7 +5,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { claudeConversation, cliExit, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, interruptions, launchArgs, lostConversation, NOTIFY_SOURCE, oneAtATime, resumableSession, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, interruptions, launchArgs, lostConversation, NOTIFY_SOURCE, oneAtATime, resumableSession, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
@@ -426,5 +426,72 @@ describe('newScreenshots', () => {
     expect(newScreenshots(dir, seen, later).map((s) => s.name)).toEqual(['page-2026-09-29T10-00-02-000Z.jpeg']);
     expect(newScreenshots(path.join(dir, 'missing'), seen, later)).toEqual([]);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('claudeWorking / bootNotice', () => {
+  const idle = ['╭───────────────────────────╮', '│ ✻ Welcome to Claude Code! │', '╰───────────────────────────╯', '', '> Try "fix lint errors"', '  ? for shortcuts'].join('\n');
+  const trust = 'Do you trust the files in this folder?\n\n❯ 1. Yes, proceed\n  2. No, exit';
+  const spinner = '> Fix #12\n\n✻ Pondering… (12s · ↑ 1.2k tokens · esc to interrupt)';
+  const tool = '● Bash(npm test)\n  ⎿  Running…';
+
+  it('tells a working screen from a startup one', () => {
+    expect(claudeWorking(spinner)).toBe(true);
+    expect(claudeWorking(tool)).toBe(true);
+    expect(claudeWorking('⏺ playwright - Navigate to a URL (MCP)(url: "http://localhost:5816")')).toBe(true);
+    expect(claudeWorking(idle)).toBe(false);
+    expect(claudeWorking(trust)).toBe(false);
+    expect(claudeWorking('')).toBe(false);
+  });
+
+  it('says hooks are out of reach when it works, and that it has not started when it is idle', () => {
+    expect(bootNotice('Claude Code', spinner, 'http://127.0.0.1:5000/api/hooks')).toEqual({
+      boot: 'no-hooks',
+      text: expect.stringMatching(/^⚠ Claude Code is working but the office isn't receiving its hooks.*check it can reach http:\/\/127\.0\.0\.1:5000\/api\/hooks; otherwise type \/hooks in the terminal and press t\. Meanwhile the office follows its transcript to see when it's done\.$/),
+    });
+    expect(bootNotice('Claude Code', idle, 'u')).toEqual({ boot: 'waiting', text: "⚠ Claude Code hasn't started on the task yet. Open the terminal to see what it's waiting for." });
+    expect(bootNotice('Claude Code', idle, 'u', true).boot).toBe('no-hooks'); // its transcript moved
+  });
+});
+
+describe('claudeTurn', () => {
+  const line = (e: Record<string, unknown>) => JSON.stringify(e);
+  const assistant = (id: string, content: unknown[], stop: string | null, extra = {}) => line({ type: 'assistant', uuid: `u-${id}`, message: { id, content, stop_reason: stop }, ...extra });
+  const prompt = line({ type: 'user', message: { role: 'user', content: 'Fix #12' } });
+  const result = line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] } });
+
+  it('follows a turn through its tool calls to its end', () => {
+    const working = [prompt, assistant('m1', [{ type: 'thinking' }], 'tool_use'), assistant('m1', [{ type: 'tool_use', name: 'Bash' }], 'tool_use'), result].join('\n');
+    expect(claudeTurn(working, 10)).toEqual({ bytes: 10, ended: false, mark: '', text: '' });
+    const done = [working, assistant('m2', [{ type: 'text', text: 'Opened PR #7.' }], 'end_turn'), line({ type: 'system', subtype: 'turn_duration' })].join('\n');
+    expect(claudeTurn(done, 20)).toEqual({ bytes: 20, ended: true, mark: 'm2', text: 'Opened PR #7.' });
+  });
+
+  it("ends on the turn's duration when the last message has no stop reason, and starts again on a new prompt", () => {
+    const text = [prompt, assistant('m3', [{ type: 'text', text: 'Part one' }], null), assistant('m3', [{ type: 'text', text: 'part two' }], null)];
+    expect(claudeTurn(text.join('\n'), 1).ended).toBe(false);
+    text.push(line({ type: 'system', subtype: 'turn_duration', uuid: 's1' }));
+    expect(claudeTurn(text.join('\n'), 1)).toMatchObject({ ended: true, mark: 'm3', text: 'Part one\npart two' });
+    text.push(prompt);
+    expect(claudeTurn(text.join('\n'), 1).ended).toBe(false);
+  });
+
+  it("skips a cut first line, other entries and subagents' messages", () => {
+    const tail = ['{"type":"assis', line({ type: 'attachment' }), assistant('m4', [{ type: 'text', text: 'Mine' }], 'end_turn'), assistant('m5', [{ type: 'text', text: 'A subagent' }], 'end_turn', { isSidechain: true }), line({ type: 'user', isMeta: true, message: { content: 'caveat' } })].join('\n');
+    expect(claudeTurn(tail, 1)).toMatchObject({ ended: true, mark: 'm4', text: 'Mine' });
+  });
+
+  it("reads a session's transcript from Claude Code's projects folder", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cubefarm-claude-'));
+    const cwd = path.join(home, 'desks', 'ada_1');
+    const dir = path.join(home, '.claude', 'projects', path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-'));
+    fs.mkdirSync(dir, { recursive: true });
+    const body = `${assistant('m6', [{ type: 'text', text: 'Done' }], 'end_turn')}\n`;
+    fs.writeFileSync(path.join(dir, 'abc-123.jsonl'), body);
+    expect(readClaudeTurn(cwd, 'abc-123', home)).toEqual({ bytes: Buffer.byteLength(body), ended: true, mark: 'm6', text: 'Done' });
+    expect(readClaudeTurn(path.join(home, 'elsewhere'), 'abc-123', home)?.mark).toBe('m6'); // found in another project's folder
+    expect(readClaudeTurn(cwd, 'missing', home)).toBeNull();
+    expect(readClaudeTurn(cwd, '../abc-123', home)).toBeNull();
+    fs.rmSync(home, { recursive: true, force: true });
   });
 });
