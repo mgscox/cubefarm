@@ -1205,3 +1205,31 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
     },
   };
 }
+
+/** Local Telegram Bot API simulation. It never reads credentials or opens a network connection. */
+export function createDemoTelegram(): import('./telegram.ts').TelegramTransport & { offline: boolean; ambiguous: boolean } {
+  let nextId = 1;
+  const sent = new Map<number, { text: string; buttons?: string[] }>();
+  const fake = {
+    identity: 'demo-telegram', offline: false, ambiguous: false,
+    preview: () => ({ sent: structuredClone([...sent.values()].slice(-20)), offline: fake.offline }),
+    async call(method: string, body: Record<string, unknown>) {
+      const { TelegramFailure } = await import('./telegram.ts');
+      if (fake.offline) throw new TelegramFailure('retry', 'Demo Telegram disconnected.', 1);
+      if (fake.ambiguous) { fake.ambiguous = false; throw new TelegramFailure('uncertain', 'Demo Telegram send result unknown.'); }
+      if (method === 'answerCallbackQuery') return true;
+      const keyboard = body.reply_markup as { inline_keyboard?: { callback_data: string }[][] } | undefined;
+      const message = { text: String(body.text ?? ''), buttons: keyboard?.inline_keyboard?.flat().map((b) => b.callback_data) };
+      if (method === 'editMessageText') {
+        const previous = sent.get(Number(body.message_id));
+        if (previous) Object.assign(previous, message);
+        return { message_id: body.message_id };
+      }
+      const id = nextId++;
+      sent.set(id, message);
+      if (sent.size > 200) sent.delete(sent.keys().next().value!);
+      return { message_id: id };
+    },
+  };
+  return fake;
+}

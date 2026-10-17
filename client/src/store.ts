@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { CEO_ID, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { appendPhoneMessage } from '../../shared/phone';
 import { issueBlockers, issueWorkNote } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
@@ -57,6 +58,7 @@ interface State {
   research: ResearchInfo;
   messages: PhoneMessage[];
   phoneReadAt: number;
+  telegram?: TelegramView;
   officeCommit?: string | null; // undefined: the server can't update itself
   officeLifecycle: OfficeLifecycleView;
   officeUpdate?: OfficeUpdateView;
@@ -208,6 +210,7 @@ export const useStore = create<State>((set, get) => ({
           research: d.research ?? { queue: [], job: null, done: [] },
           messages: d.messages,
           phoneReadAt: d.phoneReadAt,
+          telegram: d.telegram,
           officeCommit: d.officeCommit,
           officeLifecycle: d.officeLifecycle,
           officeUpdate: d.officeUpdate,
@@ -302,7 +305,9 @@ export const useStore = create<State>((set, get) => ({
         set({ research: ev.research });
         break;
       case 'message': {
-        set({ messages: [...get().messages.slice(-199), ev.message] });
+        const repeated = get().messages.some((m) => m.id === ev.message.id);
+        set({ messages: appendPhoneMessage(get().messages, ev.message) });
+        if (repeated) break;
         const o = get().overlay;
         const reading = o?.kind === 'phone' && (o.tab ?? 'chat') === 'chat';
         if (ev.message.from === 'ceo' && !reading) {
@@ -315,6 +320,9 @@ export const useStore = create<State>((set, get) => ({
       }
       case 'phoneRead':
         set({ phoneReadAt: Math.max(get().phoneReadAt, ev.at) });
+        break;
+      case 'telegram':
+        set({ telegram: ev.telegram });
         break;
       case 'toast':
         get().pushToast(ev.level, ev.text);

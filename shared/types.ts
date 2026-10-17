@@ -388,6 +388,20 @@ export interface PhoneMessage {
   text: string;
   at: number;
   requestId?: string; // a hire / let-go proposal this message is about
+  origin?: 'web' | 'telegram';
+  telegram?: { updateId: number; chatId: number; messageId: number };
+}
+
+/** Non-secret Telegram connection state; delivery never changes phone read state. */
+export interface TelegramView {
+  configured: boolean;
+  state: 'unconfigured' | 'unpaired' | 'connected' | 'reconnecting' | 'error';
+  detail: string;
+  paired: { userId: number; chatId: number } | null;
+  pairing: { code: string; expiresAt: number; candidate: { userId: number; chatId: number } | null } | null;
+  pending: number;
+  uncertain: boolean;
+  demo?: { sent: { text: string; buttons?: string[] }[]; offline: boolean };
 }
 
 export type CeoJobKind = 'onboard' | 'plan' | 'review' | 'chat';
@@ -427,6 +441,7 @@ export interface WorldSnapshot {
   research: ResearchInfo;
   messages: PhoneMessage[];
   phoneReadAt: number; // CEO messages newer than this are unread
+  telegram?: TelegramView;
   officeCommit?: string | null; // short sha the server started on (absent on servers without self-update)
   officeLifecycle: OfficeLifecycleView;
   officeUpdate?: OfficeUpdateView;
@@ -451,6 +466,7 @@ export type ServerEvent =
   | { type: 'research'; research: ResearchInfo }
   | { type: 'message'; message: PhoneMessage }
   | { type: 'phoneRead'; at: number }
+  | { type: 'telegram'; telegram: TelegramView }
   | { type: 'officeLifecycle'; officeLifecycle: OfficeLifecycleView }
   | { type: 'officeUpdate'; officeUpdate: OfficeUpdateView }
   | { type: 'usage'; usage: UsageView }

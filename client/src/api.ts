@@ -92,6 +92,8 @@ export const api = {
   ceoReview: () => call('POST', '/api/ceo/review'),
   research: (text: string, repoId?: string) => call('POST', '/api/research', { text, repoId }),
   phoneRead: (at: number) => call('POST', '/api/phone/read', { at }),
+  telegramCommand: (action: string, extra: Record<string, unknown> = {}) =>
+    call('POST', '/api/telegram', { action, ...extra }),
   approveRequest: (id: string, overrides: { name?: string; model?: string; effort?: string } = {}) => call('POST', `/api/requests/${id}/approve`, overrides),
   rejectRequest: (id: string, note?: string) => call('POST', `/api/requests/${id}/reject`, { note }),
 };
