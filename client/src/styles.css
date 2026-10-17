@@ -2211,6 +2211,18 @@ input.inline:focus {
   display: flex;
   flex-direction: column;
 }
+.telegram-settings {
+  flex-shrink: 0;
+  max-height: 48%;
+  overflow: auto;
+  padding: 8px 12px;
+  background: #fff;
+  border-top: 1px solid #ddd;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.telegram-settings summary { cursor: pointer; }
+.telegram-settings input { min-width: 0; width: 100%; }
 .chat-head {
   display: flex;
   align-items: center;

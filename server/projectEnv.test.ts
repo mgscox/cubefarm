@@ -24,3 +24,7 @@ it('removes every spelling of the inherited script policy without changing other
   expect(inherited.npm_config_allow_scripts).toBe('esbuild');
   expect(inherited.NPM_CONFIG_ALLOW_SCRIPTS).toBe('acorn');
 });
+
+it('keeps the office Telegram credential out of agent and preview environments', () => {
+  expect(projectEnv({ CUBEFARM_TELEGRAM_TOKEN: 'private', cubefarm_telegram_token: 'private', PATH: 'bin' })).toEqual({ PATH: 'bin' });
+});
