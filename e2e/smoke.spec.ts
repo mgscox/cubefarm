@@ -397,7 +397,8 @@ test('the shortcut bar ends before the phone button at 1024x640, whatever the ph
   await page.setViewportSize({ width: 1024, height: 640 });
   await enterOffice(page);
   // The bar shows once the tour is over. Last in the file, as skipping the tour is saved for the tests after it.
-  await page.getByRole('button', { name: 'Skip tour' }).click();
+  // Dispatched: on CI's software WebGL a pointer click on the tour card can time out as "not stable".
+  await page.getByRole('button', { name: 'Skip tour' }).dispatchEvent('click');
   const bar = page.locator('.hud-help');
   await expect(bar).toContainText('Esc free mouse');
   // The phone's label: unread messages, or the CEO at work, whose name is free text (up to 24 characters).
