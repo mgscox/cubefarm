@@ -28,19 +28,23 @@ export interface BoxInfo extends BoxLayout {
 /** The box an agent works on: their own, else their floor's. '' is the office's own machine. */
 export const agentBox = (own: string | null | undefined, floor: string | undefined) => own ?? floor ?? '';
 
-export type StartPlace = { box: string; fellBack?: string } | { wait: string };
+/** wait: the box to wait for; lacks: the coding agent it hasn't got (else it's offline). */
+export type StartPlace = { box: string; fellBack?: string } | { wait: string; lacks?: string };
 
 /**
  * Where a session starts. A new task (a new issue, a QA run) goes to the agent's box; anything inside a task (a fix
  * round, a follow-up, a resume, a reattach) stays on deskBox, where its worktree and CLI conversation are. A box that's
- * offline is waited for; one that was removed falls back to the office (fellBack: the box it was).
+ * offline is waited for, and so is one without the agent's coding agent (lacks: its name, for a new task: a task
+ * already there runs the CLI it started with); one that was removed falls back to the office (fellBack: the box it was).
  */
-export function startPlace(kind: 'new' | 'within', want: string, deskBox: string, online: (id: string) => boolean | null): StartPlace {
+export function startPlace(kind: 'new' | 'within', want: string, deskBox: string, online: (id: string) => boolean | null, lacks: (id: string) => string | null = () => null): StartPlace {
   const box = kind === 'new' ? want : deskBox;
   if (!box) return { box: '' };
   const up = online(box);
   if (up === null) return { box: '', fellBack: box };
-  return up ? { box } : { wait: box };
+  if (!up) return { wait: box };
+  const missing = kind === 'new' ? lacks(box) : null;
+  return missing ? { wait: box, lacks: missing } : { box };
 }
 
 /** A destination ssh takes as a host, never as an option: no leading dash, no spaces or control characters. */
