@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { agentBox, boxCommand, boxDeskDir, boxMainDir, redialDelay, startPlace, validDestination } from './fleet.ts';
+import { execFileSync } from 'node:child_process';
+import { agentBox, boxCommand, boxDeskDir, boxMainDir, loginShell, notPosix, redialDelay, startPlace, validDestination } from './fleet.ts';
 
 describe('agentBox', () => {
   it("is the agent's own box, else the floor's, else the office's machine", () => {
@@ -50,11 +51,15 @@ describe('boxCommand', () => {
     const { file, args } = boxCommand('ada@buildbox', '0.4.0', 'f00d', '');
     expect(file).toBe('ssh');
     expect(args).toContain('BatchMode=yes');
-    expect(args.slice(-3)).toEqual(['--', 'ada@buildbox', 'npx -y cubefarm@0.4.0 box --stdio --office f00d']);
+    expect(args.slice(-3)).toEqual(['--', 'ada@buildbox', loginShell('npx -y cubefarm@0.4.0 box --stdio --office f00d')]);
   });
 
   it('can run a checkout on the box instead', () => {
-    expect(boxCommand('buildbox', '0.4.0', 'f00d', 'node ~/cubefarm/dist-server/boxStdio.js').args.at(-1)).toBe('node ~/cubefarm/dist-server/boxStdio.js --stdio --office f00d');
+    expect(boxCommand('buildbox', '0.4.0', 'f00d', 'node ~/cubefarm/bin/cubefarm.js box').args.at(-1)).toBe(loginShell('node ~/cubefarm/bin/cubefarm.js box --stdio --office f00d'));
+  });
+
+  it('sends a Windows box the command as it is', () => {
+    expect(boxCommand('winbox', '0.4.0', 'f00d', '', true).args.at(-1)).toBe('npx -y cubefarm@0.4.0 box --stdio --office f00d');
   });
 
   it('refuses a destination ssh would read as an option', () => {
@@ -94,5 +99,20 @@ describe('startPlace and the coding agents a box has', () => {
 
   it('says a box is offline before asking what it has', () => {
     expect(startPlace('new', 'claude-only', '', () => false, lacksCodex)).toEqual({ wait: 'claude-only' });
+  });
+});
+
+describe('loginShell', () => {
+  // The box's own shell runs it: here, sh with /bin/sh as the login shell.
+  it.skipIf(process.platform === 'win32')("runs the command in the user's login shell, quotes and all", () => {
+    const out = execFileSync('sh', ['-c', loginShell(`printf '%s|%s' "it's" "$0"`)], { encoding: 'utf8', env: { ...process.env, SHELL: '/bin/sh' } });
+    expect(out).toBe("it's|/bin/sh");
+  });
+});
+
+describe('notPosix', () => {
+  it("knows Windows' shells saying they have no such program", () => {
+    expect(notPosix("'sh' is not recognized as an internal or external command,\noperable program or batch file.")).toBe(true);
+    expect(notPosix('zsh:1: command not found: npx')).toBe(false);
   });
 });

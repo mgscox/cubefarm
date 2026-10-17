@@ -4,7 +4,7 @@ import { VERSION } from './config.ts';
 import { KeeperPty, terminalMessage } from './ptyClient.ts';
 import { encode, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
 import { reconnectClis, startCliSession } from './cliRunner.ts';
-import { boxCommand, boxDeskDir, boxMainDir, redialDelay, type BoxInfo, type BoxLayout } from './fleet.ts';
+import { boxCommand, boxDeskDir, boxMainDir, notPosix, redialDelay, type BoxInfo, type BoxLayout } from './fleet.ts';
 import type { BoxConnection, BoxOptions, CliHost, CliPlan, Machine, PreparedCli } from './machine.ts';
 import type { SessionHandle } from './agentRunner.ts';
 import type { BoxStatus, CliView } from '../shared/types.ts';
@@ -41,6 +41,8 @@ class BoxLink implements CliHost {
   private hooksOpen = false;
   private onHook: (token: string, body: unknown) => unknown = () => ({});
   private firstHeld?: (held: HeldPty[]) => void;
+  /** The box's shell isn't POSIX (Windows): its command is sent as it is, not through its login shell. */
+  private plain = false;
   /** Transcripts the box said are on its disk (see hasFile). */
   private transcripts = new Set<string>();
 
@@ -72,7 +74,7 @@ class BoxLink implements CliHost {
     clearTimeout(this.redial);
     let cmd: { file: string; args: string[] };
     try {
-      cmd = boxCommand(this.opts.box.destination, VERSION, this.opts.officeId);
+      cmd = boxCommand(this.opts.box.destination, VERSION, this.opts.officeId, undefined, this.plain || this.opts.box.layout?.sep === '\\');
     } catch (err) {
       return this.set('offline', (err as Error).message);
     }
@@ -110,6 +112,12 @@ class BoxLink implements CliHost {
         this.calls.delete(rid);
       }
       if (this.closed) return;
+      if (!ready && !this.plain && notPosix(this.stderr)) {
+        // A Windows box: try again at once with the command as it is.
+        this.plain = true;
+        this.redial = setTimeout(() => this.dial(), 0);
+        return;
+      }
       const said = this.stderr.trim().split('\n').filter(Boolean).pop();
       this.set('offline', this.refused ?? (ready ? `the link dropped${said ? `: ${said}` : ''}` : (said ?? `ssh exited (${code})`)));
       this.redial = setTimeout(() => this.dial(), redialDelay(this.attempt++));

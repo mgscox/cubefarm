@@ -52,13 +52,28 @@ export function validDestination(d: string): boolean {
   return d.length > 0 && d.length <= 255 && !d.startsWith('-') && /^[\w.@:%[\]-]+$/.test(d);
 }
 
+/** A word for a POSIX shell, single-quoted. */
+const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
+
+/**
+ * The box host's command run in the box user's login shell. ssh runs a command in a plain non-interactive shell, which
+ * on a Mac (zsh) never reads ~/.zprofile, so Node from Homebrew or nvm isn't on its PATH. sh starts it, so a fish or
+ * csh login shell still works. What the login shell prints (nvm's "Now using node") isn't JSON and is skipped.
+ */
+export const loginShell = (command: string) => `sh -c ${sq('exec "${SHELL:-/bin/sh}" -l -c "$1"')} sh ${sq(command)}`;
+
+/** Windows' shell (cmd) saying it has no such program: that box needs the command as it is, not through sh. */
+export const notPosix = (stderr: string) => /is not recognized as an internal or external command|is not recognized as the name of a cmdlet/i.test(stderr);
+
 /**
  * The command that reaches a box: ssh in batch mode (it never prompts) running the box host of the office's own
- * version, with stdio bridged to it. SWARM_BOX_COMMAND replaces the remote command (a box that runs a checkout).
+ * version, with stdio bridged to it, in the box user's login shell (plain: as it is, for a Windows box).
+ * SWARM_BOX_COMMAND replaces the remote command (a box that runs a checkout).
  */
-export function boxCommand(destination: string, version: string, officeId: string, remote = process.env.SWARM_BOX_COMMAND): { file: string; args: string[] } {
+export function boxCommand(destination: string, version: string, officeId: string, remote = process.env.SWARM_BOX_COMMAND, plain = false): { file: string; args: string[] } {
   if (!validDestination(destination)) throw new Error(`"${destination}" isn't a destination ssh can use.`);
-  const command = `${remote?.trim() || `npx -y cubefarm@${version} box`} --stdio --office ${officeId}`;
+  const run = `${remote?.trim() || `npx -y cubefarm@${version} box`} --stdio --office ${officeId}`;
+  const command = plain ? run : loginShell(run);
   return {
     file: 'ssh',
     args: ['-T', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', '--', destination, command],
