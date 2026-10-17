@@ -2,6 +2,7 @@ import { test as base, expect, type Page } from '@playwright/test';
 import { BLASTER_RACK, HALF_D, MANAGER_DESK } from '../client/src/world/layout';
 import { colourStats, decodePng } from './png';
 import type { RepoView, ServerEvent } from '../shared/types';
+import { issueParent } from '../shared/issues';
 
 // Smoke tests against the demo office: it loads without errors, you can walk in, the 3D view renders and moves,
 // and the main panels open and close. Pointer lock may not work headless, so nothing here depends on it.
@@ -165,7 +166,8 @@ test('the demo backlog marks parents and stalled work for the manager', async ({
       if (event.type === 'snapshot') event.data.settings.tutorialStep = -1;
       const repos = event.type === 'snapshot' ? event.data.repos : event.type === 'repo' ? [event.repo] : [];
       for (const repo of repos) if (repo.fullName === 'demo-co/pixel-todo') {
-        const issue = repo.issues.find((i) => i.number === 1);
+        // The first open issue that isn't a parent: the demo's agents may have closed #1 by the time this runs.
+        const issue = repo.issues.find((i) => !issueParent(i));
         if (issue) issue.stalled = 'ended twice with no work';
       }
       ws.send(JSON.stringify(event));
@@ -397,7 +399,8 @@ test('the shortcut bar ends before the phone button at 1024x640, whatever the ph
   await page.setViewportSize({ width: 1024, height: 640 });
   await enterOffice(page);
   // The bar shows once the tour is over. Last in the file, as skipping the tour is saved for the tests after it.
-  await page.getByRole('button', { name: 'Skip tour' }).click();
+  // Dispatched: on CI's software WebGL a pointer click on the tour card can time out as "not stable".
+  await page.getByRole('button', { name: 'Skip tour' }).dispatchEvent('click');
   const bar = page.locator('.hud-help');
   await expect(bar).toContainText('Esc free mouse');
   // The phone's label: unread messages, or the CEO at work, whose name is free text (up to 24 characters).
