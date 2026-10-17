@@ -410,12 +410,33 @@ test('holding W walks forward', async ({ page }) => {
   expect(to.yaw).toBeCloseTo(from.yaw); // W walks, it doesn't turn
 });
 
-test('the shortcut bar ends before the phone button at 1024x640, whatever the phone says', async ({ page }) => {
+test('the shortcut bar ends before the phone button at 1024x640, whatever the phone says', async ({ page, request }, testInfo) => {
+  // Resume a tour after setup: entry must leave its buttons reachable with a physical pointer.
+  expect((await request.patch('/api/settings', { data: { setupDone: true, tutorialStep: 0 } })).ok()).toBe(true);
   await page.setViewportSize({ width: 1024, height: 640 });
-  await enterOffice(page);
-  // The bar shows once the tour is over. Last in the file, as skipping the tour is saved for the tests after it.
-  // Dispatched: on CI's software WebGL a pointer click on the tour card can time out as "not stable".
-  await page.getByRole('button', { name: 'Skip tour' }).dispatchEvent('click');
+  await page.goto('/');
+  const enter = page.getByRole('button', { name: 'Enter the office' });
+  await expect(enter).toBeEnabled();
+  // Entry can only capture the pointer once the 3D player has mounted.
+  await expect.poll(async () => (await canvasColours(page)).colours, { timeout: 90_000 }).toBeGreaterThan(200);
+  // Observe requests while forwarding them to Chromium's native implementation. Some headless platforms reject
+  // capture, so checking pointerLockElement alone would miss the entry race that eats the Skip click on Linux.
+  const captures = await page.evaluateHandle(() => {
+    const calls: (PointerLockOptions | undefined)[] = [];
+    const request = Element.prototype.requestPointerLock;
+    Element.prototype.requestPointerLock = function (options) {
+      calls.push(options);
+      return request.call(this, options);
+    };
+    return calls;
+  });
+  await enter.click();
+  expect(await captures.jsonValue(), 'entry leaves the pointer free for the tour buttons').toEqual([]);
+  await captures.dispose();
+  // The bar shows once the tour is over.
+  await expect(page.getByRole('button', { name: 'Skip tour' })).toBeVisible();
+  await page.locator('.tour').screenshot({ path: testInfo.outputPath('tour-pointer-free.png') });
+  await page.getByRole('button', { name: 'Skip tour' }).click();
   const bar = page.locator('.hud-help');
   await expect(bar).toContainText('Esc free mouse');
   // The phone's label: unread messages, or the CEO at work, whose name is free text (up to 24 characters).
@@ -428,4 +449,5 @@ test('the shortcut bar ends before the phone button at 1024x640, whatever the ph
     expect(help.x + help.width, label).toBeLessThanOrEqual(phone.x);
     expect(phone.x + phone.width, label).toBeLessThanOrEqual(1024);
   }
+  await page.screenshot({ path: testInfo.outputPath('shortcut-layout.png') });
 });
