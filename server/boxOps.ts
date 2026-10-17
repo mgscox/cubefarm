@@ -26,7 +26,11 @@ function sessionDir(dir: unknown): string {
   return d;
 }
 
-export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[] }) {
+/** root: the cubefarm checkout this host runs from (tests). */
+export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[]; root?: string }) {
+  // The commit this host started on, not the checkout's HEAD later: an update moves HEAD under a running host, and the
+  // office has to see the old one to restart it (say, when the office itself restarted in between).
+  const commit = checkoutCommit(ctx.root);
   const prepared = new Map<string, { cli: CliLaunch; at: number }>();
   const str = (v: unknown) => String(v ?? '');
 
@@ -34,7 +38,7 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[] 
     async info(): Promise<BoxInfo> {
       const git = await run('git', ['--version'], { timeoutMs: 10_000 }).catch(() => null);
       const gh = await run('gh', ['auth', 'status'], { timeoutMs: 20_000 }).then(() => true, () => false);
-      return { platform: process.platform, version: VERSION, commit: await checkoutCommit(), git: git?.trim() || null, ghReady: gh, workspaces: WORKSPACE_ROOT, sep: path.sep as '/' | '\\' };
+      return { platform: process.platform, version: VERSION, commit: await commit, git: git?.trim() || null, ghReady: gh, workspaces: WORKSPACE_ROOT, sep: path.sep as '/' | '\\' };
     },
     detectClis: () => detectClis(),
     async prepareDesk(fullName, base, slug, branch) {

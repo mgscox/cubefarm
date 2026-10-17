@@ -147,17 +147,29 @@ describe('following the office (#94)', () => {
     expect(boxSync(office, { info: null, refused: true })).toEqual({ target: office.commit, step: 'update' });
   });
 
-  it("leaves a checkout alone when the office isn't one, and waits for a box's info", () => {
-    const npmOffice = { version: '0.4.0', commit: null };
-    expect(boxSync(npmOffice, { info: info({ commit: 'b'.repeat(40) }), refused: false })).toBeNull();
-    expect(boxSync(npmOffice, { info: null, refused: true })).toBeNull();
+  it("moves a checkout on another version to the office's release when the office runs from npm", () => {
+    const npmOffice = { version: '0.3.19', commit: null };
+    expect(boxSync(npmOffice, { info: info({ commit: 'b'.repeat(40), version: '0.3.18' }), refused: false })).toEqual({ target: '0.3.19', step: 'update' });
+    expect(boxSync(npmOffice, { info: info({ version: '0.3.18' }), refused: false })).toEqual({ target: '0.3.19', step: 'update' });
+    expect(boxSync(npmOffice, { info: info({ commit: null, version: '0.3.18' }), refused: false })).toEqual({ target: '0.3.19', step: 'restart' });
+    expect(boxSync(npmOffice, { info: info({ commit: 'b'.repeat(40), version: '0.3.19' }), refused: false })).toBeNull();
+  });
+
+  it("updates a box refused for another protocol to the office's commit, or its release", () => {
+    expect(boxSync({ version: '0.3.19', commit: null }, { info: null, refused: true })).toEqual({ target: '0.3.19', step: 'update' });
+    expect(boxSync({ version: '0.3.19', commit: null }, { info: info({ version: '0.3.10' }), refused: true })).toEqual({ target: '0.3.19', step: 'update' });
+  });
+
+  it("waits for a box's info", () => {
     expect(boxSync(office, { info: null, refused: false })).toBeNull();
   });
 
   it('runs the update over ssh with the same command as the link', () => {
     expect(boxUpdateCommand('ada@buildbox', '0.4.0', 'abc1234', '').args.at(-1)).toBe(loginShell('npx -y cubefarm@0.4.0 box --update abc1234'));
     expect(boxUpdateCommand('winbox', '0.4.0', 'abc1234', 'node C:\\cubefarm\\bin\\cubefarm.js box', true).args.at(-1)).toBe('node C:\\cubefarm\\bin\\cubefarm.js box --update abc1234');
-    expect(() => boxUpdateCommand('ada@buildbox', '0.4.0', 'main; rm -rf ~', '')).toThrow(/isn't a commit/);
+    expect(boxUpdateCommand('ada@buildbox', '0.4.0', '0.4.0', '').args.at(-1)).toBe(loginShell('npx -y cubefarm@0.4.0 box --update 0.4.0'));
+    expect(() => boxUpdateCommand('ada@buildbox', '0.4.0', 'main; rm -rf ~', '')).toThrow(/isn't a commit or a release/);
+    expect(() => boxUpdateCommand('ada@buildbox', '0.4.0', '0.4.0; rm -rf ~', '')).toThrow(/isn't a commit or a release/);
   });
 
   it("reads the update's result past what a login shell printed", () => {
@@ -173,6 +185,7 @@ describe('following the office (#94)', () => {
     expect(boxSyncText({ target, step: 'update', state: 'draining' }, 1)).toMatch(/once its 1 agent finishes/);
     expect(boxSyncText({ target, step: 'update', state: 'updating' }, 0)).toBe("Updating to the office's c0ffee0…");
     expect(boxSyncText({ target: '0.4.0', step: 'restart', state: 'restarting' }, 0)).toBe('Restarting on v0.4.0…');
+    expect(boxSyncText({ target: '0.4.0', step: 'update', state: 'updating' }, 0)).toBe("Updating to the office's v0.4.0…");
     expect(boxSyncText({ target, step: 'update', state: 'failed', error: 'no network' }, 0)).toBe("Couldn't move to the office's c0ffee0: no network");
   });
 });

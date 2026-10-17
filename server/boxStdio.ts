@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { encode, hostSocket, PTY_PROTOCOL, runtimeFlags, type FromHost } from './ptyProtocol.ts';
 import { updateBox } from './boxUpdate.ts';
+import { isUpdateTarget } from './fleet.ts';
 
 // `cubefarm box --stdio --office <id>`: this machine as one of an office's boxes. The office runs it over ssh; it
 // starts (or finds) the box's host, a keeper of its own (ptyHost.ts in box mode, detached, so ssh can drop and be
@@ -62,12 +63,12 @@ const fail = (text: string) => {
   process.exit(1);
 };
 
-/** Run the bridge; it exits when either side closes. `--update <commit>` brings this box to the office's commit instead. */
+/** Run the bridge; it exits when either side closes. `--update <target>` brings this box to the office's commit or release instead. */
 export async function main(argv: string[]): Promise<void> {
   if (argv.includes('--update')) {
-    const commit = argv[argv.indexOf('--update') + 1] ?? '';
-    if (!/^[0-9a-f]{7,40}$/.test(commit)) fail(`"${commit}" isn't a commit`);
-    process.stdout.write(`${JSON.stringify(await updateBox(commit))}\n`, () => process.exit(0));
+    const target = argv[argv.indexOf('--update') + 1] ?? '';
+    if (!isUpdateTarget(target)) fail(`"${target}" isn't a commit or a release`);
+    process.stdout.write(`${JSON.stringify(await updateBox(target))}\n`, () => process.exit(0));
     return new Promise(() => undefined);
   }
   const office = argv[argv.indexOf('--office') + 1] ?? '';

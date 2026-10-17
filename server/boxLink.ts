@@ -196,11 +196,11 @@ class BoxLink implements CliHost {
     return this.refused !== null;
   }
 
-  /** `cubefarm box --update <commit>` on the box, over an ssh of its own (it works whatever protocol the host speaks). */
-  update(commit: string): Promise<BoxUpdateResult> {
+  /** `cubefarm box --update <target>` on the box, over an ssh of its own (it works whatever protocol the host speaks). */
+  update(target: string): Promise<BoxUpdateResult> {
     let cmd: { file: string; args: string[] };
     try {
-      cmd = boxUpdateCommand(this.opts.box.destination, VERSION, commit, undefined, this.opts.box.layout ? this.opts.box.layout.sep === '\\' : this.plain);
+      cmd = boxUpdateCommand(this.opts.box.destination, VERSION, target, undefined, this.opts.box.layout ? this.opts.box.layout.sep === '\\' : this.plain);
     } catch (err) {
       return Promise.reject(err as Error);
     }
@@ -403,7 +403,7 @@ export function connectBox(opts: BoxOptions): BoxConnection {
     reconnected: Promise.resolve().then(() => reconnectClis(opts.terminalFor, link)), // dials once the caller has the connection
     hooksReady: () => link.hooksReady(),
     check: () => link.check(),
-    update: (commit) => link.update(commit),
+    update: (target) => link.update(target),
     restart: () => link.restart(),
     close: () => link.close(),
   };

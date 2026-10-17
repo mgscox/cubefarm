@@ -133,8 +133,8 @@ export interface BoxConnection {
   hooksReady(): void;
   /** Ask again: an online box reports what it has set up (the manager fixed something there); one that isn't is dialled now. */
   check(): Promise<void>;
-  /** Bring the box's cubefarm to the office's commit (`cubefarm box --update`, over ssh of its own). */
-  update(commit: string): Promise<BoxUpdateResult>;
+  /** Bring the box's cubefarm to the office's commit or release (`cubefarm box --update`, over ssh of its own). */
+  update(target: string): Promise<BoxUpdateResult>;
   /** Restart the box's host on the cubefarm now on its disk (its terminals stop); settles once it's back and has reported. */
   restart(): Promise<void>;
   /** Close the link: the box's CLIs carry on there (they were stopped first when the office quits for good). */

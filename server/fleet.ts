@@ -21,7 +21,7 @@ export interface BoxLayout {
 export interface BoxInfo extends BoxLayout {
   platform: string;
   version: string;
-  /** The commit its cubefarm checkout is on; null when it isn't a checkout (npx). A box from before #94 doesn't say. */
+  /** The commit its host started on (its cubefarm checkout's then); null when it isn't a checkout (npx). A box from before #94 doesn't say. */
   commit?: string | null;
   git: string | null;
   ghReady: boolean;
@@ -83,10 +83,16 @@ export function boxCommand(destination: string, version: string, officeId: strin
   return sshBox(destination, version, `--stdio --office ${officeId}`, remote, plain);
 }
 
-/** The command that has a box bring its cubefarm to the office's commit (`cubefarm box --update <commit>`, boxUpdate.ts). */
-export function boxUpdateCommand(destination: string, version: string, commit: string, remote = process.env.SWARM_BOX_COMMAND, plain = false): { file: string; args: string[] } {
-  if (!/^[0-9a-f]{7,40}$/.test(commit)) throw new Error(`"${commit}" isn't a commit.`);
-  return sshBox(destination, version, `--update ${commit}`, remote, plain);
+/** A release (0.3.19), as opposed to a commit: what a box follows when the office runs from npm. */
+export const isRelease = (target: string) => /^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(target);
+
+/** What `cubefarm box --update` takes: the office's commit, or its release when it isn't a checkout. */
+export const isUpdateTarget = (target: string) => /^[0-9a-f]{7,40}$/.test(target) || isRelease(target);
+
+/** The command that has a box bring its cubefarm to the office's commit or release (`cubefarm box --update <target>`, boxUpdate.ts). */
+export function boxUpdateCommand(destination: string, version: string, target: string, remote = process.env.SWARM_BOX_COMMAND, plain = false): { file: string; args: string[] } {
+  if (!isUpdateTarget(target)) throw new Error(`"${target}" isn't a commit or a release.`);
+  return sshBox(destination, version, `--update ${target}`, remote, plain);
 }
 
 function sshBox(destination: string, version: string, rest: string, remote: string | undefined, plain: boolean) {
@@ -127,18 +133,21 @@ export function parseUpdateResult(stdout: string): BoxUpdateResult | null {
 }
 
 /**
- * What a box needs to run the office's own cubefarm, or null when it does (or can't be told). A checkout on another
- * commit is updated to the office's (target), then its host restarted; one run by npx only needs its host restarted,
- * as its next link already runs the office's version. A box from before #94 doesn't say which it is: it's asked to
- * update, which also tells an old one apart. A box refused for another protocol can only be updated.
+ * What a box needs to run the office's own cubefarm, or null when it does (or can't be told). A checkout follows the
+ * office's commit, or its release (target) when the office runs from npm, then its host restarts; one run by npx only
+ * needs its host restarted, as its next link already runs the office's version. A box from before #94 doesn't say
+ * which it is: it's asked to update, which also tells an old one apart. A box refused for another protocol runs an
+ * old checkout (npx would run the office's version), so it's updated.
  */
 export function boxSync(office: { version: string; commit: string | null }, box: { info: BoxInfo | null; refused: boolean }): { target: string; step: 'update' | 'restart' } | null {
-  if (box.refused) return office.commit ? { target: office.commit, step: 'update' } : null;
+  if (box.refused) return { target: office.commit ?? office.version, step: 'update' };
   const info = box.info;
   if (!info) return null;
-  if (typeof info.commit === 'string') return office.commit && info.commit !== office.commit ? { target: office.commit, step: 'update' } : null;
-  if (info.commit === undefined && office.commit) return { target: office.commit, step: 'update' };
-  return info.version !== office.version ? { target: office.version, step: 'restart' } : null;
+  if (info.commit === null || !office.commit) {
+    if (info.version === office.version) return null;
+    return { target: office.version, step: info.commit === null ? 'restart' : 'update' };
+  }
+  return info.commit === office.commit ? null : { target: office.commit, step: 'update' };
 }
 
 /** A box following the office: waiting for its agents to finish, updating, restarting its host, or it failed. */
@@ -149,7 +158,7 @@ export interface BoxSyncState {
   error?: string;
 }
 
-const targetLabel = (t: string) => (/^[0-9a-f]{40}$/.test(t) ? t.slice(0, 7) : `v${t}`);
+const targetLabel = (t: string) => (isRelease(t) ? `v${t}` : t.slice(0, 7));
 
 /** The line on a box's card while it follows the office. busy: its agents still at work. */
 export function boxSyncText(s: BoxSyncState, busy: number): string {

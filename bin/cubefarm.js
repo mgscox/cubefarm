@@ -22,8 +22,8 @@ const HELP = `
     npx cubefarm doctor     check that this machine is ready
     npx cubefarm box --stdio --office <id>
                             serve as a box an office runs agents on (the office starts this over ssh)
-    npx cubefarm box --update <commit>
-                            bring this box's cubefarm checkout to the office's commit (the office runs this too)
+    npx cubefarm box --update <commit|version>
+                            bring this box's cubefarm checkout to the office's commit or release (the office runs this)
 
   Options
     --port <n>   port for the office (default 4317)
@@ -49,7 +49,7 @@ const fail = (msg) => {
 if (Number(process.versions.node.split('.')[0]) < MIN_NODE) fail(`cubefarm needs Node.js ${MIN_NODE} or newer (this is ${process.version}). Get it from https://nodejs.org`);
 
 // `cubefarm box --stdio --office <id>`: this machine as a box an office runs agents on, started by the office over ssh
-// (`--update <commit>`: following the office's commit).
+// (`--update <commit|version>`: following the office's commit or release).
 if (process.argv[2] === 'box') {
   const box = path.join(root, 'dist-server', 'boxStdio.js');
   if (!fs.existsSync(box)) fail(`${box} is missing. In a checkout of the repo, run npm run build first.`);

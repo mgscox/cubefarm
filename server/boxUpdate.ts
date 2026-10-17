@@ -4,16 +4,16 @@ import path from 'node:path';
 import { git } from './exec.ts';
 import { projectEnv } from './projectEnv.ts';
 import { parseSymref, refusal, rollbackPlan, stepsFor } from '../scripts/officeSteps.mjs';
-import type { BoxUpdateResult } from './fleet.ts';
+import { isRelease, type BoxUpdateResult } from './fleet.ts';
 
-// `cubefarm box --update <commit>`: a box bringing its cubefarm checkout to the office's commit (#94), run by the office
-// over ssh once nothing runs there. The launcher's rules (office.mjs): fast-forward only, on the default branch, no
+// `cubefarm box --update <target>`: a box bringing its cubefarm checkout to the office's commit (#94), or to its release
+// when the office runs from npm, run by the office over ssh once nothing runs there. The launcher's rules (office.mjs): fast-forward only, on the default branch, no
 // local changes; npm install when the dependencies changed; a failed step rolls back. A box only runs the server
 // bundle, so that's all it builds. The office then restarts the box's host on the new build. A box run by npx has no
 // checkout: it says so, and its next link already runs the office's version.
 
 const ROOT = path.resolve(import.meta.dirname, '..');
-const short = (sha: string) => sha.slice(0, 7);
+const short = (target: string) => (isRelease(target) ? `v${target}` : target.slice(0, 7));
 const real = (p: string) => {
   try {
     return fs.realpathSync.native(p);
@@ -35,6 +35,22 @@ export async function checkoutCommit(root = ROOT): Promise<string | null> {
   const top = await git(['rev-parse', '--show-toplevel'], { cwd: root }).catch(() => null);
   if (!top || !samePath(top, root)) return null;
   return git(['rev-parse', 'HEAD'], { cwd: root }).catch(() => null);
+}
+
+/** The commit of release `version` on origin's default branch: its tag (v0.3.9), else the commit that set package.json to it. */
+export async function releaseCommit(version: string, branch: string, root = ROOT): Promise<string | null> {
+  const g = (args: string[]) => git(args, { cwd: root });
+  for (const tag of [`v${version}`, version]) {
+    const sha = await g(['rev-parse', '-q', '--verify', `refs/tags/${tag}^{commit}`]).catch(() => '');
+    if (sha) return sha;
+  }
+  let found: string | null = null;
+  for (const sha of (await g(['log', '--format=%H', `origin/${branch}`, '--', 'package.json'])).split(/\r?\n/).filter(Boolean)) {
+    const v = await g(['show', `${sha}:package.json`]).then((t) => (JSON.parse(t) as { version?: string }).version, () => undefined);
+    if (v === version) found = sha;
+    else if (found) break; // newest first: the last one on this version is where it was set
+  }
+  return found;
 }
 
 /** npm, or node, in the checkout. On Windows npm is a .cmd, so it goes through cmd.exe (fixed arguments only). */
@@ -64,25 +80,26 @@ async function defaultBranch(root: string) {
   throw new Error("can't tell origin's default branch");
 }
 
-/** Bring the box's checkout to the office's commit. Never throws: a failure is in the result, rolled back. */
-export async function updateBox(commit: string, root = ROOT): Promise<BoxUpdateResult> {
+/** Bring the box's checkout to the office's commit or release (target). Never throws: a failure is in the result, rolled back. */
+export async function updateBox(target: string, root = ROOT): Promise<BoxUpdateResult> {
   const from = await checkoutCommit(root);
   if (!from) return { ok: true, checkout: false, from: null, to: null };
-  if (from === commit) return { ok: true, checkout: true, from, to: from };
+  if (from === target) return { ok: true, checkout: true, from, to: from };
   const ran = { installed: false, built: false };
   const g = (args: string[], timeoutMs?: number) => git(args, { cwd: root, timeoutMs });
   let error: string | undefined;
   try {
     await g(['fetch', 'origin', '--prune'], 180_000);
-    if (!(await g(['cat-file', '-e', `${commit}^{commit}`]).then(() => true, () => false))) throw new Error(`the office's ${short(commit)} isn't on the box's origin`);
     const branch = await defaultBranch(root);
+    const commit = isRelease(target) ? await releaseCommit(target, branch, root) : target;
+    if (!commit || !(await g(['cat-file', '-e', `${commit}^{commit}`]).then(() => true, () => false))) throw new Error(`the office's ${short(target)} isn't on the box's origin`);
     const refused = updateRefusal({
       branch: await g(['symbolic-ref', '--short', '-q', 'HEAD']).catch(() => ''),
       defaultBranch: branch,
       dirty: (await g(['status', '--porcelain', '--untracked-files=no'])) !== '',
       ahead: Number(await g(['rev-list', '--count', `origin/${branch}..HEAD`])),
       behindOffice: await g(['merge-base', '--is-ancestor', 'HEAD', commit]).then(() => true, () => false),
-      office: commit,
+      office: target,
     });
     if (refused) throw new Error(refused);
     await g(['merge', '--ff-only', commit]);

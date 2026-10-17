@@ -3110,6 +3110,31 @@ describe('boxes', () => {
     expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
   });
 
+  it("still restarts a box whose checkout was updated by an office that restarted before restarting its host", async () => {
+    const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
+    const head = `0ff1ce5${'0'.repeat(33)}`;
+    Object.assign(office, { officeHead: head });
+    vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
+    const box = swarm.addBox('Tower', 'stale-tower');
+    await vi.advanceTimersByTimeAsync(1600);
+    const conn = internals().boxConns.get(box.id) as unknown as import('./machine.ts').BoxConnection;
+    const update = vi.spyOn(conn, 'update');
+    const updating = conn.update(head); // the office before this one, which went before restarting the box's host
+    await vi.advanceTimersByTimeAsync(3000);
+    await updating;
+    expect(conn.state().info?.commit).toMatch(/^5ta1e00/); // the old host still runs
+
+    office.scheduling = true;
+    office.syncBoxes();
+    expect(office.boxView(box).sync?.text).toBe("Updating to the office's 0ff1ce5…");
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(office.boxView(box)).toMatchObject({ status: 'connecting', sync: { text: 'Restarting on 0ff1ce5…' } });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
+    expect(conn.state().info?.commit).toBe(head);
+    expect(update).toHaveBeenCalledTimes(2);
+  });
+
   it('refuses bad boxes', () => {
     expect(() => swarm.addBox('x', '-oProxyCommand=evil')).toThrow(HttpError);
     expect(() => swarm.updateAgent('a1', { box: 'nope' })).toThrow(/No box/);
