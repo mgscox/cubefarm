@@ -45,7 +45,7 @@ export function missingClis<A extends Pick<AgentView, 'name' | 'cli'>>(agents: A
 
 /**
  * A box's status line: what it runs, what's missing before agents can work there, and why its CLIs' hooks wouldn't
- * reach the office (their steps and finished turns would never arrive).
+ * reach the office.
  */
 export function boxNotes(b: Pick<BoxView, 'status' | 'platform' | 'version' | 'git' | 'ghReady' | 'hookError' | 'clis'>): { info: string; missing: string[]; hooks: string | null } {
   const info = [b.platform, b.version && `cubefarm ${b.version}`, b.git && (/^git\b/i.test(b.git) ? b.git : `git ${b.git}`)].filter(Boolean).join(' · ');
@@ -54,5 +54,5 @@ export function boxNotes(b: Pick<BoxView, 'status' | 'platform' | 'version' | 'g
   if (!b.git) missing.push('git');
   if (!b.ghReady) missing.push('gh auth login');
   if (!b.clis.some((c) => c.installed)) missing.push('a coding-agent CLI');
-  return { info, missing, hooks: b.hookError ? `Can't reach the office's hook URL (${b.hookError}): its agents' steps and finished turns won't reach the office.` : null };
+  return { info, missing, hooks: b.hookError ? `Can't reach the office's hook URL (${b.hookError}): its agents' steps won't reach the office, which follows their transcripts to see when they're done.` : null };
 }

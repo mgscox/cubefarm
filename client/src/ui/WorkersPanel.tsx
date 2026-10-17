@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { agentsOnRepo, useStore, type Agent } from '../store';
 import { CEO_ID, type LogLine, type RepoView } from '../../../shared/types';
+import { BOOT_TEXT } from '../world/draw';
 
 // Who is busy with what, across the whole company: everyone working right now with their project and their latest
 // thought, reply or tool call. Idle workers are left out; the floor you're on comes first. Click someone to watch
@@ -50,6 +51,7 @@ function Row({ a, now }: { a: Agent; now: number }) {
         <span className="wk-name">
           {a.name}
           {task && <span className="wk-task">{task}</span>}
+          {a.boot && <span className="wk-task wk-boot">⚠ {BOOT_TEXT[a.boot]}</span>}
         </span>
         <span className="wk-line">
           <span className={`wk-last wk-last-${last?.kind ?? 'none'}`} title={last?.text}>

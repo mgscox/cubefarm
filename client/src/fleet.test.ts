@@ -55,7 +55,7 @@ describe('boxNotes', () => {
 
   it("says when its CLIs can't reach the office's hook URL", () => {
     expect(boxNotes({ ...box, hookError: 'http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED' }).hooks).toBe(
-      "Can't reach the office's hook URL (http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED): its agents' steps and finished turns won't reach the office.",
+      "Can't reach the office's hook URL (http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED): its agents' steps won't reach the office, which follows their transcripts to see when they're done.",
     );
   });
 
