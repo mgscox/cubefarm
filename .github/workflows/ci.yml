@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,63 +17,66 @@ concurrency:
 jobs:
   check:
     name: check (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
       matrix:
         # Windows and macOS too: people run the office on both (paths, child processes, terminals, git worktrees).
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+        include:
+          - os: ubuntu-latest
+            platform: Linux
+          - os: windows-latest
+            platform: Windows
+          - os: macos-latest
+            platform: macOS
+    runs-on: [self-hosted, '${{ matrix.platform }}', cubefarm]
+    timeout-minutes: 45
     env:
       # Never let anything in CI look at a real office's state or ports.
       SWARM_HOME: ${{ github.workspace }}/.ci-swarm-home
       SWARM_PORT: '0'
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: npm
 
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      - run: npm test -- --maxWorkers=2
       - run: npm run build
       # The npm package as users get it: packed, installed into an empty folder and booted in demo mode.
       - run: node scripts/smoke-package.mjs
 
   # The built app in a real browser: a demo office boots, renders, and its panels open (e2e/, Playwright).
   e2e:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, cubefarm]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: npm
-
       - run: npm ci
-
-      - id: playwright
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
-      # With the browser cached this only installs its system libraries.
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install chromium
 
       # playwright.config.ts builds the app and boots a demo office on a test port with a temp SWARM_HOME.
       - run: npm run test:e2e
 
-      - if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report
-          path: |
-            playwright-report/
-            test-results/
-          retention-days: 14
+      - name: Retain browser diagnostics
+        if: ${{ always() }}
+        env:
+          CI_ARTIFACT_NAME: cubefarm-e2e
+          CI_ARTIFACT_PATHS: |-
+            playwright-report/**
+            test-results/**
+          CI_ARTIFACT_RETENTION_DAYS: '14'
+          CI_ARTIFACT_REQUIRED: 'false'
+        run: node scripts/retain-ci-artifacts.mjs
