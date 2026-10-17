@@ -3081,8 +3081,9 @@ describe('boxes', () => {
     expect(await swarm.checkBox(online.id)).toMatchObject({ status: 'online' });
     const again = swarm.checkBox(attic.id);
     expect((swarm as unknown as { boxView(b: unknown): { status: string } }).boxView(attic).status).toBe('connecting');
+    const failed = expect(again).rejects.toThrow(/Attic didn't answer: ssh: connect to host/);
     await vi.advanceTimersByTimeAsync(1000);
-    expect(await again).toMatchObject({ status: 'offline' });
+    await failed;
     await expect(swarm.checkBox('box-gone')).rejects.toThrow(HttpError);
   });
 

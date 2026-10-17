@@ -47,6 +47,8 @@ class BoxLink implements CliHost {
    */
   private plain = false;
   private pinned = false;
+  /** check()s waiting on a dial: settled when the box answers, or when the dial ends with it offline. */
+  private dialWaiters: { resolve(): void; reject(e: Error): void }[] = [];
   /** Transcripts the box said are on its disk (see hasFile). */
   private transcripts = new Set<string>();
 
@@ -123,6 +125,7 @@ class BoxLink implements CliHost {
       }
       const said = this.stderr.trim().split('\n').filter(Boolean).pop();
       this.set('offline', this.refused ?? (ready ? `the link dropped${said ? `: ${said}` : ''}` : (said ?? `ssh exited (${code})`)));
+      for (const w of this.dialWaiters.splice(0)) w.reject(new Error(this.error ?? 'it went offline'));
       this.redial = setTimeout(() => this.dial(), redialDelay(this.attempt++));
     });
   }
@@ -152,7 +155,14 @@ class BoxLink implements CliHost {
       for (const p of unknown) this.send({ op: 'kill', id: p.id });
     }
     if (this.hooksOpen) this.send({ op: 'hooksReady' });
-    void this.report().catch((err) => console.warn(`  box ${this.name}: ${(err as Error).message}`));
+    const waiters = this.dialWaiters.splice(0);
+    void this.report().then(
+      () => waiters.forEach((w) => w.resolve()),
+      (err: Error) => {
+        console.warn(`  box ${this.name}: ${err.message}`);
+        waiters.forEach((w) => w.reject(err));
+      },
+    );
   }
 
   /** What the box has set up (its git, gh, paths) and the CLIs it has. */
@@ -169,14 +179,20 @@ class BoxLink implements CliHost {
       });
   }
 
-  /** Ask again (BoxConnection.check): an online box reports again; one that isn't is dialled now, not after its wait. */
+  /**
+   * Ask again (BoxConnection.check): an online box reports again; one that isn't is dialled now, not after its wait.
+   * Settles once that dial has: the box answered and reported, or it's still offline (rejected with why).
+   */
   async check() {
     if (this.closed) return;
     if (this.status === 'online') return this.report();
-    if (this.child) return; // dialling it already
-    clearTimeout(this.redial);
-    this.attempt = 0;
-    this.dial();
+    const answered = new Promise<void>((resolve, reject) => this.dialWaiters.push({ resolve, reject }));
+    if (!this.child) {
+      clearTimeout(this.redial);
+      this.attempt = 0;
+      this.dial();
+    }
+    return answered;
   }
 
   private message(m: FromHost) {
@@ -218,6 +234,7 @@ class BoxLink implements CliHost {
   close() {
     this.closed = true;
     clearTimeout(this.redial);
+    for (const w of this.dialWaiters.splice(0)) w.reject(new Error('the box was removed'));
     const c = this.child;
     this.child = null;
     c?.stdin.end();
