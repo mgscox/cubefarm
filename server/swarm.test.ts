@@ -2988,3 +2988,108 @@ describe('researchers', () => {
     expect(lobby.status).toBe('done');
   });
 });
+
+describe('boxes', () => {
+  type Agent = Record<string, unknown>;
+  const internals = () => swarm as unknown as { prepare(a: Agent, r: Repo, base: object, branch: string): Promise<string | null>; available(r: Repo, role: string): Agent[]; boxConns: Map<string, { state(): { status: string; running: number; clis: { id: string }[] } }> };
+
+  beforeEach(() => {
+    Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready' });
+    Object.assign(repo, { links: [], box: '' });
+    Object.assign(s.state.agents[0], { box: null, deskBox: '' });
+  });
+
+  it("moves a whole floor to a box with one change, and the floor's next tasks start there", async () => {
+    const box = swarm.addBox('Build box', 'ada@buildbox');
+    await vi.advanceTimersByTimeAsync(1600);
+    expect((swarm as unknown as { boxView(b: unknown): unknown }).boxView(box)).toMatchObject({ name: 'Build box', status: 'online', running: 0 });
+
+    const ada = s.state.agents[0];
+    ada.box = ''; // her own choice, cleared when the whole floor moves
+    swarm.updateRepo(repo.id, { box: box.id, everyone: true });
+    expect(ada.box).toBeNull();
+    expect(ada.deskBox).toBe(''); // nothing moves until a task starts
+
+    ada.status = 'preparing';
+    const cwd = s.prepare(ada, repo, {}, 'swarm/issue-1-ada');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await cwd).toMatch(/^\/boxes\/Build-box\//);
+    expect(ada.deskBox).toBe(box.id);
+  });
+
+  it('keeps an agent who has a box of their own there when only the floor moves', () => {
+    const box = swarm.addBox('', 'ada@buildbox');
+    const ada = s.state.agents[0];
+    ada.box = '';
+    swarm.updateRepo(repo.id, { box: box.id });
+    expect(ada.box).toBe('');
+    expect(s.repoView(repo)).toMatchObject({ box: box.id });
+  });
+
+  it('waits while the box is offline: the agent takes no new work, and an assignment waits', async () => {
+    const box = swarm.addBox('Attic', 'offline-attic');
+    await vi.advanceTimersByTimeAsync(1600);
+    const ada = s.state.agents[0];
+    swarm.updateAgent('a1', { box: box.id });
+    expect(internals().available(repo, 'dev')).toEqual([]);
+    s.repoRt.get(repo.id)!.issues = [issue(7)];
+    const out = (await swarm.assign('a1', 7)) as { warning?: string };
+    expect(out.warning).toMatch(/Attic.*offline/);
+    expect(runTask).not.toHaveBeenCalled();
+    expect(repo.requestedStarts).toEqual([expect.objectContaining({ issueNumber: 7, restartPending: true })]);
+    swarm.updateAgent('a1', { box: null });
+    expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
+    expect(ada.box).toBeNull();
+  });
+
+  it("falls back to the office's machine once the box is removed, and doesn't resume a conversation left there", async () => {
+    const box = swarm.addBox('Old box', 'ada@old');
+    await vi.advanceTimersByTimeAsync(1600);
+    const ada = s.state.agents[0];
+    Object.assign(ada, { box: box.id, deskBox: box.id, sessionId: 'on-the-box', branch: 'swarm/issue-3-ada', task: 'issue', status: 'stopped' });
+    swarm.removeBox(box.id);
+    expect(ada.box).toBeNull();
+    expect(internals().boxConns.has(box.id)).toBe(false); // nothing ran there: closed at once
+    await expect(swarm.message('a1', 'carry on')).rejects.toThrow(/Old box, which was removed/);
+
+    ada.status = 'preparing';
+    const cwd = s.prepare(ada, repo, {}, 'swarm/issue-4-ada');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await cwd).toMatch(/^\/demo\//);
+    expect(ada.deskBox).toBe('');
+  });
+
+  it("waits while the box hasn't got the agent's coding agent", async () => {
+    const box = swarm.addBox('Mac mini', 'ada@mini');
+    await vi.advanceTimersByTimeAsync(1600);
+    const conn = internals().boxConns.get(box.id)!;
+    const real = conn.state.bind(conn);
+    vi.spyOn(conn, 'state').mockImplementation(() => ({ ...real(), clis: real().clis.filter((c) => c.id === 'claude') }));
+    const ada = s.state.agents[0];
+    Object.assign(ada, { cli: 'codex', box: box.id });
+    expect(internals().available(repo, 'dev')).toEqual([]);
+    s.repoRt.get(repo.id)!.issues = [issue(8)];
+    expect(((await swarm.assign('a1', 8)) as { warning?: string }).warning).toBe("waiting: Mac mini hasn't got Codex");
+    ada.cli = 'claude';
+    expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
+  });
+
+  it('asks a box again, or connects to an offline one now', async () => {
+    const online = swarm.addBox('Mac mini', 'ada@mini');
+    const attic = swarm.addBox('Attic', 'offline-attic');
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(await swarm.checkBox(online.id)).toMatchObject({ status: 'online' });
+    const again = swarm.checkBox(attic.id);
+    expect((swarm as unknown as { boxView(b: unknown): { status: string } }).boxView(attic).status).toBe('connecting');
+    const failed = expect(again).rejects.toThrow(/Attic didn't answer: ssh: connect to host/);
+    await vi.advanceTimersByTimeAsync(1000);
+    await failed;
+    await expect(swarm.checkBox('box-gone')).rejects.toThrow(HttpError);
+  });
+
+  it('refuses bad boxes', () => {
+    expect(() => swarm.addBox('x', '-oProxyCommand=evil')).toThrow(HttpError);
+    expect(() => swarm.updateAgent('a1', { box: 'nope' })).toThrow(/No box/);
+    expect(() => swarm.updateAgent(CEO_ID, { box: '' })).toThrow(/office's machine/);
+  });
+});

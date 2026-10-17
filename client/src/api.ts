@@ -1,5 +1,5 @@
 import { useStore } from './store';
-import type { AgentCli, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
+import type { AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
 
 async function call<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -48,6 +48,9 @@ export const api = {
       qaBrief?: string;
       previewCommand?: string | null;
       previewEnv?: Record<string, string>;
+      /** The floor's box ('' = the office's machine); everyone: clear the floor's own-box settings too. */
+      box?: string;
+      everyone?: boolean;
     },
   ) => call('PATCH', r(repoId), patch),
   startPreview: (repoId: string, pr?: number) => call<PreviewView>('POST', `${r(repoId)}/preview`, pr ? { pr } : {}),
@@ -64,9 +67,15 @@ export const api = {
   sendToQa: (repoId: string, n: number) => call('POST', `${r(repoId)}/pulls/${n}/qa`),
   hireAgent: (repoId: string, opts: { name?: string; model?: string; effort?: string; role?: 'dev' | 'qa' | 'researcher'; title?: string; specialty?: string } = {}) =>
     call('POST', `${r(repoId)}/agents`, opts),
-  updateAgent: (id: string, patch: { name?: string; model?: string; effort?: string; cli?: AgentCli | ''; look?: 'feminine' | 'masculine'; title?: string; specialty?: string; brief?: string }) =>
+  updateAgent: (
+    id: string,
+    patch: { name?: string; model?: string; effort?: string; cli?: AgentCli | ''; look?: 'feminine' | 'masculine'; title?: string; specialty?: string; brief?: string; box?: string | null },
+  ) =>
     call('PATCH', `/api/agents/${id}`, patch),
   fireAgent: (id: string) => call('DELETE', `/api/agents/${id}`),
+  addBox: (name: string, destination: string) => call<BoxView>('POST', '/api/boxes', { name, destination }),
+  removeBox: (id: string) => call('DELETE', `/api/boxes/${id}`),
+  checkBox: (id: string) => call<BoxView>('POST', `/api/boxes/${id}/check`),
   assign: (id: string, issueNumber: number, note?: string) => call('POST', `/api/agents/${id}/assign`, { issueNumber, note }),
   stop: (id: string) => call('POST', `/api/agents/${id}/stop`),
   reset: (id: string) => call('POST', `/api/agents/${id}/reset`),

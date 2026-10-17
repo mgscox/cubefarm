@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
-import { requestLook } from '../world/Player';
 import { CEO_ID, type RepoView } from '../../../shared/types';
 import { ProjectPicker } from './ProjectPicker';
 
@@ -65,7 +64,6 @@ export function SetupWizard() {
       await save();
       await api.updateSettings({ setupDone: true, tutorialStep: 0 });
       start();
-      requestLook();
     } catch {
       setBusy(false); // api() already toasted
     }

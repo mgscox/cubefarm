@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import type { Backend } from './backend.ts';
+import type { BoxConnection, BoxOptions, Machine } from './machine.ts';
 import type { PreviewBackend } from './previewRunner.ts';
 import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
 import { CLIS } from './clis.ts';
@@ -449,10 +450,92 @@ function fakeUsageWarning(cb: SessionCallbacks) {
   }, 3000);
 }
 
+const fakeClis = () => CLIS.map((c) => ({ id: c.id, label: c.label, installed: true, version: 'demo', integrated: c.integrated }));
+
+/**
+ * A pretend box: it "connects" after a moment (one whose destination starts with "offline" never does), and its desks
+ * and fake sessions are the demo's own under its folder, labelled with its name in the terminal.
+ */
+function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
+  let status: 'connecting' | 'online' | 'offline' = 'connecting';
+  let running = 0;
+  const offline = /^offline/i.test(opts.box.destination);
+  const claudeOnly = /^claude-only/i.test(opts.box.destination);
+  const timer = setTimeout(() => {
+    status = offline ? 'offline' : 'online';
+    opts.changed();
+  }, 1500);
+  const workspaces = `/boxes/${opts.box.name}/workspaces`;
+  const machine: Machine = {
+    ...desks,
+    startSession: (o, cb) => {
+      running += 1;
+      opts.changed();
+      return start({ ...o, label: `${o.label ?? ''} @ ${opts.box.name}`.trim() }, {
+        ...cb,
+        finished: (r) => {
+          running -= 1;
+          opts.changed();
+          cb.finished(r);
+        },
+      });
+    },
+    terminals: true,
+    detectClis: async () => fakeClis(),
+  };
+  return {
+    machine,
+    state: () => ({
+      status,
+      error: offline && status === 'offline' ? 'ssh: connect to host: Connection timed out (demo)' : null,
+      info: status === 'online' ? { platform: 'linux', version: 'demo', git: 'git version 2.47.0 (demo)', ghReady: true, workspaces, sep: '/' } : null,
+      // A box whose destination starts with "claude-only" has just Claude Code: other agents can't move there.
+      clis: status === 'online' ? fakeClis().map((c) => (claudeOnly && c.id !== 'claude' ? { ...c, installed: false, version: null } : c)) : [],
+      running,
+    }),
+    reconnected: Promise.resolve([]), // fake sessions end with the office
+    hooksReady: () => undefined,
+    // An offline one tries again for a moment and stays offline (the check fails, as a real one would); an online one has nothing new to say.
+    check: async () => {
+      if (status !== 'offline') return opts.changed();
+      status = 'connecting';
+      opts.changed();
+      await new Promise((r) => setTimeout(r, 1000));
+      status = 'offline';
+      opts.changed();
+      throw new Error('ssh: connect to host: Connection timed out (demo)');
+    },
+    close: () => clearTimeout(timer),
+  };
+}
+
 export function createDemoBackend(): Backend {
   // Tie each fake session back to its repo via the desk directory name.
   const deskRepo = new Map<string, string>();
   const deskBranches = new Map<string, string | null>();
+  /** Fake desks under a folder: the office's own (/demo), or a box's. */
+  const desks = (root: string) => ({
+    mainDir: (fullName: string) => `${root}/${fullName}/main`,
+    deskDir: (fullName: string, slug: string) => `${root}/${fullName}/desks/${slug}`,
+    prepareDesk: async (fullName: string, base: { pr?: number }, slug: string, branch: string, note?: (text: string) => void) => {
+      await new Promise((r) => setTimeout(r, 900));
+      const dir = `${root}/${fullName}/desks/${slug}`;
+      const holder = [...deskBranches].find(([d, b]) => b === branch && d !== dir && deskRepo.get(d) === fullName)?.[0];
+      if (holder) note?.(`${branch} is checked out at ${holder}; this desk uses detached HEAD at origin/pr/${base.pr}. Push fixes with git push origin HEAD:${branch}.`);
+      deskBranches.set(dir, holder ? null : branch);
+      deskRepo.set(dir, fullName);
+      return dir;
+    },
+    removeDesk: async () => undefined,
+    releaseDesk: async () => undefined,
+    deskAhead: async () => 0,
+    deskHead: async () => 'demo-head',
+  });
+  const startSession: Machine['startSession'] = (opts, cb) => {
+    if (++sessionsStarted === USAGE_WARNING_AT) fakeUsageWarning(cb);
+    const fullName = deskRepo.get(opts.cwd) ?? (opts.role === 'researcher' ? '' : [...repos.keys()][0]);
+    return inTerminal(opts, cb, (c) => (opts.role === 'ceo' ? ceoSession(opts, c) : fakeSession(opts, c, fullName)));
+  };
   // A pretend projects folder: the demo repos, one git folder that isn't on GitHub yet, and one plain folder.
   const folders = new Map<string, LocalFolder>();
   const addFolder = (name: string, github: string | null, git = true) =>
@@ -547,8 +630,6 @@ export function createDemoBackend(): Backend {
     },
     prForBranch: async () => null,
     branchAhead: async () => 0, // the fake sessions always open their PR
-    deskAhead: async () => 0,
-    deskHead: async () => 'demo-head',
     prDetails: async (fullName, number) => {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
       if (!pr) throw new Error(`Unknown PR #${number}`);
@@ -580,33 +661,17 @@ export function createDemoBackend(): Backend {
       mergedSinceSync.set(fullName, 0);
       return { status: `updated to ${fakeSha().slice(0, 7)}`, behind: 0, updatable: false };
     },
-    mainDir: (fullName) => `/demo/${fullName}/main`,
-    deskDir: (fullName, slug) => `/demo/${fullName}/desks/${slug}`,
-    prepareDesk: async (fullName, base, slug, branch, note) => {
-      await new Promise((r) => setTimeout(r, 900));
-      const dir = `/demo/${fullName}/desks/${slug}`;
-      const holder = [...deskBranches].find(([d, b]) => b === branch && d !== dir && deskRepo.get(d) === fullName)?.[0];
-      if (holder) note?.(`${branch} is checked out at ${holder}; this desk uses detached HEAD at origin/pr/${base.pr}. Push fixes with git push origin HEAD:${branch}.`);
-      deskBranches.set(dir, holder ? null : branch);
-      deskRepo.set(dir, fullName);
-      return dir;
-    },
-    removeDesk: async () => undefined,
+    ...desks('/demo'),
     prepareResearchFolder: async (dir) => {
       await fs.mkdir(dir, { recursive: true });
     },
-    releaseDesk: async () => undefined,
-    startSession: (opts, cb) => {
-      if (++sessionsStarted === USAGE_WARNING_AT) fakeUsageWarning(cb);
-      const fullName = deskRepo.get(opts.cwd) ?? (opts.role === 'researcher' ? '' : [...repos.keys()][0]);
-      return inTerminal(opts, cb, (c) => (opts.role === 'ceo' ? ceoSession(opts, c) : fakeSession(opts, c, fullName)));
-    },
+    startSession,
     terminals: true,
     reconnectClis: async () => [], // fake sessions end with the office
     hooksReady: () => undefined,
     releaseClis: async () => undefined,
-    detectClis: async () =>
-      CLIS.map((c) => ({ id: c.id, label: c.label, installed: true, version: 'demo', integrated: c.integrated })),
+    detectClis: async () => fakeClis(),
+    connectBox: (opts) => fakeBox(opts, desks(`/boxes/${opts.box.name.replace(/[^\w.-]+/g, '-')}`), startSession),
     previews: demoPreviews,
     office: demoOffice,
   };

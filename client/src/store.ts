@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CEO_ID, type AgentView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { issueBlockers, issueWorkNote } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
@@ -16,7 +16,7 @@ export type Overlay =
   | { kind: 'phone'; tab?: PhoneTab; requestId?: string }
   | { kind: 'help' };
 
-export type ManagerTab = 'floors' | 'ceo' | 'team' | 'issues' | 'settings';
+export type ManagerTab = 'floors' | 'ceo' | 'team' | 'fleet' | 'issues' | 'settings';
 
 export interface Focus {
   id: string;
@@ -46,6 +46,7 @@ interface State {
   workspaceRoot: string;
   settings: SwarmSettings;
   clis: CliView[]; // the coding-agent CLIs installed where the office runs
+  boxes: BoxView[]; // other machines agents' desks and CLIs can run on
   repos: RepoView[];
   agents: Record<string, Agent>;
   logs: Record<string, LogLine[]>;
@@ -146,6 +147,7 @@ export const useStore = create<State>((set, get) => ({
     pacingSessions: 3,
   },
   clis: [],
+  boxes: [],
   repos: [],
   agents: {},
   logs: {},
@@ -211,6 +213,7 @@ export const useStore = create<State>((set, get) => ({
           officeUpdate: d.officeUpdate,
           usage: d.usage,
           clis: d.clis ?? [],
+          boxes: d.boxes ?? [],
           restarting: false,
           floor: floorExists ? get().floor : 0,
         });
@@ -275,6 +278,14 @@ export const useStore = create<State>((set, get) => ({
         break;
       case 'clis':
         set({ clis: ev.clis });
+        break;
+      case 'box': {
+        const boxes = get().boxes;
+        set({ boxes: boxes.some((b) => b.id === ev.box.id) ? boxes.map((b) => (b.id === ev.box.id ? ev.box : b)) : [...boxes, ev.box] });
+        break;
+      }
+      case 'boxRemoved':
+        set({ boxes: get().boxes.filter((b) => b.id !== ev.boxId) });
         break;
       case 'request': {
         const prev = get().requests.find((r) => r.id === ev.request.id);
