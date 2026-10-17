@@ -58,6 +58,20 @@ async function enterOffice(page: Page) {
 
 const phoneButton = (page: Page) => page.getByTitle('Your phone (P)');
 
+/**
+ * Lets go of the mouse, so the page's HTML can be clicked. Entering after the tour and closing a panel (#42) grab it,
+ * and a locked pointer sends every click to the canvas. Headless Chromium grants the lock on Linux but not always
+ * elsewhere, so tests that skip this pass locally and fail in CI. The request is async: wait for it to land (or be
+ * refused) before letting go, or it lands after and eats the click.
+ */
+async function releaseMouse(page: Page) {
+  await page
+    .waitForFunction(() => document.pointerLockElement !== null, undefined, { timeout: 3000 })
+    .catch(() => undefined);
+  await page.evaluate(() => document.exitPointerLock());
+  await page.waitForFunction(() => document.pointerLockElement === null);
+}
+
 async function savedView(page: Page): Promise<SavedView | null> {
   return page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? 'null'), VIEW_KEY);
 }
@@ -125,13 +139,8 @@ test('the phone opens and closes with P, its button and Esc', async ({ page }) =
   await page.keyboard.press('p');
   await expect(hires).toBeHidden();
 
-  // Closing a panel grabs the mouse again (#42); a locked pointer can't click the HUD, so let go of it first. The lock
-  // request is async: wait for it to land (or be refused) before letting go, or it lands after and eats the click.
-  await page
-    .waitForFunction(() => document.pointerLockElement !== null, undefined, { timeout: 3000 })
-    .catch(() => undefined);
-  await page.evaluate(() => document.exitPointerLock());
-  await page.waitForFunction(() => document.pointerLockElement === null);
+  // Closing a panel grabs the mouse again (#42); a locked pointer can't click the HUD.
+  await releaseMouse(page);
   // Clicks are also ignored for a moment after a panel closes (so a double click can't act through it): retry.
   await expect(async () => {
     await phoneButton(page).click();
