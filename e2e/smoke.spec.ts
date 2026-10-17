@@ -301,6 +301,24 @@ test('repository refresh distinguishes unavailable checks, REST fallback, stale 
 });
 
 test('Q/E turn and Z/X pitch without walking, and help pauses keyboard look', async ({ page }) => {
+  // Count the client's view saves: it saves at most once a second, from a frame, so on a slow runner a fixed wait
+  // after a key release can still read the save from before the last frames under the key.
+  await page.addInitScript((key) => {
+    const setItem = Storage.prototype.setItem;
+    const w = window as unknown as { __viewSaves: number };
+    w.__viewSaves = 0;
+    Storage.prototype.setItem = function (k: string, v: string) {
+      if (k === key) w.__viewSaves++;
+      return setItem.call(this, k, v);
+    };
+  }, VIEW_KEY);
+  /** The view as saved by a frame after this call, so after any key already released. */
+  const nextSavedView = async () => {
+    const saves = () => page.evaluate(() => (window as unknown as { __viewSaves: number }).__viewSaves);
+    const now = await saves();
+    await expect.poll(saves, { timeout: 15_000 }).toBeGreaterThan(now);
+    return (await savedView(page))!;
+  };
   await enterOffice(page);
   await expect.poll(() => savedView(page)).not.toBeNull();
   const start = (await savedView(page))!;
@@ -308,22 +326,19 @@ test('Q/E turn and Z/X pitch without walking, and help pauses keyboard look', as
   for (const [key, axis, direction] of [
     ['q', 'yaw', 1], ['e', 'yaw', -1], ['z', 'pitch', -1], ['x', 'pitch', 1],
   ] as const) {
-    const before = (await savedView(page))!;
+    const before = await nextSavedView();
     await page.keyboard.down(key);
     try {
       await expect.poll(async () => ((await savedView(page))![axis] - before[axis]) * direction).toBeGreaterThan(0.1);
     } finally {
       await page.keyboard.up(key);
     }
-    // Allow the saved view to catch up to key release before checking the next direction.
-    await page.waitForTimeout(1200);
   }
 
-  const stopped = (await savedView(page))!;
+  const stopped = await nextSavedView();
   expect(stopped.x).toBe(start.x);
   expect(stopped.z).toBe(start.z);
-  await page.waitForTimeout(1200);
-  expect(await savedView(page)).toEqual(stopped);
+  expect(await nextSavedView()).toEqual(stopped);
 
   await page.keyboard.press('h');
   await expect(page.getByText('How the office works', { exact: true })).toBeVisible();
@@ -332,7 +347,7 @@ test('Q/E turn and Z/X pitch without walking, and help pauses keyboard look', as
   await page.waitForTimeout(1200);
   await page.keyboard.up('q');
   await page.keyboard.up('x');
-  expect(await savedView(page)).toEqual(stopped);
+  expect(await nextSavedView()).toEqual(stopped);
 });
 
 test('a blaster empties, T reloads it, R does nothing, and the prompts say T', async ({ page }) => {
