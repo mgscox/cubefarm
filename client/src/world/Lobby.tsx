@@ -6,7 +6,7 @@ import { qaCounts } from '../qaCounts';
 import { CEO_ID, RESEARCHER_ID, type HireRequestView } from '../../../shared/types';
 import { Character } from './Character';
 import { Desk } from './Desk';
-import { drawCandidateTag, drawSign, roundRect, SANS } from './draw';
+import { directoryRowPitch, drawCandidateTag, drawSign, roundRect, SANS } from './draw';
 import { Elevator } from './Elevator';
 import { useCanvasTexture, useInteractable } from './interact';
 import { CEO_DESK, CEO_ROOM, HALF_D, HALF_W, MANAGER_DESK, MANAGER_ROOM, QA_ROTATION, RECEPTION, RESEARCH_DESK, WAITING, WAITING_ROTATION } from './layout';
@@ -132,39 +132,35 @@ function Directory() {
       ctx.font = `700 46px ${SANS}`;
       ctx.textBaseline = 'middle';
       ctx.fillText('Directory', 36, 52);
-      const floors = [...stats.floors].sort((a, b) => b.floor - a.floor).slice(0, 7);
-      floors.forEach((f, i) => {
-        const y = 118 + i * 58;
-        ctx.fillStyle = f.color;
-        roundRect(ctx, 36, y - 22, 54, 44, 12);
+      const floors = [...stats.floors].sort((a, b) => b.floor - a.floor);
+      // Every floor plus the lobby, squeezed (text and all) to fit when there are too many for full-size rows.
+      const pitch = directoryRowPitch(floors.length + 1, 118, 524, 58);
+      const k = pitch / 58;
+      const px = (n: number) => `${Math.round(n * k)}px`;
+      const row = (y: number, color: string, label: string, name: string) => {
+        ctx.fillStyle = color;
+        roundRect(ctx, 36, y - 22 * k, 54 * k, 44 * k, 12 * k);
         ctx.fill();
         ctx.fillStyle = '#1f2233';
-        ctx.font = `700 30px ${SANS}`;
+        ctx.font = `700 ${px(30)} ${SANS}`;
         ctx.textAlign = 'center';
-        ctx.fillText(String(f.floor), 63, y + 1);
+        ctx.fillText(label, 36 + 27 * k, y + k);
         ctx.textAlign = 'left';
         ctx.fillStyle = '#ffffff';
-        ctx.font = `600 28px ${SANS}`;
-        const name = f.name.length > 24 ? `${f.name.slice(0, 23)}…` : f.name;
-        ctx.fillText(name, 108, y);
+        ctx.font = `600 ${px(28)} ${SANS}`;
+        ctx.fillText(name, 36 + 72 * k, y);
+      };
+      floors.forEach((f, i) => {
+        const y = 118 + i * pitch;
+        row(y, f.color, String(f.floor), f.name.length > 24 ? `${f.name.slice(0, 23)}…` : f.name);
         ctx.fillStyle = '#a9adc6';
-        ctx.font = `500 24px ${SANS}`;
+        ctx.font = `500 ${px(24)} ${SANS}`;
         ctx.textAlign = 'right';
         ctx.fillText(`${f.working}/${f.team} busy · ${f.prs} PR`, 740, y);
         ctx.textAlign = 'left';
       });
-      const gy = 118 + floors.length * 58;
-      ctx.fillStyle = ACCENT;
-      roundRect(ctx, 36, gy - 22, 54, 44, 12);
-      ctx.fill();
-      ctx.fillStyle = '#1f2233';
-      ctx.font = `700 30px ${SANS}`;
-      ctx.textAlign = 'center';
-      ctx.fillText('G', 63, gy + 1);
-      ctx.textAlign = 'left';
-      ctx.fillStyle = '#ffffff';
-      ctx.font = `600 28px ${SANS}`;
-      ctx.fillText("Lobby & manager's office", 108, gy);
+      const gy = 118 + floors.length * pitch;
+      row(gy, ACCENT, 'G', "Lobby & manager's office");
       if (stats.floors.length === 0) {
         ctx.fillStyle = '#a9adc6';
         ctx.font = `500 26px ${SANS}`;
@@ -174,8 +170,9 @@ function Directory() {
     },
     [stats],
   );
+  // Bottom edge above the wall's accent stripe (y 0.89–1.01), which stands proud of the sign and hid its last row.
   return (
-    <group ref={ref} position={[4.4, 1.75, HALF_D - 0.03]} rotation={[0, Math.PI, 0]}>
+    <group ref={ref} position={[4.4, 2.05, HALF_D - 0.03]} rotation={[0, Math.PI, 0]}>
       <mesh>
         <planeGeometry args={[2.6, 1.9]} />
         <meshBasicMaterial map={tex} transparent toneMapped={false} />
