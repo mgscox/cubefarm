@@ -5,7 +5,8 @@ import { hooksReady, officeProcesses, reconnectClis, releaseClis, startCliSessio
 import { detectClis } from './clis.ts';
 import { realPreviews, type PreviewBackend } from './previewRunner.ts';
 import { realOffice, type OfficeHost } from './officeUpdate.ts';
-import type { Machine } from './machine.ts';
+import { connectBox } from './boxLink.ts';
+import type { BoxConnection, BoxOptions, Machine } from './machine.ts';
 import type { AgentTerminal } from './terminal.ts';
 import type { GhRepoSummary, IssueInfo, PullRefresh } from '../shared/types.ts';
 
@@ -50,6 +51,8 @@ export interface Backend extends Machine {
   hooksReady(): void;
   /** The office is stopping: its CLIs carry on in the keeper through a restart (true), or stop with it. */
   releaseClis(restart: boolean): Promise<void>;
+  /** Connect to a box: another machine agents' desks and CLIs run on, over ssh (see docs/fleet-design.md). */
+  connectBox(opts: BoxOptions): BoxConnection;
   /** Run a floor's app for the preview monitor (its own worktree, its own port). */
   previews: PreviewBackend;
   /** The running office's own folder and its launcher, for the office's self-update. */
@@ -97,6 +100,7 @@ export const realBackend: Backend = {
   hooksReady,
   releaseClis,
   detectClis,
+  connectBox,
   previews: realPreviews,
   office: realOffice,
 };

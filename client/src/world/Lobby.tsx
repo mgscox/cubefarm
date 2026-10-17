@@ -348,6 +348,8 @@ function candidateAgent(r: HireRequestView): Agent {
     hasScreenshot: false,
     screenshotAt: null,
     lastError: null,
+    box: null,
+    deskBox: '',
   };
 }
 

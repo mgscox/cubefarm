@@ -114,6 +114,7 @@ export interface RepoView {
   qaBrief: string; // how QA should test this kind of project (written by the CEO, editable)
   localPath: string | null; // the manager's own project folder, when the floor lives in one
   checkoutPath: string; // where the floor's main checkout is on disk (localPath, or a clone the office manages)
+  box: string; // the box its developers and QA testers work on unless they have their own ('' = the office's machine)
   cloneStatus: 'pending' | 'cloning' | 'ready' | 'error';
   cloneError?: string;
   issues: IssueInfo[]; // open issues
@@ -204,6 +205,23 @@ export interface CliView {
   integrated: boolean;
 }
 
+export type BoxStatus = 'connecting' | 'online' | 'offline';
+
+/** Another machine agents' desks and CLIs can run on, reached over ssh. */
+export interface BoxView {
+  id: string;
+  name: string;
+  destination: string; // what ssh is given: user@host, an ~/.ssh/config alias, a Tailscale name
+  status: BoxStatus;
+  error: string | null;
+  platform: string | null;
+  version: string | null; // cubefarm on the box
+  git: string | null;
+  ghReady: boolean;
+  clis: CliView[];
+  running: number; // CLIs running there now
+}
+
 /** Messages on an agent's terminal socket (/ws/term?agent=<id>), server to browser. */
 export type TermServerMessage =
   | { t: 'snapshot'; data: string; cols: number; rows: number; live: boolean } // the screen and scrollback so far
@@ -249,6 +267,8 @@ export interface AgentView {
   hasScreenshot: boolean;
   screenshotAt: number | null;
   lastError: string | null;
+  box: string | null; // their own box, overriding the floor's (null = the floor's)
+  deskBox: string; // where their current task's desk and CLI are ('' = the office's machine)
   log: LogLine[]; // tail of the terminal log (full buffer on snapshot)
 }
 
@@ -412,6 +432,7 @@ export interface WorldSnapshot {
   officeUpdate?: OfficeUpdateView;
   usage: UsageView;
   clis: CliView[];
+  boxes: BoxView[];
 }
 
 export type ServerEvent =
@@ -434,6 +455,8 @@ export type ServerEvent =
   | { type: 'officeUpdate'; officeUpdate: OfficeUpdateView }
   | { type: 'usage'; usage: UsageView }
   | { type: 'clis'; clis: CliView[] }
+  | { type: 'box'; box: BoxView }
+  | { type: 'boxRemoved'; boxId: string }
   | { type: 'toast'; level: 'info' | 'success' | 'error'; text: string };
 
 export interface GhRepoSummary {

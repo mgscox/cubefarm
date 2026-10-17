@@ -1,12 +1,12 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import type { Socket } from 'node:net';
+import type { Readable } from 'node:stream';
 
-// What the office and its terminal keeper (ptyHost.ts) say to each other over their local socket: one JSON message
-// per line. Kept free of the rest of the server so the keeper stays small and starts fast.
+// What the office and its terminal keeper (ptyHost.ts) say to each other over their local socket, and to a box's host
+// over ssh: one JSON message per line. Kept free of the rest of the server so the keeper stays small and starts fast.
 
 /** Bumped when the messages change: an office that finds a keeper on another version replaces it. */
-export const PTY_PROTOCOL = 1;
+export const PTY_PROTOCOL = 2;
 
 /** A terminal the keeper holds, as it reports it to an office that (re)connects. */
 export interface HeldPty {
@@ -28,7 +28,10 @@ export type ToHost =
   | { op: 'meta'; id: string; meta: unknown }
   | { op: 'kill'; id: string }
   | { op: 'hookReply'; rid: number; answer: unknown }
-  | { op: 'shutdown' }; // stop every terminal and exit (a keeper on another version)
+  | { op: 'shutdown' } // stop every terminal and exit (a keeper on another version)
+  // a box host only:
+  | { op: 'rpc'; rid: number; method: string; args: unknown[] } // a desk or session-file method, run on the box
+  | { op: 'launch'; id: string; token: string; cols: number; rows: number; meta: unknown }; // start the CLI a 'prepare' rpc wrote
 
 export type FromHost =
   | { op: 'ready'; version: number; hookPort: number; ptys: HeldPty[]; pid?: number }
@@ -36,7 +39,8 @@ export type FromHost =
   | { op: 'failed'; id: string; error: string }
   | { op: 'data'; id: string; data: string }
   | { op: 'exit'; id: string; code: number; signal?: number } // signal: an older keeper doesn't say
-  | { op: 'hook'; rid: number; token: string; body: unknown };
+  | { op: 'hook'; rid: number; token: string; body: unknown }
+  | { op: 'rpcReply'; rid: number; ok: boolean; value?: unknown; error?: string };
 
 /** The keeper's socket for an office home: a named pipe on Windows, a Unix socket in the home elsewhere. */
 export function hostSocket(home: string, platform = process.platform): string {
@@ -47,8 +51,11 @@ export function hostSocket(home: string, platform = process.platform): string {
 
 export const encode = (m: ToHost | FromHost) => `${JSON.stringify(m)}\n`;
 
-/** Calls back with each message a socket sends (newline-delimited JSON); a line that isn't JSON is skipped. */
-export function readMessages<T>(sock: Socket, onMessage: (m: T) => void) {
+/** Node flags this process runs with that a keeper it starts needs too (tsx in development), not debugging or watching. */
+export const runtimeFlags = () => process.execArgv.filter((a, i, all) => !/^--(inspect|watch|debug)/.test(a) && !/^--(inspect|watch|debug)/.test(all[i - 1] ?? ''));
+
+/** Calls back with each message a socket or pipe sends (newline-delimited JSON); a line that isn't JSON is skipped. */
+export function readMessages<T>(sock: Readable, onMessage: (m: T) => void) {
   let buf = '';
   sock.setEncoding('utf8');
   sock.on('data', (chunk: string) => {
@@ -67,4 +74,22 @@ export function readMessages<T>(sock: Socket, onMessage: (m: T) => void) {
       onMessage(m);
     }
   });
+}
+
+// ---------- hooks a box answers itself ----------
+
+/** PreToolUse's answer: nobody may be watching to answer a permission question, so every tool call is approved. */
+export const ALLOW = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'Approved by cubefarm' } };
+
+/**
+ * A box answers a hook at once when the office's answer never depends on the office, so a slow or dropped link never
+ * stalls a CLI; the hook still goes to the office (fire-and-forget). Only a prompt the manager typed waits: the office
+ * decides whether it becomes a follow-up. undefined: wait for the office.
+ */
+export function localHookAnswer(body: unknown, statusLine: string | undefined): Record<string, unknown> | undefined {
+  const event = body && typeof body === 'object' ? String((body as { hook_event_name?: unknown }).hook_event_name ?? '') : '';
+  if (event === 'UserPromptSubmit') return undefined;
+  if (event === 'PreToolUse') return ALLOW;
+  if (event === 'StatusLine') return { statusLine: statusLine ?? '🏢 cubefarm' };
+  return {};
 }

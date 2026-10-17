@@ -66,7 +66,10 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
   terminal ends the session as `interrupted`. The CEO's office tools are served over MCP (`/api/mcp/:token`).
 - `machine.ts`: the `Machine` seam (an agent's desk and sessions; `Backend` is the office's own) and `CliHost`, the
   machine-side half of a CLI session: `planCli` (pure) → `prepare` (session files, command line) → `start` (a pty).
-  `localCliHost.ts` is the office's own. Groundwork for running agents on other machines (`docs/fleet-design.md`).
+  `localCliHost.ts` is the office's own; `cliFiles.ts` writes a session's files and command line on either kind.
+- Boxes (other machines agents run on, over ssh; `docs/fleet-design.md`): `fleet.ts` (pure: the start rule, the ssh
+  command, box paths), `boxLink.ts` (the office's side: `connectBox`, a remote `Machine` and `CliHost`), `boxStdio.ts`
+  (`cubefarm box --stdio` on the box) and `boxOps.ts` (what the box's host runs on its own disk).
 - `ptyHost.ts`: the terminal keeper, a detached process of its own (`launch` re-spawns it outside the office's process
   tree) holding the CLIs' pseudo-terminals and relaying their hooks, so agents keep working through office restarts.
   `ptyClient.ts` is the office's side (start/connect, spawn, adopt after a restart, local fallback); `ptyProtocol.ts`

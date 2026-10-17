@@ -1,6 +1,7 @@
 # Fleet: running agents' CLIs on other machines (design)
 
-Status: phase 1 (the `Machine` / `CliHost` seam, `server/machine.ts`) is built; the rest is a design. Goal: the manager adds and removes **boxes** (other machines on the LAN or the
+Status: phases 1 and 2 are built: the `Machine` / `CliHost` seam (`server/machine.ts`), and boxes over SSH with
+assignment through REST (below); the console UI and the rest are still a design. Goal: the manager adds and removes **boxes** (other machines on the LAN or the
 tailnet), assigns developers and QA testers to a box, and their coding-agent CLIs (Claude Code, Codex, OpenCode) run
 there. Adding or removing a box, or reassigning an agent, never touches a running CLI: it applies when a session
 starts.
@@ -162,6 +163,25 @@ the style.
 name, one demo box can be toggled offline. Pure, tested helpers: the start rule (`pickMachine(agent, boxes, task)`),
 the removal drain, `box --stdio` argument building, version/handshake checks, and path handling for a box on another
 OS.
+
+## Phase 2 as built
+
+- `cubefarm box --stdio --office <office id>` (`server/boxStdio.ts`) finds or starts the box's host in
+  `~/.cubefarm-box/<office id>` (`SWARM_BOX_HOME` overrides) and bridges stdio to it. The host is `ptyHost.ts` with a
+  trailing `box`: it loads `boxOps.ts` (desks, session files, screenshots on its own disk), answers every hook but
+  `UserPromptSubmit` itself (`localHookAnswer`), queues them for the office, and waits 6 hours for an office that went.
+- The office side is `server/boxLink.ts` (`connectBox`): the ssh process (`fleet.boxCommand`), redialled with backoff
+  after a drop, the box as a `Machine` and a `CliHost`. `SWARM_BOX_COMMAND` replaces the remote
+  `npx -y cubefarm@<version> box` (a box that runs a checkout: `node <checkout>/bin/cubefarm.js box`).
+- Persisted: `boxes` (with each box's last-reported workspaces folder and separator, so desk paths are known while it's
+  offline), `officeId`, the floor's `box` and the agent's `box` / `deskBox`. The start rule is `fleet.startPlace`;
+  `Swarm.prepare` applies it, `available()` keeps agents whose box is offline out of the queue, and an explicit
+  assignment to one waits as a requested start. A fix round for the PR's own author stays on its desk's box.
+- REST: `POST /api/boxes { name, destination }`, `DELETE /api/boxes/:id`, `PATCH /api/agents/:id { box }`,
+  `PATCH /api/repos/:id { box, everyone? }`. The snapshot has `boxes`; `box` / `boxRemoved` events carry changes.
+- A removed box leaves the list at once (agents on it follow their floor, floors on it go back to the office); its link
+  stays open until the CLIs still running there end. In the demo, a box connects after a moment and one whose
+  destination starts with `offline` never does.
 
 ## Phases
 
