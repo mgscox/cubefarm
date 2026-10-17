@@ -27,7 +27,7 @@ import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { officeLifecycle } from './officeLifecycle.ts';
 import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type LastUpdate } from './officeUpdate.ts';
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
-import { isCli, ONE_TURN } from './clis.ts';
+import { cliLabel, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { issueBlockers, issueParent, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
 import { effectiveModel } from '../shared/models.ts';
@@ -977,10 +977,28 @@ export class Swarm {
   private place(a: PersistedAgent, kind: 'new' | 'within'): StartPlace {
     if (a.role === 'ceo' || a.role === 'researcher' || this.state.settings.runtime !== 'terminal') return { box: '' };
     const floor = this.state.repos.find((r) => r.id === a.repoId)?.box;
-    return startPlace(kind, agentBox(a.box, floor), a.deskBox, (id) => {
-      if (!this.state.boxes.some((b) => b.id === id)) return null;
-      return this.boxConns.get(id)?.state().status === 'online';
-    });
+    const cli = a.cli || this.state.settings.defaultCli;
+    return startPlace(
+      kind,
+      agentBox(a.box, floor),
+      a.deskBox,
+      (id) => {
+        if (!this.state.boxes.some((b) => b.id === id)) return null;
+        return this.boxConns.get(id)?.state().status === 'online';
+      },
+      (id) => {
+        // Its CLIs are looked for once it connects: until they're known, a new task waits for the list.
+        const clis = this.boxConns.get(id)?.state().clis ?? [];
+        return clis.some((c) => c.id === cli && c.installed) ? null : cliLabel(cli);
+      },
+    );
+  }
+
+  /** Why an agent waits for a box. */
+  private waitReason(where: { wait: string; lacks?: string }) {
+    const name = this.boxName(where.wait);
+    if (!where.lacks) return `${name} is offline`;
+    return this.boxConns.get(where.wait)?.state().clis.length ? `${name} hasn't got ${where.lacks}` : `${name} is still looking for its coding agents`;
   }
 
   private boxName(id: string) {
@@ -1956,8 +1974,8 @@ export class Swarm {
     ]);
     if ('wait' in where) {
       // It starts once a desk is free: theirs when their box is back, or another developer's.
-      this.appendLog(a, [{ kind: 'system', text: `⏸ #${issueNumber} waits: ${this.boxName(where.wait)} is offline.` }]);
-      return { ...this.agentView(a, false), warning: `waiting for ${this.boxName(where.wait)}, which is offline` };
+      this.appendLog(a, [{ kind: 'system', text: `⏸ #${issueNumber} waits: ${this.waitReason(where)}.` }]);
+      return { ...this.agentView(a, false), warning: `waiting: ${this.waitReason(where)}` };
     }
     void this.runTask(a, repo, issue, note);
     const warning = explicit && issueParent(issue) ? `parent: ${issueParent(issue)}` : explicit && issue.subIssues === null ? 'sub-issues have not loaded' : undefined;
@@ -2111,7 +2129,7 @@ export class Swarm {
       if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') await this.cloneRepo(repo.id);
       // A fix round for the PR's own author stays on the desk with their conversation; anything else is a new task.
       const where = this.place(a, job?.task === 'fix' && job.author === a.id ? 'within' : 'new');
-      if ('wait' in where) throw new Error(`${this.boxName(where.wait)} is offline: waiting for it to come back.`);
+      if ('wait' in where) throw new Error(`Waiting: ${this.waitReason(where)}.`);
       if (where.fellBack) this.appendLog(a, [{ kind: 'system', text: `ℹ ${this.boxName(where.fellBack)} was removed: this task runs on the office's machine.` }]);
       const rt = this.agentRt.get(a.id);
       if (rt) rt.deskMoved = where.box !== a.deskBox;
@@ -3018,7 +3036,7 @@ export class Swarm {
     const now = Date.now();
     return this.state.agents
       .filter((a) => a.repoId === repo.id && a.role === role && !a.heldRetry && (FREE.includes(a.status) || (a.status === 'error' && now - (a.endedAt ?? 0) >= ERROR_COOLDOWN_MS)))
-      .filter((a) => !('wait' in this.place(a, 'new'))) // their box is offline: they wait for it
+      .filter((a) => !('wait' in this.place(a, 'new'))) // their box is offline, or hasn't got their coding agent: they wait
       .sort((x, y) => x.desk - y.desk);
   }
 

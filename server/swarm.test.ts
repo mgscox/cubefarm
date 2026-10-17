@@ -2991,7 +2991,7 @@ describe('researchers', () => {
 
 describe('boxes', () => {
   type Agent = Record<string, unknown>;
-  const internals = () => swarm as unknown as { prepare(a: Agent, r: Repo, base: object, branch: string): Promise<string | null>; available(r: Repo, role: string): Agent[]; boxConns: Map<string, { state(): { status: string; running: number } }> };
+  const internals = () => swarm as unknown as { prepare(a: Agent, r: Repo, base: object, branch: string): Promise<string | null>; available(r: Repo, role: string): Agent[]; boxConns: Map<string, { state(): { status: string; running: number; clis: { id: string }[] } }> };
 
   beforeEach(() => {
     Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready' });
@@ -3057,6 +3057,21 @@ describe('boxes', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(await cwd).toMatch(/^\/demo\//);
     expect(ada.deskBox).toBe('');
+  });
+
+  it("waits while the box hasn't got the agent's coding agent", async () => {
+    const box = swarm.addBox('Mac mini', 'ada@mini');
+    await vi.advanceTimersByTimeAsync(1600);
+    const conn = internals().boxConns.get(box.id)!;
+    const real = conn.state.bind(conn);
+    vi.spyOn(conn, 'state').mockImplementation(() => ({ ...real(), clis: real().clis.filter((c) => c.id === 'claude') }));
+    const ada = s.state.agents[0];
+    Object.assign(ada, { cli: 'codex', box: box.id });
+    expect(internals().available(repo, 'dev')).toEqual([]);
+    s.repoRt.get(repo.id)!.issues = [issue(8)];
+    expect(((await swarm.assign('a1', 8)) as { warning?: string }).warning).toBe("waiting: Mac mini hasn't got Codex");
+    ada.cli = 'claude';
+    expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
   });
 
   it('refuses bad boxes', () => {

@@ -78,3 +78,21 @@ describe('redialDelay', () => {
     expect(redialDelay(40)).toBe(60_000);
   });
 });
+
+describe('startPlace and the coding agents a box has', () => {
+  const online = () => true;
+  const lacksCodex = (id: string) => (id === 'claude-only' ? 'Codex' : null);
+
+  it("waits with a new task for a box without the agent's coding agent", () => {
+    expect(startPlace('new', 'claude-only', '', online, lacksCodex)).toEqual({ wait: 'claude-only', lacks: 'Codex' });
+    expect(startPlace('new', 'both', '', online, lacksCodex)).toEqual({ box: 'both' });
+  });
+
+  it('keeps a task already on the box there: it runs the CLI it started with', () => {
+    expect(startPlace('within', 'both', 'claude-only', online, lacksCodex)).toEqual({ box: 'claude-only' });
+  });
+
+  it('says a box is offline before asking what it has', () => {
+    expect(startPlace('new', 'claude-only', '', () => false, lacksCodex)).toEqual({ wait: 'claude-only' });
+  });
+});
