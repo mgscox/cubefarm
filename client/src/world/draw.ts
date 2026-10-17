@@ -307,6 +307,14 @@ export function fitStatus(text: string, maxWidth: number, measure: (s: string) =
 }
 
 /**
+ * Spacing for a list of `rows` rows whose first and last centres must lie between y `first` and `last`: `full` while
+ * they fit, then squeezed so none is left off.
+ */
+export function directoryRowPitch(rows: number, first: number, last: number, full: number): number {
+  return rows > 1 ? Math.min(full, (last - first) / (rows - 1)) : full;
+}
+
+/**
  * A sticky note's footer on a card w wide: the developer's name from the left and the status from the right, each
  * fitted so neither crosses the other or the card's edges. The name keeps at most two thirds of the card.
  */
