@@ -1108,6 +1108,19 @@ export class Swarm {
     return this.boxView(box);
   }
 
+  /** Ask a box again what it has (the manager set something up there), or connect to it now if it's offline. */
+  async checkBox(id: string): Promise<BoxView> {
+    const box = this.state.boxes.find((b) => b.id === id);
+    const conn = box && this.boxConns.get(id);
+    if (!box || !conn) throw new HttpError(404, 'No such box');
+    try {
+      await conn.check();
+    } catch (err) {
+      throw new HttpError(502, `${box.name} didn't answer: ${(err as Error).message}`);
+    }
+    return this.boxView(box);
+  }
+
   /** Remove a box. CLIs running there carry on until they end; nothing new starts there, and agents on it follow their floor. */
   removeBox(id: string) {
     const box = this.state.boxes.find((b) => b.id === id);

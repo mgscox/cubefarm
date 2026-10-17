@@ -495,6 +495,15 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
     }),
     reconnected: Promise.resolve([]), // fake sessions end with the office
     hooksReady: () => undefined,
+    // An offline one tries again for a moment and stays offline; an online one has nothing new to say.
+    check: async () => {
+      if (status !== 'offline') return opts.changed();
+      status = 'connecting';
+      opts.changed();
+      await new Promise((r) => setTimeout(r, 1000));
+      status = 'offline';
+      opts.changed();
+    },
     close: () => clearTimeout(timer),
   };
 }

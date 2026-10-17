@@ -152,7 +152,12 @@ class BoxLink implements CliHost {
       for (const p of unknown) this.send({ op: 'kill', id: p.id });
     }
     if (this.hooksOpen) this.send({ op: 'hooksReady' });
-    void this.call<BoxInfo>('info')
+    void this.report().catch((err) => console.warn(`  box ${this.name}: ${(err as Error).message}`));
+  }
+
+  /** What the box has set up (its git, gh, paths) and the CLIs it has. */
+  private report() {
+    return this.call<BoxInfo>('info')
       .then((info) => {
         this.info = info;
         this.onChange();
@@ -161,8 +166,17 @@ class BoxLink implements CliHost {
       .then((clis) => {
         this.clis = clis;
         this.onChange();
-      })
-      .catch((err) => console.warn(`  box ${this.name}: ${(err as Error).message}`));
+      });
+  }
+
+  /** Ask again (BoxConnection.check): an online box reports again; one that isn't is dialled now, not after its wait. */
+  async check() {
+    if (this.closed) return;
+    if (this.status === 'online') return this.report();
+    if (this.child) return; // dialling it already
+    clearTimeout(this.redial);
+    this.attempt = 0;
+    this.dial();
   }
 
   private message(m: FromHost) {
@@ -316,6 +330,7 @@ export function connectBox(opts: BoxOptions): BoxConnection {
     state: () => ({ status: link.status, error: link.error, info: link.info, clis: link.clis, running: link.ptys.size }),
     reconnected: Promise.resolve().then(() => reconnectClis(opts.terminalFor, link)), // dials once the caller has the connection
     hooksReady: () => link.hooksReady(),
+    check: () => link.check(),
     close: () => link.close(),
   };
 }

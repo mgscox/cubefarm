@@ -70,6 +70,11 @@ function OfficeMachine({ agents, repos }: { agents: Agent[]; repos: RepoView[] }
 
 function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos: RepoView[] }) {
   const { info, missing } = boxNotes(box);
+  const [checking, setChecking] = useState(false);
+  const check = () => {
+    setChecking(true);
+    void attempt(() => api.checkBox(box.id)).finally(() => setChecking(false));
+  };
   const remove = () =>
     void confirmDialog({
       tone: 'danger',
@@ -100,6 +105,14 @@ function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos:
       <Workers id={box.id} agents={agents} repos={repos} />
       <div className="row">
         <span className="muted small grow">{box.running ? `${box.running} CLI${box.running === 1 ? '' : 's'} running there` : 'Nothing running there'}</span>
+        <button
+          className="btn btn-small btn-ghost"
+          disabled={checking || box.status === 'connecting'}
+          title={box.status === 'online' ? 'Ask the box again what it has set up, after you changed something there' : 'Connect to it now instead of waiting for the next try'}
+          onClick={check}
+        >
+          {checking ? 'Checking…' : 'Check again'}
+        </button>
         <button className="btn btn-small btn-ghost" onClick={remove}>
           Remove
         </button>
