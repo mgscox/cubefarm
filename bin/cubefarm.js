@@ -20,6 +20,8 @@ const HELP = `
     npx cubefarm            start the office and open it in your browser
     npx cubefarm login      sign in to Claude Code, the built-in coding agent
     npx cubefarm doctor     check that this machine is ready
+    npx cubefarm box --stdio --office <id>
+                            serve as a box an office runs agents on (the office starts this over ssh)
 
   Options
     --port <n>   port for the office (default 4317)
@@ -43,6 +45,13 @@ const fail = (msg) => {
 };
 
 if (Number(process.versions.node.split('.')[0]) < MIN_NODE) fail(`cubefarm needs Node.js ${MIN_NODE} or newer (this is ${process.version}). Get it from https://nodejs.org`);
+
+// `cubefarm box --stdio --office <id>`: this machine as a box an office runs agents on, started by the office over ssh.
+if (process.argv[2] === 'box') {
+  const box = path.join(root, 'dist-server', 'boxStdio.js');
+  if (!fs.existsSync(box)) fail(`${box} is missing. In a checkout of the repo, run npm run build first.`);
+  await (await import(pathToFileURL(box).href)).main(process.argv.slice(3));
+}
 
 let args;
 try {

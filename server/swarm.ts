@@ -3,8 +3,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
-import type { Machine } from './machine.ts';
+import type { BoxConnection, Machine } from './machine.ts';
+import { agentBox, startPlace, validDestination, type PersistedBox, type StartPlace } from './fleet.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
+import type { ReconnectedCli } from './cliRunner.ts';
 import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type MergePrRequest, type OfficeTools, type ParkPrRequest, type ResearchRequest, type StartIssueRequest } from './ceo.ts';
@@ -25,7 +27,7 @@ import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { officeLifecycle } from './officeLifecycle.ts';
 import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type LastUpdate } from './officeUpdate.ts';
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
-import { isCli, ONE_TURN } from './clis.ts';
+import { cliLabel, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { issueBlockers, issueParent, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
 import { effectiveModel } from '../shared/models.ts';
@@ -39,6 +41,7 @@ import type {
   AgentTask,
   AgentView,
   CeoInfo,
+  BoxView,
   CliView,
   EffortLevel,
   HireRequestView,
@@ -86,6 +89,7 @@ interface PersistedRepo {
   summary: string;
   qaBrief: string;
   preview: PreviewConfig; // how the floor's app runs for the preview monitor
+  box: string; // the box its developers and QA testers work on, unless they have their own ('' = the office's machine)
   addedAt: number;
 }
 
@@ -123,6 +127,8 @@ interface PersistedAgent {
   heldRetry?: HeldRetry | null;
   issueStartHead?: string | null;
   lastError: string | null;
+  box: string | null; // their own box, overriding the floor's (null = the floor's)
+  deskBox: string; // where the current task's desk and CLI conversation are ('' = the office's machine)
   logTail: LogLine[];
 }
 
@@ -184,6 +190,9 @@ interface Persisted {
   research: ResearchState;
   messages: PhoneMessage[];
   phoneReadAt: number;
+  /** Names this office to its boxes (each keeps a home per office). */
+  officeId: string;
+  boxes: PersistedBox[];
 }
 
 interface Shot {
@@ -205,6 +214,7 @@ interface AgentRuntime {
   starting?: number; // reserved while reading an issue session baseline
   generation?: number; // bumped by every new task, cleared task and session: see nextGeneration
   qaResume?: { cwd: string; systemAppend: string } | null; // the QA run's one resume for a missing report, until used
+  deskMoved?: boolean; // the task's desk had to move off a removed box: its conversation can't be resumed
 }
 
 interface RepoRuntime {
@@ -280,6 +290,8 @@ const RESEARCHER_NAME = 'Hypatia';
 const RESEARCH_DIR = path.join(HOME_DIR, 'research');
 const KEEP_RESEARCH_DOCS = 12;
 const MAX_RESEARCH_QUEUE = 8;
+/** At the office's start, how long a box gets to say which CLIs it kept running before the office carries on without it. */
+const BOX_WAIT_MS = 5000;
 const DEFAULT_PROJECTS_DIR = defaultProjectsDir(path.resolve(import.meta.dirname, '..'));
 const MAX_PENDING_REQUESTS = 8;
 const MAX_ISSUES_PER_JOB = 12;
@@ -434,7 +446,11 @@ export class Swarm {
     research: { queue: [], job: null, done: [] },
     messages: [],
     phoneReadAt: 0,
+    officeId: '',
+    boxes: [],
   };
+  /** Links to the boxes: removed ones stay until the CLIs still running there have ended. */
+  private boxConns = new Map<string, BoxConnection>();
   /**
    * The CEO's office tools. Every session gets its own server: one can only be connected to one session at a time, so
    * a shared one left the next session connected but without any tools while an earlier session still held it.
@@ -515,6 +531,7 @@ export class Swarm {
           qaBrief: r.qaBrief ?? '',
           localPath: r.localPath ?? null,
           preview: { command: r.preview?.command ?? null, env: { ...r.preview?.env } },
+          box: typeof r.box === 'string' ? r.box : '',
         })),
         agents: (loaded.agents ?? []).map((a) => ({
           ...a,
@@ -528,6 +545,8 @@ export class Swarm {
           task: a.task ?? (a.issueNumber ? 'issue' : null),
           cli: isCli(a.cli) ? a.cli : '',
           sessionCli: a.sessionCli ?? (a.sessionId ? 'claude' : null),
+          box: typeof a.box === 'string' ? a.box : null,
+          deskBox: typeof a.deskBox === 'string' ? a.deskBox : '',
         })),
         qa: (loaded.qa ?? []).map((q) => ({
           ...q,
@@ -549,6 +568,8 @@ export class Swarm {
         research: { ...this.state.research, ...loaded.research },
         messages: loaded.messages ?? [],
         phoneReadAt: loaded.phoneReadAt ?? 0,
+        officeId: typeof loaded.officeId === 'string' ? loaded.officeId : '',
+        boxes: (loaded.boxes ?? []).filter((b) => b && typeof b.id === 'string' && typeof b.destination === 'string'),
       };
       for (const m of this.state.messages) this.messageSeq = Math.max(this.messageSeq, m.id + 1);
       if (!EFFORTS.includes(this.state.settings.defaultEffort)) this.state.settings.defaultEffort = 'medium';
@@ -570,6 +591,7 @@ export class Swarm {
       // first run
     }
     for (const r of this.state.repos) if (r.localPath) this.backend.setLocalPath(r.fullName, r.localPath);
+    this.state.officeId ||= crypto.randomBytes(8).toString('hex');
     const interrupted: PersistedAgent[] = [];
     for (const a of this.state.agents) {
       const tail = a.logTail ?? [];
@@ -578,7 +600,7 @@ export class Swarm {
     }
     // CLIs the terminal keeper kept running through the restart go back into their terminals, and busy ones carry on.
     // (The CEO's session is resumed instead: its office tools live in this process. The lobby researcher's job is queued again.)
-    const back = await this.backend
+    const back: ReconnectedCli[] = await this.backend
       .reconnectClis((id) => {
         const a = this.state.agents.find((x) => x.id === id);
         return a && a.role !== 'ceo' && a.id !== RESEARCHER_ID ? this.terminalFor(a) : null;
@@ -587,6 +609,9 @@ export class Swarm {
         console.warn('could not reconnect to the terminal keeper', err);
         return [];
       });
+    // The boxes' CLIs too, from the boxes that answer in time; one that answers later is picked up then (boxBack).
+    const early = await Promise.all(this.state.boxes.map((b) => this.openBox(b)));
+    back.push(...early.flat());
     const carryOn: PersistedAgent[] = [];
     const preparing = new Set<PersistedAgent>(); // their task's session hadn't started: nothing of it to resume
     for (const a of this.state.agents) {
@@ -604,6 +629,7 @@ export class Swarm {
     for (const r of this.state.repos) this.repoRt.set(r.id, { issues: [], pulls: [], lastSync: null, syncing: false, cloneStatus: 'pending', lastMergedAt: null, folderSync: null, merging: false });
     for (const a of carryOn) this.reattachSession(a);
     this.backend.hooksReady();
+    for (const c of this.boxConns.values()) c.hooksReady();
 
     try {
       this.user = await this.backend.user();
@@ -646,6 +672,7 @@ export class Swarm {
     if (updated) await this.reportUpdate(updated);
     setInterval(() => this.state.repos.forEach((r, i) => setTimeout(() => void this.syncRepo(r.id), i * 1500)), SYNC_INTERVAL_MS);
     setInterval(() => this.schedule(), SCHEDULER_INTERVAL_MS);
+    this.scheduling = true;
     setInterval(() => void this.saveTerminals(), TERMINAL_SAVE_MS);
     void this.backend
       .detectClis()
@@ -684,6 +711,7 @@ export class Swarm {
         continue;
       }
       if (this.slotsFull()) continue; // stays 'stopped'; the manager can resume it later
+      if (this.agentRt.get(a.id)?.session) continue; // its box answered meanwhile and the office follows its CLI again (boxBack)
       void this.message(a.id, this.resumeNote(a)).catch((err) => console.warn(`could not resume ${a.name}`, err));
     }
     this.reconcileOrphanedQa();
@@ -720,6 +748,7 @@ export class Swarm {
       qaBrief: r.qaBrief,
       localPath: r.localPath,
       checkoutPath: this.backend.mainDir(r.fullName),
+      box: r.box,
       cloneStatus: rt.cloneStatus,
       cloneError: rt.cloneError,
       issues: rt.issues.map((i) => this.workIssue(r, i)),
@@ -770,6 +799,8 @@ export class Swarm {
       hasScreenshot: !!rt.screenshot,
       screenshotAt: rt.screenshot?.at ?? null,
       lastError: a.lastError,
+      box: a.box,
+      deskBox: a.deskBox,
       log: withLog ? rt.log : [],
     };
   }
@@ -810,6 +841,7 @@ export class Swarm {
       phoneReadAt: this.state.phoneReadAt,
       usage: this.usageNow(),
       clis: this.clis,
+      boxes: this.state.boxes.map((b) => this.boxView(b)),
       officeCommit: this.officeHead?.slice(0, 7) ?? null,
       officeLifecycle: this.officeLifecycleView(),
       officeUpdate: this.officeHead ? this.officeUpdateView() : undefined,
@@ -935,9 +967,182 @@ export class Swarm {
     return `${slugify(a.name)}-${a.id.slice(0, 4)}`;
   }
 
-  /** The machine an agent's desk and sessions are on. Always the office's own, for now (see docs/fleet-design.md). */
-  private machineFor(_a: PersistedAgent): Machine {
-    return this.backend;
+  /** The machine an agent's desk and sessions are on: their task's box, or the office's own. The CEO and researchers stay on the office. */
+  private machineFor(a: PersistedAgent): Machine {
+    if (a.role === 'ceo' || a.role === 'researcher') return this.backend;
+    return (a.deskBox && this.boxConns.get(a.deskBox)?.machine) || this.backend;
+  }
+
+  /** Where an agent's next session starts (see fleet.ts): a new task on their box, anything inside one on their desk's. */
+  private place(a: PersistedAgent, kind: 'new' | 'within'): StartPlace {
+    if (a.role === 'ceo' || a.role === 'researcher' || this.state.settings.runtime !== 'terminal') return { box: '' };
+    const floor = this.state.repos.find((r) => r.id === a.repoId)?.box;
+    const cli = a.cli || this.state.settings.defaultCli;
+    return startPlace(
+      kind,
+      agentBox(a.box, floor),
+      a.deskBox,
+      (id) => {
+        if (!this.state.boxes.some((b) => b.id === id)) return null;
+        return this.boxConns.get(id)?.state().status === 'online';
+      },
+      (id) => {
+        // Its CLIs are looked for once it connects: until they're known, a new task waits for the list.
+        const clis = this.boxConns.get(id)?.state().clis ?? [];
+        return clis.some((c) => c.id === cli && c.installed) ? null : cliLabel(cli);
+      },
+    );
+  }
+
+  /** Why an agent waits for a box. */
+  private waitReason(where: { wait: string; lacks?: string }) {
+    const name = this.boxName(where.wait);
+    if (!where.lacks) return `${name} is offline`;
+    return this.boxConns.get(where.wait)?.state().clis.length ? `${name} hasn't got ${where.lacks}` : `${name} is still looking for its coding agents`;
+  }
+
+  private boxName(id: string) {
+    return this.state.boxes.find((b) => b.id === id)?.name ?? this.removedBoxes.get(id) ?? id;
+  }
+  /** Names of boxes removed since the office started, for what agents whose desk was there are told. */
+  private removedBoxes = new Map<string, string>();
+
+  // ---------- boxes ----------
+
+  /** An agent's terminal, for a CLI a keeper or box kept running (the CEO and the lobby researcher's are resumed instead). */
+  private keptTerminal(agentId: string) {
+    const a = this.state.agents.find((x) => x.id === agentId);
+    return a && a.role !== 'ceo' && a.id !== RESEARCHER_ID ? this.terminalFor(a) : null;
+  }
+
+  /**
+   * Connect to a box. At the office's start this resolves with the CLIs the box kept running if it answers within a
+   * few seconds; a box that answers later (or one added now) has them picked up then (boxBack).
+   */
+  private openBox(b: PersistedBox, atStart = true): Promise<ReconnectedCli[]> {
+    const conn = this.backend.connectBox({ box: b, officeId: this.state.officeId, changed: () => this.boxChanged(b.id), terminalFor: (id) => this.keptTerminal(id) });
+    this.boxConns.set(b.id, conn);
+    return new Promise((resolve) => {
+      let waiting = atStart;
+      const timer = setTimeout(() => {
+        waiting = false;
+        resolve([]);
+      }, atStart ? BOX_WAIT_MS : 0);
+      void conn.reconnected.then(
+        (back) => {
+          if (!waiting) return this.boxBack(b.id, back);
+          waiting = false;
+          clearTimeout(timer);
+          resolve(back);
+        },
+        () => undefined,
+      );
+    });
+  }
+
+  /** A box answered after the office started: agents whose CLI kept working there are followed again; other busy CLIs close. */
+  private boxBack(id: string, back: ReconnectedCli[]) {
+    for (const c of back) {
+      const a = this.state.agents.find((x) => x.id === c.agentId);
+      const follow = !!a && a.status === 'stopped' && a.deskBox === id && !this.agentRt.get(a.id)?.session && followKeptCli({ ...a, status: 'working' }, c);
+      if (follow) this.reattachSession(a);
+      else if (c.busy) this.agentRt.get(c.agentId)?.terminal?.releaseIdle?.();
+    }
+    this.boxConns.get(id)?.hooksReady();
+    this.save();
+  }
+
+  private boxView(b: PersistedBox): BoxView {
+    const st = this.boxConns.get(b.id)?.state();
+    return {
+      id: b.id,
+      name: b.name,
+      destination: b.destination,
+      status: st?.status ?? 'offline',
+      error: st?.error ?? null,
+      platform: st?.info?.platform ?? null,
+      version: st?.info?.version ?? null,
+      git: st?.info?.git ?? null,
+      ghReady: st?.info?.ghReady ?? false,
+      clis: st?.clis ?? [],
+      running: st?.running ?? 0,
+    };
+  }
+
+  /** A box's link changed: its status, what it reported, or how many CLIs run there. A removed one closes once none do. */
+  private boxChanged(id: string) {
+    const conn = this.boxConns.get(id);
+    const b = this.state.boxes.find((x) => x.id === id);
+    if (!conn) return;
+    if (!b) {
+      if (conn.state().running === 0) {
+        conn.close();
+        this.boxConns.delete(id);
+      }
+      return;
+    }
+    const info = conn.state().info;
+    if (info && (b.layout?.workspaces !== info.workspaces || b.layout?.sep !== info.sep)) {
+      b.layout = { workspaces: info.workspaces, sep: info.sep };
+      this.save();
+    }
+    const was = this.boxStatus.get(id);
+    const now = conn.state().status;
+    this.boxStatus.set(id, now);
+    this.broadcast({ type: 'box', box: this.boxView(b) });
+    if (now === 'online' && was !== 'online' && this.scheduling) setTimeout(() => this.schedule(), 200); // agents waiting for it can start
+  }
+  private boxStatus = new Map<string, string>();
+  /** init() is done: the scheduler runs. */
+  private scheduling = false;
+
+  addBox(name: unknown, destination: unknown): BoxView {
+    const dest = String(destination ?? '').trim();
+    if (!validDestination(dest)) throw new HttpError(400, 'Give the box the way ssh takes it: user@host, an ~/.ssh/config alias or a Tailscale name.');
+    if (this.state.boxes.some((b) => b.destination === dest)) throw new HttpError(409, `${dest} is already a box.`);
+    const box: PersistedBox = { id: `box-${crypto.randomBytes(4).toString('hex')}`, name: String(name ?? '').trim().slice(0, 40) || dest, destination: dest, layout: null };
+    this.state.boxes.push(box);
+    this.save();
+    void this.openBox(box, false);
+    this.broadcast({ type: 'box', box: this.boxView(box) });
+    return this.boxView(box);
+  }
+
+  /** Remove a box. CLIs running there carry on until they end; nothing new starts there, and agents on it follow their floor. */
+  removeBox(id: string) {
+    const box = this.state.boxes.find((b) => b.id === id);
+    if (!box) throw new HttpError(404, 'No such box');
+    this.state.boxes = this.state.boxes.filter((b) => b !== box);
+    this.removedBoxes.set(id, box.name);
+    for (const r of this.state.repos.filter((x) => x.box === id)) {
+      r.box = '';
+      this.emitRepo(r);
+    }
+    for (const a of this.state.agents.filter((x) => x.box === id)) {
+      a.box = null;
+      this.emitAgent(a);
+    }
+    this.boxChanged(id);
+    this.boxStatus.delete(id);
+    this.save();
+    this.broadcast({ type: 'boxRemoved', boxId: id });
+    const running = this.boxConns.get(id)?.state().running ?? 0;
+    this.toast('info', `${box.name} removed${running ? `: its ${running} running CLI${running === 1 ? '' : 's'} finish there first` : ''}.`);
+  }
+
+  /** A box id from a request: '' (the office's machine) or a box's; null where allowed (follow the floor). */
+  private boxRef(v: unknown, nullable: boolean): string | null {
+    if (v === null && nullable) return null;
+    if (v === '' || (typeof v === 'string' && this.state.boxes.some((b) => b.id === v))) return v as string;
+    throw new HttpError(400, `No box "${String(v)}". Use '' for the office's machine${nullable ? ', or null to follow the floor' : ''}.`);
+  }
+
+  /** Busy agents say where they go next: a change of box applies when their next task starts. */
+  private noteMove(a: PersistedAgent, before: string) {
+    const after = agentBox(a.box, this.state.repos.find((r) => r.id === a.repoId)?.box);
+    if (after === before) return;
+    if (BUSY.includes(a.status)) this.appendLog(a, [{ kind: 'system', text: `ℹ Moves to ${after ? this.boxName(after) : "the office's machine"} after this task.` }]);
+    this.emitAgent(a);
   }
 
   /** The agent's task or session changes: a session end still being handled for the old one must not act on it. */
@@ -1010,6 +1215,7 @@ export class Swarm {
       summary: '',
       qaBrief: '',
       preview: { ...DEFAULT_PREVIEW, env: {} },
+      box: '',
       addedAt: Date.now(),
     };
     this.backend.setLocalPath(repo.fullName, folder);
@@ -1104,9 +1310,20 @@ export class Swarm {
 
   updateRepo(
     id: string,
-    patch: Partial<Pick<PersistedRepo, 'autoAssign' | 'autoMerge' | 'browserTesting' | 'color' | 'links' | 'mission' | 'summary' | 'qaBrief'>> & { previewCommand?: unknown; previewEnv?: unknown },
+    patch: Partial<Pick<PersistedRepo, 'autoAssign' | 'autoMerge' | 'browserTesting' | 'color' | 'links' | 'mission' | 'summary' | 'qaBrief'>> & { previewCommand?: unknown; previewEnv?: unknown; box?: unknown; everyone?: unknown },
   ) {
     const repo = this.repo(id);
+    if (patch.box !== undefined) {
+      // The floor's box; everyone: the whole floor moves there, overrides cleared. Each agent moves when their next task starts.
+      const box = this.boxRef(patch.box, false)!;
+      const floor = this.state.agents.filter((a) => a.repoId === id);
+      const before = new Map(floor.map((a) => [a, agentBox(a.box, repo.box)]));
+      repo.box = box;
+      for (const a of floor) {
+        if (patch.everyone === true) a.box = null;
+        this.noteMove(a, before.get(a)!);
+      }
+    }
     const preview = parsePreviewPatch(patch.previewCommand, patch.previewEnv);
     repo.preview = { ...repo.preview, ...preview };
     if (preview.command === null) void this.previews.refreshDefault(repo);
@@ -1300,6 +1517,7 @@ export class Swarm {
   async shutdown(restart = false): Promise<void> {
     await this.writeState().catch((err) => console.warn('could not save the state', err));
     await this.backend.releaseClis(restart); // before the terminals are saved: whatever they print next waits in the keeper
+    for (const c of this.boxConns.values()) c.close();
     await this.saveTerminals(true);
     await this.previews.stopAll(this.state.repos);
   }
@@ -1553,6 +1771,8 @@ export class Swarm {
       sessionId: null,
       sessionCli: null,
       lastError: null,
+      box: null,
+      deskBox: '',
       logTail: [],
     };
     this.state.agents.push(agent);
@@ -1590,7 +1810,7 @@ export class Swarm {
 
   updateAgent(
     id: string,
-    patch: { name?: string; model?: string; effort?: string; cli?: string; look?: string; title?: string; specialty?: string; brief?: string; color?: string; hair?: string },
+    patch: { name?: string; model?: string; effort?: string; cli?: string; look?: string; title?: string; specialty?: string; brief?: string; color?: string; hair?: string; box?: unknown },
   ) {
     const a = this.agent(id);
     if (patch.cli !== undefined && a.role !== 'ceo' && a.role !== 'researcher') a.cli = isCli(patch.cli) ? patch.cli : '';
@@ -1607,6 +1827,12 @@ export class Swarm {
       if (patch.title !== undefined) a.title = String(patch.title).trim().slice(0, 60);
       if (patch.specialty !== undefined) a.specialty = a.role === 'researcher' ? RESEARCH : specialtySlug(patch.specialty);
       if (patch.brief !== undefined) a.brief = String(patch.brief).trim().slice(0, 2500);
+    }
+    if (patch.box !== undefined) {
+      if (a.role === 'ceo' || a.role === 'researcher') throw new HttpError(400, `${a.name} works on the office's machine.`);
+      const before = agentBox(a.box, this.repo(a.repoId).box);
+      a.box = this.boxRef(patch.box, true);
+      this.noteMove(a, before);
     }
     this.save();
     this.emitAgent(a);
@@ -1741,10 +1967,16 @@ export class Swarm {
       const parent = issueParent(issue);
       if (parent || issue.subIssues === null) this.toast('info', `Starting #${issueNumber} manually: ${parent ? `parent: ${parent}` : 'sub-issues have not loaded'}.`);
     }
+    const where = this.place(a, 'new');
     if (explicit) this.setRequestedStarts(repo, [
       ...repo.requestedStarts.filter((r) => r.issueNumber !== issueNumber),
-      { issueNumber, preferredAgentId: a.id, note, restartPending: false },
+      { issueNumber, preferredAgentId: a.id, note, restartPending: 'wait' in where },
     ]);
+    if ('wait' in where) {
+      // It starts once a desk is free: theirs when their box is back, or another developer's.
+      this.appendLog(a, [{ kind: 'system', text: `⏸ #${issueNumber} waits: ${this.waitReason(where)}.` }]);
+      return { ...this.agentView(a, false), warning: `waiting: ${this.waitReason(where)}` };
+    }
     void this.runTask(a, repo, issue, note);
     const warning = explicit && issueParent(issue) ? `parent: ${issueParent(issue)}` : explicit && issue.subIssues === null ? 'sub-issues have not loaded' : undefined;
     return { ...this.agentView(a, false), ...(warning && { warning }) };
@@ -1895,6 +2127,17 @@ export class Swarm {
     const gone = () => a.status !== 'preparing' || this.agentRt.get(a.id)?.generation !== generation;
     try {
       if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') await this.cloneRepo(repo.id);
+      // A fix round for the PR's own author stays on the desk with their conversation; anything else is a new task.
+      const where = this.place(a, job?.task === 'fix' && job.author === a.id ? 'within' : 'new');
+      if ('wait' in where) throw new Error(`Waiting: ${this.waitReason(where)}.`);
+      if (where.fellBack) this.appendLog(a, [{ kind: 'system', text: `ℹ ${this.boxName(where.fellBack)} was removed: this task runs on the office's machine.` }]);
+      const rt = this.agentRt.get(a.id);
+      if (rt) rt.deskMoved = where.box !== a.deskBox;
+      if (where.box !== a.deskBox) {
+        a.deskBox = where.box;
+        this.emitAgent(a);
+      }
+      if (where.box) this.appendLog(a, [{ kind: 'system', text: `🖥 Working on ${this.boxName(where.box)}.` }]);
       await this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
       const cwd = await this.machineFor(a).prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch, (text) => this.appendLog(a, [{ kind: 'system', text }]));
       if (gone()) return null;
@@ -2649,7 +2892,7 @@ export class Swarm {
     ];
     const mergeEnd = 'Then reply with a short summary of what you did. Do not open a new pull request; the office merges it once the checks pass, after another QA round if the code changed.';
     const prompt = (mergeFix ? [...mergeFix, '', mergeEnd] : qaFix).filter((l) => l !== '').join('\n');
-    const resume = original && rec.devSessionId ? rec.devSessionId : undefined;
+    const resume = original && rec.devSessionId && !this.agentRt.get(dev.id)?.deskMoved ? rec.devSessionId : undefined;
     await this.startAgentSession(dev, repo, cwd, prompt, this.buildSystemAppend(dev, repo, cwd, headRef, { pr: rec.prNumber, headRef }), resume);
   }
 
@@ -2729,6 +2972,9 @@ export class Swarm {
     if (rt.starting !== undefined) throw new HttpError(409, `${a.name}'s session is still starting; try again in a moment`);
     if (a.status === 'preparing') throw new HttpError(409, `${a.name} is still setting up; try again in a moment`);
     if (!a.sessionId || !a.branch || a.task === 'qa') throw new HttpError(409, `${a.name} has no session to continue. Assign an issue instead.`);
+    const desk = this.place(a, 'within');
+    if ('wait' in desk) throw new HttpError(409, `${a.name}'s desk is on ${this.boxName(desk.wait)}, which is offline. Try again once it's back.`);
+    if (desk.fellBack) throw new HttpError(409, `${a.name}'s desk was on ${this.boxName(desk.fellBack)}, which was removed. Assign the issue again to start it afresh.`);
     this.ensureSlot();
     this.appendLog(a, [{ kind: 'manager', text: `▶ Manager: ${text}` }]);
     const cwd = this.machineFor(a).deskDir(repo.fullName, this.agentSlug(a));
@@ -2790,6 +3036,7 @@ export class Swarm {
     const now = Date.now();
     return this.state.agents
       .filter((a) => a.repoId === repo.id && a.role === role && !a.heldRetry && (FREE.includes(a.status) || (a.status === 'error' && now - (a.endedAt ?? 0) >= ERROR_COOLDOWN_MS)))
+      .filter((a) => !('wait' in this.place(a, 'new'))) // their box is offline, or hasn't got their coding agent: they wait
       .sort((x, y) => x.desk - y.desk);
   }
 
@@ -2860,7 +3107,7 @@ export class Swarm {
       const pool = freshOnFloor ? devs.filter(fresh) : devs;
       const author = this.state.agents.find((a) => a.id === rec.devAgentId && a.repoId === repo.id && a.role === 'dev') ?? null;
       const headRef = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headRefName ?? null;
-      const to = fixGoesTo(author, !!author && pool.includes(author), rec.prNumber, headRef);
+      const to = fixGoesTo(author, !!author && pool.includes(author) && !('wait' in this.place(author, 'within')), rec.prNumber, headRef);
       if (to === 'wait') continue;
       const dev = to === 'author' ? author : this.pickDev(repo, pool, (a) => a.specialty.toLowerCase() === want);
       if (!dev) continue;
@@ -3316,6 +3563,8 @@ export class Swarm {
         sessionId: null,
         sessionCli: null,
         lastError: null,
+        box: null,
+        deskBox: '',
         logTail: [],
       };
       this.state.agents.push(a);
@@ -3629,6 +3878,8 @@ export class Swarm {
         sessionId: null,
         sessionCli: null,
         lastError: null,
+        box: null,
+        deskBox: '',
         logTail: [],
       };
       this.state.agents.push(a);

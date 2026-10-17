@@ -1,6 +1,7 @@
 # Fleet: running agents' CLIs on other machines (design)
 
-Status: phase 1 (the `Machine` / `CliHost` seam, `server/machine.ts`) is built; the rest is a design. Goal: the manager adds and removes **boxes** (other machines on the LAN or the
+Status: phases 1 and 2 are built: the `Machine` / `CliHost` seam (`server/machine.ts`), and boxes over SSH with
+assignment through REST (below); the console UI and the rest are still a design. Goal: the manager adds and removes **boxes** (other machines on the LAN or the
 tailnet), assigns developers and QA testers to a box, and their coding-agent CLIs (Claude Code, Codex, OpenCode) run
 there. Adding or removing a box, or reassigning an agent, never touches a running CLI: it applies when a session
 starts.
@@ -111,15 +112,22 @@ interface BoxView {
   status: 'connecting' | 'online' | 'offline' | 'removing';
   platform?: string; clis: CliView[]; ghReady: boolean; running: number; error?: string;
 }
+// persisted floor
+box: string;         // the floor's box: where its developers and QA testers work by default; '' = this machine
 // persisted agent
-box: string;      // assigned box id; '' = this machine
-deskBox: string;  // where the current task's desk (worktree + CLI conversation) actually is
+box: string | null;  // the agent's own box, overriding the floor's; null = follow the floor
+deskBox: string;     // where the current task's desk (worktree + CLI conversation) actually is
 ```
 
-Snapshot gets `boxes`; a new `box` server event carries changes; REST: `POST /api/boxes` (name, destination),
-`DELETE /api/boxes/:id`, `PATCH /api/agents/:id { box }`.
+An agent's box is `a.box ?? floor.box`. New hires follow the floor, so a floor moves as one unless someone on it was
+given a box of their own.
 
-When the agent's **task starts** (new issue, QA run): if `a.box` is online and has the agent's CLI, `deskBox = a.box`;
+Snapshot gets `boxes`; a new `box` server event carries changes; REST: `POST /api/boxes` (name, destination),
+`DELETE /api/boxes/:id`, `PATCH /api/agents/:id { box }` (`null`: follow the floor again),
+`PATCH /api/repos/:id { box, everyone? }`. With `everyone: true` the whole floor moves to that box: the floor's box is
+set and every override on the floor is cleared.
+
+When the agent's **task starts** (new issue, QA run): if the agent's box is online and has the agent's CLI, `deskBox = a.box`;
 if it is offline, the agent waits ("waiting for <box>") and the scheduler retries (offline is usually transient); if
 it was removed, the agent falls back to the office machine with a log line. Everything inside a task (fix rounds,
 follow-ups, `finishPushedWork`, typed prompts, reattach after a restart) uses `deskBox`, because the worktree,
@@ -144,8 +152,9 @@ Pacing (`pacing.ts`) is per CLI account; boxes signed into other accounts should
 
 ### 6. UI
 
-Manager's console: a Fleet tab (boxes, status, CLIs, running count, add/remove). Agent panel: a box picker. In the
-building: the box name on the desk's monitor; a small server rack in the lobby with one light per box would fit
+Manager's console: a Fleet tab (boxes, status, CLIs, running count, add/remove), and per floor a box picker with a
+"Move the whole floor" button (the floor's box, overrides cleared; it says how many agents finish their current task
+first). Agent panel: a box picker whose first entry is "Floor's box (<name>)". In the building: the box name on the desk's monitor; a small server rack in the lobby with one light per box would fit
 the style.
 
 ## Demo parity and tests
@@ -155,9 +164,28 @@ name, one demo box can be toggled offline. Pure, tested helpers: the start rule 
 the removal drain, `box --stdio` argument building, version/handshake checks, and path handling for a box on another
 OS.
 
+## Phase 2 as built
+
+- `cubefarm box --stdio --office <office id>` (`server/boxStdio.ts`) finds or starts the box's host in
+  `~/.cubefarm-box/<office id>` (`SWARM_BOX_HOME` overrides) and bridges stdio to it. The host is `ptyHost.ts` with a
+  trailing `box`: it loads `boxOps.ts` (desks, session files, screenshots on its own disk), answers every hook but
+  `UserPromptSubmit` itself (`localHookAnswer`), queues them for the office, and waits 6 hours for an office that went.
+- The office side is `server/boxLink.ts` (`connectBox`): the ssh process (`fleet.boxCommand`), redialled with backoff
+  after a drop, the box as a `Machine` and a `CliHost`. `SWARM_BOX_COMMAND` replaces the remote
+  `npx -y cubefarm@<version> box` (a box that runs a checkout: `node <checkout>/bin/cubefarm.js box`).
+- Persisted: `boxes` (with each box's last-reported workspaces folder and separator, so desk paths are known while it's
+  offline), `officeId`, the floor's `box` and the agent's `box` / `deskBox`. The start rule is `fleet.startPlace`;
+  `Swarm.prepare` applies it, `available()` keeps agents whose box is offline out of the queue, and an explicit
+  assignment to one waits as a requested start. A fix round for the PR's own author stays on its desk's box.
+- REST: `POST /api/boxes { name, destination }`, `DELETE /api/boxes/:id`, `PATCH /api/agents/:id { box }`,
+  `PATCH /api/repos/:id { box, everyone? }`. The snapshot has `boxes`; `box` / `boxRemoved` events carry changes.
+- A removed box leaves the list at once (agents on it follow their floor, floors on it go back to the office); its link
+  stays open until the CLIs still running there end. In the demo, a box connects after a moment and one whose
+  destination starts with `offline` never does.
+
 ## Phases
 
 1. `Machine` seam and `localMachine`, plan/launch split in `cliRunner` (no behaviour change; reviewable alone).
 2. Box host and SSH transport, one box, assignment via REST.
-3. Fleet state, events, console UI, demo boxes, removal drain.
+3. Fleet state, events, console UI (the floor-wide box assignment included), demo boxes, removal drain.
 4. Optional: `--listen` transport for boxes without sshd; per-account pacing.

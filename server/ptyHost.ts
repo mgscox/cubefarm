@@ -3,8 +3,9 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import * as nodePty from '@lydell/node-pty';
-import { encode, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
+import { encode, localHookAnswer, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
 
 // The office's terminal keeper: a small process of its own that runs the agents' CLIs in pseudo-terminals, so they
 // keep working while the office restarts (an update, a crash, a code change in development). The office connects over
@@ -13,22 +14,29 @@ import { encode, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type T
 //
 // node ptyHost.js launch <socket> <secret file>   starts a keeper outside the caller's process tree, then exits
 // node ptyHost.js serve <socket> <secret file>    is the keeper
+//
+// With a trailing "box" it is a box's host (cubefarm box, see boxStdio.ts): the same keeper, for an office on another
+// machine. It also runs the desk and session-file methods on its own disk (boxOps.ts), answers the hooks whose answer
+// never depends on the office itself, and waits hours rather than minutes for an office that went away.
 
 /** Output kept per terminal while no office is listening. */
 const BACKLOG_BYTES = 2 * 1024 * 1024;
 /** A hook waits this long for an office (the CLIs are told 120 s). */
 const HOOK_WAIT_MS = 110_000;
-/** With no office for this long, nobody is coming back: the terminals are stopped. */
-const ORPHAN_MS = 10 * 60_000;
 /** Nothing left to keep and no office: the keeper goes. */
 const IDLE_EXIT_MS = 60_000;
+/** Hooks answered here kept for an office that's away (the oldest go first). */
+const FORWARD_MAX = 5000;
 
-const [mode, socketPath, secretFile] = process.argv.slice(2);
+const [mode, socketPath, secretFile, flavor] = process.argv.slice(2);
+const isBox = flavor === 'box';
+/** With no office for this long, nobody is coming back: the terminals are stopped. A remote link can be down for longer than a restart. */
+const ORPHAN_MS = isBox ? 6 * 60 * 60_000 : 10 * 60_000;
 
 if (mode === 'launch') {
   // A detached child whose parent exits at once: the office's process tree (which the launcher kills on a restart)
   // doesn't include it, and on Windows nothing ties it to a console window.
-  spawn(process.execPath, [...process.execArgv, process.argv[1], 'serve', socketPath, secretFile], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  spawn(process.execPath, [...process.execArgv, process.argv[1], 'serve', socketPath, secretFile, ...(isBox ? ['box'] : [])], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
   process.exit(0);
 }
 
@@ -38,6 +46,14 @@ process.on('uncaughtException', (err) => note(`uncaught: ${err.stack ?? err}`));
 for (const sig of ['SIGINT', 'SIGHUP', 'SIGBREAK'] as const) process.on(sig, () => undefined); // the office's console isn't ours
 
 const secret = fs.readFileSync(secretFile, 'utf8').trim();
+
+const box = isBox
+  ? ((await import(pathToFileURL(path.join(import.meta.dirname, `boxOps${path.extname(import.meta.filename)}`)).href)) as typeof import('./boxOps.ts')).createBoxOps({
+      hookUrl: () => `http://127.0.0.1:${(hooks.address() as net.AddressInfo).port}`,
+      pids: () => [process.pid, ...[...held.values()].map((h) => h.proc.pid)],
+    })
+  : null;
+if (isBox) delete process.env.SWARM_HOME; // the box's home (read on import): the CLIs it starts don't inherit it
 
 interface Held {
   proc: nodePty.IPty;
@@ -129,19 +145,24 @@ function stopAll() {
 interface Waiting {
   token: string;
   body: unknown;
-  res: http.ServerResponse;
-  timer: NodeJS.Timeout;
+  /** null: answered here already, only the office still has to hear it. */
+  res: http.ServerResponse | null;
+  timer?: NodeJS.Timeout;
   sent: boolean;
 }
 const waiting = new Map<number, Waiting>();
 let nextRid = 1;
+/** A box: the status line the office last gave each session, which the box shows itself. */
+const statusLines = new Map<string, string>();
 
 function answer(rid: number, reply: unknown) {
   const w = waiting.get(rid);
   if (!w) return;
   waiting.delete(rid);
   clearTimeout(w.timer);
-  if (!w.res.writableEnded) w.res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(reply ?? {}));
+  if (w.res && !w.res.writableEnded) w.res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(reply ?? {}));
+  const line = (reply as { statusLine?: unknown } | null)?.statusLine;
+  if (!w.res && typeof line === 'string') statusLines.set(w.token, line);
 }
 
 /** Hooks that waited for an office go to the one that's ready (again, if the office before it went without answering). */
@@ -171,7 +192,20 @@ const hooks = http.createServer((req, res) => {
       // not JSON: an empty hook
     }
     const rid = nextRid++;
-    waiting.set(rid, { token, body, res, timer: setTimeout(() => answer(rid, {}), HOOK_WAIT_MS), sent: false });
+    const local = box ? localHookAnswer(body, statusLines.get(token)) : undefined;
+    if (local && box) {
+      // The office can't look at this disk: it's told whether the transcript the hook names is there yet.
+      const b = body as Record<string, unknown>;
+      if (typeof b.transcript_path === 'string') b.cubefarm_transcript = fs.existsSync(b.transcript_path);
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(local));
+      waiting.set(rid, { token, body, res: null, sent: false });
+      if (waiting.size > FORWARD_MAX) {
+        const oldest = [...waiting].find(([, w]) => !w.res)?.[0];
+        if (oldest !== undefined) waiting.delete(oldest);
+      }
+    } else {
+      waiting.set(rid, { token, body, res, timer: setTimeout(() => answer(rid, {}), HOOK_WAIT_MS), sent: false });
+    }
     passHooks();
   });
 });
@@ -218,6 +252,17 @@ function connected(sock: net.Socket) {
         stopAll();
         setTimeout(() => process.exit(0), 3000);
         return;
+      case 'rpc':
+        if (!box) return send({ op: 'rpcReply', rid: m.rid, ok: false, error: 'not a box' });
+        return void box.rpc(m.method, m.args).then(
+          (value) => send({ op: 'rpcReply', rid: m.rid, ok: true, value }),
+          (err: unknown) => send({ op: 'rpcReply', rid: m.rid, ok: false, error: (err as Error)?.message ?? String(err) }),
+        );
+      case 'launch': {
+        const cli = box?.take(m.token);
+        if (!cli) return send({ op: 'failed', id: m.id, error: 'the session was not prepared on this box' });
+        return start({ op: 'spawn', id: m.id, file: cli.file, args: cli.args, cwd: cli.cwd, env: cli.env, cols: m.cols, rows: m.rows, meta: m.meta });
+      }
     }
   });
   sock.on('error', () => undefined);

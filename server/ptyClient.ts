@@ -4,7 +4,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { IPty } from '@lydell/node-pty';
-import { encode, hostSocket, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty } from './ptyProtocol.ts';
+import { encode, hostSocket, PTY_PROTOCOL, readMessages, runtimeFlags, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
 
 // The office's side of its terminal keeper (ptyHost.ts): CLIs start in terminals the keeper holds, so they outlive an
 // office restart, and the office picks them up again when it comes back. If the keeper can't start, terminals run in
@@ -44,32 +44,37 @@ let leaving = false; // the office is closing its connection on purpose (a resta
 let hookPort = 0;
 let hostPid = 0;
 let found: HeldPty[] = [];
-const remote = new Map<string, RemotePty>();
+const remote = new Map<string, KeeperPty>();
 let hookHandler: (token: string, body: unknown) => unknown = () => ({});
 
 const send = (m: Parameters<typeof encode>[0]) => {
   if (conn && !conn.destroyed) conn.write(encode(m));
 };
 
-class RemotePty implements Pty {
+/** A terminal a keeper (or a box's host) holds, driven over its connection; registered in `held` until it exits. */
+export class KeeperPty implements Pty {
   pid = 0;
   private dataFns: ((data: string) => void)[] = [];
   private exitFns: ((code: number, signal?: number) => void)[] = [];
   private done = false;
-  constructor(readonly id: string) {
-    remote.set(id, this);
+  constructor(
+    readonly id: string,
+    private readonly send: (m: ToHost) => void,
+    private readonly held: Map<string, KeeperPty>,
+  ) {
+    held.set(id, this);
   }
   write(data: string) {
-    send({ op: 'write', id: this.id, data });
+    this.send({ op: 'write', id: this.id, data });
   }
   resize(cols: number, rows: number) {
-    send({ op: 'resize', id: this.id, cols, rows });
+    this.send({ op: 'resize', id: this.id, cols, rows });
   }
   kill() {
-    send({ op: 'kill', id: this.id });
+    this.send({ op: 'kill', id: this.id });
   }
   setMeta(meta: unknown) {
-    send({ op: 'meta', id: this.id, meta });
+    this.send({ op: 'meta', id: this.id, meta });
   }
   onData(cb: (data: string) => void) {
     this.dataFns.push(cb);
@@ -83,25 +88,36 @@ class RemotePty implements Pty {
   exit(code: number, signal?: number) {
     if (this.done) return;
     this.done = true;
-    remote.delete(this.id);
+    this.held.delete(this.id);
     for (const fn of this.exitFns) fn(code, signal);
   }
 }
 
-function onMessage(m: FromHost) {
+/** A terminal's news from its keeper, passed to its KeeperPty. False: not a terminal's message. */
+export function terminalMessage(held: Map<string, KeeperPty>, m: FromHost): boolean {
   switch (m.op) {
     case 'spawned': {
-      const p = remote.get(m.id);
+      const p = held.get(m.id);
       if (p) p.pid = m.pid;
-      return;
+      return true;
     }
     case 'failed':
       console.warn(`  could not start a terminal: ${m.error}`);
-      return remote.get(m.id)?.exit(-1);
+      held.get(m.id)?.exit(-1);
+      return true;
     case 'data':
-      return remote.get(m.id)?.data(m.data);
+      held.get(m.id)?.data(m.data);
+      return true;
     case 'exit':
-      return remote.get(m.id)?.exit(m.code, m.signal);
+      held.get(m.id)?.exit(m.code, m.signal);
+      return true;
+  }
+  return false;
+}
+
+function onMessage(m: FromHost) {
+  if (terminalMessage(remote, m)) return;
+  switch (m.op) {
     case 'hook':
       void Promise.resolve()
         .then(() => hookHandler(m.token, m.body))
@@ -147,9 +163,6 @@ function connect(socket: string, secret: string): Promise<{ ready: Ready; sock: 
     });
   });
 }
-
-/** Node flags the office runs with that the keeper needs too (tsx in development), not debugging or watching. */
-const runtimeFlags = () => process.execArgv.filter((a, i, all) => !/^--(inspect|watch|debug)/.test(a) && !/^--(inspect|watch|debug)/.test(all[i - 1] ?? ''));
 
 function launch(socket: string, secretFile: string) {
   const entry = path.join(import.meta.dirname, `ptyHost${path.extname(import.meta.filename)}`);
@@ -219,7 +232,7 @@ export function keeperHookUrl(): string | null {
 /** A CLI in a new pseudo-terminal: in the keeper when there is one, else in this process (throws if it can't start). */
 export function spawnPty(file: string, args: string[], o: PtyOptions, meta: unknown): Pty {
   if (conn) {
-    const p = new RemotePty(crypto.randomUUID());
+    const p = new KeeperPty(crypto.randomUUID(), send, remote);
     send({ op: 'spawn', id: p.id, file, args, cwd: o.cwd, env: o.env, cols: o.cols, rows: o.rows, meta });
     return p;
   }
@@ -242,7 +255,7 @@ export function spawnPty(file: string, args: string[], o: PtyOptions, meta: unkn
 
 /** Take over a terminal the keeper held through a restart: what it printed meanwhile, then everything live. */
 export function adoptPty(held: HeldPty): Pty {
-  const p = new RemotePty(held.id);
+  const p = new KeeperPty(held.id, send, remote);
   p.pid = held.pid;
   queueMicrotask(() => send({ op: 'attach', id: held.id })); // once the caller has its listeners on
   return p;
