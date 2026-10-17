@@ -128,8 +128,9 @@ Snapshot gets `boxes`; a new `box` server event carries changes; REST: `POST /ap
 `PATCH /api/repos/:id { box, everyone? }`. With `everyone: true` the whole floor moves to that box: the floor's box is
 set and every override on the floor is cleared.
 
-When the agent's **task starts** (new issue, QA run): if the agent's box is online and has the agent's CLI, `deskBox = a.box`;
-if it is offline, the agent waits ("waiting for <box>") and the scheduler retries (offline is usually transient); if
+When the agent's **task starts** (new issue, QA run): if the agent's box (`a.box ?? floor.box`) is online and has the
+agent's CLI, `deskBox` is set to that box; if it is offline or hasn't got that CLI, the agent waits ("waiting for <box>")
+and the scheduler retries (offline is usually transient); if
 it was removed, the agent falls back to the office machine with a log line. Everything inside a task (fix rounds,
 follow-ups, `finishPushedWork`, typed prompts, reattach after a restart) uses `deskBox`, because the worktree,
 unpushed commits and the CLI's conversation (`--resume`) are on that disk. Reassigning shows "moves to <box> after
