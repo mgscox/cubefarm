@@ -1155,8 +1155,8 @@ export class Swarm {
 
   /**
    * Keep every box on the office's own cubefarm: when the office runs another commit (or version) than a box, nothing
-   * new starts there, and once its agents have finished it updates and its host restarts. Runs whenever a box changes
-   * and with the scheduler.
+   * new starts there, and once its agents have finished (a refused box: at once) it updates and its host restarts.
+   * Runs whenever a box changes and with the scheduler.
    */
   private syncBoxes() {
     if (!this.scheduling) return;
@@ -1180,7 +1180,8 @@ export class Swarm {
         this.boxSyncs.set(b.id, { ...want, state: 'draining' });
         console.log(`  box ${b.name}: moving to the office's ${want.target.slice(0, 7)} once nothing runs there`);
       }
-      if (this.boxBusy(b.id) === 0) void this.moveBox(b, conn, want);
+      // A refused box can't be reached: its agents can't finish there, so it moves now.
+      if (st.refused || this.boxBusy(b.id) === 0) void this.moveBox(b, conn, want);
       this.broadcast({ type: 'box', box: this.boxView(b) });
     }
   }

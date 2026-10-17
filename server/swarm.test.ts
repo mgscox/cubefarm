@@ -3136,6 +3136,33 @@ describe('boxes', () => {
     expect(update).toHaveBeenCalledTimes(2);
   });
 
+  it("updates a box refused for another protocol at once, though an agent is still at work there", async () => {
+    const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
+    const head = `0ff1ce5${'0'.repeat(33)}`;
+    Object.assign(office, { officeHead: head });
+    vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
+    const box = swarm.addBox('Tower', 'ada@tower');
+    const conn = internals().boxConns.get(box.id) as unknown as import('./machine.ts').BoxConnection;
+    const real = conn.state.bind(conn);
+    let refused = true; // its old checkout speaks another protocol, until it's updated
+    vi.spyOn(conn, 'state').mockImplementation(() => (refused ? { ...real(), status: 'offline', info: null, clis: [], reported: false, refused: true } : real()));
+    const update = vi.spyOn(conn, 'update').mockImplementation(async (target) => {
+      refused = false;
+      return { ok: true, checkout: true, from: `5ta1e00${'0'.repeat(33)}`, to: target };
+    });
+    await vi.advanceTimersByTimeAsync(1600);
+    Object.assign(s.state.agents[0], { box: box.id, deskBox: box.id, status: 'working' });
+
+    office.scheduling = true;
+    office.syncBoxes();
+    expect(update).toHaveBeenCalledWith(head);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(office.boxView(box).sync?.text).toBe('Restarting on 0ff1ce5…');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+
   it("asks a box from before #94 on the npm office's own version to update, and says when it can't", async () => {
     const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
     Object.assign(office, { scheduling: true, officeHead: null }); // run from npm
