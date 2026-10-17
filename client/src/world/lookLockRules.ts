@@ -7,6 +7,11 @@ export interface Covering {
   confirm: boolean;
 }
 
+/** Leave the tour's buttons reachable on entry; its first step teaches clicking the view to look. */
+export function shouldGrabLookOnEntry(tutorialStep: number): boolean {
+  return tutorialStep < 0;
+}
+
 /** True when going from prev to next closed the last thing covering the office view. */
 export function viewUncovered(prev: Covering, next: Covering): boolean {
   const closed = (prev.overlay && !next.overlay) || (prev.confirm && !next.confirm);

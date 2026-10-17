@@ -1,5 +1,6 @@
 import { usePhoneBadge, useStore } from '../store';
 import { requestLook } from '../world/Player';
+import { shouldGrabLookOnEntry } from '../world/lookLockRules';
 import { CEO_ID } from '../../../shared/types';
 import { SetupWizard } from './SetupWizard';
 import { unlockAudio } from './sfx';
@@ -20,7 +21,7 @@ export function StartScreen() {
   const enter = () => {
     start();
     unlockAudio();
-    requestLook();
+    if (shouldGrabLookOnEntry(settings.tutorialStep)) requestLook();
   };
   const ceo = agents[CEO_ID];
   const staff = Object.values(agents).filter((a) => a.role !== 'ceo').length;

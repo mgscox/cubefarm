@@ -1,9 +1,20 @@
 // Run with `npm test` (Vitest).
 import { describe, expect, it } from 'vitest';
-import { shouldGrabLook, viewUncovered, type Covering } from './lookLockRules';
+import { shouldGrabLook, shouldGrabLookOnEntry, viewUncovered, type Covering } from './lookLockRules';
 
 const c = (overlay: boolean, confirm = false): Covering => ({ overlay, confirm });
 const on = { started: true, enabled: true };
+
+describe('shouldGrabLookOnEntry', () => {
+  it('keeps the pointer free for a new or resumed tour', () => {
+    expect(shouldGrabLookOnEntry(0)).toBe(false);
+    expect(shouldGrabLookOnEntry(4)).toBe(false);
+  });
+
+  it('grabs the mouse when the tour was completed or skipped', () => {
+    expect(shouldGrabLookOnEntry(-1)).toBe(true);
+  });
+});
 
 describe('viewUncovered', () => {
   it('is true when the last panel closes (✕, backdrop, Esc, or goToFloor from the elevator/console/phone)', () => {
