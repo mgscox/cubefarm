@@ -4,7 +4,7 @@ import { VERSION } from './config.ts';
 import { KeeperPty, terminalMessage } from './ptyClient.ts';
 import { encode, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
 import { reconnectClis, startCliSession } from './cliRunner.ts';
-import { boxCommand, boxDeskDir, boxMainDir, redialDelay, type BoxInfo, type BoxLayout } from './fleet.ts';
+import { boxCommand, boxDeskDir, boxMainDir, redialDelay, retryForm, type BoxInfo, type BoxLayout } from './fleet.ts';
 import type { BoxConnection, BoxOptions, CliHost, CliPlan, Machine, PreparedCli } from './machine.ts';
 import type { SessionHandle } from './agentRunner.ts';
 import type { BoxStatus, CliView } from '../shared/types.ts';
@@ -41,6 +41,12 @@ class BoxLink implements CliHost {
   private hooksOpen = false;
   private onHook: (token: string, body: unknown) => unknown = () => ({});
   private firstHeld?: (held: HeldPty[]) => void;
+  /**
+   * Send the command as it is, not through the login shell (a Windows box's cmd has no sh). Until a form has worked
+   * (pinned), a failed dial tries the other one next: Windows' "not recognized" is in the box's own language.
+   */
+  private plain = false;
+  private pinned = false;
   /** Transcripts the box said are on its disk (see hasFile). */
   private transcripts = new Set<string>();
 
@@ -72,7 +78,7 @@ class BoxLink implements CliHost {
     clearTimeout(this.redial);
     let cmd: { file: string; args: string[] };
     try {
-      cmd = boxCommand(this.opts.box.destination, VERSION, this.opts.officeId);
+      cmd = boxCommand(this.opts.box.destination, VERSION, this.opts.officeId, undefined, this.opts.box.layout ? this.opts.box.layout.sep === '\\' : this.plain);
     } catch (err) {
       return this.set('offline', (err as Error).message);
     }
@@ -110,6 +116,11 @@ class BoxLink implements CliHost {
         this.calls.delete(rid);
       }
       if (this.closed) return;
+      if (!ready && !this.pinned && !this.opts.box.layout) {
+        const next = retryForm(this.plain, this.stderr);
+        this.plain = next.plain;
+        if (next.now) return void (this.redial = setTimeout(() => this.dial(), 0));
+      }
       const said = this.stderr.trim().split('\n').filter(Boolean).pop();
       this.set('offline', this.refused ?? (ready ? `the link dropped${said ? `: ${said}` : ''}` : (said ?? `ssh exited (${code})`)));
       this.redial = setTimeout(() => this.dial(), redialDelay(this.attempt++));
@@ -122,6 +133,7 @@ class BoxLink implements CliHost {
       this.child?.kill();
       return;
     }
+    this.pinned = true;
     this.attempt = 0;
     this.refused = null;
     this.set('online', null);
