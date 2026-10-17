@@ -66,6 +66,13 @@ export const loginShell = (command: string) => `sh -c ${sq('exec "${SHELL:-/bin/
 export const notPosix = (stderr: string) => /is not recognized as an internal or external command|is not recognized as the name of a cmdlet/i.test(stderr);
 
 /**
+ * A box that never answered, before either form of its command has worked: the next dial tries the other form
+ * (Windows says "not recognized" in its own language, so the message can't be relied on). now: it was clearly a
+ * Windows box, so try at once.
+ */
+export const retryForm = (plain: boolean, stderr: string) => ({ plain: !plain, now: !plain && notPosix(stderr) });
+
+/**
  * The command that reaches a box: ssh in batch mode (it never prompts) running the box host of the office's own
  * version, with stdio bridged to it, in the box user's login shell (plain: as it is, for a Windows box).
  * SWARM_BOX_COMMAND replaces the remote command (a box that runs a checkout).

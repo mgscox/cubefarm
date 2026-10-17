@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { agentBox, boxCommand, boxDeskDir, boxMainDir, loginShell, notPosix, redialDelay, startPlace, validDestination } from './fleet.ts';
+import { agentBox, boxCommand, boxDeskDir, boxMainDir, loginShell, notPosix, redialDelay, retryForm, startPlace, validDestination } from './fleet.ts';
 
 describe('agentBox', () => {
   it("is the agent's own box, else the floor's, else the office's machine", () => {
@@ -114,5 +114,16 @@ describe('notPosix', () => {
   it("knows Windows' shells saying they have no such program", () => {
     expect(notPosix("'sh' is not recognized as an internal or external command,\noperable program or batch file.")).toBe(true);
     expect(notPosix('zsh:1: command not found: npx')).toBe(false);
+  });
+});
+
+describe('retryForm', () => {
+  it('tries the plain form at once when cmd plainly says it has no sh', () => {
+    expect(retryForm(false, "'sh' is not recognized as an internal or external command,")).toEqual({ plain: true, now: true });
+  });
+
+  it("alternates forms whatever the box said, as Windows says it in the box's own language", () => {
+    expect(retryForm(false, "Der Befehl \"sh\" ist entweder falsch geschrieben oder konnte nicht gefunden werden.")).toEqual({ plain: true, now: false });
+    expect(retryForm(true, 'zsh:1: command not found: npx')).toEqual({ plain: false, now: false });
   });
 });
