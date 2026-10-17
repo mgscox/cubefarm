@@ -1,20 +1,15 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { HOME_DIR } from './config.ts';
-import { projectEnv } from './projectEnv.ts';
-import { claudeConversation, cliExit, cliLabel, CODEX_HOOK_SOURCE, codexThread, codexTurnThread, commandFor, hookReviewKey, interruptions, isCli, launchArgs, LOST_CONVERSATION, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, resumableSession, STATUSLINE_SOURCE, trustKey } from './clis.ts';
-import { adoptPty, discardPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, startKeeper, terminalsAvailable, type Pty } from './ptyClient.ts';
+import { claudeConversation, cliExit, cliLabel, codexTurnThread, hookReviewKey, interruptions, isCli, LOST_CONVERSATION, resumableSession, trustKey } from './clis.ts';
+import { terminalsAvailable, type Pty } from './ptyClient.ts';
+import { localCliHost } from './localCliHost.ts';
+import { planCli, type CliHost, type PreparedCli } from './machine.ts';
 import {
   clip,
   describeTool,
   playwrightAction,
-  newScreenshots,
   resultText,
-  screenshotFile,
   summariseResult,
   tidyPaths,
   todoLines,
@@ -37,20 +32,17 @@ import type { AgentCli } from '../shared/types.ts';
 // hooks in its /hooks, reports its steps through them too. OpenCode's plugin only says when a turn ends.
 //
 // The CLIs run in the office's terminal keeper (ptyClient.ts) and call their hooks there, so an office restart doesn't
-// stop them: the office picks them up again when it's back (reconnectClis).
+// stop them: the office picks them up again when it's back (reconnectClis). Writing a CLI's files and starting it is
+// its machine's part (a CliHost, see machine.ts): here, the office's own (localCliHost.ts).
 
 export { terminalsAvailable };
 
-const SESSIONS_DIR = path.join(HOME_DIR, 'sessions');
-const BIN_DIR = path.join(HOME_DIR, 'bin');
 /** After a turn ends the CLI may still pick up a queued message: only an idle prompt this long means it's done. */
 const FINISH_GRACE_MS = 3000;
 /** Starting up: how long before the office says the CLI seems to be waiting on something. */
 const BOOT_MS = 60_000;
 /** Claude's usage warning, the way the SDK's allowed_warning is used: pace new work from here. */
 const USAGE_WARN_PCT = 90;
-/** Prompts longer than this go in a file: Windows caps a command line at 32K characters. */
-const INLINE_PROMPT_MAX = 8000;
 
 // ---------- routing the CLIs' calls back to their sessions ----------
 
@@ -96,33 +88,7 @@ export async function handleMcp(token: string, req: Request, res: Response) {
   await transport.handleRequest(req, res, req.body);
 }
 
-// ---------- helper scripts ----------
-
-let helpersWritten = false;
-
-/** The status line, notify and plugin scripts the CLIs run. Rewritten once per office start, so updates reach them. */
-function writeHelpers() {
-  if (helpersWritten) return;
-  fs.mkdirSync(BIN_DIR, { recursive: true });
-  fs.writeFileSync(path.join(BIN_DIR, 'statusline.cjs'), STATUSLINE_SOURCE);
-  fs.writeFileSync(path.join(BIN_DIR, 'notify.cjs'), NOTIFY_SOURCE);
-  fs.writeFileSync(path.join(BIN_DIR, 'codex-hook.cjs'), CODEX_HOOK_SOURCE);
-  fs.writeFileSync(path.join(BIN_DIR, 'opencode-plugin.mjs'), OPENCODE_PLUGIN_SOURCE);
-  helpersWritten = true;
-}
-
-/** A command line for Claude Code's shell (Git Bash on Windows): forward slashes, quoted. */
-const shellArg = (p: string) => `"${p.replaceAll('\\', '/')}"`;
-
 // ---------- plumbing ----------
-
-const HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'StopFailure', 'Notification'];
-
-/** The browser for a session. Its snapshots and unnamed screenshots go to the session's folder, not the worktree. */
-function playwrightServer(outputDir: string) {
-  const args = ['-y', '@playwright/mcp@latest', '--headless', '--isolated', '--output-dir', outputDir, '--init-script', path.join(import.meta.dirname, 'browser-init.js')];
-  return process.platform === 'win32' ? { command: 'cmd', args: ['/c', 'npx', ...args] } : { command: 'npx', args };
-}
 
 /** What a tool call returned, as text, and any images in it (Playwright screenshots). */
 function toolOutput(response: unknown): { text: string; images: { data: string; mime: string }[] } {
@@ -166,6 +132,8 @@ interface LiveCli {
   agentId: string;
   cli: AgentCli;
   term: AgentTerminal;
+  /** The machine it runs on. */
+  host: CliHost;
   proc: Pty | null;
   token: string;
   dir: string;
@@ -207,8 +175,8 @@ function endLive(live: LiveCli): Promise<void> {
   live.proc?.kill();
   live.proc = null;
   live.term.note(`── ${cliLabel(live.cli)} session ended ──`);
-  fs.rm(live.dir, { recursive: true, force: true, maxRetries: 5 }, () => undefined);
-  return live.cli === 'codex' && live.resumeId ? codexThread('archive', live.resumeId, gone) : Promise.resolve();
+  live.host.removeDir(live.dir);
+  return live.cli === 'codex' && live.resumeId ? live.host.codexThread('archive', live.resumeId, gone) : Promise.resolve();
 }
 
 /** What the keeper holds with a CLI's terminal, so the office can pick it up again after a restart. */
@@ -265,17 +233,18 @@ export interface ReconnectedCli {
  * resumes those sessions itself. Call hooksReady() once the busy ones are followed again.
  */
 export async function reconnectClis(terminalFor: (agentId: string) => AgentTerminal | null): Promise<ReconnectedCli[]> {
-  const held = await startKeeper(HOME_DIR, handleHook);
+  const host = localCliHost;
+  const held = await host.reconnect(handleHook);
   const back: ReconnectedCli[] = [];
   for (const h of held) {
     const meta = (h.meta ?? {}) as Partial<CliMeta>;
     const term = meta.agentId ? terminalFor(meta.agentId) : null;
     if (h.exit !== null || !term || lives.has(term) || !isCli(meta.cli) || !meta.token || !meta.dir || !meta.agentId) {
-      discardPty(h);
-      if (meta.cli === 'codex' && meta.resumeId) void codexThread('archive', meta.resumeId, h.exit === null ? new Promise((r) => setTimeout(r, 5000)) : undefined);
+      host.discard(h);
+      if (meta.cli === 'codex' && meta.resumeId) void host.codexThread('archive', meta.resumeId, h.exit === null ? new Promise((r) => setTimeout(r, 5000)) : undefined);
       continue;
     }
-    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, proc: adoptPty(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null };
+    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, host, proc: host.adopt(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null };
     wire(l);
     waitAtPrompt(l);
     // Resizing makes the CLI draw its whole screen again, over whatever the saved copy of the terminal missed.
@@ -285,15 +254,17 @@ export async function reconnectClis(terminalFor: (agentId: string) => AgentTermi
   return back;
 }
 
-export { hooksReady };
+/** The office follows the reconnected CLIs' sessions again: hooks that waited for it can come in. */
+export const hooksReady = () => localCliHost.hooksReady();
 
 /**
  * What a desk clean-up (releaseDesk) must leave alone: the keeper, every CLI in a terminal, and the office's session
  * files, which only the CLIs' own command lines carry (Codex's instructions name the worktree, for one).
  */
 export function officeProcesses(): { pids: number[]; markers: string[] } {
-  const pids = [keeperPid(), ...[...lives.values()].map((l) => l.proc?.pid ?? 0)].filter((p) => p > 0);
-  return { pids, markers: [SESSIONS_DIR, BIN_DIR] };
+  const { pids, markers } = localCliHost.protect();
+  const clis = [...lives.values()].filter((l) => l.host === localCliHost).map((l) => l.proc?.pid ?? 0);
+  return { pids: [...pids, ...clis.filter((p) => p > 0)], markers };
 }
 
 /**
@@ -302,7 +273,7 @@ export function officeProcesses(): { pids: number[]; markers: string[] } {
  */
 export async function releaseClis(restart: boolean): Promise<void> {
   if (!restart) await Promise.all([...lives.values()].map(endLive)); // their exits come through the keeper
-  leaveKeeper();
+  localCliHost.leave();
 }
 
 /** A CLI waiting at its prompt: what the manager types there becomes a follow-up. */
@@ -323,13 +294,14 @@ function idleHook(live: LiveCli, b: Record<string, unknown>): Record<string, unk
 
 // ---------- the session ----------
 
-export function startCliSession(opts: SessionOptions, callbacks: SessionCallbacks): SessionHandle {
+/** An agent session in its CLI, which runs on host (the office's own machine unless said otherwise). */
+export function startCliSession(opts: SessionOptions, callbacks: SessionCallbacks, host: CliHost = localCliHost): SessionHandle {
   const term = opts.terminal!;
   // A follow-up to the session a CLI is still waiting in picks that CLI up again, and so does an office that restarted
   // while it worked (reattach); anything else replaces it.
   const prev = lives.get(term);
   const waiting = !!prev?.proc && !prev.session;
-  const adopt = waiting && (!!opts.reattach || (prev!.cli === (opts.cli ?? 'claude') && !!opts.resumeSessionId && prev!.resumeId === opts.resumeSessionId));
+  const adopt = waiting && prev!.host === host && (!!opts.reattach || (prev!.cli === (opts.cli ?? 'claude') && !!opts.resumeSessionId && prev!.resumeId === opts.resumeSessionId));
   if (prev && !adopt) endLive(prev);
   let live: LiveCli | null = adopt ? prev! : null;
   const cli = live?.cli ?? opts.cli ?? 'claude';
@@ -337,7 +309,6 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
 
   const token = crypto.randomUUID();
   const sessionId = opts.resumeSessionId ?? crypto.randomUUID();
-  const dir = path.join(SESSIONS_DIR, token);
   const started = Date.now();
   const statusLine = `🏢 cubefarm${opts.label ? ` · ${opts.label}` : ''}`;
   const toolNames = new Map<string, string>();
@@ -369,14 +340,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const collectShots = (all = false) => {
     const l = live;
     if (!l || cli === 'claude' || !opts.browserTesting) return;
-    for (const shot of newScreenshots(path.join(l.dir, 'browser'), l.shots, all ? Infinity : Date.now())) {
-      l.shots.add(shot.name);
-      try {
-        cb.screenshot(fs.readFileSync(shot.file), shot.mime);
-      } catch {
-        // removed before we got to it
-      }
-    }
+    for (const shot of l.host.newShots(l.dir, l.shots, all ? Infinity : Date.now())) cb.screenshot(shot.data, shot.mime);
   };
 
   /** The session is over. A developer's CLI that ended its turn normally stays at its prompt (keep); others close. */
@@ -462,7 +426,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     const event = String(b.hook_event_name ?? '');
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
     if (cli === 'claude') {
-      const id = resumableSession(b, fs.existsSync);
+      const id = resumableSession(b, host.hasFile);
       if (id) conversation.found(id);
     }
     switch (event) {
@@ -486,7 +450,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         const out = toolOutput(b.tool_response);
         // Codex's unnamed screenshots are collected from the browser's folder (its hooks may not be trusted yet).
         if (cli === 'claude') for (const img of out.images) cb.screenshot(Buffer.from(img.data, 'base64'), img.mime);
-        const saved = playwrightAction(name) === 'take_screenshot' && !out.images.length ? screenshotFile(opts.cwd, out.text) : null;
+        const saved = playwrightAction(name) === 'take_screenshot' && !out.images.length ? host.savedShot(opts.cwd, out.text) : null;
         if (saved) cb.screenshot(saved.data, saved.mime);
         if (playwrightAction(name) !== null) {
           const url = out.text.match(/Page URL:\s*(\S+)/);
@@ -613,89 +577,29 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     return handle;
   }
 
-  // ---------- a new CLI: files for this session, and the command line ----------
+  // ---------- a new CLI: its plan, then its files and command line on its machine ----------
 
-  const cmd = commandFor(cli);
-  if (!terminalsAvailable || !cmd) {
-    const why = !terminalsAvailable ? 'the terminal module could not be loaded on this machine' : `${label} isn't installed (no "${cli}" on PATH)`;
-    setTimeout(() => finish({ ok: false, text: '', errors: [`Could not start ${label}: ${why}.`] }), 0);
-    return handle;
-  }
-
-  // Through the keeper, a hook waits while the office restarts instead of failing: the CLIs allow it longer.
-  const keeper = keeperHookUrl();
-  const hookUrl = `${keeper ?? officeUrl}/api/hooks/${token}`;
-  const browser = opts.browserTesting ? playwrightServer(path.join(dir, 'browser')) : null;
-  let prompt = opts.prompt;
-  if (opts.outputSchema) {
-    prompt += `\n\nWhen you are done, end your final message with your report as one JSON object in a \`\`\`json block, matching this JSON schema:\n${JSON.stringify(opts.outputSchema)}`;
-  }
-  let files: { settings: string; mcp: string | null; system: string };
+  let prepared: PreparedCli;
   try {
-    writeHelpers();
-    fs.mkdirSync(dir, { recursive: true });
-    const settings = {
-      hooks: Object.fromEntries(HOOK_EVENTS.map((e) => [e, [{ hooks: [{ type: 'http', url: hookUrl, timeout: keeper ? 120 : 30 }] }]])),
-      statusLine: { type: 'command', command: `${shellArg(process.execPath)} ${shellArg(path.join(BIN_DIR, 'statusline.cjs'))} ${shellArg(hookUrl)}`, padding: 0 },
-    };
-    const servers: Record<string, unknown> = {};
-    if (browser) servers.playwright = browser;
-    if (opts.office) servers.office = { type: 'http', url: `${officeUrl}/api/mcp/${token}` };
-    files = { settings: path.join(dir, 'settings.json'), mcp: Object.keys(servers).length ? path.join(dir, 'mcp.json') : null, system: path.join(dir, 'instructions.md') };
-    fs.writeFileSync(files.settings, JSON.stringify(settings, null, 2));
-    if (files.mcp) fs.writeFileSync(files.mcp, JSON.stringify({ mcpServers: servers }, null, 2));
-    fs.writeFileSync(files.system, opts.systemAppend);
-    if (prompt.length > INLINE_PROMPT_MAX) {
-      const file = path.join(dir, 'task.md');
-      fs.writeFileSync(file, prompt);
-      prompt = `Your task is in ${file}. Read all of it first, then do what it says.`;
-    }
+    prepared = host.prepare(planCli(opts, { cli, token, sessionId, officeUrl }));
   } catch (err) {
-    setTimeout(() => finish({ ok: false, text: '', errors: [`Could not prepare ${label}: ${(err as Error).message}`] }), 0);
+    setTimeout(() => finish({ ok: false, text: '', errors: [(err as Error).message] }), 0);
     return handle;
   }
-  officePrompts.push(prompt.trim()); // as given: a long one is a pointer to its file
-  launched.push(prompt.trim());
-
-  const launch = launchArgs(cli, {
-    prompt,
-    systemAppend: opts.systemAppend,
-    model: opts.model,
-    effort: opts.effort,
-    resumeId: opts.resumeSessionId,
-    sessionId,
-    name: opts.label ?? 'cubefarm',
-    role: opts.role,
-    additionalDirectories: opts.additionalDirectories,
-    files,
-    notify: { script: path.join(BIN_DIR, 'notify.cjs'), url: hookUrl },
-    codexHook: path.join(BIN_DIR, 'codex-hook.cjs'),
-    plugin: pathToFileURL(path.join(BIN_DIR, 'opencode-plugin.mjs')).href,
-    browser,
-  });
-
-  // Each agent must be a clean instance on the account its CLI is logged into: no API keys (they would switch Claude
-  // Code's billing to the API) and nothing inherited from a Claude Code session the office itself was started from.
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(projectEnv(process.env))) {
-    if (v === undefined) continue;
-    if (/^(ANTHROPIC_|CLAUDE)/i.test(k) && k !== 'CLAUDE_CONFIG_DIR') continue;
-    if (/^(NO_COLOR|FORCE_COLOR|TERM_PROGRAM|TERM_PROGRAM_VERSION|CODEX_THREAD_ID|OPENCODE_CONFIG_CONTENT)$/i.test(k)) continue;
-    env[k] = v;
-  }
-  Object.assign(env, { TERM: 'xterm-256color', COLORTERM: 'truecolor' }, launch.env);
+  officePrompts.push(prepared.prompt.trim()); // as given: a long one is a pointer to its file
+  launched.push(prepared.prompt.trim());
 
   if (cli === 'claude' && opts.resumeSessionId) cb.sessionId(sessionId); // a new one is saved once it's on disk (see the hooks)
   term.note(`── ${label}${opts.label ? ` · ${opts.label}` : ''} ──`);
   const resumeId = cli === 'claude' ? sessionId : (opts.resumeSessionId ?? null);
-  const l: LiveCli = { agentId: opts.agentId ?? '', cli, term, proc: null, token, dir, resumeId, statusLine, shots: new Set(), session: { hook, exited } };
+  const l: LiveCli = { agentId: opts.agentId ?? '', cli, term, host, proc: null, token, dir: prepared.dir, resumeId, statusLine, shots: new Set(), session: { hook, exited } };
   const begin = () => {
     if (done) return; // stopped while its thread was being unarchived
     let p: Pty;
     try {
-      p = spawnPty(cmd.file, [...cmd.args, ...launch.args], { cols: term.cols, rows: term.rows, cwd: opts.cwd, env }, metaOf(l));
+      p = prepared.start({ cols: term.cols, rows: term.rows }, metaOf(l));
     } catch (err) {
-      setTimeout(() => finish({ ok: false, text: '', errors: [`Could not start ${label}: ${(err as Error).message}`] }), 0);
+      setTimeout(() => finish({ ok: false, text: '', errors: [(err as Error).message] }), 0);
       return;
     }
     l.proc = p;
@@ -737,7 +641,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     }, BOOT_MS);
   };
   // Codex won't resume a thread the office archived (see codexThread): it's unarchived first.
-  if (cli === 'codex' && opts.resumeSessionId) void codexThread('unarchive', opts.resumeSessionId).then(begin);
+  if (cli === 'codex' && opts.resumeSessionId) void host.codexThread('unarchive', opts.resumeSessionId).then(begin);
   else begin();
 
   return handle;
