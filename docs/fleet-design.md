@@ -1,7 +1,8 @@
 # Fleet: running agents' CLIs on other machines (design)
 
 Status: phases 1 and 2 are built: the `Machine` / `CliHost` seam (`server/machine.ts`), and boxes over SSH with
-assignment through REST (below); the console UI and the rest are still a design. Goal: the manager adds and removes **boxes** (other machines on the LAN or the
+assignment through REST (below); phase 3 adds the console UI (the Fleet tab, `client/src/ui/FleetTab.tsx`). The 3D touches
+and phase 4 are still a design. Goal: the manager adds and removes **boxes** (other machines on the LAN or the
 tailnet), assigns developers and QA testers to a box, and their coding-agent CLIs (Claude Code, Codex, OpenCode) run
 there. Adding or removing a box, or reassigning an agent, never touches a running CLI: it applies when a session
 starts.
@@ -154,7 +155,7 @@ Pacing (`pacing.ts`) is per CLI account; boxes signed into other accounts should
 
 Manager's console: a Fleet tab (boxes, status, CLIs, running count, add/remove), and per floor a box picker with a
 "Move the whole floor" button (the floor's box, overrides cleared; it says how many agents finish their current task
-first). Agent panel: a box picker whose first entry is "Floor's box (<name>)". In the building: the box name on the desk's monitor; a small server rack in the lobby with one light per box would fit
+first). Team tab: a box picker per developer and QA tester whose first entry is "Floor's box". In the building (not built yet): the box name on the desk's monitor; a small server rack in the lobby with one light per box would fit
 the style.
 
 ## Demo parity and tests

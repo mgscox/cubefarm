@@ -7,6 +7,8 @@ import { CEO_ID, type AgentCli, type CliView, type EffortLevel, type OfficeUpdat
 import { effectiveModel } from '../../../shared/models';
 import { canPostpone, canUpdateNow, drainDeadline, officeUpdateText } from '../officeUpdate';
 import { confirmDialog } from './Confirm';
+import { FleetTab } from './FleetTab';
+import { boxName, busy, movable } from '../fleet';
 import { IssueForm } from './KanbanView';
 import { LiveTerminal } from './LiveTerminal';
 import { MouseSettings, Panel } from './Overlays';
@@ -17,6 +19,9 @@ import { RepoRefreshStatus } from './RepoRefreshStatus';
 
 const MODELS = ['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5'];
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** The Team tab's box picker value for "follow the floor" (an agent's box is null). */
+const FLOOR_BOX = '__floor';
 
 const cliName = (clis: CliView[], id: AgentCli) => clis.find((c) => c.id === id)?.label ?? id;
 
@@ -401,8 +406,10 @@ function TeamTab() {
   const agents = useStore((s) => s.agents);
   const settings = useStore((s) => s.settings);
   const clis = useStore((s) => s.clis);
+  const boxes = useStore((s) => s.boxes);
   const openOverlay = useStore((s) => s.openOverlay);
   const terminal = settings.runtime === 'terminal';
+  const fleet = terminal && boxes.length > 0;
   // The Agent SDK runtime is Claude Code for everyone.
   const workerCli = (a: { cli: AgentCli | '' }): AgentCli => (terminal ? a.cli || settings.defaultCli : 'claude');
   const [names, setNames] = useState<Record<string, string>>({});
@@ -517,6 +524,27 @@ function TeamTab() {
                         </select>
                       </td>
                     )}
+                    {fleet && (
+                      <td>
+                        {movable(a) && (
+                          <select
+                            value={a.box ?? FLOOR_BOX}
+                            title={`Their machine, from their next task${a.box === null ? ` (the floor's: ${boxName(boxes, repo.box)})` : ''}${a.deskBox !== (a.box ?? repo.box) && busy(a) ? `. This task stays on ${boxName(boxes, a.deskBox)}.` : ''}`}
+                            aria-label={`${a.name}'s machine`}
+                            style={{ width: 112 }}
+                            onChange={(e) => void attempt(() => api.updateAgent(a.id, { box: e.target.value === FLOOR_BOX ? null : e.target.value }))}
+                          >
+                            <option value={FLOOR_BOX}>Floor's box</option>
+                            <option value="">This machine</option>
+                            {boxes.map((b) => (
+                              <option key={b.id} value={b.id}>
+                                {b.name}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </td>
+                    )}
                     <td>
                       <input
                         key={`m-${a.model}-${workerCli(a)}`}
@@ -558,7 +586,7 @@ function TeamTab() {
                   {openBrief === a.id && (
                     <tr>
                       <td />
-                      <td colSpan={terminal ? 11 : 10}>
+                      <td colSpan={(terminal ? 11 : 10) + (fleet ? 1 : 0)}>
                         <label className="row small">
                           <span>Drawn as</span>
                           <select
@@ -827,6 +855,7 @@ export function ManagerConsole({ initialTab, initialRepo }: { initialTab?: Manag
     ['floors', '🏢 Floors & repos'],
     ['ceo', `🧠 CEO & hiring${pending ? ` (${pending})` : ''}`],
     ['team', '👩‍💻 Team'],
+    ['fleet', '🖥 Fleet'],
     ['issues', '📝 Issues'],
     ['settings', '⚙️ Settings'],
   ];
@@ -843,6 +872,7 @@ export function ManagerConsole({ initialTab, initialRepo }: { initialTab?: Manag
         {tab === 'floors' && <FloorsTab />}
         {tab === 'ceo' && <CeoTab />}
         {tab === 'team' && <TeamTab />}
+        {tab === 'fleet' && <FleetTab />}
         {tab === 'issues' && <IssuesTab initialRepo={initialRepo} />}
         {tab === 'settings' && <SettingsTab />}
       </div>
