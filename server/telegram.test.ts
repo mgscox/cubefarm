@@ -467,3 +467,31 @@ it.each([false, true])('submits an accepted Telegram update once after a failed 
   expect(saved.managerInputs).toEqual([]);
   expect(saved.messages.filter((m) => m.from === 'manager')).toHaveLength(1);
 });
+
+it('retries a failed idle handoff without Telegram or another manager message', async () => {
+  await swarm.telegram.stop(); await setup(null);
+  s.state.settings.runtime = 'sdk';
+  s.state.settings.ceoHeartbeatMin = 0;
+  vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+  const starts: string[] = [];
+  vi.spyOn(s.backend, 'startSession').mockImplementation((opts) => {
+    starts.push(opts.prompt);
+    return { send: vi.fn(), stop: vi.fn() };
+  });
+  vi.mocked(s.schedule).mockRestore();
+  let writes = 0;
+  vi.mocked(s.writeState).mockImplementation(async () => {
+    if (++writes === 2) throw new Error('handoff disk failure');
+    saved = structuredClone(s.state);
+  });
+  await expect(swarm.messageCeo('Web request')).rejects.toThrow('handoff disk failure');
+  s.schedule();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(starts).toHaveLength(0);
+  // Storage is healthy again; no further message arrives.
+  await vi.advanceTimersByTimeAsync(20 * 60_000);
+  expect(starts).toHaveLength(1);
+  expect(starts[0]).toContain('Web request');
+  expect(saved.managerInputs).toEqual([]);
+  expect(s.state.ceo.queue).toEqual([]);
+});

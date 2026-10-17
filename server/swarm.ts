@@ -510,6 +510,8 @@ export class Swarm {
   private managerCommands: Promise<void> = Promise.resolve();
   private acceptingManager = 0;
   private managerHandoffPending = false;
+  private handoffRetry: ReturnType<typeof setTimeout> | null = null;
+  private handoffRetryMs = 1000;
 
   constructor(private backend: Backend, transport?: TelegramTransport | null) {
     this.demoTelegram = backend.demo ? createDemoTelegram() : null;
@@ -1562,6 +1564,8 @@ export class Swarm {
    */
   async shutdown(restart = false): Promise<void> {
     await this.telegram.stop();
+    if (this.handoffRetry) clearTimeout(this.handoffRetry);
+    this.handoffRetry = null;
     await this.managerCommands;
     await this.writeState().catch((err) => console.warn('could not save the state', err));
     await this.backend.releaseClis(restart); // before the terminals are saved: whatever they print next waits in the keeper
@@ -3838,7 +3842,7 @@ export class Swarm {
       } finally { this.acceptingManager--; }
       setTimeout(() => this.schedule(), 150);
     });
-    this.managerCommands = run.catch(() => undefined);
+    this.managerCommands = run.catch(() => this.retryManagerInputs());
     return run;
   }
 
@@ -3847,9 +3851,22 @@ export class Swarm {
       await this.writeState();
       this.managerHandoffPending = false;
       await this.dispatchManagerInputs();
+      this.handoffRetryMs = 1000;
+      setTimeout(() => this.schedule(), 150);
     });
-    this.managerCommands = run.catch(() => undefined);
+    this.managerCommands = run.catch(() => this.retryManagerInputs());
     return run;
+  }
+
+  /** Inputs left behind by a failed save block CEO work, so retry on a capped backoff without waiting for another message. */
+  private retryManagerInputs() {
+    if (this.handoffRetry || (!this.managerHandoffPending && !this.state.managerInputs.length)) return;
+    const delay = this.handoffRetryMs;
+    this.handoffRetryMs = Math.min(delay * 2, 60_000);
+    this.handoffRetry = setTimeout(() => {
+      this.handoffRetry = null;
+      this.recoverManagerInputs().catch((err) => console.warn('could not hand the manager\'s message to the CEO', err));
+    }, delay);
   }
 
   private async dispatchManagerInputs() {
