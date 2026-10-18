@@ -264,6 +264,10 @@ test('hook warnings and status fit the terminal header at phone width', async ({
   const title = page.locator('.term-title');
   await expect(title.locator('.chip-warn')).toHaveText('⚠ Hooks not reaching the office');
   await expect(title.locator('.status')).toHaveText('working');
+  // The opening scale animation can put an edge a few millionths of a pixel outside its parent on Linux.
+  await page.locator('.panel').evaluate(async (el) => {
+    await Promise.all(el.getAnimations().map((animation) => animation.finished.catch(() => undefined)));
+  });
   const fits = await title.evaluate((el) => {
     const bounds = el.getBoundingClientRect();
     return [...el.children].every((child) => {
