@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { planCli, type CliHost } from './machine.ts';
 import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
-import type { ClaudeTurn } from './clis.ts';
+import { STUCK_MS, type ClaudeTurn } from './clis.ts';
 import type { SessionCallbacks, SessionOptions } from './agentRunner.ts';
 import type { AgentTerminal } from './terminal.ts';
 
@@ -92,6 +92,27 @@ describe('startCliSession on a host', () => {
   };
   const errors = (cb: SessionCallbacks) => vi.mocked(cb.log).mock.calls.flat(2).filter((e) => e.kind === 'error').map((e) => e.text);
   const turn = (t: Partial<ClaudeTurn>): ClaudeTurn => ({ bytes: 100, ended: false, mark: '', text: '', ...t });
+
+  it.each(['hook', 'key'])('gives a Codex refusal another quiet interval after a %s', async (activity) => {
+    const { cb, term, hook } = claude(() => "ⓘ This content can't be shown\n› Ask Codex to do anything", () => null, { cli: 'codex' });
+    await vi.advanceTimersByTimeAsync(STUCK_MS - 30_000);
+    if (activity === 'hook') hook({ hook_event_name: 'SessionStart', session_id: 'codex-1' });
+    else term.onInput?.('a');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(cb.finished).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(STUCK_MS - 60_000);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: ['Codex refused the request (safety filter)'] }));
+  });
+
+  it('keeps a hook-reported Codex turn successful when its idle prompt stays on screen', async () => {
+    const { cb, hook } = claude(() => '› Ask Codex to do anything', () => null, { cli: 'codex', keepAlive: true });
+    const kills = pty.kill.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(STUCK_MS);
+    hook({ hook_event_name: 'TurnComplete', session_id: 'codex-1', input: 'Fix #12', last_assistant_message: 'Done' });
+    await vi.advanceTimersByTimeAsync(STUCK_MS + 30_000);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'Done', errors: [] }));
+    expect(pty.kill).toHaveBeenCalledTimes(kills);
+  });
 
   it('says a CLI working with no hooks is out of reach, and ends its session when its transcript ends the turn', async () => {
     let now: ClaudeTurn | null = null;

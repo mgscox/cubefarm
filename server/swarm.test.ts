@@ -2,7 +2,10 @@ import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { CommandError, ghJson, run } from './exec.ts';
 import { branchAhead, listIssues } from './github.ts';
-import { LOST_CONVERSATION } from './clis.ts';
+import { LOST_CONVERSATION, STUCK_MS } from './clis.ts';
+import { startCliSession } from './cliRunner.ts';
+import type { CliHost } from './machine.ts';
+import type { AgentTerminal } from './terminal.ts';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
 import { VERSION } from './config.ts';
@@ -1892,6 +1895,57 @@ describe('a developer session that ends without a PR after pushing commits', () 
     expect(await end(cut)).toBe(false);
     expect(ada()).toMatchObject({ status: 'error', lastError: cut.errors[0] });
     expect(f.state.messages.at(-1)?.text).toContain('Its branch swarm/issue-66-ada has 3 pushed commits on GitHub');
+  });
+
+  it.each([0, 3])('ends a silent Codex refusal and recovers work with %i pushed commits', async (commits) => {
+    const error = 'Codex refused the request (safety filter)';
+    const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
+    const term = {
+      cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(),
+      screen: () => "ⓘ This content can't be shown\n1 background terminal running · /ps to view · /stop to close\n› Ask Codex to do anything",
+    } as unknown as AgentTerminal;
+    const host: CliHost = {
+      prepare: (plan) => ({ dir: 'fake-session', prompt: plan.prompt, start: () => pty }),
+      recoverTurn: () => null, hasFile: () => false, claudeTurn: () => null, newShots: () => [], savedShot: () => null,
+      codexThread: async () => undefined, removeDir: vi.fn(), reconnect: async () => [], adopt: () => pty,
+      discard: vi.fn(), hooksReady: vi.fn(), leave: vi.fn(), protect: () => ({ pids: [], markers: [] }),
+    };
+    ahead.mockResolvedValue(commits);
+    setIssues(issue(66));
+    vi.spyOn(backend, 'deskAhead').mockResolvedValue(0);
+    let cleaned!: () => void;
+    const release = vi.spyOn(backend, 'releaseDesk').mockReturnValue(new Promise<void>((resolve) => { cleaned = resolve; }));
+    const removeDesk = vi.spyOn(backend, 'removeDesk');
+    const prepareDesk = vi.spyOn(backend, 'prepareDesk');
+    const finished = vi.fn();
+    vi.mocked(backend.startSession).mockImplementationOnce((opts, cb) => startCliSession({ ...opts, cli: 'codex', terminal: term }, {
+      ...cb, finished: (result) => { finished(result); cb.finished(result); },
+    }, host));
+    await s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
+
+    await vi.advanceTimersByTimeAsync(STUCK_MS + 30_000); // the first screen sample is at 30 s
+    expect(finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: [error] }));
+    expect(term.note).toHaveBeenCalledWith(`── ${error} ──`);
+    expect(pty.kill).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledWith(repo.fullName, 'ada-a1', expect.any(Number));
+    expect(s.agentRt.get('a1')!.log).toContainEqual(expect.objectContaining({ kind: 'error', text: error }));
+    expect(sessions).toHaveLength(1); // retry waits for the background process clean-up
+
+    cleaned();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(ada().branch).toBe('swarm/issue-66-ada');
+    expect(removeDesk).not.toHaveBeenCalled();
+    expect(prepareDesk).not.toHaveBeenCalled();
+    if (commits) {
+      expect(sessions).toHaveLength(2);
+      expect(sessions[1].opts.prompt).toContain(error);
+      expect(sessions[1].opts.cwd).toBe(backend.deskDir(repo.fullName, 'ada-a1'));
+    } else {
+      expect(ada()).toMatchObject({ status: 'error', lastError: error });
+      s.repoRt.get(repo.id)!.issuesFetchedAt = Date.now() + 1; // a fresh sync releases the normal retry cooldown
+      expect(ready()).toEqual([66]);
+      expect(finished).toHaveBeenCalledOnce();
+    }
   });
 
   it('resumes the session it has, and names the branch when the issue goes back on the board', async () => {

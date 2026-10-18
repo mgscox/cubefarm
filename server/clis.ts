@@ -467,7 +467,7 @@ export function trustKey(screen: string): 'enter' | 'down' | null {
   return null;
 }
 
-/** A working CLI sat at a menu this long, its screen unchanged and nothing from its hooks or the keyboard, is stuck. */
+/** A working CLI waiting this long, its screen unchanged and nothing from its hooks or the keyboard, is stuck. */
 export const STUCK_MS = 10 * 60_000;
 
 /** The selected option of a numbered menu on screen (Codex's resume picker or sign-in, Claude Code's selects), or null. */
@@ -484,18 +484,37 @@ export function menuOnScreen(screen: string): string | null {
  * tool call doesn't count: there's no menu, and the CLI's spinner keeps changing the screen.
  */
 export function menuWatch(limitMs = STUCK_MS, now = Date.now()) {
+  return screenWatch(menuOnScreen, limitMs, now);
+}
+
+/** Codex can end at its prompt without sending a turn-end hook, particularly after a safety refusal. */
+export function idlePromptWatch(limitMs = STUCK_MS, now = Date.now()) {
+  const watch = screenWatch<'refusal' | 'idle'>((screen) => {
+    if (/esc to (interrupt|cancel)/i.test(screen)) return null;
+    if (/This content can['’]t be shown|We take extra care with some cybersecurity requests/i.test(screen)) return 'refusal';
+    return /^[ \t]*›(?![ \t]*\d+\.)[^\n]*$/m.test(screen) ? 'idle' : null;
+  }, limitMs, now);
+  return {
+    stir: watch.stir,
+    look(screen: string, working: boolean, at = Date.now()) {
+      return watch.look(working ? screen : '', at);
+    },
+  };
+}
+
+function screenWatch<T>(reason: (screen: string) => T | null, limitMs: number, now: number) {
   let last = '';
   let since = now;
   return {
     stir(at = Date.now()) {
       since = at;
     },
-    look(screen: string, at = Date.now()): string | null {
+    look(screen: string, at = Date.now()): T | null {
       if (screen !== last) {
         last = screen;
         since = at;
       }
-      return at - since >= limitMs ? menuOnScreen(screen) : null;
+      return at - since >= limitMs ? reason(screen) : null;
     },
   };
 }

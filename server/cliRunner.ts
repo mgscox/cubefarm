@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, codexTurnThread, hookReviewKey, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, STUCK_MS, trustKey } from './clis.ts';
+import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, codexTurnThread, hookReviewKey, idlePromptWatch, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, STUCK_MS, trustKey } from './clis.ts';
 import { terminalsAvailable, type Pty } from './ptyClient.ts';
 import { ALLOW } from './ptyProtocol.ts';
 import { localCliHost } from './localCliHost.ts';
@@ -47,7 +47,7 @@ const BOOT_MS = 60_000;
 const BOOT_LOOK_MS = 10_000;
 /** Working with no hooks reaching the office: how often it reads the CLI's transcript for the end of its turn. */
 const HOOKLESS_LOOK_MS = 5000;
-/** How often the office looks for a CLI stuck at a menu (see menuWatch). */
+/** How often the office looks for a CLI stuck at a menu or idle prompt. */
 const STUCK_LOOK_MS = 30_000;
 /** Claude's usage warning, the way the SDK's allowed_warning is used: pace new work from here. */
 const USAGE_WARN_PCT = 90;
@@ -366,6 +366,11 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let shotTimer: NodeJS.Timeout | undefined;
   let stuckTimer: NodeJS.Timeout | undefined;
   const stuck = menuWatch();
+  const idleStuck = idlePromptWatch();
+  const stir = () => {
+    stuck.stir();
+    idleStuck.stir();
+  };
   const nudged = new Set<string>();
   let trustKeys = 0; // keys pressed on a folder-trust question (a few at most)
   let trustedAt = 0;
@@ -448,6 +453,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     finishTimer = timer;
   };
   const busy = () => {
+    stir();
     begun = true;
     transcriptEnded = false;
     if (heard) setBoot(null);
@@ -464,7 +470,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
 
   /** Esc typed in the terminal while the agent works: if the CLI then says it interrupted the turn, it's over. */
   const watchKeys = (data: string) => {
-    stuck.stir();
+    stir();
     if (data !== '\x1b' || done || !begun) return;
     const before = interruptions(term.screen());
     let looks = 0;
@@ -512,7 +518,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
     if (fromMain(b)) {
       heardAt = Date.now();
-      stuck.stir();
+      stir();
     }
     if (fromMain(b) && !heard) {
       heard = true;
@@ -731,17 +737,23 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   };
 
   /**
-   * A CLI waiting at a menu nobody answers (Codex's resume picker, say) would leave its desk working forever: once it
-   * has sat there for STUCK_MS, the session ends as failed, which takes the office's usual retry or failure path.
+   * A menu nobody answers, or Codex back at its prompt without a turn-end hook (notably after a refusal), would leave
+   * its desk working forever. After STUCK_MS the session fails through the usual retry path, closing its CLI tree.
    */
   const watchStuck = () => {
     stuckTimer = setInterval(() => {
       if (done || !live?.proc) return;
-      const option = stuck.look(term.screen());
-      if (option === null) return;
+      const screen = term.screen();
+      const idle = cli === 'codex' ? idleStuck.look(screen, working) : null;
+      const option = working ? stuck.look(screen) : null;
       const minutes = Math.round(STUCK_MS / 60_000);
-      const error = `${label} sat at a question nobody answered ("${clip(option, 80)}") for ${minutes} minutes, so the office ended the session`;
+      const error = idle === 'refusal' ? `${label} refused the request (safety filter)`
+        : idle === 'idle' ? `${label} sat at an idle prompt without reporting a turn end for ${minutes} minutes, so the office ended the session`
+        : option !== null ? `${label} sat at a question nobody answered ("${clip(option, 80)}") for ${minutes} minutes, so the office ended the session`
+        : null;
+      if (!error) return;
       term.note(`── ${error} ──`);
+      log([{ kind: 'error', text: error }]);
       finish({ ok: false, text: lastText, errors: [error] });
     }, STUCK_LOOK_MS);
   };

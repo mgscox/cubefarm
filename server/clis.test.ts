@@ -5,7 +5,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
@@ -104,6 +104,47 @@ describe('the stuck-at-a-menu watchdog', () => {
     for (let t = 0; t <= 3 * STUCK_MS; t += 30_000) expect(watch.look(`• Running npm run test:e2e\n◦ Working (${t / 1000}s • esc to interrupt)`, t)).toBeNull();
     const quiet = menuWatch(STUCK_MS, 0);
     expect(quiet.look('• Running npm run test:e2e', 3 * STUCK_MS)).toBeNull();
+  });
+});
+
+describe('the idle Codex watchdog', () => {
+  const prompt = '› Ask Codex to do anything';
+  const refusal = `ⓘ This content can't be shown\n  1 background terminal running · /ps to view · /stop to close\n${prompt}`;
+
+  it.each([refusal, '  We take extra care with some cybersecurity requests.'])('detects a safety refusal only after the full quiet interval', (screen) => {
+    const watch = idlePromptWatch(STUCK_MS, 0);
+    expect(watch.look(screen, true, 0)).toBeNull();
+    expect(watch.look(screen, true, STUCK_MS - 1)).toBeNull();
+    expect(watch.look(screen, true, STUCK_MS)).toBe('refusal');
+  });
+
+  it('starts the quiet interval over after a hook or keystroke', () => {
+    const watch = idlePromptWatch(STUCK_MS, 0);
+    watch.look(refusal, true, 0);
+    watch.stir(STUCK_MS - 1000);
+    expect(watch.look(refusal, true, STUCK_MS)).toBeNull();
+    expect(watch.look(refusal, true, 2 * STUCK_MS - 1000)).toBe('refusal');
+  });
+
+  it('detects a missed turn ending at a plain prompt, but leaves a reported turn end alone', () => {
+    const watch = idlePromptWatch(STUCK_MS, 0);
+    watch.look(prompt, true, 0);
+    expect(watch.look(prompt, true, STUCK_MS)).toBe('idle');
+    expect(watch.look(prompt, false, STUCK_MS)).toBeNull(); // the end hook arrived
+    expect(watch.look(prompt, false, 3 * STUCK_MS)).toBeNull();
+    expect(watch.look(prompt, true, 3 * STUCK_MS)).toBeNull(); // a new turn gets its own interval
+  });
+
+  it('leaves static spinners, long tool calls and changing screens alone', () => {
+    for (const screen of [`${refusal}\n◦ Working (esc to interrupt)`, '• Running npm test', '› 1. Only option']) {
+      const watch = idlePromptWatch(STUCK_MS, 0);
+      watch.look(screen, true, 0);
+      expect(watch.look(screen, true, 2 * STUCK_MS)).toBeNull();
+    }
+    const watch = idlePromptWatch(STUCK_MS, 0);
+    for (let at = 0; at <= 3 * STUCK_MS; at += 30_000) {
+      expect(watch.look(`${refusal}\nTool output ${at}`, true, at)).toBeNull();
+    }
   });
 });
 
