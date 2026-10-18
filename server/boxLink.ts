@@ -5,7 +5,7 @@ import { KeeperPty, terminalMessage } from './ptyClient.ts';
 import { encode, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
 import { reconnectClis, startCliSession } from './cliRunner.ts';
 import type { ClaudeTurn } from './clis.ts';
-import { boxCommand, boxDeskDir, boxMainDir, boxUpdateCommand, parseUpdateResult, redialDelay, retryForm, type BoxInfo, type BoxLayout, type BoxUpdateResult } from './fleet.ts';
+import { boxCommand, boxDeskDir, boxMainDir, boxUpdateCommand, parseUpdateResult, redialDelay, retryForm, updateFailure, type BoxInfo, type BoxLayout, type BoxUpdateResult } from './fleet.ts';
 import type { BoxConnection, BoxOptions, CliHost, CliPlan, Machine, PreparedCli } from './machine.ts';
 import type { SessionHandle } from './agentRunner.ts';
 import type { BoxStatus, CliView } from '../shared/types.ts';
@@ -217,8 +217,7 @@ class BoxLink implements CliHost {
         clearTimeout(timer);
         const result = parseUpdateResult(out);
         if (result) return resolve(result);
-        const said = err.trim().split('\n').filter(Boolean).pop();
-        reject(new Error(said ?? `ssh exited (${code})`));
+        reject(new Error(updateFailure(this.opts.box.name, err.trim().split('\n').filter(Boolean).pop(), code)));
       });
     });
   }

@@ -159,6 +159,25 @@ export interface BoxSyncState {
   step: 'update' | 'restart';
   state: 'draining' | 'updating' | 'restarting' | 'failed';
   error?: string;
+  /** When it failed (epoch ms). */
+  at?: number;
+}
+
+/** How long a box that failed to move waits before it tries the same target again by itself. */
+export const BOX_SYNC_RETRY_MS = 30 * 60_000;
+
+/** A failed move is tried again once BOX_SYNC_RETRY_MS has passed (Check again on the box's card clears it sooner). */
+export const syncRetryDue = (s: BoxSyncState, now: number) => s.state === 'failed' && now - (s.at ?? now) >= BOX_SYNC_RETRY_MS;
+
+/**
+ * Why `cubefarm box --update` failed when it printed no result, from its last stderr line. A box whose cubefarm
+ * predates #94 doesn't know --update and only prints boxStdio's usage line, so the manager is told what to run there.
+ */
+export function updateFailure(box: string, said: string | undefined, code: number | null): string {
+  if (said && /an office starts this over ssh/.test(said)) {
+    return `${box}'s cubefarm predates self-update: run git pull, npm install and node scripts/build-server.mjs in its cubefarm folder once, then Check again`;
+  }
+  return said ?? `ssh exited (${code})`;
 }
 
 const targetLabel = (t: string) => (isRelease(t) ? `v${t}` : t.slice(0, 7));
@@ -169,7 +188,8 @@ export function boxSyncText(s: BoxSyncState, busy: number): string {
   if (s.state === 'draining' && busy > 0) return `Moving to the office's ${t} once its ${busy} agent${busy === 1 ? ' finishes' : 's finish'}: nothing new starts there.`;
   if (s.state !== 'restarting' && s.state !== 'failed') return `Updating to the office's ${t}…`;
   if (s.state === 'restarting') return `Restarting on ${t}…`;
-  return `Couldn't move to the office's ${t}: ${s.error ?? 'unknown error'}`;
+  const why = s.error ?? 'unknown error';
+  return `Couldn't move to the office's ${t}: ${why}${/Check again/.test(why) ? '' : '. Check again tries now; it also tries again in 30 min.'}`;
 }
 
 const repoFolder = (fullName: string) => fullName.replace('/', '__');
