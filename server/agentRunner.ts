@@ -40,6 +40,8 @@ export interface SessionOptions {
   agentId?: string;
   /** Follow the session of the CLI still running in the terminal after the office restarted; start nothing. */
   reattach?: boolean;
+  /** Original task start: bounds transcript discovery after a restart. */
+  reattachSince?: number;
 }
 
 export interface LogEntry {

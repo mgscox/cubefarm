@@ -361,6 +361,8 @@ export function claudeConversation(resumeId: string | null, save: (id: string | 
 export interface ClaudeTurn {
   /** The transcript's size: it grows while the CLI works. */
   bytes: number;
+  /** Completion event time, used to distinguish tasks in a resumed conversation. */
+  completedAt?: number;
   /** The last turn has ended (Claude's last message didn't call a tool, or the turn's duration was written). */
   ended: boolean;
   /** Tells turns apart: the last finished message's id ('' before any). */
@@ -377,6 +379,7 @@ export function claudeTurn(tail: string, bytes: number): ClaudeTurn {
   let ended = false;
   let mark = '';
   let lastId = '';
+  let completedAt: number | undefined;
   let parts: string[] = [];
   for (const line of tail.split('\n')) {
     let e: Record<string, unknown>;
@@ -390,6 +393,7 @@ export function claudeTurn(tail: string, bytes: number): ClaudeTurn {
     else if (e.type === 'system' && e.subtype === 'turn_duration') {
       ended = true;
       mark = lastId || String(e.uuid ?? '');
+      completedAt = Date.parse(String(e.timestamp ?? ''));
     }
     else if (e.type === 'assistant') {
       const msg = (e.message ?? {}) as { id?: unknown; content?: unknown; stop_reason?: unknown };
@@ -400,10 +404,11 @@ export function claudeTurn(tail: string, bytes: number): ClaudeTurn {
       for (const b of blocks) if (b?.type === 'text' && typeof b.text === 'string') parts.push(b.text);
       const calls = blocks.some((b) => b?.type === 'tool_use') || msg.stop_reason === 'tool_use';
       ended = !calls && msg.stop_reason != null;
+      completedAt = ended ? Date.parse(String(e.timestamp ?? '')) : undefined;
       if (ended) mark = id;
     }
   }
-  return { bytes, ended, mark, text: parts.join('\n').trim() };
+  return { bytes, ended, mark, text: parts.join('\n').trim(), ...(Number.isFinite(completedAt) && { completedAt }) };
 }
 
 /** Claude Code's folder for a project: its path with everything but letters and digits as dashes. */

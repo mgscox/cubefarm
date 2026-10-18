@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { recoverCliTurn } from './cliTranscript.ts';
 import { HOME_DIR } from './config.ts';
 import { cliLabel, codexThread, readClaudeTurn } from './clis.ts';
 import { adoptPty, discardPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, startKeeper, terminalsAvailable } from './ptyClient.ts';
@@ -33,6 +34,7 @@ export const localCliHost: CliHost = {
   prepare,
   hasFile: (file) => fs.existsSync(file),
   claudeTurn: (cwd, sessionId) => readClaudeTurn(cwd, sessionId),
+  recoverTurn: recoverCliTurn,
   newShots: sessionShots,
   savedShot: screenshotFile,
   codexThread,

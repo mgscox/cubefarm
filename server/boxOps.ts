@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { recoverCliTurn } from './cliTranscript.ts';
+import type { AgentCli } from '../shared/types.ts';
 import { VERSION, WORKSPACE_ROOT } from './config.ts';
 import { run } from './exec.ts';
 import * as workspace from './workspace.ts';
@@ -68,6 +70,7 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
       return s ? shot(s) : null;
     },
     claudeTurn: (cwd, sessionId) => readClaudeTurn(str(cwd), str(sessionId)),
+    recoverTurn: (cwd, cli, sessionId, since) => recoverCliTurn(str(cwd), cli as AgentCli, sessionId === null ? null : str(sessionId), Number(since)),
     codexThread: (action, id) => codexThread(action === 'archive' ? 'archive' : 'unarchive', str(id)),
     removeDir: (dir) => removeSessionDir(sessionDir(dir)),
   };

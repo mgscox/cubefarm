@@ -2422,6 +2422,7 @@ export class Swarm {
         keepAlive: a.task !== 'qa',
         typed: mode === 'typed',
         reattach: mode === 'reattach',
+        reattachSince: a.startedAt ?? undefined,
         agentId: a.id,
         ...how,
       },
@@ -2487,7 +2488,12 @@ export class Swarm {
     const released = this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
     if (result.interrupted) this.interrupted(a);
 
-    if (a.task === 'qa') await this.onQaFinished(a, repo, result, released);
+    if (result.errors.some((e) => e.includes('finished while the office restarted; result not collected'))) {
+      this.fail(a, result, 'restart recovery');
+      a.status = 'stopped'; // The outcome is unknown: don't automatically rerun the task after the error cooldown.
+      const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
+      if (rec) this.setQa(rec, { status: 'needs-human', qaAgentId: null, summary: a.lastError });
+    } else if (a.task === 'qa') await this.onQaFinished(a, repo, result, released);
     else if (a.task === 'fix') await this.onFixFinished(a, repo, result);
     else await this.onIssueFinished(a, repo, result, released, generation);
 
@@ -4515,6 +4521,7 @@ export class Swarm {
               title: a.title || ROLE_TITLE[a.role],
               specialty: a.specialty || null,
               status: a.status,
+              ...(a.lastError && { error: a.lastError }),
               ...(doing(a) && { doing: doing(a) }),
               hiredBy: a.hiredBy,
               ...(full && { jobDescription: a.brief ? jobDescription(a.brief) : null }),
