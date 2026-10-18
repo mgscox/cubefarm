@@ -455,7 +455,8 @@ const fakeClis = () => CLIS.map((c) => ({ id: c.id, label: c.label, installed: t
 /**
  * A pretend box: it "connects" after a moment (one whose destination starts with "offline" never does; "no-hooks": its
  * CLIs can't reach its hook URL), and its desks and fake sessions are the demo's own under its folder, labelled with
- * its name in the terminal.
+ * its name in the terminal. One whose destination starts with "stale" runs an older commit than the office, so it's
+ * brought up to date.
  */
 function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
   let status: 'connecting' | 'online' | 'offline' = 'connecting';
@@ -463,7 +464,9 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
   const offline = /^offline/i.test(opts.box.destination);
   const claudeOnly = /^claude-only/i.test(opts.box.destination);
   const noHooks = /^no-hooks/i.test(opts.box.destination);
-  const timer = setTimeout(() => {
+  let commit = /^stale/i.test(opts.box.destination) ? `5ta1e00${'0'.repeat(33)}` : DEMO_HEAD;
+  let pulled = commit;
+  let timer = setTimeout(() => {
     status = offline ? 'offline' : 'online';
     opts.changed();
   }, 1500);
@@ -501,10 +504,12 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
     state: () => ({
       status,
       error: offline && status === 'offline' ? 'ssh: connect to host: Connection timed out (demo)' : null,
-      info: status === 'online' ? { platform: 'linux', version: 'demo', git: 'git version 2.47.0 (demo)', ghReady: true, hookError: noHooks ? 'http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED (demo)' : null, workspaces, sep: '/' } : null,
+      info: status === 'online' ? { platform: 'linux', version: 'demo', commit, git: 'git version 2.47.0 (demo)', ghReady: true, hookError: noHooks ? 'http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED (demo)' : null, workspaces, sep: '/' } : null,
       // A box whose destination starts with "claude-only" has just Claude Code: other agents can't move there.
       clis: status === 'online' ? fakeClis().map((c) => (claudeOnly && c.id !== 'claude' ? { ...c, installed: false, version: null } : c)) : [],
       running,
+      reported: status === 'online',
+      refused: false,
     }),
     reconnected: Promise.resolve([]), // fake sessions end with the office
     hooksReady: () => undefined,
@@ -517,6 +522,21 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
       status = 'offline';
       opts.changed();
       throw new Error('ssh: connect to host: Connection timed out (demo)');
+    },
+    // A pull and a build take a moment; the restart drops the link, and the box comes back on the new commit.
+    update: async (target) => {
+      await new Promise((r) => setTimeout(r, 3000));
+      const from = pulled;
+      pulled = target;
+      return { ok: true, checkout: true, from, to: target };
+    },
+    restart: async () => {
+      status = 'connecting';
+      opts.changed();
+      await new Promise<void>((r) => (timer = setTimeout(r, 1500)));
+      commit = pulled;
+      status = 'online';
+      opts.changed();
     },
     close: () => clearTimeout(timer),
   };

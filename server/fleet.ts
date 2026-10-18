@@ -21,6 +21,8 @@ export interface BoxLayout {
 export interface BoxInfo extends BoxLayout {
   platform: string;
   version: string;
+  /** The commit its host started on (its cubefarm checkout's then); null when it isn't a checkout (npx). A box from before #94 doesn't say. */
+  commit?: string | null;
   git: string | null;
   ghReady: boolean;
   /** Why its CLIs can't reach the hook URL they post to (null: they can; missing: a box from before it was checked). */
@@ -80,13 +82,94 @@ export const retryForm = (plain: boolean, stderr: string) => ({ plain: !plain, n
  * SWARM_BOX_COMMAND replaces the remote command (a box that runs a checkout).
  */
 export function boxCommand(destination: string, version: string, officeId: string, remote = process.env.SWARM_BOX_COMMAND, plain = false): { file: string; args: string[] } {
+  return sshBox(destination, version, `--stdio --office ${officeId}`, remote, plain);
+}
+
+/** A release (0.3.19), as opposed to a commit: what a box follows when the office runs from npm. */
+export const isRelease = (target: string) => /^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(target);
+
+/** What `cubefarm box --update` takes: the office's commit, or its release when it isn't a checkout. */
+export const isUpdateTarget = (target: string) => /^[0-9a-f]{7,40}$/.test(target) || isRelease(target);
+
+/** The command that has a box bring its cubefarm to the office's commit or release (`cubefarm box --update <target>`, boxUpdate.ts). */
+export function boxUpdateCommand(destination: string, version: string, target: string, remote = process.env.SWARM_BOX_COMMAND, plain = false): { file: string; args: string[] } {
+  if (!isUpdateTarget(target)) throw new Error(`"${target}" isn't a commit or a release.`);
+  return sshBox(destination, version, `--update ${target}`, remote, plain);
+}
+
+function sshBox(destination: string, version: string, rest: string, remote: string | undefined, plain: boolean) {
   if (!validDestination(destination)) throw new Error(`"${destination}" isn't a destination ssh can use.`);
-  const run = `${remote?.trim() || `npx -y cubefarm@${version} box`} --stdio --office ${officeId}`;
+  const run = `${remote?.trim() || `npx -y cubefarm@${version} box`} ${rest}`;
   const command = plain ? run : loginShell(run);
   return {
     file: 'ssh',
     args: ['-T', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=4', '--', destination, command],
   };
+}
+
+// ---------- following the office's version (#94) ----------
+
+/** What `cubefarm box --update` prints as its last line. checkout: false when the box runs cubefarm from npx. */
+export interface BoxUpdateResult {
+  ok: boolean;
+  checkout: boolean;
+  from: string | null;
+  to: string | null;
+  error?: string;
+}
+
+/** The update's result from what the command printed (a login shell may print other lines first); null when there's none. */
+export function parseUpdateResult(stdout: string): BoxUpdateResult | null {
+  for (const line of stdout.split(/\r?\n/).reverse()) {
+    try {
+      const r = JSON.parse(line) as Partial<BoxUpdateResult> | null;
+      if (r && typeof r.ok === 'boolean') {
+        const sha = (v: unknown) => (typeof v === 'string' ? v : null);
+        return { ok: r.ok, checkout: r.checkout !== false, from: sha(r.from), to: sha(r.to), error: typeof r.error === 'string' ? r.error : undefined };
+      }
+    } catch {
+      // not the result
+    }
+  }
+  return null;
+}
+
+/**
+ * What a box needs to run the office's own cubefarm, or null when it does (or can't be told). A checkout follows the
+ * office's commit, or its release (target) when the office runs from npm, then its host restarts; one run by npx only
+ * needs its host restarted, as its next link already runs the office's version. A box from before #94 doesn't say
+ * which it is: it's asked to update whatever its version, which also tells an old one apart. A box refused for another protocol runs an
+ * old checkout (npx would run the office's version), so it's updated.
+ */
+export function boxSync(office: { version: string; commit: string | null }, box: { info: BoxInfo | null; refused: boolean }): { target: string; step: 'update' | 'restart' } | null {
+  if (box.refused) return { target: office.commit ?? office.version, step: 'update' };
+  const info = box.info;
+  if (!info) return null;
+  if (info.commit === undefined) return { target: office.commit ?? office.version, step: 'update' }; // its version alone doesn't say it runs the same code
+  if (info.commit === null || !office.commit) {
+    if (info.version === office.version) return null;
+    return { target: office.version, step: info.commit === null ? 'restart' : 'update' };
+  }
+  return info.commit === office.commit ? null : { target: office.commit, step: 'update' };
+}
+
+/** A box following the office: waiting for its agents to finish, updating, restarting its host, or it failed. */
+export interface BoxSyncState {
+  target: string;
+  step: 'update' | 'restart';
+  state: 'draining' | 'updating' | 'restarting' | 'failed';
+  error?: string;
+}
+
+const targetLabel = (t: string) => (isRelease(t) ? `v${t}` : t.slice(0, 7));
+
+/** The line on a box's card while it follows the office. busy: its agents still at work. */
+export function boxSyncText(s: BoxSyncState, busy: number): string {
+  const t = targetLabel(s.target);
+  if (s.state === 'draining' && busy > 0) return `Moving to the office's ${t} once its ${busy} agent${busy === 1 ? ' finishes' : 's finish'}: nothing new starts there.`;
+  if (s.state !== 'restarting' && s.state !== 'failed') return `Updating to the office's ${t}…`;
+  if (s.state === 'restarting') return `Restarting on ${t}…`;
+  return `Couldn't move to the office's ${t}: ${s.error ?? 'unknown error'}`;
 }
 
 const repoFolder = (fullName: string) => fullName.replace('/', '__');

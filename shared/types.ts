@@ -221,6 +221,7 @@ export interface BoxView {
   hookError: string | null; // why its CLIs can't reach the office's hook URL (null: they can, or not known yet)
   clis: CliView[];
   running: number; // CLIs running there now
+  sync: { text: string; failed: boolean } | null; // moving to the office's version (#94), or why it couldn't
 }
 
 /** Messages on an agent's terminal socket (/ws/term?agent=<id>), server to browser. */

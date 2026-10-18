@@ -5,6 +5,7 @@ import { branchAhead, listIssues } from './github.ts';
 import { LOST_CONVERSATION } from './clis.ts';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
+import { VERSION } from './config.ts';
 import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
 import { ceoSystemPrompt, type OfficeTools } from './ceo.ts';
 import { researcherSystemPrompt } from './research.ts';
@@ -3164,6 +3165,104 @@ describe('boxes', () => {
     await vi.advanceTimersByTimeAsync(1000);
     await failed;
     await expect(swarm.checkBox('box-gone')).rejects.toThrow(HttpError);
+  });
+
+  it("moves a box to the office's commit once its agents finish, and nothing new starts there meanwhile", async () => {
+    const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
+    Object.assign(office, { scheduling: true, officeHead: `0ff1ce5${'0'.repeat(33)}` }); // the demo office's commit
+    vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
+    const box = swarm.addBox('Tower', 'stale-tower');
+    const ada = s.state.agents[0];
+    Object.assign(ada, { box: box.id, deskBox: box.id, status: 'working' });
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(office.boxView(box).sync).toEqual({ text: "Moving to the office's 0ff1ce5 once its 1 agent finishes: nothing new starts there.", failed: false });
+    ada.status = 'done';
+    expect(internals().available(repo, 'dev')).toEqual([]);
+    s.repoRt.get(repo.id)!.issues = [issue(9)];
+    expect(((await swarm.assign('a1', 9)) as { warning?: string }).warning).toBe("waiting: Tower is moving to the office's version");
+
+    office.syncBoxes();
+    expect(office.boxView(box).sync?.text).toBe("Updating to the office's 0ff1ce5…");
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(office.boxView(box)).toMatchObject({ status: 'connecting', sync: { text: 'Restarting on 0ff1ce5…' } });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
+    expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
+  });
+
+  it("still restarts a box whose checkout was updated by an office that restarted before restarting its host", async () => {
+    const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
+    const head = `0ff1ce5${'0'.repeat(33)}`;
+    Object.assign(office, { officeHead: head });
+    vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
+    const box = swarm.addBox('Tower', 'stale-tower');
+    await vi.advanceTimersByTimeAsync(1600);
+    const conn = internals().boxConns.get(box.id) as unknown as import('./machine.ts').BoxConnection;
+    const update = vi.spyOn(conn, 'update');
+    const updating = conn.update(head); // the office before this one, which went before restarting the box's host
+    await vi.advanceTimersByTimeAsync(3000);
+    await updating;
+    expect(conn.state().info?.commit).toMatch(/^5ta1e00/); // the old host still runs
+
+    office.scheduling = true;
+    office.syncBoxes();
+    expect(office.boxView(box).sync?.text).toBe("Updating to the office's 0ff1ce5…");
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(office.boxView(box)).toMatchObject({ status: 'connecting', sync: { text: 'Restarting on 0ff1ce5…' } });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
+    expect(conn.state().info?.commit).toBe(head);
+    expect(update).toHaveBeenCalledTimes(2);
+  });
+
+  it("updates a box refused for another protocol at once, though an agent is still at work there", async () => {
+    const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
+    const head = `0ff1ce5${'0'.repeat(33)}`;
+    Object.assign(office, { officeHead: head });
+    vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
+    const box = swarm.addBox('Tower', 'ada@tower');
+    const conn = internals().boxConns.get(box.id) as unknown as import('./machine.ts').BoxConnection;
+    const real = conn.state.bind(conn);
+    let refused = true; // its old checkout speaks another protocol, until it's updated
+    vi.spyOn(conn, 'state').mockImplementation(() => (refused ? { ...real(), status: 'offline', info: null, clis: [], reported: false, refused: true } : real()));
+    const update = vi.spyOn(conn, 'update').mockImplementation(async (target) => {
+      refused = false;
+      return { ok: true, checkout: true, from: `5ta1e00${'0'.repeat(33)}`, to: target };
+    });
+    await vi.advanceTimersByTimeAsync(1600);
+    Object.assign(s.state.agents[0], { box: box.id, deskBox: box.id, status: 'working' });
+
+    office.scheduling = true;
+    office.syncBoxes();
+    expect(update).toHaveBeenCalledWith(head);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(office.boxView(box).sync?.text).toBe('Restarting on 0ff1ce5…');
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks a box from before #94 on the npm office's own version to update, and says when it can't", async () => {
+    const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
+    Object.assign(office, { scheduling: true, officeHead: null }); // run from npm
+    vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
+    const events = vi.spyOn(s, 'broadcast');
+    const box = swarm.addBox('Tower', 'ada@tower');
+    const conn = internals().boxConns.get(box.id) as unknown as import('./machine.ts').BoxConnection;
+    const real = conn.state.bind(conn);
+    vi.spyOn(conn, 'state').mockImplementation(() => {
+      const st = real();
+      return { ...st, info: st.info && { ...st.info, version: VERSION, commit: undefined } }; // the office's version, no commit
+    });
+    // Its cubefarm doesn't know --update.
+    const update = vi.spyOn(conn, 'update').mockRejectedValue(new Error('cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>'));
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(update).toHaveBeenCalledWith(VERSION);
+    expect(office.boxView(box).sync).toEqual({ text: `Couldn't move to the office's v${VERSION}: cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>`, failed: true });
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'toast', level: 'error', text: expect.stringMatching(/^Tower couldn't move to the office's version/) }));
+    office.syncBoxes();
+    expect(update).toHaveBeenCalledTimes(1); // not retried for the same version
+    expect(internals().available(repo, 'dev').length).toBeGreaterThan(0); // agents can still work there
   });
 
   it('refuses bad boxes', () => {

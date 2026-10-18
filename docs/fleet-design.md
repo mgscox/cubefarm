@@ -185,6 +185,21 @@ OS.
   stays open until the CLIs still running there end. In the demo, a box connects after a moment and one whose
   destination starts with `offline` never does.
 
+## Following the office's version (#94)
+
+When the office runs another commit than a box's cubefarm checkout (it updated, or the box is new), the box drains:
+nothing new starts there ("moving to the office's version") while its agents finish. Then the office runs
+`ssh <destination> <box command> --update <office commit>` (`server/boxUpdate.ts`), which fast-forwards the box's
+checkout by the launcher's rules (default branch, no local changes, never past the office), runs `npm install` when the
+dependencies changed and rebuilds `dist-server/`, rolling back on failure. The office then shuts the box's host down
+and redials it, so the next host runs the new build (its idle CLIs stop). A box run by npx only needs that restart
+when its cubefarm version differs. An office run from npm has no commit: a checkout box on another version moves to
+the office's release instead (its tag `v<version>`, else the commit that set `package.json` to it). Boxes report
+`commit` in their info, the one their host started on (not the checkout's HEAD now, so a host left running after an
+update is still restarted); one that doesn't (older) is asked to update too, and a box refused for another protocol
+version is updated without draining. A failure shows on the box's card
+and isn't retried until the office runs another commit or restarts. Rules: `fleet.boxSync`; flow: `Swarm.syncBoxes`.
+
 ## Phases
 
 1. `Machine` seam and `localMachine`, plan/launch split in `cliRunner` (no behaviour change; reviewable alone).

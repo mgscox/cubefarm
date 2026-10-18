@@ -4,6 +4,7 @@ import { run } from './exec.ts';
 import * as workspace from './workspace.ts';
 import { codexThread, detectClis, readClaudeTurn } from './clis.ts';
 import { screenshotFile } from './agentRunner.ts';
+import { checkoutCommit } from './boxUpdate.ts';
 import { BIN_DIR, removeSessionDir, SESSIONS_DIR, sessionShots, writeCliSession, type CliLaunch } from './cliFiles.ts';
 import { probeHookUrl, type BoxInfo } from './fleet.ts';
 import type { CliPlan } from './machine.ts';
@@ -25,7 +26,11 @@ function sessionDir(dir: unknown): string {
   return d;
 }
 
-export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[] }) {
+/** root: the cubefarm checkout this host runs from (tests). */
+export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[]; root?: string }) {
+  // The commit this host started on, not the checkout's HEAD later: an update moves HEAD under a running host, and the
+  // office has to see the old one to restart it (say, when the office itself restarted in between).
+  const commit = checkoutCommit(ctx.root);
   const prepared = new Map<string, { cli: CliLaunch; at: number }>();
   const str = (v: unknown) => String(v ?? '');
 
@@ -36,7 +41,7 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[] 
       const hookError = await Promise.resolve()
         .then(() => probeHookUrl(ctx.hookUrl()))
         .catch((err: Error) => err.message);
-      return { platform: process.platform, version: VERSION, git: git?.trim() || null, ghReady: gh, hookError, workspaces: WORKSPACE_ROOT, sep: path.sep as '/' | '\\' };
+      return { platform: process.platform, version: VERSION, commit: await commit, git: git?.trim() || null, ghReady: gh, hookError, workspaces: WORKSPACE_ROOT, sep: path.sep as '/' | '\\' };
     },
     detectClis: () => detectClis(),
     async prepareDesk(fullName, base, slug, branch) {
