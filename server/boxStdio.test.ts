@@ -59,14 +59,15 @@ describe.skipIf(!terminalsAvailable)("a box's bridge", () => {
 
     const env = Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined));
     first.send({ op: 'spawn', id: 't1', file: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], cwd: home, env, cols: 80, rows: 24, meta: { agentId: 'ada' } });
-    const spawned = await first.next(op('spawned', (m) => m.id === 't1'));
+    await first.next(op('spawned', (m) => m.id === 't1'));
     await first.end();
 
     // The office relinks: a new bridge finds the same keeper, still running the CLI.
     const second = link();
     const again = await second.next(op('ready'));
     expect(again.pid).toBe(ready.pid);
-    expect(again.ptys).toEqual([{ id: 't1', pid: spawned.pid, meta: { agentId: 'ada' }, exit: null }]);
+    // (Its pid: on Windows the keeper says 0 when it starts a CLI, and the real one later.)
+    expect(again.ptys).toEqual([{ id: 't1', pid: expect.any(Number), meta: { agentId: 'ada' }, exit: null }]);
     second.send({ op: 'rpc', rid: 1, method: 'info', args: [] });
     expect(await second.next(op('rpcReply', (m) => m.rid === 1))).toMatchObject({ ok: true, value: { keeperStale: false } });
 
