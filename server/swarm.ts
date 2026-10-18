@@ -6,7 +6,7 @@ import { createDemoTelegram } from './demo.ts';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
 import type { BoxConnection, Machine } from './machine.ts';
-import { agentBox, boxSync, boxSyncText, startPlace, syncRetryDue, validDestination, type BoxSyncState, type PersistedBox, type StartPlace } from './fleet.ts';
+import { agentBox, boxSync, boxSyncText, startPlace, syncRetryDue, validDestination, type BoxStep, type BoxSyncState, type PersistedBox, type StartPlace } from './fleet.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { ReconnectedCli } from './cliRunner.ts';
 import type { PrDetails } from './github.ts';
@@ -1154,9 +1154,10 @@ export class Swarm {
   }
 
   /**
-   * Keep every box on the office's own cubefarm: when the office runs another commit (or version) than a box, nothing
-   * new starts there, and once its agents have finished (a refused box: at once) it updates and its host restarts.
-   * Runs whenever a box changes and with the scheduler.
+   * Keep every box on the office's own cubefarm: when the office runs another commit (or version) than a box, it
+   * updates and its link is redialled at once, its agents carrying on (nothing new starts there meanwhile). Only when
+   * that changed its terminal keeper does it wait for its agents to finish, then restart the keeper. Runs whenever a
+   * box changes and with the scheduler.
    */
   private syncBoxes() {
     if (!this.scheduling) return;
@@ -1164,7 +1165,7 @@ export class Swarm {
     for (const b of this.state.boxes) {
       const conn = this.boxConns.get(b.id);
       const s = this.boxSyncs.get(b.id);
-      if (!conn || (s && s.state !== 'draining' && s.state !== 'failed')) continue; // updating or restarting
+      if (!conn || (s && s.state !== 'draining' && s.state !== 'failed')) continue; // updating, relinking or restarting
       const st = conn.state();
       if (!st.refused && !(st.status === 'online' && st.reported)) continue;
       const want = boxSync(office, st);
@@ -1177,18 +1178,21 @@ export class Swarm {
       }
       if (s?.target === want.target && s.state === 'failed' && !syncRetryDue(s, Date.now())) continue;
       const retry = s?.state === 'failed' && s.target === want.target ? s.error : undefined;
+      if (want.step !== 'restart') {
+        void this.moveBox(b, conn, want, retry);
+        continue;
+      }
       if (!s || s.target !== want.target || s.state === 'failed') {
         this.boxSyncs.set(b.id, { ...want, state: 'draining' });
-        console.log(`  box ${b.name}: moving to the office's ${want.target.slice(0, 7)} once nothing runs there`);
+        console.log(`  box ${b.name}: restarting its terminals on the office's ${want.target.slice(0, 7)} once nothing runs there`);
       }
-      // A refused box can't be reached: its agents can't finish there, so it moves now.
-      if (st.refused || this.boxBusy(b.id) === 0) void this.moveBox(b, conn, want, retry);
+      if (this.boxBusy(b.id) === 0) void this.moveBox(b, conn, want, retry);
       this.broadcast({ type: 'box', box: this.boxView(b) });
     }
   }
 
-  /** Update a drained box to the office's version and restart its host. lastError: a retry's, not toasted again. */
-  private async moveBox(b: PersistedBox, conn: BoxConnection, want: { target: string; step: 'update' | 'restart' }, lastError?: string) {
+  /** Update a box to the office's version and redial it, or restart its keeper (once drained). lastError: a retry's, not toasted again. */
+  private async moveBox(b: PersistedBox, conn: BoxConnection, want: { target: string; step: BoxStep }, lastError?: string) {
     const set = (state: BoxSyncState['state'], error?: string) => {
       if (this.boxConns.get(b.id) !== conn) return;
       this.boxSyncs.set(b.id, { ...want, state, error, at: state === 'failed' ? Date.now() : undefined });
@@ -1200,15 +1204,24 @@ export class Swarm {
         const r = await conn.update(want.target);
         if (!r.ok) throw new Error(r.error ?? 'the update failed');
       }
-      set('restarting');
-      await conn.restart();
+      if (want.step === 'restart') {
+        set('restarting');
+        await conn.restart();
+      } else {
+        set('relinking');
+        await conn.relink();
+      }
+      // A relink may find its keeper's code changed too: that restart is the next move (syncBoxes).
       const still = boxSync({ version: VERSION, commit: this.officeHead }, conn.state());
-      if (still?.target === want.target) throw new Error(`it still runs ${conn.state().info?.commit?.slice(0, 7) ?? `v${conn.state().info?.version ?? '?'}`}`);
+      if (still?.target === want.target && (want.step === 'restart' || still.step !== 'restart')) {
+        throw new Error(still.step === 'restart' ? 'its terminal keeper still runs older code' : `it still runs ${conn.state().info?.commit?.slice(0, 7) ?? `v${conn.state().info?.version ?? '?'}`}`);
+      }
       if (this.boxConns.get(b.id) !== conn) return;
       this.boxSyncs.delete(b.id);
       if (this.state.boxes.includes(b)) this.broadcast({ type: 'box', box: this.boxView(b) });
-      console.log(`  box ${b.name}: now on the office's ${want.target.slice(0, 7)}`);
-      if (this.scheduling) setTimeout(() => this.schedule(), 200); // agents waiting for it can start
+      console.log(`  box ${b.name}: ${still ? 'its link' : 'now'} on the office's ${want.target.slice(0, 7)}`);
+      if (still) this.syncBoxes();
+      else if (this.scheduling) setTimeout(() => this.schedule(), 200); // agents waiting for it can start
     } catch (err) {
       const why = (err as Error).message;
       console.warn(`  box ${b.name}: couldn't move to the office's ${want.target.slice(0, 7)}: ${why}`);

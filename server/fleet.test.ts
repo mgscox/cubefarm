@@ -137,9 +137,18 @@ describe('following the office (#94)', () => {
     expect(boxSync(office, { info: info({ commit: office.commit }), refused: false })).toBeNull();
   });
 
-  it("restarts a box run by npx on another version: its next link runs the office's", () => {
-    expect(boxSync(office, { info: info({ commit: null, version: '0.3.9' }), refused: false })).toEqual({ target: '0.4.0', step: 'restart' });
+  it("redials a box run by npx on another version: its next link runs the office's", () => {
+    expect(boxSync(office, { info: info({ commit: null, version: '0.3.9' }), refused: false })).toEqual({ target: '0.4.0', step: 'relink' });
     expect(boxSync(office, { info: info({ commit: null }), refused: false })).toBeNull();
+  });
+
+  it('restarts its keeper only once the link runs the office\'s code and says the keeper is older', () => {
+    expect(boxSync(office, { info: info({ commit: office.commit, keeperStale: true }), refused: false })).toEqual({ target: office.commit, step: 'restart' });
+    expect(boxSync(office, { info: info({ commit: office.commit, keeperStale: false }), refused: false })).toBeNull();
+    expect(boxSync(office, { info: info({ commit: null, keeperStale: true }), refused: false })).toEqual({ target: '0.4.0', step: 'restart' });
+    // Code to move first: the update, with the agents carrying on; the keeper is looked at by the link after it.
+    expect(boxSync(office, { info: info({ commit: 'b'.repeat(40), keeperStale: true }), refused: false })).toEqual({ target: office.commit, step: 'update' });
+    expect(boxSync(office, { info: info({ commit: null, version: '0.3.9', keeperStale: true }), refused: false })).toEqual({ target: '0.4.0', step: 'relink' });
   });
 
   it("asks a box that doesn't say (from before #94) to update, and a refused one too", () => {
@@ -153,7 +162,7 @@ describe('following the office (#94)', () => {
     expect(boxSync(npmOffice, { info: info({ version: '0.3.18' }), refused: false })).toEqual({ target: '0.3.19', step: 'update' });
     expect(boxSync(npmOffice, { info: info({ version: '0.3.19' }), refused: false })).toEqual({ target: '0.3.19', step: 'update' }); // from before #94: same version, maybe not the same code
     expect(boxSync(npmOffice, { info: info({ commit: null, version: '0.3.19' }), refused: false })).toBeNull();
-    expect(boxSync(npmOffice, { info: info({ commit: null, version: '0.3.18' }), refused: false })).toEqual({ target: '0.3.19', step: 'restart' });
+    expect(boxSync(npmOffice, { info: info({ commit: null, version: '0.3.18' }), refused: false })).toEqual({ target: '0.3.19', step: 'relink' });
     expect(boxSync(npmOffice, { info: info({ commit: 'b'.repeat(40), version: '0.3.19' }), refused: false })).toBeNull();
   });
 
@@ -183,11 +192,12 @@ describe('following the office (#94)', () => {
 
   it("says on the box's card where it stands", () => {
     const target = 'c0ffee0'.padEnd(40, '0');
-    expect(boxSyncText({ target, step: 'update', state: 'draining' }, 2)).toBe("Moving to the office's c0ffee0 once its 2 agents finish: nothing new starts there.");
-    expect(boxSyncText({ target, step: 'update', state: 'draining' }, 1)).toMatch(/once its 1 agent finishes/);
-    expect(boxSyncText({ target, step: 'update', state: 'updating' }, 0)).toBe("Updating to the office's c0ffee0…");
-    expect(boxSyncText({ target: '0.4.0', step: 'restart', state: 'restarting' }, 0)).toBe('Restarting on v0.4.0…');
-    expect(boxSyncText({ target: '0.4.0', step: 'update', state: 'updating' }, 0)).toBe("Updating to the office's v0.4.0…");
+    expect(boxSyncText({ target, step: 'update', state: 'updating' }, 2)).toBe("Updating to the office's c0ffee0: its agents carry on…");
+    expect(boxSyncText({ target, step: 'update', state: 'relinking' }, 2)).toBe("Reconnecting on the office's c0ffee0…");
+    expect(boxSyncText({ target, step: 'restart', state: 'draining' }, 2)).toBe("Restarting its terminals on the office's c0ffee0 once its 2 agents finish: nothing new starts there.");
+    expect(boxSyncText({ target, step: 'restart', state: 'draining' }, 1)).toMatch(/once its 1 agent finishes/);
+    expect(boxSyncText({ target: '0.4.0', step: 'restart', state: 'restarting' }, 0)).toBe('Restarting its terminals on v0.4.0…');
+    expect(boxSyncText({ target: '0.4.0', step: 'update', state: 'updating' }, 0)).toBe("Updating to the office's v0.4.0: its agents carry on…");
     expect(boxSyncText({ target, step: 'update', state: 'failed', error: 'no network' }, 0)).toBe("Couldn't move to the office's c0ffee0: no network. Check again tries now; it also tries again in 30 min.");
     expect(boxSyncText({ target, step: 'update', state: 'failed', error: updateFailure('buildbox', 'cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>', 1) }, 0)).toMatch(/then Check again$/);
   });

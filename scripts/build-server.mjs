@@ -10,8 +10,8 @@ const out = path.join(root, 'dist-server');
 
 fs.rmSync(out, { recursive: true, force: true });
 await build({
-  // The terminal keeper (ptyHost) runs as a process of its own, started from the server's folder; on a box it loads
-  // boxOps by path, and `cubefarm box` runs boxStdio.
+  // The terminal keeper (ptyHost) runs as a process of its own, started from the server's folder; `cubefarm box` runs
+  // boxStdio, which loads boxOps by path.
   entryPoints: ['index.ts', 'ptyHost.ts', 'boxOps.ts', 'boxStdio.ts'].map((f) => path.join(root, 'server', f)),
   outdir: out,
   bundle: true,
