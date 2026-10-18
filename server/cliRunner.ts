@@ -498,7 +498,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       setBoot(null);
     }
     if (cli === 'claude') {
-      const id = resumableSession(b, host.hasFile);
+      const id = resumableSession(b, (file) => host.hasFile(file));
       if (id) conversation.found(id);
     }
     switch (event) {
