@@ -4883,7 +4883,7 @@ export class Swarm {
   }
 
   /** Shared routing validation; parking has already reserved and checked its linked agents. */
-  private async planIssueRoute(x: { floor: number; number: number; specialty?: string; depends_on?: number[] }, inProgress?: boolean) {
+  private async planIssueRoute(x: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean }, inProgress?: boolean) {
     const repo = this.floorRepo(x.floor);
     const issues = this.repoRt.get(repo.id)?.issues ?? [];
     const asked = [Number(x.number), ...(x.depends_on ?? []).map(Number)].filter((n) => !issues.some((i) => i.number === n));
@@ -4897,6 +4897,7 @@ export class Swarm {
       number: Number(x.number),
       specialty: x.specialty,
       dependsOn: x.depends_on,
+      readyForHuman: x.ready_for_human,
       issues,
       closed: (n) => states.get(n) === 'CLOSED',
       inProgress: inProgress ?? this.issueTaken(repo, Number(x.number)),
@@ -4904,8 +4905,8 @@ export class Swarm {
     });
   }
 
-  /** Change an open issue's specialty and/or dependencies (see planRoute for what is refused). */
-  private async routeIssue(x: { floor: number; number: number; specialty?: string; depends_on?: number[] }) {
+  /** Change an open issue's specialty, dependencies and/or ready-for-human gate (see planRoute for what is refused). */
+  private async routeIssue(x: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean }) {
     const repo = this.floorRepo(x.floor);
     const check = () => {
       if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
@@ -4916,6 +4917,16 @@ export class Swarm {
     if (plan.body !== null || plan.addLabels.length || plan.removeLabels.length) {
       await this.backend.editIssue(repo.fullName, Number(x.number), { body: plan.body ?? undefined, addLabels: plan.addLabels, removeLabels: plan.removeLabels });
       await this.syncRepo(repo.id); // the scheduler sees the new routing right away
+      // A sync already in flight may predate the edit: apply it to the cache too (idempotent).
+      const rt = this.repoRt.get(repo.id);
+      if (rt) {
+        rt.issues = rt.issues.map((i) => i.number === Number(x.number) ? {
+          ...i,
+          body: plan.body ?? i.body,
+          labels: [...i.labels.filter((l) => !plan.removeLabels.includes(l)), ...plan.addLabels.filter((l) => !i.labels.includes(l))],
+        } : i);
+        this.emitRepo(repo);
+      }
     }
     return plan.summary;
   }
