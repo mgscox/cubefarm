@@ -11,6 +11,7 @@ import { ceoSystemPrompt, type OfficeTools } from './ceo.ts';
 import { researcherSystemPrompt } from './research.ts';
 import { ONE_TURN } from './clis.ts';
 import { QA_RESUME_PROMPT } from './qaRetry.ts';
+import { AGENT_COMMENT_MARKER } from '../shared/issues.ts';
 import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRunner.ts';
 
 // A Swarm that is never init()ed: no state file, scheduler timers or real sessions.
@@ -22,7 +23,7 @@ type QaRec = QaView & { issueNumber?: number | null; sessionFailures: number; re
 interface Internals {
   backend: Backend;
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[] };
-  repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string }>;
+  repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string; issuesFetchedAt?: number }>;
   agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null; shots?: unknown[]; qaResume?: unknown }>;
   pausedUntil: number;
   readyIssues(repo: Repo): { issue: IssueInfo }[];
@@ -1567,7 +1568,8 @@ describe('a developer session that ends without a PR after pushing commits', () 
     setIssues(issue(66));
     const message = vi.spyOn(swarm, 'message');
     await emptyEnding();
-    expect(ready()).toEqual([66]);
+    expect(ready()).toEqual([]);
+    expect(s.startIssueWork(repo)).toBe(false);
     expect(repo.noWorkEndings?.[0].count).toBe(1);
     await emptyEnding();
     repo.noWorkEndings = JSON.parse(JSON.stringify(repo.noWorkEndings));
@@ -1579,6 +1581,50 @@ describe('a developer session that ends without a PR after pushing commits', () 
     expect(status.floors[0].capacity.issuesReadyToStart).toBe(0);
     expect(s.repoView(repo)).toMatchObject({ issues: [{ stalled: 'ended twice with no work' }] });
     expect(f.state.messages.at(-1)?.text).toContain('ended twice with no work');
+  });
+
+  it('waits for a later successful issue sync, then prefers different ready work', async () => {
+    setIssues(issue(66));
+    await emptyEnding();
+    expect(ready()).toEqual([]);
+    vi.mocked(f.syncRepo).mockRestore();
+    const list = vi.spyOn(backend, 'listIssues').mockRejectedValue(new Error('offline'));
+    vi.spyOn(backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    await vi.advanceTimersByTimeAsync(1);
+    await f.syncRepo(repo.id);
+    expect(ready()).toEqual([]);
+    list.mockResolvedValue([issue(66), issue(67)]);
+    await f.syncRepo(repo.id);
+    expect(ready()).toEqual([67, 66]);
+    expect(s.startIssueWork(repo)).toBe(false); // mocked runTask does not occupy a desk
+    expect(runTask).toHaveBeenLastCalledWith(ada(), repo, expect.objectContaining({ number: 67 }), undefined);
+  });
+
+  it('keeps agent owner-account comments from resetting the stall across real refreshes', async () => {
+    vi.mocked(f.syncRepo).mockRestore();
+    const nodes: { author: { login: string }; createdAt: string; body: string }[] = [];
+    const query = vi.fn().mockResolvedValue([{ ...issue(66), labels: [] }]);
+    const api = vi.fn().mockImplementation(async () => ({ data: { repository: { i66: {
+      blockedBy: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+      subIssuesSummary: { total: 0, completed: 0 }, comments: { nodes: [...nodes] },
+    } } } }));
+    vi.spyOn(backend, 'listIssues').mockImplementation(() => listIssues(repo.fullName, query, api));
+    vi.spyOn(backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    await f.syncRepo(repo.id);
+    for (let n = 0; n < 2; n++) {
+      nodes.push({ author: { login: 'demo-co' }, createdAt: `2026-10-18T12:0${n}:00Z`, body: `Blocked. ${AGENT_COMMENT_MARKER}` });
+      await emptyEnding();
+      expect(sessions.at(-1)?.opts.systemAppend).toContain(AGENT_COMMENT_MARKER);
+      expect(repo.noWorkEndings?.[0].count).toBe(n + 1);
+      await vi.advanceTimersByTimeAsync(1);
+      await f.syncRepo(repo.id);
+    }
+    expect(s.repoView(repo)).toMatchObject({ issues: [{ stalled: 'ended twice with no work' }] });
+    expect(s.startIssueWork(repo)).toBe(false);
+    nodes.push({ author: { login: 'demo-co' }, createdAt: '2026-10-18T12:02:00Z', body: 'The dependency is ready now.' });
+    await f.syncRepo(repo.id);
+    expect(repo.noWorkEndings).toEqual([]);
+    expect(ready()).toEqual([66]);
   });
 
   it('a manual start clears the consecutive no-work count', async () => {
@@ -1688,6 +1734,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
     expect(ready()).toEqual([]);
     expect(s.startIssueWork(repo)).toBe(false);
     setIssues(issue(66));
+    s.repoRt.get(repo.id)!.issuesFetchedAt = Date.now() + 1;
     expect(ready()).toEqual([66]);
   });
 

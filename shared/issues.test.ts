@@ -4,6 +4,18 @@ import { blockers, forHuman, holdUps, issueBlockers, issueWaitReason, issueSpeci
 const open = (...n: number[]) => new Set(n);
 
 describe('merged dependencies', () => {
+  it('normalizes same-repo URLs and keeps cross-repo URLs distinct in mixed lists', () => {
+    const body = 'Depends on #1, https://github.com/demo/repo/issues/2 and https://github.com/other/repo/issues/1 & #3';
+    expect(issueBlockers({ body, url: 'https://github.com/demo/repo/issues/4' }, open(1, 2, 3))).toEqual([1, 3, 2, 'other/repo#1']);
+    expect(blockers(body, open(1, 3))).toEqual([1, 3]);
+  });
+
+  it('waits for same-repo and cross-repo URLs and releases resolved closed URLs', () => {
+    const body = 'Depends on https://github.com/demo/repo/issues/2 and https://github.com/other/repo/issues/2';
+    const issue = { body, url: 'https://github.com/demo/repo/issues/4' };
+    expect(issueBlockers(issue, open(2))).toEqual([2, 'other/repo#2']);
+    expect(issueBlockers({ ...issue, bodyBlockers: [{ repo: 'demo/repo', number: 2, state: 'CLOSED' }, { repo: 'other/repo', number: 2, state: 'CLOSED' }] }, open())).toEqual([]);
+  });
   it('reads native-only blockers even outside the fetched open backlog', () => {
     expect(issueBlockers({ body: '', nativeBlockers: [{ number: 1, state: 'OPEN' }] }, open())).toEqual([1]);
   });
@@ -130,6 +142,10 @@ describe('setDependsOn', () => {
   it('puts one Depends on line at the top', () => {
     expect(setDependsOn('Build it.', [3, 4])).toBe('Depends on #3, #4\n\nBuild it.');
     expect(setDependsOn('', [3])).toBe('Depends on #3');
+  });
+
+  it('replaces URL dependencies as well as short references', () => {
+    expect(setDependsOn('Depends on #1 and https://github.com/other/repo/issues/2\n\nBrief', [3])).toBe('Depends on #3\n\nBrief');
   });
 
   it('replaces the old statements, wherever they were', () => {

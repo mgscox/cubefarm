@@ -22,7 +22,7 @@ import { fixGoesTo, prepFailure, prepHeld, PREP_HOLD_MS } from './handOut.ts';
 import { HttpError } from './httpError.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
-import { issueSessionWork, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
+import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
 import { pickRequestedStart, retainRequestedStarts } from './requestedStarts.ts';
 import { followKeptCli, resumeNote, resumesAfterRestart } from './restartRecovery.ts';
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
@@ -31,7 +31,7 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { cliLabel, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { issueBlockers, issueParent, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, issueBlockers, issueParent, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
 import { effectiveModel } from '../shared/models.ts';
 import { CEO_ID, RESEARCHER_ID } from '../shared/types.ts';
 import { isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchFiledAt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
@@ -224,6 +224,7 @@ interface AgentRuntime {
 }
 
 interface RepoRuntime {
+  issuesFetchedAt?: number;
   issues: IssueInfo[];
   pulls: PullInfo[];
   lastSync: number | null;
@@ -1738,7 +1739,10 @@ export class Swarm {
       const started = Date.now();
       const [issues, pullResult] = await Promise.allSettled([this.backend.listIssues(repo.fullName), this.backend.listPulls(repo.fullName)]);
       Object.assign(rt, applyRepoRefresh(rt, issues, pullResult, Date.now()));
-      if (issues.status === 'fulfilled') this.setNoWorkEndings(repo, retainNoWork(repo.noWorkEndings ?? [], issues.value));
+      if (issues.status === 'fulfilled') {
+        rt.issuesFetchedAt = started;
+        this.setNoWorkEndings(repo, retainNoWork(repo.noWorkEndings ?? [], issues.value));
+      }
       const requests = retainRequestedStarts(repo.requestedStarts, issues.status === 'fulfilled' ? issues.value : null, pullResult.status === 'fulfilled' ? pullResult.value.pulls : null);
       if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests);
       if (pullResult.status === 'rejected') return;
@@ -2120,7 +2124,7 @@ export class Swarm {
     if (forHuman(issue.labels)) {
       throw new HttpError(409, `#${issueNumber} is labelled ${READY_FOR_HUMAN}: an agent can't complete it. Remove the label to hand it to a developer.`);
     }
-    if (!explicit && issueWaitReason(this.workIssue(repo, issue), new Set(this.repoRt.get(repo.id)!.issues.map((i) => i.number)))) throw new HttpError(409, `#${issueNumber} is not ready for automatic work`);
+    if (!explicit && (issueWaitReason(this.workIssue(repo, issue), new Set(this.repoRt.get(repo.id)!.issues.map((i) => i.number))) || noWorkCoolingDown(repo.noWorkEndings?.find((r) => r.issueNumber === issueNumber), this.repoRt.get(repo.id)!.issuesFetchedAt))) throw new HttpError(409, `#${issueNumber} is not ready for automatic work`);
     const holder = this.state.agents.find((x) => x.id !== a.id && x.repoId === repo.id && x.issueNumber === issueNumber && BUSY.includes(x.status));
     if (holder) throw new HttpError(409, `${holder.name} is already working on #${issueNumber}`);
     if (explicit) {
@@ -2411,7 +2415,7 @@ export class Swarm {
       {
         cwd,
         prompt,
-        systemAppend,
+        systemAppend: `${systemAppend}\nAppend ${AGENT_COMMENT_MARKER} to every GitHub issue comment you post, so the office can distinguish it from a human update.`,
         model: this.modelFor(a, how.cli),
         effort: a.effort || this.state.settings.defaultEffort,
         browserTesting: repo.browserTesting,
@@ -2554,7 +2558,7 @@ export class Swarm {
       const reason = issue && issueWaitReason(issue, new Set(issues.map((i) => i.number)));
       await released;
       if (unavailable()) return;
-      if (issue) this.setNoWorkEndings(repo, recordNoWork(repo.noWorkEndings ?? [], issue));
+      if (issue) this.setNoWorkEndings(repo, recordNoWork(repo.noWorkEndings ?? [], issue, Date.now()));
       if (!result.ok) { // a crash still counts as an empty ending, but shows as an error rather than a quiet hand-back
         this.issueFailed(repo, a.issueNumber);
         return this.fail(a, result, `#${a.issueNumber}`);
@@ -3225,11 +3229,12 @@ export class Swarm {
       .filter(
         (i) =>
           issueWaitReason(this.workIssue(repo, i), open) === null &&
+          !noWorkCoolingDown(repo.noWorkEndings?.find((r) => r.issueNumber === i.number), this.repoRt.get(repo.id)!.issuesFetchedAt) &&
           !this.issueTaken(repo, i.number) &&
           (this.issueFailures.get(`${repo.id}#${i.number}`) ?? 0) < MAX_ISSUE_FAILURES,
       )
-      .map((issue) => ({ issue, want: issueSpecialty(issue.labels), ...weight.get(issue.number)! }))
-      .sort((x, y) => y.chain - x.chain || y.waiting - x.waiting || x.issue.number - y.issue.number);
+      .map((issue) => ({ issue, want: issueSpecialty(issue.labels), empty: repo.noWorkEndings?.find((r) => r.issueNumber === issue.number)?.count ?? 0, ...weight.get(issue.number)! }))
+      .sort((x, y) => x.empty - y.empty || y.chain - x.chain || y.waiting - x.waiting || x.issue.number - y.issue.number);
   }
 
   /**
@@ -3324,7 +3329,7 @@ export class Swarm {
     if (ready.length === 0) return false;
     const fits = (a: PersistedAgent, want: string) => a.specialty.toLowerCase() === want;
     // Of the issues holding up the most, take one a free specialist fits.
-    const pick = ready.find((r) => r.chain === ready[0].chain && free.some((a) => fits(a, r.want))) ?? ready[0];
+    const pick = ready.find((r) => r.empty === ready[0].empty && r.chain === ready[0].chain && free.some((a) => fits(a, r.want))) ?? ready[0];
     const agent = this.pickDev(repo, free, (a) => fits(a, pick.want))!;
     // assign() flips the agent to 'preparing' synchronously, so the next pass sees it as busy.
     void this.assignIssue(agent.id, pick.issue.number, undefined, false).catch((err) => console.warn('auto-assign failed', err));

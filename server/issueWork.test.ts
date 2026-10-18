@@ -1,11 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { issueSessionWork, recordNoWork, retainNoWork } from './issueWork.ts';
+import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork } from './issueWork.ts';
 import { deskAhead } from './workspace.ts';
 import type { IssueInfo } from '../shared/types.ts';
 
 const issue: IssueInfo = { number: 51, body: 'Brief', labels: ['b', 'a'], title: 'Work', url: '', createdAt: '', ownerCommentAt: '2026-10-08T01:00:00Z' };
 
 describe('no-work reset decisions', () => {
+  it('requires a successful issue fetch that started after the empty ending, including after persistence', () => {
+    const [record] = JSON.parse(JSON.stringify(recordNoWork([], issue, 100)));
+    expect(noWorkCoolingDown(record)).toBe(true);
+    expect(noWorkCoolingDown(record, 99)).toBe(true);
+    expect(noWorkCoolingDown(record, 100)).toBe(true);
+    expect(noWorkCoolingDown(record, 101)).toBe(false);
+  });
   it('ignores label ordering, old comments and repeated poll data', () => {
     const records = recordNoWork(recordNoWork([], issue), issue);
     expect(retainNoWork(records, [{ ...issue, labels: ['a', 'b'], ownerCommentAt: '2026-10-07T01:00:00Z' }])).toEqual(records);

@@ -15,12 +15,17 @@ export function retainNoWork(records: NoWorkEnding[], issues: IssueInfo[]): NoWo
   });
 }
 
-export function recordNoWork(records: NoWorkEnding[], issue: IssueInfo): NoWorkEnding[] {
+export function recordNoWork(records: NoWorkEnding[], issue: IssueInfo, endedAt?: number): NoWorkEnding[] {
   const previous = records.find((r) => r.issueNumber === issue.number);
   return [...records.filter((r) => r.issueNumber !== issue.number), {
     issueNumber: issue.number, count: previous && unchangedWork(previous, issue) ? previous.count + 1 : 1,
     body: issue.body, labels: [...issue.labels], ownerCommentAt: issue.ownerCommentAt,
+    retryAfterSync: endedAt,
   }];
+}
+
+export function noWorkCoolingDown(record: NoWorkEnding | undefined, issuesFetchedAt: number = 0): boolean {
+  return record?.retryAfterSync !== undefined && issuesFetchedAt <= record.retryAfterSync;
 }
 
 /** A known session baseline takes precedence over commits inherited from earlier sessions. */
