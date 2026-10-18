@@ -40,12 +40,17 @@ function useTerminalTexture(agent: Agent, anchor: React.RefObject<THREE.Object3D
       useStore.subscribe((s, prev) => {
         if (s.logs[agent.id] !== prev.logs[agent.id]) dirty.current = true;
         if (s.screens[agent.id] !== prev.screens[agent.id]) {
+          shot.current = null;
+          dirty.current = true;
+          const at = s.screens[agent.id];
+          if (!at) return;
           const img = new Image();
           img.onload = () => {
+            if (useStore.getState().screens[agent.id] !== at) return;
             shot.current = img;
             dirty.current = true;
           };
-          img.src = `/api/agents/${agent.id}/screen?t=${s.screens[agent.id]}`;
+          img.src = `/api/agents/${agent.id}/screen?t=${at}`;
         }
       }),
     [agent.id],
@@ -55,6 +60,7 @@ function useTerminalTexture(agent: Agent, anchor: React.RefObject<THREE.Object3D
     if (!at) return;
     const img = new Image();
     img.onload = () => {
+      if (useStore.getState().screens[agent.id] !== at) return;
       shot.current = img;
       dirty.current = true;
     };
