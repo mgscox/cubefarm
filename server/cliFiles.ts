@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { HOME_DIR } from './config.ts';
 import { projectEnv } from './projectEnv.ts';
-import { cliLabel, CODEX_HOOK_SOURCE, commandFor, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE } from './clis.ts';
+import { cliLabel, cliSearchLocations, CODEX_HOOK_SOURCE, commandFor, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE } from './clis.ts';
 import { newScreenshots } from './agentRunner.ts';
 import type { CliPlan } from './machine.ts';
 
@@ -57,7 +57,7 @@ export interface CliLaunch {
 export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boolean }): CliLaunch {
   const label = cliLabel(plan.cli);
   const cmd = commandFor(plan.cli);
-  if (!cmd) throw new Error(`Could not start ${label}: ${label} isn't installed (no "${plan.cli}" on PATH).`);
+  if (!cmd) throw new Error(`Could not start ${label}: ${label} isn't installed (no "${plan.cli}" on ${cliSearchLocations(plan.cli)}).`);
 
   const hookUrl = `${hooks.url}/api/hooks/${plan.token}`;
   const dir = path.join(SESSIONS_DIR, plan.token);

@@ -37,6 +37,10 @@ export interface BoxInfo extends BoxLayout {
 /** The box an agent works on: their own, else their floor's. '' is the office's own machine. */
 export const agentBox = (own: string | null | undefined, floor: string | undefined) => own ?? floor ?? '';
 
+export const BOX_CLI_CHECK_MS = 5 * 60_000;
+/** While an agent waits for a missing CLI, look again at most once per interval. */
+export const boxCliCheckDue = (last: number | undefined, now: number) => last === undefined || now - last >= BOX_CLI_CHECK_MS;
+
 /** wait: the box to wait for; lacks: the coding agent it hasn't got (else it's offline). */
 export type StartPlace = { box: string; fellBack?: string } | { wait: string; lacks?: string };
 
@@ -181,7 +185,7 @@ export interface BoxSyncState {
 /** How long a box that failed to move waits before it tries the same target again by itself. */
 export const BOX_SYNC_RETRY_MS = 30 * 60_000;
 
-/** A failed move is tried again once BOX_SYNC_RETRY_MS has passed (Check again on the box's card clears it sooner). */
+/** A failed move is tried again once BOX_SYNC_RETRY_MS has passed (Look again on the box's card clears it sooner). */
 export const syncRetryDue = (s: BoxSyncState, now: number) => s.state === 'failed' && now - (s.at ?? now) >= BOX_SYNC_RETRY_MS;
 
 /**
@@ -190,7 +194,7 @@ export const syncRetryDue = (s: BoxSyncState, now: number) => s.state === 'faile
  */
 export function updateFailure(box: string, said: string | undefined, code: number | null): string {
   if (said && /an office starts this over ssh/.test(said)) {
-    return `${box}'s cubefarm predates self-update: run git pull, npm install and node scripts/build-server.mjs in its cubefarm folder once, then Check again`;
+    return `${box}'s cubefarm predates self-update: run git pull, npm install and node scripts/build-server.mjs in its cubefarm folder once, then Look again`;
   }
   return said ?? `ssh exited (${code})`;
 }
@@ -205,7 +209,7 @@ export function boxSyncText(s: BoxSyncState, busy: number): string {
   if (s.state === 'draining' && busy > 0) return `Restarting its terminals on the office's ${t} once its ${busy} agent${busy === 1 ? ' finishes' : 's finish'}: nothing new starts there.`;
   if (s.state !== 'failed') return `Restarting its terminals on ${t}…`;
   const why = s.error ?? 'unknown error';
-  return `Couldn't move to the office's ${t}: ${why}${/Check again/.test(why) ? '' : '. Check again tries now; it also tries again in 30 min.'}`;
+  return `Couldn't move to the office's ${t}: ${why}${/Look again/.test(why) ? '' : '. Look again tries now; it also tries again in 30 min.'}`;
 }
 
 const repoFolder = (fullName: string) => fullName.replace('/', '__');

@@ -204,7 +204,12 @@ Only when an update changed the host's own code (the bridge finds the host's rep
 one on disk: `keeperStale` in its info) does the box drain: nothing new starts there while its agents finish, then the
 office shuts the host down and redials it (its idle CLIs stop). A host from before the bridge ran the box's methods
 counts as changed, so that happens once. A failure shows on the box's card and is tried again after 30 minutes, or at
-once on Check again (`fleet.syncRetryDue`). Rules: `fleet.boxSync`; flow: `Swarm.syncBoxes`.
+once on Look again (`fleet.syncRetryDue`). Rules: `fleet.boxSync`; flow: `Swarm.syncBoxes`.
+
+CLI detection and launch share `commandFor`: after PATH, they search `~/.local/bin`, `~/.bun/bin` and
+`~/.npm-global/bin`, with `~/.opencode/bin` first for OpenCode. While a free agent waits for a missing CLI,
+the scheduler asks the box for a fresh report at most every five minutes. Look again refreshes it immediately;
+both use the existing link and resume scheduling after the report. Wait messages name the searched folders.
 
 ## Phases
 
