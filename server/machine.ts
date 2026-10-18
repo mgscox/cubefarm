@@ -3,6 +3,7 @@ import type { Pty } from './ptyClient.ts';
 import type { SessionCallbacks, SessionHandle, SessionOptions } from './agentRunner.ts';
 import type { DeskBase } from './workspace.ts';
 import type { ReconnectedCli } from './cliRunner.ts';
+import type { RecoveredTurn } from './cliTranscript.ts';
 import type { ClaudeTurn } from './clis.ts';
 import type { BoxInfo, BoxUpdateResult, PersistedBox } from './fleet.ts';
 import type { AgentTerminal } from './terminal.ts';
@@ -104,6 +105,8 @@ export interface CliHost {
   hasFile(file: string): boolean;
   /** Where a Claude Code conversation stands by its transcript here (see clis.readClaudeTurn); null when it isn't there. */
   claudeTurn(cwd: string, sessionId: string): ClaudeTurn | null | Promise<ClaudeTurn | null>;
+  /** Recover a turn from transcripts on this machine, even when its session id was never reported. */
+  recoverTurn(cwd: string, cli: AgentCli, sessionId: string | null, since: number): RecoveredTurn | null | Promise<RecoveredTurn | null>;
   /** Browser screenshots new in a session's browser folder (dir: the session's), each then added to seen (Codex and OpenCode don't report tool results). */
   newShots(dir: string, seen: Set<string>, now: number): (Shot & { name: string })[] | Promise<(Shot & { name: string })[]>;
   /** The screenshot a Playwright result names (relative to the CLI's folder). */

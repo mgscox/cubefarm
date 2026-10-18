@@ -41,7 +41,7 @@ describe('startCliSession on a host', () => {
   const terminal = () => ({ cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), screen: () => '' }) as unknown as AgentTerminal;
   const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
   const host = (prepare: CliHost['prepare']): CliHost => ({
-    prepare, hasFile: () => false, claudeTurn: () => null, newShots: () => [], savedShot: () => null, codexThread: async () => undefined,
+    prepare, recoverTurn: () => null, hasFile: () => false, claudeTurn: () => null, newShots: () => [], savedShot: () => null, codexThread: async () => undefined,
     removeDir: vi.fn(), reconnect: async () => [], adopt: () => pty, discard: vi.fn(), hooksReady: vi.fn(), leave: vi.fn(),
     protect: () => ({ pids: [], markers: [] }),
   });
@@ -215,7 +215,7 @@ describe('startCliSession on a host', () => {
       vi.clearAllTimers(); // the old office is gone; the keeper and CLI keep running
       now = turn({ bytes: 9000, ended: true, mark: 'msg_2', text: 'Opened the PR' });
       const term = { ...terminal(), screen: () => '❯' } as unknown as AgentTerminal;
-      const h = { ...host(vi.fn()), claudeTurn: async () => now, reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+      const h = { ...host(vi.fn()), claudeTurn: async () => now, recoverTurn: async () => now, reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
       expect(await reconnectClis(() => term, h)).toEqual([{ agentId: 'ada', cli: 'claude', resumeId: 'sess-1', busy: true }]);
       const cb = claudeCallbacks();
       startCliSession({ ...opts, terminal: term, reattach: true, keepAlive: true, resumeSessionId: 'sess-1' }, cb, h);
@@ -226,6 +226,70 @@ describe('startCliSession on a host', () => {
       term.releaseIdle?.();
     });
   }
+
+  for (const cli of ['claude', 'codex'] as const) for (const hookless of [false, true]) for (const resumeId of [null, 'sess-1']) {
+    it(`collects ${cli} completed during downtime (hookless=${hookless}, resumeId=${resumeId}) through two restarts`, async () => {
+      let meta: unknown = { agentId: 'ada', cli, token: 'restart-token', dir: 'sessions/t', busy: true, hookless, resumeId };
+      const result = turn({ bytes: 9000, ended: true, mark: 'reply-1', text: 'Opened https://github.com/o/r/pull/7' });
+      const recoverTurn = vi.fn(async () => ({ ...result, sessionId: 'sess-1' }));
+      const h = { ...host(vi.fn()), claudeTurn: async (_cwd: string, id: string) => id === resumeId ? result : null, recoverTurn,
+        reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }],
+        adopt: () => ({ ...pty, setMeta: (next: unknown) => { meta = next; } }),
+      };
+      let term1 = terminal();
+      await reconnectClis(() => term1, h);
+      vi.clearAllTimers(); // restart again before the swarm has attached the session
+      term1 = terminal();
+      expect((await reconnectClis(() => term1, h))[0].busy).toBe(true);
+      const cb1 = claudeCallbacks();
+      startCliSession({ ...opts, cli, terminal: term1, reattach: true, keepAlive: true }, cb1, h);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(cb1.turn).toHaveBeenCalledExactlyOnceWith(result.text);
+      expect(cb1.finished).not.toHaveBeenCalled();
+      vi.clearAllTimers(); // restart during finish grace
+      const term2 = terminal();
+      expect((await reconnectClis(() => term2, h))[0].busy).toBe(true);
+      const cb2 = claudeCallbacks();
+      startCliSession({ ...opts, cli, terminal: term2, reattach: true, keepAlive: true }, cb2, h);
+      await vi.advanceTimersByTimeAsync(8000);
+      expect(cb2.turn).not.toHaveBeenCalled();
+      expect(cb2.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: result.text, turns: 1 }));
+      expect(meta).toMatchObject({ busy: false, transcriptPending: false });
+      const term3 = terminal();
+      expect((await reconnectClis(() => term3, h))[0].busy).toBe(false);
+      term3.releaseIdle?.();
+      term2.releaseIdle?.();
+    });
+  }
+
+  it('retains a hooked reply collected just before restart without delivering its queued Stop again', async () => {
+    const first = claude(() => '❯', async () => null, { agentId: 'ada', keepAlive: true });
+    first.hook({ hook_event_name: 'Stop', last_assistant_message: 'Done' });
+    const meta = vi.mocked(pty.setMeta).mock.calls.at(-1)![0];
+    vi.clearAllTimers();
+    const term = terminal();
+    const h = { ...host(vi.fn()), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+    await reconnectClis(() => term, h);
+    const cb = claudeCallbacks();
+    startCliSession({ ...opts, terminal: term, reattach: true, keepAlive: true }, cb, h);
+    handleHook((meta as { token: string }).token, { hook_event_name: 'Stop', last_assistant_message: 'Done' });
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(cb.turn).not.toHaveBeenCalled();
+    expect(first.cb.turn).toHaveBeenCalledTimes(1);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'Done', turns: 1 }));
+    term.releaseIdle?.();
+  });
+
+  it('ends visibly when a restarted idle CLI has no readable result', async () => {
+    const meta = { agentId: 'ada', cli: 'codex', token: 'lost', dir: 'sessions/t', busy: true, resumeId: null };
+    const term = { ...terminal(), screen: () => 'Worked for 45m 38s\n› Ask anything' } as unknown as AgentTerminal;
+    const h = { ...host(vi.fn()), recoverTurn: async () => null, reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+    await reconnectClis(() => term, h);
+    const cb = claudeCallbacks();
+    startCliSession({ ...opts, cli: 'codex', terminal: term, reattach: true }, cb, h);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: [expect.stringMatching(/finished while the office restarted; result not collected/)] }));
+  });
 
   it('cancels hookless completion when a prompt starts inside the finish grace period', async () => {
     let now = turn({ bytes: 2000 });

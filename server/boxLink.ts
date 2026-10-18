@@ -5,10 +5,11 @@ import { KeeperPty, terminalMessage } from './ptyClient.ts';
 import { encode, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
 import { reconnectClis, startCliSession } from './cliRunner.ts';
 import type { ClaudeTurn } from './clis.ts';
+import type { RecoveredTurn } from './cliTranscript.ts';
 import { boxCommand, boxDeskDir, boxMainDir, boxUpdateCommand, parseUpdateResult, redialDelay, retryForm, updateFailure, type BoxInfo, type BoxLayout, type BoxUpdateResult } from './fleet.ts';
 import type { BoxConnection, BoxOptions, CliHost, CliPlan, Machine, PreparedCli } from './machine.ts';
 import type { SessionHandle } from './agentRunner.ts';
-import type { BoxStatus, CliView } from '../shared/types.ts';
+import type { AgentCli, BoxStatus, CliView } from '../shared/types.ts';
 
 // The office's side of a box: `ssh <destination> cubefarm box --stdio` (boxStdio.ts) runs desk and session-file
 // methods there (boxOps.ts) and bridges to the box's host, a terminal keeper on that machine. The ssh link can drop
@@ -349,6 +350,10 @@ class BoxLink implements CliHost {
 
   claudeTurn(cwd: string, sessionId: string) {
     return this.call<ClaudeTurn | null>('claudeTurn', cwd, sessionId).catch(() => null);
+  }
+
+  recoverTurn(cwd: string, cli: AgentCli, sessionId: string | null, since: number) {
+    return this.call<RecoveredTurn | null>('recoverTurn', cwd, cli, sessionId, since).catch(() => null);
   }
 
   async newShots(dir: string, seen: Set<string>, now: number) {

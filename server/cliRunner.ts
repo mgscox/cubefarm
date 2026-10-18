@@ -149,6 +149,7 @@ interface LiveCli {
   /** The office session driving it; null while it waits at its prompt. */
   session: { hook(b: Record<string, unknown>): Record<string, unknown>; exited(code: number, signal?: number): void } | null;
   idleTimer?: NodeJS.Timeout;
+  recoveringBusy?: boolean;
   /** Where its hooks post (said when they don't arrive). */
   hookUrl?: string;
   /**
@@ -207,7 +208,7 @@ interface CliMeta {
   transcriptPending?: boolean;
 }
 
-const metaOf = (l: LiveCli): CliMeta => ({ agentId: l.agentId, cli: l.cli, token: l.token, dir: l.dir, resumeId: l.resumeId, busy: !!l.session, hookUrl: l.hookUrl, hookless: l.hookless, transcriptBase: l.transcriptBase, transcriptPending: l.transcriptPending });
+const metaOf = (l: LiveCli): CliMeta => ({ agentId: l.agentId, cli: l.cli, token: l.token, dir: l.dir, resumeId: l.resumeId, busy: !!l.session || !!l.recoveringBusy, hookUrl: l.hookUrl, hookless: l.hookless, transcriptBase: l.transcriptBase, transcriptPending: l.transcriptPending });
 const remember = (l: LiveCli) => l.proc?.setMeta(metaOf(l));
 
 /** A hook from a CLI's main session (not a subagent's, not its status line, which runs untrusted): its hooks reach the office. */
@@ -238,11 +239,11 @@ function wire(l: LiveCli, office?: OfficeTools) {
 }
 
 /** The task is done but the CLI stays at its prompt for the manager (or a follow-up), for a while. */
-function waitAtPrompt(l: LiveCli) {
+function waitAtPrompt(l: LiveCli, persist = true) {
   clearTimeout(l.idleTimer);
   l.idleTimer = setTimeout(() => endLive(l), IDLE_MS);
   l.term.releaseIdle = () => endLive(l);
-  remember(l);
+  if (persist) remember(l);
 }
 
 export interface ReconnectedCli {
@@ -270,9 +271,9 @@ export async function reconnectClis(terminalFor: (agentId: string) => AgentTermi
       if (meta.cli === 'codex' && meta.resumeId) void host.codexThread('archive', meta.resumeId, h.exit === null ? new Promise((r) => setTimeout(r, 5000)) : undefined);
       continue;
     }
-    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, host, proc: host.adopt(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null, hookUrl: meta.hookUrl, hookless: meta.hookless === true, transcriptBase: meta.transcriptBase, transcriptPending: meta.transcriptPending };
+    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, host, proc: host.adopt(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null, recoveringBusy: !!meta.busy, hookUrl: meta.hookUrl, hookless: meta.hookless === true, transcriptBase: meta.transcriptBase, transcriptPending: meta.transcriptPending };
     wire(l);
-    waitAtPrompt(l);
+    waitAtPrompt(l, !meta.busy);
     // Resizing makes the CLI draw its whole screen again, over whatever the saved copy of the terminal missed.
     setTimeout(() => quietly(() => (l.proc?.resize(term.cols - 1, term.rows), l.proc?.resize(term.cols, term.rows))), 500);
     back.push({ agentId: l.agentId, cli: l.cli, resumeId: l.resumeId, busy: !!meta.busy });
@@ -340,7 +341,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const toolNames = new Map<string, string>();
   const officePrompts: string[] = []; // prompts the office typed, so the ones the manager typed are told apart
   const launched: string[] = []; // every prompt the CLI was given, as given (Codex: finds its main thread)
-  let mainThread: string | null = opts.resumeSessionId ?? null;
+  let mainThread: string | null = live?.resumeId ?? opts.resumeSessionId ?? null;
   const usageResets = new Map<string, number | null>();
   const warned = new Set<string>();
   let done = false;
@@ -350,7 +351,9 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let turnError: string | null = null; // the turn failed (OpenCode reports errors separately from going idle)
   let begun = false; // the CLI took its first prompt
   let boot: AgentBoot | null = null; // what the office said about a CLI it hasn't heard from (see bootNotice)
+  let heardAt = 0;
   let heard = false; // a hook from the CLI's main session reached the office
+  let recoveryIdleAt: number | null = null;
   let turnBase: ClaudeTurn | null = live?.transcriptBase ?? null;
   let transcriptEnded = !!(opts.reattach && live?.transcriptPending); // a late Stop must not deliver the same reply again
   let working = true; // a prompt is in hand and its turn hasn't ended (a new CLI starts on the one it's launched with)
@@ -421,12 +424,12 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     cb.tool(null);
     clearTimeout(finishTimer);
     const timer = setTimeout(async () => {
-      if (live?.hookless && !heard) {
+      if ((live?.hookless && !heard) || opts.reattach) {
         const t = await readTurn().catch(() => null);
         if (done || working || finishTimer !== timer) return;
         // A box may be temporarily unavailable. Keep following it rather than finish from a stale reply.
-        if (!t) return turnEnded(lastText);
-        if (followTurn(t)) return;
+        if (!t && !opts.reattach) return turnEnded(lastText);
+        if (t && followTurn(t)) return;
       }
       if (!done && !working && finishTimer === timer) finish({ ok: !turnError, text: lastText, errors: turnError ? [turnError] : [] }, true);
     }, FINISH_GRACE_MS);
@@ -434,6 +437,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   };
   const busy = () => {
     begun = true;
+    transcriptEnded = false;
     if (heard) setBoot(null);
     working = true;
     clearTimeout(finishTimer);
@@ -492,6 +496,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const hook = (b: Record<string, unknown>): Record<string, unknown> => {
     const event = String(b.hook_event_name ?? '');
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
+    if (fromMain(b)) heardAt = Date.now();
     if (fromMain(b) && !heard) {
       heard = true;
       if (boot === 'no-hooks') log([{ kind: 'system', text: `✓ The office is receiving ${label}'s hooks now.` }]);
@@ -552,10 +557,11 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         const text = String(b.last_assistant_message ?? '').trim();
         if (transcriptEnded) {
           // Its transcript already ended this turn (the hooks were only quiet): just make sure it finishes.
-          transcriptEnded = false;
           if (working) turnEnded(text || lastText);
           return {};
         }
+        saveTurn({ bytes: 0, ended: true, mark: `hook:${text}`, text }, true);
+        transcriptEnded = true;
         turns += 1;
         if (text) {
           log(assistantLines(text));
@@ -597,6 +603,10 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
           }
         }
         const text = String(b.last_assistant_message ?? '').trim();
+        if (transcriptEnded && !working) return {};
+        const reply = cli === 'codex' ? text || lastText : text;
+        saveTurn({ bytes: 0, ended: true, mark: `hook:${reply}`, text: reply }, true);
+        transcriptEnded = true;
         turns += 1;
         if (text) {
           log(assistantLines(text));
@@ -620,8 +630,20 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     finish({ ok, text: lastText, errors: error ? [error] : [] });
   };
 
-  /** Claude's transcript for this session on its machine (null: not there yet, or not Claude). */
-  const readTurn = async (): Promise<ClaudeTurn | null> => (cli === 'claude' ? ((await host.claudeTurn(opts.cwd, live?.resumeId ?? sessionId)) ?? null) : null);
+  /** The session transcript on its own machine; recovery also discovers an unreported session id. */
+  const readTurn = async (): Promise<ClaudeTurn | null> => {
+    if (opts.reattach) {
+      const t = await host.recoverTurn(opts.cwd, cli, live?.resumeId ?? opts.resumeSessionId ?? null, opts.reattachSince ?? 0);
+      if (t?.sessionId && live && live.resumeId !== t.sessionId) {
+        live.resumeId = t.sessionId;
+        mainThread = t.sessionId;
+        cb.sessionId(t.sessionId);
+        remember(live);
+      }
+      return t;
+    }
+    return cli === 'claude' ? await host.claudeTurn(opts.cwd, live?.resumeId ?? sessionId) : null;
+  };
 
   const saveTurn = (t: ClaudeTurn | null, pending: boolean) => {
     turnBase = t;
@@ -635,6 +657,9 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   /** True when this reading starts another turn or replaces the pending finish. */
   const followTurn = (t: ClaudeTurn): boolean => {
     begun = true; // confirmed hookless activity also enables terminal Esc interruption
+    if (t.ended && turnBase?.mark.startsWith('hook:') && turnBase.text === t.text) {
+      saveTurn(t, !!live?.transcriptPending);
+    }
     if (t.ended && t.mark && t.mark !== turnBase?.mark) {
       saveTurn(t, true);
       transcriptEnded = true;
@@ -687,6 +712,37 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     bootTimer = setTimeout(() => void look(), first);
   };
 
+  /** Unlike startup checks, recovery must inspect even a CLI whose hooks worked before the outage. */
+  const watchRecovery = () => {
+    const look = async () => {
+      if (done) return;
+      const t = await readTurn().catch(() => null);
+      if (done) return;
+      const screen = term.screen();
+      const active = /esc to (interrupt|cancel)/i.test(screen);
+      const idle = !active && /(?:^|\n)\s*[❯›]/.test(screen);
+      const stale = t?.ended && t.mark === turnBase?.mark && !live?.transcriptPending && working;
+      if (t && (!t.ended || (t.text && t.mark)) && !(idle && !t.ended) && !stale) {
+        followTurn(t);
+        recoveryIdleAt = null;
+      } else if (live?.transcriptPending && lastText) {
+        if (working) turnEnded(lastText);
+      } else if (Date.now() - heardAt < BOOT_MS || active) {
+        recoveryIdleAt = null;
+      } else {
+        // A readable active transcript is enough to keep waiting. Missing evidence is bounded: a broken
+        // link or an unreadable idle CLI must become a visible error instead of holding a desk forever.
+        recoveryIdleAt ??= Date.now();
+        if (Date.now() - recoveryIdleAt >= BOOT_MS) {
+          finish({ ok: false, text: '', errors: [`${label} finished while the office restarted; result not collected (transcript unavailable).`] }, true);
+          return;
+        }
+      }
+      bootTimer = setTimeout(() => void look(), HOOKLESS_LOOK_MS);
+    };
+    bootTimer = setTimeout(() => void look(), HOOKLESS_LOOK_MS);
+  };
+
   const handle: SessionHandle = {
     send(text) {
       const proc = live?.proc;
@@ -709,6 +765,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     // Back in the CLI that was waiting at its prompt: same conversation, same terminal.
     clearTimeout(live.idleTimer);
     term.releaseIdle = null;
+    live.recoveringBusy = false;
     live.session = { hook, exited };
     Object.assign(live, { statusLine });
     remember(live);
@@ -717,7 +774,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     else if (opts.typed) busy();
     else handle.send(opts.prompt);
     shotTimer = setInterval(collectShots, 2000);
-    if (live.hookless) watchHookless(HOOKLESS_LOOK_MS, !opts.reattach && !live.transcriptBase); // a restart must catch completions written while away
+    if (opts.reattach) watchRecovery();
+    else if (live.hookless) watchHookless(HOOKLESS_LOOK_MS, !live.transcriptBase);
     return handle;
   }
   if (opts.reattach) {
