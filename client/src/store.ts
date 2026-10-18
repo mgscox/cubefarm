@@ -241,12 +241,16 @@ export const useStore = create<State>((set, get) => ({
         const prev = get().agents[ev.agent.id];
         if (live && !prev && ev.agent.role !== 'ceo') cue('welcome');
         if (live && prev && prev.status !== 'error' && ev.agent.status === 'error') cue('error');
-        set({ agents: { ...get().agents, [ev.agent.id]: ev.agent } });
+        const screens = { ...get().screens };
+        if (ev.agent.hasScreenshot && ev.agent.screenshotAt !== null) screens[ev.agent.id] = ev.agent.screenshotAt;
+        else delete screens[ev.agent.id];
+        set({ agents: { ...get().agents, [ev.agent.id]: ev.agent }, screens });
         break;
       }
       case 'agentRemoved': {
         const { [ev.agentId]: _gone, ...agents } = get().agents;
-        set({ agents });
+        const { [ev.agentId]: _shot, ...screens } = get().screens;
+        set({ agents, screens });
         break;
       }
       case 'log': {

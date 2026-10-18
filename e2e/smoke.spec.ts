@@ -264,6 +264,10 @@ test('hook warnings and status fit the terminal header at phone width', async ({
   const title = page.locator('.term-title');
   await expect(title.locator('.chip-warn')).toHaveText('⚠ Hooks not reaching the office');
   await expect(title.locator('.status')).toHaveText('working');
+  // The opening scale animation can put an edge a few millionths of a pixel outside its parent on Linux.
+  await page.locator('.panel').evaluate(async (el) => {
+    await Promise.all(el.getAnimations().map((animation) => animation.finished.catch(() => undefined)));
+  });
   const fits = await title.evaluate((el) => {
     const bounds = el.getBoundingClientRect();
     return [...el.children].every((child) => {
@@ -273,6 +277,44 @@ test('hook warnings and status fit the terminal header at phone width', async ({
   });
   expect(fits, 'every header item fits within the visible title').toBe(true);
   await page.screenshot({ path: testInfo.outputPath('hook-warning-phone.png') });
+});
+
+test('floor monitors discard screenshots cleared by a session handoff', async ({ page }, testInfo) => {
+  let agentId = '';
+  const staleRequests: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === `/api/agents/${agentId}/screen` && url.searchParams.get('t') === '1') staleRequests.push(request.url());
+  });
+  await page.routeWebSocket('**/ws', (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((message) => {
+      const event = JSON.parse(message.toString()) as ServerEvent;
+      if (event.type === 'snapshot') {
+        event.data.settings.tutorialStep = -1;
+        const repo = event.data.repos.find((r) => r.fullName === 'demo-co/pixel-todo')!;
+        const agent = event.data.agents.find((a) => a.role === 'dev' && a.repoId === repo.id)!;
+        agentId = agent.id;
+        agent.hasScreenshot = true;
+        agent.screenshotAt = 1;
+        ws.send(JSON.stringify(event));
+        // beginTask clears the server's image and publishes this agent update before the floor is entered.
+        ws.send(JSON.stringify({ type: 'agent', agent: { ...agent, hasScreenshot: false, screenshotAt: null } }));
+        return;
+      }
+      ws.send(JSON.stringify(event));
+    });
+  });
+  const spot: SavedView = { floor: 0, x: 4.4, z: HALF_D - 2, yaw: Math.PI, pitch: 0.2 };
+  await page.addInitScript(([key, view]) => localStorage.setItem(key, view), [VIEW_KEY, JSON.stringify(spot)] as const);
+  await enterOffice(page);
+  await expect(page.getByText('Floor directory — take the elevator')).toBeVisible();
+  await page.keyboard.press('e');
+  await expect(page.locator('.elevator')).toBeVisible();
+  await page.keyboard.press('1');
+  await expect(page.locator('.floor-name')).toHaveText('demo-co/pixel-todo');
+  await page.screenshot({ path: testInfo.outputPath('handoff-floor.png') });
+  expect(staleRequests, 'monitors must not request the previous session image').toEqual([]);
 });
 
 test('repository refresh distinguishes unavailable checks, REST fallback, stale data, failure and recovery', async ({ page }, testInfo) => {
