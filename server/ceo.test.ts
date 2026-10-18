@@ -297,6 +297,34 @@ describe('planRoute (route_issue)', () => {
   it('needs something to change', () => {
     expect(() => route({})).toThrow(/Nothing to change/);
   });
+
+  it('adds and removes the ready-for-human gate, in any letter case', () => {
+    expect(route({ readyForHuman: true })).toEqual({ addLabels: ['ready-for-human'], removeLabels: [], body: null, summary: '#4 on floor 1: reserved for a person (ready-for-human).' });
+    const issues = base.issues.map((i) => i.number === 4 ? { ...i, labels: [...i.labels, 'Ready-For-Human'] } : i);
+    expect(route({ issues, readyForHuman: false })).toEqual({ addLabels: [], removeLabels: ['Ready-For-Human'], body: null, summary: '#4 on floor 1: ready-for-human removed, agents can start it.' });
+  });
+
+  it('changes nothing when the gate already matches', () => {
+    expect(route({ readyForHuman: false })).toMatchObject({ addLabels: [], removeLabels: [], body: null, summary: '#4 on floor 1: not ready-for-human, unchanged.' });
+    const issues = base.issues.map((i) => i.number === 4 ? { ...i, labels: ['ready-for-human'] } : i);
+    expect(route({ issues, readyForHuman: true })).toMatchObject({ addLabels: [], removeLabels: [], summary: '#4 on floor 1: already ready-for-human, unchanged.' });
+  });
+
+  it('gates or ungates an issue in progress, saying the session keeps running', () => {
+    expect(route({ inProgress: true, readyForHuman: true }).summary).toBe('#4 on floor 1: reserved for a person (ready-for-human); the current session keeps running.');
+    const issues = base.issues.map((i) => i.number === 4 ? { ...i, labels: ['ready-for-human'] } : i);
+    expect(route({ issues, inProgress: true, readyForHuman: false }).removeLabels).toEqual(['ready-for-human']);
+  });
+
+  it('refuses ready_for_human on a closed or unknown issue', () => {
+    expect(() => route({ number: 9, readyForHuman: false })).toThrow('#9 is closed.');
+    expect(() => route({ number: 42, readyForHuman: true })).toThrow('There is no open issue #42 on floor 1.');
+  });
+
+  it('counts a gate set in the same call as zero chain steps', () => {
+    expect(() => route({ number: 6, dependsOn: [3] })).toThrow(/3 steps deep/);
+    expect(route({ number: 6, dependsOn: [3], readyForHuman: true })).toMatchObject({ addLabels: ['ready-for-human'], body: 'Depends on #3\n\nFree' });
+  });
 });
 
 describe('IssueCap', () => {

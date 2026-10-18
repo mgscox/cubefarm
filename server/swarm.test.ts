@@ -1501,6 +1501,31 @@ describe('ready-for-human issues', () => {
     expect(runTask.mock.calls[0][2].number).toBe(2);
   });
 
+  it('are set and cleared on an existing issue by route_issue, flipping company_status at once', async () => {
+    setIssues(issue(1), issue(2));
+    const edit = vi.spyOn(s.backend, 'editIssue').mockResolvedValue();
+    vi.spyOn(swarm, 'syncRepo').mockResolvedValue(); // no refresh: the tool updates the cache itself
+    const backlog = () => JSON.parse(s.companyStatus()).floors[0].backlog.find((i: { number: number }) => i.number === 1);
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 1, ready_for_human: true })).toBe('#1 on floor 1: reserved for a person (ready-for-human).');
+    expect(edit).toHaveBeenLastCalledWith(repo.fullName, 1, { body: undefined, addLabels: ['ready-for-human'], removeLabels: [] });
+    expect(backlog()).toMatchObject({ readyForHuman: true });
+    expect(ready()).toEqual([2]);
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 1, ready_for_human: true })).toContain('already ready-for-human, unchanged');
+    expect(edit).toHaveBeenCalledOnce();
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 1, ready_for_human: false })).toBe('#1 on floor 1: ready-for-human removed, agents can start it.');
+    expect(edit).toHaveBeenLastCalledWith(repo.fullName, 1, { body: undefined, addLabels: [], removeLabels: ['ready-for-human'] });
+    expect(backlog().readyForHuman).toBeUndefined();
+    expect(ready()).toEqual([1, 2]);
+  });
+
+  it('refuses route_issue ready_for_human on an unknown issue without editing', async () => {
+    setIssues(issue(1));
+    const edit = vi.spyOn(s.backend, 'editIssue');
+    vi.spyOn(s.backend, 'issueState').mockResolvedValue(null);
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 42, ready_for_human: false })).toContain('There is no open issue #42 on floor 1.');
+    expect(edit).not.toHaveBeenCalled();
+  });
+
   it('are marked in company_status and left out of its capacity', () => {
     setIssues(issue(1, ['ready-for-human']), issue(2));
     const floor = JSON.parse(s.companyStatus()).floors[0];
@@ -1554,6 +1579,24 @@ describe('a developer session that ends without a PR after pushing commits', () 
     await s.startAgentSession(ada(), repo, '/desk', 'Please resolve GitHub issue #66', '');
   });
 
+
+  it.each(['issue', 'qa', 'fix'])('surfaces an unreadable restarted %s result without retrying or advancing the PR', async (task) => {
+    const error = 'Codex finished while the office restarted; result not collected (transcript unavailable).';
+    Object.assign(ada(), { task, prNumber: task === 'issue' ? null : 13 });
+    const rec = { repoId: repo.id, prNumber: 13, status: task === 'qa' ? 'testing' : 'fixing', qaAgentId: 'a1', summary: '', checks: [], round: 1 } as unknown as QaRec;
+    if (task !== 'issue') s.state.qa.push(rec);
+    const before = sessions.length;
+    expect(await end({ ...cut, errors: [error] })).toBe(false);
+    expect(sessions).toHaveLength(before);
+    expect(ada()).toMatchObject({ status: 'stopped', lastError: error });
+    if (task !== 'issue') expect(rec).toMatchObject({ status: 'needs-human', summary: error, qaAgentId: null });
+    if (task === 'issue') {
+      setIssues(issue(66));
+      expect(s.startIssueWork(repo)).toBe(false);
+    }
+    const status = JSON.parse(s.companyStatus());
+    expect(status.floors[0].team[0]).toMatchObject({ status: 'stopped', error });
+  });
 
   const emptyEnding = async () => {
     Object.assign(ada(), { status: 'working', task: 'issue', issueNumber: 66, issueTitle: 'Issue 66', branch: 'swarm/issue-66-ada', prNumber: null });

@@ -2422,6 +2422,7 @@ export class Swarm {
         keepAlive: a.task !== 'qa',
         typed: mode === 'typed',
         reattach: mode === 'reattach',
+        reattachSince: a.startedAt ?? undefined,
         agentId: a.id,
         ...how,
       },
@@ -2487,7 +2488,12 @@ export class Swarm {
     const released = this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
     if (result.interrupted) this.interrupted(a);
 
-    if (a.task === 'qa') await this.onQaFinished(a, repo, result, released);
+    if (result.errors.some((e) => e.includes('finished while the office restarted; result not collected'))) {
+      this.fail(a, result, 'restart recovery');
+      a.status = 'stopped'; // The outcome is unknown: don't automatically rerun the task after the error cooldown.
+      const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
+      if (rec) this.setQa(rec, { status: 'needs-human', qaAgentId: null, summary: a.lastError });
+    } else if (a.task === 'qa') await this.onQaFinished(a, repo, result, released);
     else if (a.task === 'fix') await this.onFixFinished(a, repo, result);
     else await this.onIssueFinished(a, repo, result, released, generation);
 
@@ -4515,6 +4521,7 @@ export class Swarm {
               title: a.title || ROLE_TITLE[a.role],
               specialty: a.specialty || null,
               status: a.status,
+              ...(a.lastError && { error: a.lastError }),
               ...(doing(a) && { doing: doing(a) }),
               hiredBy: a.hiredBy,
               ...(full && { jobDescription: a.brief ? jobDescription(a.brief) : null }),
@@ -4876,7 +4883,7 @@ export class Swarm {
   }
 
   /** Shared routing validation; parking has already reserved and checked its linked agents. */
-  private async planIssueRoute(x: { floor: number; number: number; specialty?: string; depends_on?: number[] }, inProgress?: boolean) {
+  private async planIssueRoute(x: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean }, inProgress?: boolean) {
     const repo = this.floorRepo(x.floor);
     const issues = this.repoRt.get(repo.id)?.issues ?? [];
     const asked = [Number(x.number), ...(x.depends_on ?? []).map(Number)].filter((n) => !issues.some((i) => i.number === n));
@@ -4890,6 +4897,7 @@ export class Swarm {
       number: Number(x.number),
       specialty: x.specialty,
       dependsOn: x.depends_on,
+      readyForHuman: x.ready_for_human,
       issues,
       closed: (n) => states.get(n) === 'CLOSED',
       inProgress: inProgress ?? this.issueTaken(repo, Number(x.number)),
@@ -4897,8 +4905,8 @@ export class Swarm {
     });
   }
 
-  /** Change an open issue's specialty and/or dependencies (see planRoute for what is refused). */
-  private async routeIssue(x: { floor: number; number: number; specialty?: string; depends_on?: number[] }) {
+  /** Change an open issue's specialty, dependencies and/or ready-for-human gate (see planRoute for what is refused). */
+  private async routeIssue(x: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean }) {
     const repo = this.floorRepo(x.floor);
     const check = () => {
       if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
@@ -4909,6 +4917,16 @@ export class Swarm {
     if (plan.body !== null || plan.addLabels.length || plan.removeLabels.length) {
       await this.backend.editIssue(repo.fullName, Number(x.number), { body: plan.body ?? undefined, addLabels: plan.addLabels, removeLabels: plan.removeLabels });
       await this.syncRepo(repo.id); // the scheduler sees the new routing right away
+      // A sync already in flight may predate the edit: apply it to the cache too (idempotent).
+      const rt = this.repoRt.get(repo.id);
+      if (rt) {
+        rt.issues = rt.issues.map((i) => i.number === Number(x.number) ? {
+          ...i,
+          body: plan.body ?? i.body,
+          labels: [...i.labels.filter((l) => !plan.removeLabels.includes(l)), ...plan.addLabels.filter((l) => !i.labels.includes(l))],
+        } : i);
+        this.emitRepo(repo);
+      }
     }
     return plan.summary;
   }

@@ -351,6 +351,10 @@ test('repository refresh distinguishes unavailable checks, REST fallback, stale 
 });
 
 test('Q/E turn and Z/X pitch without walking, and help pauses keyboard look', async ({ page }) => {
+  // E also interacts: keep this rotation test out of range of the elevator and other targets.
+  await page.addInitScript(({ key, view }) => localStorage.setItem(key, JSON.stringify(view)), {
+    key: VIEW_KEY, view: { floor: 0, x: 0, z: 0, yaw: 0, pitch: 0 },
+  });
   // Count the client's view saves: it saves at most once a second, from a frame, so on a slow runner a fixed wait
   // after a key release can still read the save from before the last frames under the key.
   await page.addInitScript((key) => {
@@ -379,7 +383,7 @@ test('Q/E turn and Z/X pitch without walking, and help pauses keyboard look', as
     const before = await nextSavedView();
     await page.keyboard.down(key);
     try {
-      await expect.poll(async () => ((await savedView(page))![axis] - before[axis]) * direction).toBeGreaterThan(0.1);
+      await expect.poll(async () => ((await savedView(page))![axis] - before[axis]) * direction, { message: `${key} rotates ${axis}` }).toBeGreaterThan(0.1);
     } finally {
       await page.keyboard.up(key);
     }
