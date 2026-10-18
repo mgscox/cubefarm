@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { agentBox, boxCommand, boxDeskDir, boxMainDir, boxSync, boxSyncText, boxUpdateCommand, loginShell, notPosix, parseUpdateResult, probeHookUrl, redialDelay, retryForm, startPlace, validDestination, type BoxInfo } from './fleet.ts';
+import { agentBox, boxCommand, boxDeskDir, boxMainDir, BOX_SYNC_RETRY_MS, boxSync, boxSyncText, boxUpdateCommand, loginShell, notPosix, parseUpdateResult, probeHookUrl, redialDelay, retryForm, startPlace, syncRetryDue, updateFailure, validDestination, type BoxInfo } from './fleet.ts';
 
 describe('agentBox', () => {
   it("is the agent's own box, else the floor's, else the office's machine", () => {
@@ -188,7 +188,23 @@ describe('following the office (#94)', () => {
     expect(boxSyncText({ target, step: 'update', state: 'updating' }, 0)).toBe("Updating to the office's c0ffee0…");
     expect(boxSyncText({ target: '0.4.0', step: 'restart', state: 'restarting' }, 0)).toBe('Restarting on v0.4.0…');
     expect(boxSyncText({ target: '0.4.0', step: 'update', state: 'updating' }, 0)).toBe("Updating to the office's v0.4.0…");
-    expect(boxSyncText({ target, step: 'update', state: 'failed', error: 'no network' }, 0)).toBe("Couldn't move to the office's c0ffee0: no network");
+    expect(boxSyncText({ target, step: 'update', state: 'failed', error: 'no network' }, 0)).toBe("Couldn't move to the office's c0ffee0: no network. Check again tries now; it also tries again in 30 min.");
+    expect(boxSyncText({ target, step: 'update', state: 'failed', error: updateFailure('buildbox', 'cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>', 1) }, 0)).toMatch(/then Check again$/);
+  });
+
+  it('tells a box too old to update itself what to run there', () => {
+    expect(updateFailure('buildbox', 'cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>', 1)).toBe(
+      "buildbox's cubefarm predates self-update: run git pull, npm install and node scripts/build-server.mjs in its cubefarm folder once, then Check again",
+    );
+    expect(updateFailure('buildbox', 'Permission denied (publickey).', 255)).toBe('Permission denied (publickey).');
+    expect(updateFailure('buildbox', undefined, 255)).toBe('ssh exited (255)');
+  });
+
+  it('tries a failed move again after a while', () => {
+    const failed = { target: 'abc1234', step: 'update' as const, state: 'failed' as const, error: 'no network', at: 1_000_000 };
+    expect(syncRetryDue(failed, 1_000_000 + BOX_SYNC_RETRY_MS - 1)).toBe(false);
+    expect(syncRetryDue(failed, 1_000_000 + BOX_SYNC_RETRY_MS)).toBe(true);
+    expect(syncRetryDue({ ...failed, state: 'draining' }, 1_000_000 + BOX_SYNC_RETRY_MS)).toBe(false);
   });
 });
 

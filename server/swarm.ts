@@ -6,7 +6,7 @@ import { createDemoTelegram } from './demo.ts';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
 import type { BoxConnection, Machine } from './machine.ts';
-import { agentBox, boxSync, boxSyncText, startPlace, validDestination, type BoxSyncState, type PersistedBox, type StartPlace } from './fleet.ts';
+import { agentBox, boxSync, boxSyncText, startPlace, syncRetryDue, validDestination, type BoxSyncState, type PersistedBox, type StartPlace } from './fleet.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { ReconnectedCli } from './cliRunner.ts';
 import type { PrDetails } from './github.ts';
@@ -1139,7 +1139,7 @@ export class Swarm {
 
   // ---------- boxes following the office's version (#94) ----------
 
-  /** Boxes moving to the office's version, or that failed to (not retried for the same target until the office restarts). */
+  /** Boxes moving to the office's version, or that failed to (tried again after a while, or on Check again). */
   private boxSyncs = new Map<string, BoxSyncState>();
 
   /** Nothing new starts on a box while it moves to the office's version. */
@@ -1175,22 +1175,23 @@ export class Swarm {
         }
         continue;
       }
-      if (s?.target === want.target && s.state === 'failed') continue;
-      if (!s || s.target !== want.target) {
+      if (s?.target === want.target && s.state === 'failed' && !syncRetryDue(s, Date.now())) continue;
+      const retry = s?.state === 'failed' && s.target === want.target ? s.error : undefined;
+      if (!s || s.target !== want.target || s.state === 'failed') {
         this.boxSyncs.set(b.id, { ...want, state: 'draining' });
         console.log(`  box ${b.name}: moving to the office's ${want.target.slice(0, 7)} once nothing runs there`);
       }
       // A refused box can't be reached: its agents can't finish there, so it moves now.
-      if (st.refused || this.boxBusy(b.id) === 0) void this.moveBox(b, conn, want);
+      if (st.refused || this.boxBusy(b.id) === 0) void this.moveBox(b, conn, want, retry);
       this.broadcast({ type: 'box', box: this.boxView(b) });
     }
   }
 
-  /** Update a drained box to the office's version and restart its host. */
-  private async moveBox(b: PersistedBox, conn: BoxConnection, want: { target: string; step: 'update' | 'restart' }) {
+  /** Update a drained box to the office's version and restart its host. lastError: a retry's, not toasted again. */
+  private async moveBox(b: PersistedBox, conn: BoxConnection, want: { target: string; step: 'update' | 'restart' }, lastError?: string) {
     const set = (state: BoxSyncState['state'], error?: string) => {
       if (this.boxConns.get(b.id) !== conn) return;
-      this.boxSyncs.set(b.id, { ...want, state, error });
+      this.boxSyncs.set(b.id, { ...want, state, error, at: state === 'failed' ? Date.now() : undefined });
       if (this.state.boxes.includes(b)) this.broadcast({ type: 'box', box: this.boxView(b) });
     };
     try {
@@ -1212,7 +1213,7 @@ export class Swarm {
       const why = (err as Error).message;
       console.warn(`  box ${b.name}: couldn't move to the office's ${want.target.slice(0, 7)}: ${why}`);
       set('failed', why);
-      if (this.state.boxes.includes(b)) this.toast('error', `${b.name} couldn't move to the office's version: ${why}`);
+      if (this.state.boxes.includes(b) && why !== lastError) this.toast('error', `${b.name} couldn't move to the office's version: ${why}`);
     }
   }
   /** init() is done: the scheduler runs. */
@@ -1230,16 +1231,24 @@ export class Swarm {
     return this.boxView(box);
   }
 
-  /** Ask a box again what it has (the manager set something up there), or connect to it now if it's offline. */
+  /**
+   * Ask a box again what it has (the manager set something up there), or connect to it now if it's offline. A box that
+   * failed to move to the office's version tries again now (the manager may have fixed it by hand).
+   */
   async checkBox(id: string): Promise<BoxView> {
     const box = this.state.boxes.find((b) => b.id === id);
     const conn = box && this.boxConns.get(id);
     if (!box || !conn) throw new HttpError(404, 'No such box');
+    if (this.boxSyncs.get(id)?.state === 'failed') {
+      this.boxSyncs.delete(id);
+      this.broadcast({ type: 'box', box: this.boxView(box) });
+    }
     try {
       await conn.check();
     } catch (err) {
       throw new HttpError(502, `${box.name} didn't answer: ${(err as Error).message}`);
     }
+    this.syncBoxes();
     return this.boxView(box);
   }
 
