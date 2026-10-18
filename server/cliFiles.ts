@@ -94,6 +94,7 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
     effort: plan.effort,
     resumeId: plan.resumeId,
     sessionId: plan.sessionId,
+    cwd: plan.cwd,
     name: plan.name,
     role: plan.role,
     additionalDirectories: plan.additionalDirectories,
