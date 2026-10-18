@@ -3,9 +3,8 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
 import * as nodePty from '@lydell/node-pty';
-import { encode, localHookAnswer, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
+import { encode, keeperBuild, localHookAnswer, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
 
 // The office's terminal keeper: a small process of its own that runs the agents' CLIs in pseudo-terminals, so they
 // keep working while the office restarts (an update, a crash, a code change in development). The office connects over
@@ -16,8 +15,9 @@ import { encode, localHookAnswer, PTY_PROTOCOL, readMessages, type FromHost, typ
 // node ptyHost.js serve <socket> <secret file>    is the keeper
 //
 // With a trailing "box" it is a box's host (cubefarm box, see boxStdio.ts): the same keeper, for an office on another
-// machine. It also runs the desk and session-file methods on its own disk (boxOps.ts), answers the hooks whose answer
-// never depends on the office itself, and waits hours rather than minutes for an office that went away.
+// machine. It answers the hooks whose answer never depends on the office itself and waits hours rather than minutes
+// for an office that went away. The box's desk and session-file methods (boxOps.ts) run in its bridge, not here, so
+// an update reaches them with a new link while this keeps the terminals: keep this file small and slow to change.
 
 /** Output kept per terminal while no office is listening. */
 const BACKLOG_BYTES = 2 * 1024 * 1024;
@@ -46,14 +46,8 @@ process.on('uncaughtException', (err) => note(`uncaught: ${err.stack ?? err}`));
 for (const sig of ['SIGINT', 'SIGHUP', 'SIGBREAK'] as const) process.on(sig, () => undefined); // the office's console isn't ours
 
 const secret = fs.readFileSync(secretFile, 'utf8').trim();
-
-const box = isBox
-  ? ((await import(pathToFileURL(path.join(import.meta.dirname, `boxOps${path.extname(import.meta.filename)}`)).href)) as typeof import('./boxOps.ts')).createBoxOps({
-      hookUrl: () => `http://127.0.0.1:${(hooks.address() as net.AddressInfo).port}`,
-      pids: () => [process.pid, ...[...held.values()].map((h) => h.proc.pid)],
-    })
-  : null;
-if (isBox) delete process.env.SWARM_HOME; // the box's home (read on import): the CLIs it starts don't inherit it
+/** The code this keeper runs (it reports it, see keeperBuild). */
+const build = keeperBuild(import.meta.dirname, path.extname(import.meta.filename));
 
 interface Held {
   proc: nodePty.IPty;
@@ -192,8 +186,8 @@ const hooks = http.createServer((req, res) => {
       // not JSON: an empty hook
     }
     const rid = nextRid++;
-    const local = box ? localHookAnswer(body, statusLines.get(token)) : undefined;
-    if (local && box) {
+    const local = isBox ? localHookAnswer(body, statusLines.get(token)) : undefined;
+    if (local) {
       // The office can't look at this disk: it's told whether the transcript the hook names is there yet.
       const b = body as Record<string, unknown>;
       if (typeof b.transcript_path === 'string') b.cubefarm_transcript = fs.existsSync(b.transcript_path);
@@ -222,7 +216,7 @@ function connected(sock: net.Socket) {
       office = sock;
       hooksOpen = false;
       const ptys: HeldPty[] = [...held].map(([id, h]) => ({ id, pid: h.proc.pid, meta: h.meta, exit: h.exit }));
-      send({ op: 'ready', version: PTY_PROTOCOL, hookPort: (hooks.address() as net.AddressInfo).port, ptys, pid: process.pid });
+      send({ op: 'ready', version: PTY_PROTOCOL, hookPort: (hooks.address() as net.AddressInfo).port, ptys, pid: process.pid, build });
       return;
     }
     const h = 'id' in m ? held.get(m.id) : undefined;
@@ -253,16 +247,7 @@ function connected(sock: net.Socket) {
         setTimeout(() => process.exit(0), 3000);
         return;
       case 'rpc':
-        if (!box) return send({ op: 'rpcReply', rid: m.rid, ok: false, error: 'not a box' });
-        return void box.rpc(m.method, m.args).then(
-          (value) => send({ op: 'rpcReply', rid: m.rid, ok: true, value }),
-          (err: unknown) => send({ op: 'rpcReply', rid: m.rid, ok: false, error: (err as Error)?.message ?? String(err) }),
-        );
-      case 'launch': {
-        const cli = box?.take(m.token);
-        if (!cli) return send({ op: 'failed', id: m.id, error: 'the session was not prepared on this box' });
-        return start({ op: 'spawn', id: m.id, file: cli.file, args: cli.args, cwd: cli.cwd, env: cli.env, cols: m.cols, rows: m.rows, meta: m.meta });
-      }
+        return send({ op: 'rpcReply', rid: m.rid, ok: false, error: "a box's methods run in its bridge, not its keeper" });
     }
   });
   sock.on('error', () => undefined);

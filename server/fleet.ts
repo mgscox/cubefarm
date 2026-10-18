@@ -21,8 +21,13 @@ export interface BoxLayout {
 export interface BoxInfo extends BoxLayout {
   platform: string;
   version: string;
-  /** The commit its host started on (its cubefarm checkout's then); null when it isn't a checkout (npx). A box from before #94 doesn't say. */
+  /** The commit its link started on (its cubefarm checkout's then); null when it isn't a checkout (npx). A box from before #94 doesn't say. */
   commit?: string | null;
+  /**
+   * Its terminal keeper runs other code than the cubefarm the link runs (an update changed ptyHost): it's restarted once
+   * nothing runs there. Missing: a box whose keeper ran its methods itself, so commit is the keeper's too.
+   */
+  keeperStale?: boolean;
   git: string | null;
   ghReady: boolean;
   /** Why its CLIs can't reach the hook URL they post to (null: they can; missing: a box from before it was checked). */
@@ -135,29 +140,39 @@ export function parseUpdateResult(stdout: string): BoxUpdateResult | null {
 }
 
 /**
- * What a box needs to run the office's own cubefarm, or null when it does (or can't be told). A checkout follows the
- * office's commit, or its release (target) when the office runs from npm, then its host restarts; one run by npx only
- * needs its host restarted, as its next link already runs the office's version. A box from before #94 doesn't say
- * which it is: it's asked to update whatever its version, which also tells an old one apart. A box refused for another protocol runs an
- * old checkout (npx would run the office's version), so it's updated.
+ * How a box moves to the office's version. update: its checkout moves to the office's commit (or release), then its
+ * link is redialled; relink: only redialled (npx runs the office's version). Both keep its keeper and the CLIs in it.
+ * restart: its keeper's own code changed, so it restarts once its agents finish (its terminals stop).
  */
-export function boxSync(office: { version: string; commit: string | null }, box: { info: BoxInfo | null; refused: boolean }): { target: string; step: 'update' | 'restart' } | null {
-  if (box.refused) return { target: office.commit ?? office.version, step: 'update' };
+export type BoxStep = 'update' | 'relink' | 'restart';
+
+/**
+ * What a box needs to run the office's own cubefarm, or null when it does (or can't be told). A checkout follows the
+ * office's commit, or its release (target) when the office runs from npm; one run by npx only needs a new link, as
+ * that runs the office's version. Its keeper restarts only when its code is older than the link's (keeperStale), which
+ * the link after an update says. A box from before #94 doesn't say which it is: it's asked to update whatever its
+ * version, which also tells an old one apart. A box refused for another protocol runs an old checkout (npx would run
+ * the office's version), so it's updated, and its next link replaces the keeper it can't talk to.
+ */
+export function boxSync(office: { version: string; commit: string | null }, box: { info: BoxInfo | null; refused: boolean }): { target: string; step: BoxStep } | null {
+  const target = office.commit ?? office.version;
+  if (box.refused) return { target, step: 'update' };
   const info = box.info;
   if (!info) return null;
-  if (info.commit === undefined) return { target: office.commit ?? office.version, step: 'update' }; // its version alone doesn't say it runs the same code
+  if (info.commit === undefined) return { target, step: 'update' }; // its version alone doesn't say it runs the same code
   if (info.commit === null || !office.commit) {
-    if (info.version === office.version) return null;
-    return { target: office.version, step: info.commit === null ? 'restart' : 'update' };
+    if (info.version !== office.version) return { target: office.version, step: info.commit === null ? 'relink' : 'update' };
+    return info.keeperStale ? { target: office.version, step: 'restart' } : null;
   }
-  return info.commit === office.commit ? null : { target: office.commit, step: 'update' };
+  if (info.commit !== office.commit) return { target: office.commit, step: 'update' };
+  return info.keeperStale ? { target: office.commit, step: 'restart' } : null;
 }
 
-/** A box following the office: waiting for its agents to finish, updating, restarting its host, or it failed. */
+/** A box following the office: updating, redialling, waiting for its agents to finish to restart its keeper, restarting it, or it failed. */
 export interface BoxSyncState {
   target: string;
-  step: 'update' | 'restart';
-  state: 'draining' | 'updating' | 'restarting' | 'failed';
+  step: BoxStep;
+  state: 'updating' | 'relinking' | 'draining' | 'restarting' | 'failed';
   error?: string;
 }
 
@@ -166,9 +181,10 @@ const targetLabel = (t: string) => (isRelease(t) ? `v${t}` : t.slice(0, 7));
 /** The line on a box's card while it follows the office. busy: its agents still at work. */
 export function boxSyncText(s: BoxSyncState, busy: number): string {
   const t = targetLabel(s.target);
-  if (s.state === 'draining' && busy > 0) return `Moving to the office's ${t} once its ${busy} agent${busy === 1 ? ' finishes' : 's finish'}: nothing new starts there.`;
-  if (s.state !== 'restarting' && s.state !== 'failed') return `Updating to the office's ${t}…`;
-  if (s.state === 'restarting') return `Restarting on ${t}…`;
+  if (s.state === 'updating') return `Updating to the office's ${t}: its agents carry on…`;
+  if (s.state === 'relinking') return `Reconnecting on the office's ${t}…`;
+  if (s.state === 'draining' && busy > 0) return `Restarting its terminals on the office's ${t} once its ${busy} agent${busy === 1 ? ' finishes' : 's finish'}: nothing new starts there.`;
+  if (s.state !== 'failed') return `Restarting its terminals on ${t}…`;
   return `Couldn't move to the office's ${t}: ${s.error ?? 'unknown error'}`;
 }
 

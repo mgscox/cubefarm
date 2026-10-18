@@ -3167,7 +3167,7 @@ describe('boxes', () => {
     await expect(swarm.checkBox('box-gone')).rejects.toThrow(HttpError);
   });
 
-  it("moves a box to the office's commit once its agents finish, and nothing new starts there meanwhile", async () => {
+  it("moves a box to the office's commit at once, its agents carrying on, and nothing new starts there meanwhile", async () => {
     const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
     Object.assign(office, { scheduling: true, officeHead: `0ff1ce5${'0'.repeat(33)}` }); // the demo office's commit
     vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
@@ -3175,22 +3175,48 @@ describe('boxes', () => {
     const ada = s.state.agents[0];
     Object.assign(ada, { box: box.id, deskBox: box.id, status: 'working' });
     await vi.advanceTimersByTimeAsync(1600);
-    expect(office.boxView(box).sync).toEqual({ text: "Moving to the office's 0ff1ce5 once its 1 agent finishes: nothing new starts there.", failed: false });
+    const conn = internals().boxConns.get(box.id) as unknown as import('./machine.ts').BoxConnection;
+    const restart = vi.spyOn(conn, 'restart');
+    expect(office.boxView(box).sync).toEqual({ text: "Updating to the office's 0ff1ce5: its agents carry on…", failed: false });
     ada.status = 'done';
     expect(internals().available(repo, 'dev')).toEqual([]);
     s.repoRt.get(repo.id)!.issues = [issue(9)];
     expect(((await swarm.assign('a1', 9)) as { warning?: string }).warning).toBe("waiting: Tower is moving to the office's version");
+    ada.status = 'working';
 
-    office.syncBoxes();
-    expect(office.boxView(box).sync?.text).toBe("Updating to the office's 0ff1ce5…");
     await vi.advanceTimersByTimeAsync(3000);
-    expect(office.boxView(box)).toMatchObject({ status: 'connecting', sync: { text: 'Restarting on 0ff1ce5…' } });
+    expect(office.boxView(box)).toMatchObject({ status: 'connecting', sync: { text: "Reconnecting on the office's 0ff1ce5…" } });
     await vi.advanceTimersByTimeAsync(1500);
     expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
+    expect(conn.state().info?.commit).toBe(`0ff1ce5${'0'.repeat(33)}`);
+    expect(restart).not.toHaveBeenCalled();
+    ada.status = 'done';
     expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
   });
 
-  it("still restarts a box whose checkout was updated by an office that restarted before restarting its host", async () => {
+  it("restarts a box's keeper once its agents finish when the update changed it", async () => {
+    const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
+    Object.assign(office, { scheduling: true, officeHead: `0ff1ce5${'0'.repeat(33)}` });
+    vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
+    const box = swarm.addBox('Tower', 'stale-keeper-tower');
+    const ada = s.state.agents[0];
+    Object.assign(ada, { box: box.id, deskBox: box.id, status: 'working' });
+    await vi.advanceTimersByTimeAsync(1600 + 3000 + 1500); // updated and redialled while ada works
+    const conn = internals().boxConns.get(box.id) as unknown as import('./machine.ts').BoxConnection;
+    expect(conn.state().info).toMatchObject({ commit: `0ff1ce5${'0'.repeat(33)}`, keeperStale: true });
+    expect(office.boxView(box).sync).toEqual({ text: "Restarting its terminals on the office's 0ff1ce5 once its 1 agent finishes: nothing new starts there.", failed: false });
+    ada.status = 'done';
+    expect(internals().available(repo, 'dev')).toEqual([]);
+
+    office.syncBoxes();
+    expect(office.boxView(box)).toMatchObject({ status: 'connecting', sync: { text: 'Restarting its terminals on 0ff1ce5…' } });
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
+    expect(conn.state().info?.keeperStale).toBe(false);
+    expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
+  });
+
+  it("still redials a box whose checkout was updated by an office that restarted before redialling it", async () => {
     const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
     const head = `0ff1ce5${'0'.repeat(33)}`;
     Object.assign(office, { officeHead: head });
@@ -3206,9 +3232,9 @@ describe('boxes', () => {
 
     office.scheduling = true;
     office.syncBoxes();
-    expect(office.boxView(box).sync?.text).toBe("Updating to the office's 0ff1ce5…");
+    expect(office.boxView(box).sync?.text).toBe("Updating to the office's 0ff1ce5: its agents carry on…");
     await vi.advanceTimersByTimeAsync(3000);
-    expect(office.boxView(box)).toMatchObject({ status: 'connecting', sync: { text: 'Restarting on 0ff1ce5…' } });
+    expect(office.boxView(box)).toMatchObject({ status: 'connecting', sync: { text: "Reconnecting on the office's 0ff1ce5…" } });
     await vi.advanceTimersByTimeAsync(1500);
     expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
     expect(conn.state().info?.commit).toBe(head);
@@ -3236,7 +3262,7 @@ describe('boxes', () => {
     office.syncBoxes();
     expect(update).toHaveBeenCalledWith(head);
     await vi.advanceTimersByTimeAsync(0);
-    expect(office.boxView(box).sync?.text).toBe('Restarting on 0ff1ce5…');
+    expect(office.boxView(box).sync?.text).toBe("Reconnecting on the office's 0ff1ce5…");
     await vi.advanceTimersByTimeAsync(1500);
     expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
     expect(update).toHaveBeenCalledTimes(1);

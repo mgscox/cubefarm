@@ -10,10 +10,10 @@ import type { BoxConnection, BoxOptions, CliHost, CliPlan, Machine, PreparedCli 
 import type { SessionHandle } from './agentRunner.ts';
 import type { BoxStatus, CliView } from '../shared/types.ts';
 
-// The office's side of a box: `ssh <destination> cubefarm box --stdio` (boxStdio.ts) bridges to the box's host, a
-// terminal keeper on that machine that also runs desk and session-file methods there (boxOps.ts). The ssh link can
-// drop and is redialled; the box's CLIs keep running meanwhile and their hooks wait on the box. Paths the box hands
-// out are its own and are only ever passed back to it.
+// The office's side of a box: `ssh <destination> cubefarm box --stdio` (boxStdio.ts) runs desk and session-file
+// methods there (boxOps.ts) and bridges to the box's host, a terminal keeper on that machine. The ssh link can drop
+// and is redialled; the box's CLIs keep running meanwhile and their hooks wait on the box. Paths the box hands out are
+// its own and are only ever passed back to it.
 
 /** How long the first answer may take: npx may be installing cubefarm on the box. */
 const READY_MS = 180_000;
@@ -23,6 +23,10 @@ const SLOW_CALL_MS = 15 * 60_000;
 const SLOW = new Set(['prepareDesk', 'detectClis', 'info']);
 /** Updating a box's cubefarm: a fetch, maybe an npm install, and a build. */
 const UPDATE_MS = 20 * 60_000;
+/** A relink waits this long at most for the box's methods to answer and prepared CLIs to start (a new link loses them). */
+const RELINK_WAIT_MS = 2 * 60_000;
+/** A CLI prepared on the box is started within this, or never. */
+const LAUNCH_MS = 30_000;
 
 class BoxLink implements CliHost {
   status: BoxStatus = 'connecting';
@@ -56,8 +60,10 @@ class BoxLink implements CliHost {
   private transcripts = new Set<string>();
   /** info and clis are from the link that's up now. */
   reported = false;
-  /** The host was told to shut down to restart: the link closing is expected, and redialled at once. */
+  /** The link was dropped on purpose (a restart or a relink): its closing is expected, and redialled at once. */
   private restarting = false;
+  /** CLIs prepared on the box and not started yet, by token: when each was. */
+  private launching = new Map<string, number>();
 
   constructor(
     private readonly opts: BoxOptions,
@@ -236,6 +242,27 @@ class BoxLink implements CliHost {
   }
 
   /**
+   * Dial a new link once the box's methods have answered and its prepared CLIs started: the box's next bridge runs the
+   * cubefarm now on its disk, and its keeper keeps the terminals. One that's offline is dialled now.
+   */
+  async relink(): Promise<void> {
+    const until = Date.now() + RELINK_WAIT_MS;
+    const busy = () => {
+      for (const [token, at] of this.launching) if (Date.now() - at > LAUNCH_MS) this.launching.delete(token);
+      return this.calls.size > 0 || this.launching.size > 0;
+    };
+    while (!this.closed && this.status === 'online' && busy() && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
+    const child = this.child;
+    if (this.closed) return;
+    if (this.status !== 'online' || !child) return this.check();
+    const back = new Promise<void>((resolve, reject) => this.dialWaiters.push({ resolve, reject }));
+    this.restarting = true;
+    child.stdin.end(); // the bridge goes; the keeper waits for the next
+    setTimeout(() => this.child === child && child.kill(), 15_000).unref();
+    return back;
+  }
+
+  /**
    * Ask again (BoxConnection.check): an online box reports again; one that isn't is dialled now, not after its wait.
    * Settles once that dial has: the box answered and reported, or it's still offline (rejected with why).
    */
@@ -301,11 +328,13 @@ class BoxLink implements CliHost {
 
   async prepare(plan: CliPlan): Promise<PreparedCli> {
     const { dir, prompt, hookUrl } = await this.call<{ dir: string; prompt: string; hookUrl?: string }>('prepare', plan);
+    this.launching.set(plan.token, Date.now());
     return {
       dir,
       prompt,
       hookUrl,
       start: ({ cols, rows }, meta) => {
+        this.launching.delete(plan.token);
         if (this.status !== 'online') throw new Error(`Could not start the CLI: ${this.name} went ${this.status}.`);
         const p = new KeeperPty(crypto.randomUUID(), this.send, this.ptys);
         this.send({ op: 'launch', id: p.id, token: plan.token, cols, rows, meta });
@@ -410,6 +439,7 @@ export function connectBox(opts: BoxOptions): BoxConnection {
     hooksReady: () => link.hooksReady(),
     check: () => link.check(),
     update: (target) => link.update(target),
+    relink: () => link.relink(),
     restart: () => link.restart(),
     close: () => link.close(),
   };

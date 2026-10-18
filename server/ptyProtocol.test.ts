@@ -1,8 +1,10 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { Socket } from 'node:net';
 import { describe, expect, it } from 'vitest';
-import { ALLOW, encode, hostSocket, localHookAnswer, readMessages, type ToHost } from './ptyProtocol.ts';
+import { ALLOW, encode, hostSocket, keeperBuild, keeperStale, localHookAnswer, readMessages, type ToHost } from './ptyProtocol.ts';
 
 describe('hostSocket', () => {
   it('names one named pipe per office home on Windows, whatever the path looks like', () => {
@@ -42,5 +44,34 @@ describe('localHookAnswer', () => {
 
   it('leaves a prompt the manager typed to the office, which decides whether it becomes a follow-up', () => {
     expect(localHookAnswer({ hook_event_name: 'UserPromptSubmit', prompt: 'carry on' }, undefined)).toBeUndefined();
+  });
+});
+
+describe('keeperBuild', () => {
+  it("hashes the bundled keeper alone, or in development the keeper's two files", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-build-'));
+    fs.writeFileSync(path.join(dir, 'ptyHost.js'), 'keeper v1');
+    const v1 = keeperBuild(dir, '.js');
+    expect(v1).toMatch(/^[0-9a-f]{16}$/);
+    expect(keeperBuild(dir, '.js')).toBe(v1);
+    fs.writeFileSync(path.join(dir, 'ptyHost.js'), 'keeper v2');
+    expect(keeperBuild(dir, '.js')).not.toBe(v1);
+    expect(keeperBuild(dir, '.ts')).toBeNull(); // no ptyHost.ts here
+    expect(keeperBuild(import.meta.dirname, '.ts')).toMatch(/^[0-9a-f]{16}$/);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('keeperStale', () => {
+  it('says a keeper runs older code when its build differs from the one on disk, or it never said', () => {
+    expect(keeperStale('aaaa', 'aaaa')).toBe(false);
+    expect(keeperStale('aaaa', 'bbbb')).toBe(true);
+    expect(keeperStale(undefined, 'bbbb')).toBe(true); // a keeper from before builds were reported ran the box's methods too
+    expect(keeperStale(null, 'bbbb')).toBe(true);
+  });
+
+  it("doesn't restart a keeper over a build it can't read on disk", () => {
+    expect(keeperStale('aaaa', null)).toBe(false);
+    expect(keeperStale(undefined, null)).toBe(false);
   });
 });

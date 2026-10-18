@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 
@@ -29,12 +30,12 @@ export type ToHost =
   | { op: 'kill'; id: string }
   | { op: 'hookReply'; rid: number; answer: unknown }
   | { op: 'shutdown' } // stop every terminal and exit (a keeper on another version)
-  // a box host only:
+  // to a box (answered by its bridge, boxStdio.ts, not its keeper):
   | { op: 'rpc'; rid: number; method: string; args: unknown[] } // a desk or session-file method, run on the box
   | { op: 'launch'; id: string; token: string; cols: number; rows: number; meta: unknown }; // start the CLI a 'prepare' rpc wrote
 
 export type FromHost =
-  | { op: 'ready'; version: number; hookPort: number; ptys: HeldPty[]; pid?: number }
+  | { op: 'ready'; version: number; hookPort: number; ptys: HeldPty[]; pid?: number; build?: string | null } // build: keeperBuild when it started
   | { op: 'spawned'; id: string; pid: number }
   | { op: 'failed'; id: string; error: string }
   | { op: 'data'; id: string; data: string }
@@ -48,6 +49,24 @@ export function hostSocket(home: string, platform = process.platform): string {
   const tag = crypto.createHash('sha1').update(path.resolve(home).toLowerCase()).digest('hex').slice(0, 12);
   return `\\\\.\\pipe\\cubefarm-pty-${tag}`;
 }
+
+/**
+ * The keeper's code on disk, as a short hash: ptyHost.js (which bundles this file), or in development ptyHost.ts and
+ * this file. null when it can't be read. A keeper reports the one it started with, so a box's bridge can tell whether
+ * an update since changed it (keeperStale).
+ */
+export function keeperBuild(dir: string, ext: string): string | null {
+  try {
+    const hash = crypto.createHash('sha256');
+    for (const f of ext === '.ts' ? ['ptyHost.ts', 'ptyProtocol.ts'] : [`ptyHost${ext}`]) hash.update(fs.readFileSync(path.join(dir, f)));
+    return hash.digest('hex').slice(0, 16);
+  } catch {
+    return null;
+  }
+}
+
+/** A running keeper's code differs from the keeper on disk now (one from before builds were reported counts). Unknown on disk: not stale. */
+export const keeperStale = (running: string | null | undefined, onDisk: string | null) => onDisk !== null && running !== onDisk;
 
 export const encode = (m: ToHost | FromHost) => `${JSON.stringify(m)}\n`;
 

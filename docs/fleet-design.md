@@ -169,9 +169,11 @@ OS.
 ## Phase 2 as built
 
 - `cubefarm box --stdio --office <office id>` (`server/boxStdio.ts`) finds or starts the box's host in
-  `~/.cubefarm-box/<office id>` (`SWARM_BOX_HOME` overrides) and bridges stdio to it. The host is `ptyHost.ts` with a
-  trailing `box`: it loads `boxOps.ts` (desks, session files, screenshots on its own disk), answers every hook but
-  `UserPromptSubmit` itself (`localHookAnswer`), queues them for the office, and waits 6 hours for an office that went.
+  `~/.cubefarm-box/<office id>` (`SWARM_BOX_HOME` overrides) and bridges stdio to it. The bridge itself runs
+  `boxOps.ts` (desks, session files, screenshots on its own disk) and starts prepared CLIs in the host, so each link
+  runs the cubefarm on the box's disk then. The host is `ptyHost.ts` with a trailing `box`: only terminals and hooks;
+  it answers every hook but `UserPromptSubmit` itself (`localHookAnswer`), queues them for the office, waits 6 hours
+  for an office that went, and reports a hash of its own code (`keeperBuild`).
 - The office side is `server/boxLink.ts` (`connectBox`): the ssh process (`fleet.boxCommand`), redialled with backoff
   after a drop, the box as a `Machine` and a `CliHost`. `SWARM_BOX_COMMAND` replaces the remote
   `npx -y cubefarm@<version> box` (a box that runs a checkout: `node <checkout>/bin/cubefarm.js box`).
@@ -187,18 +189,22 @@ OS.
 
 ## Following the office's version (#94)
 
-When the office runs another commit than a box's cubefarm checkout (it updated, or the box is new), the box drains:
-nothing new starts there ("moving to the office's version") while its agents finish. Then the office runs
+When the office runs another commit than a box's cubefarm checkout (it updated, or the box is new), it updates the box
+at once while its agents carry on (nothing new starts there meanwhile): the office runs
 `ssh <destination> <box command> --update <office commit>` (`server/boxUpdate.ts`), which fast-forwards the box's
 checkout by the launcher's rules (default branch, no local changes, never past the office), runs `npm install` when the
-dependencies changed and rebuilds `dist-server/`, rolling back on failure. The office then shuts the box's host down
-and redials it, so the next host runs the new build (its idle CLIs stop). A box run by npx only needs that restart
-when its cubefarm version differs. An office run from npm has no commit: a checkout box on another version moves to
-the office's release instead (its tag `v<version>`, else the commit that set `package.json` to it). Boxes report
-`commit` in their info, the one their host started on (not the checkout's HEAD now, so a host left running after an
-update is still restarted); one that doesn't (older) is asked to update too, and a box refused for another protocol
-version is updated without draining. A failure shows on the box's card
-and isn't retried until the office runs another commit or restarts. Rules: `fleet.boxSync`; flow: `Swarm.syncBoxes`.
+dependencies changed and rebuilds `dist-server/`, rolling back on failure. The office then redials the box once its
+calls there have answered (`relink`): the new bridge runs the new build, and the host keeps its terminals. A box run
+by npx only needs that relink when its cubefarm version differs. An office run from npm has no commit: a checkout box
+on another version moves to the office's release instead (its tag `v<version>`, else the commit that set
+`package.json` to it). Boxes report `commit` in their info, the one their link started on; one that doesn't (older)
+is asked to update too, and a box refused for another protocol version is updated and its next link replaces the host.
+
+Only when an update changed the host's own code (the bridge finds the host's reported `keeperBuild` differs from the
+one on disk: `keeperStale` in its info) does the box drain: nothing new starts there while its agents finish, then the
+office shuts the host down and redials it (its idle CLIs stop). A host from before the bridge ran the box's methods
+counts as changed, so that happens once. A failure shows on the box's card and isn't retried until the office runs
+another commit or restarts. Rules: `fleet.boxSync`; flow: `Swarm.syncBoxes`.
 
 ## Phases
 

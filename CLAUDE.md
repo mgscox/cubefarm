@@ -69,7 +69,8 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
   `localCliHost.ts` is the office's own; `cliFiles.ts` writes a session's files and command line on either kind.
 - Boxes (other machines agents run on, over ssh; `docs/fleet-design.md`): `fleet.ts` (pure: the start rule, the ssh
   command, box paths), `boxLink.ts` (the office's side: `connectBox`, a remote `Machine` and `CliHost`), `boxStdio.ts`
-  (`cubefarm box --stdio` on the box) and `boxOps.ts` (what the box's host runs on its own disk).
+  (`cubefarm box --stdio` on the box: a link's bridge to its keeper) and `boxOps.ts` (what the box does on its own disk,
+  run by the bridge, so a redialled link runs an update's code while the keeper keeps the terminals).
 - `ptyHost.ts`: the terminal keeper, a detached process of its own (`launch` re-spawns it outside the office's process
   tree) holding the CLIs' pseudo-terminals and relaying their hooks, so agents keep working through office restarts.
   `ptyClient.ts` is the office's side (start/connect, spawn, adopt after a restart, local fallback); `ptyProtocol.ts`

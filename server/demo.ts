@@ -456,7 +456,7 @@ const fakeClis = () => CLIS.map((c) => ({ id: c.id, label: c.label, installed: t
  * A pretend box: it "connects" after a moment (one whose destination starts with "offline" never does; "no-hooks": its
  * CLIs can't reach its hook URL), and its desks and fake sessions are the demo's own under its folder, labelled with
  * its name in the terminal. One whose destination starts with "stale" runs an older commit than the office, so it's
- * brought up to date.
+ * brought up to date; "stale-keeper": and that update changes its terminal keeper, which restarts once its agents finish.
  */
 function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
   let status: 'connecting' | 'online' | 'offline' = 'connecting';
@@ -466,6 +466,8 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
   const noHooks = /^no-hooks/i.test(opts.box.destination);
   let commit = /^stale/i.test(opts.box.destination) ? `5ta1e00${'0'.repeat(33)}` : DEMO_HEAD;
   let pulled = commit;
+  let keeperStale = false;
+  const keeperChanges = /^stale-keeper/i.test(opts.box.destination);
   let timer = setTimeout(() => {
     status = offline ? 'offline' : 'online';
     opts.changed();
@@ -504,7 +506,7 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
     state: () => ({
       status,
       error: offline && status === 'offline' ? 'ssh: connect to host: Connection timed out (demo)' : null,
-      info: status === 'online' ? { platform: 'linux', version: 'demo', commit, git: 'git version 2.47.0 (demo)', ghReady: true, hookError: noHooks ? 'http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED (demo)' : null, workspaces, sep: '/' } : null,
+      info: status === 'online' ? { platform: 'linux', version: 'demo', commit, git: 'git version 2.47.0 (demo)', ghReady: true, hookError: noHooks ? 'http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED (demo)' : null, workspaces, sep: '/', keeperStale } : null,
       // A box whose destination starts with "claude-only" has just Claude Code: other agents can't move there.
       clis: status === 'online' ? fakeClis().map((c) => (claudeOnly && c.id !== 'claude' ? { ...c, installed: false, version: null } : c)) : [],
       running,
@@ -523,18 +525,28 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
       opts.changed();
       throw new Error('ssh: connect to host: Connection timed out (demo)');
     },
-    // A pull and a build take a moment; the restart drops the link, and the box comes back on the new commit.
+    // A pull and a build take a moment; a new link runs the new commit (its sessions carry on), a restart its keeper too.
     update: async (target) => {
       await new Promise((r) => setTimeout(r, 3000));
       const from = pulled;
       pulled = target;
       return { ok: true, checkout: true, from, to: target };
     },
+    relink: async () => {
+      status = 'connecting';
+      opts.changed();
+      await new Promise<void>((r) => (timer = setTimeout(r, 1500)));
+      if (commit !== pulled) keeperStale = keeperChanges;
+      commit = pulled;
+      status = 'online';
+      opts.changed();
+    },
     restart: async () => {
       status = 'connecting';
       opts.changed();
       await new Promise<void>((r) => (timer = setTimeout(r, 1500)));
       commit = pulled;
+      keeperStale = false;
       status = 'online';
       opts.changed();
     },

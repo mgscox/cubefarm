@@ -140,6 +140,8 @@ export interface BoxConnection {
   check(): Promise<void>;
   /** Bring the box's cubefarm to the office's commit or release (`cubefarm box --update`, over ssh of its own). */
   update(target: string): Promise<BoxUpdateResult>;
+  /** Redial the box: its new link runs the cubefarm now on its disk; its keeper and CLIs carry on. Settles once it has reported. */
+  relink(): Promise<void>;
   /** Restart the box's host on the cubefarm now on its disk (its terminals stop); settles once it's back and has reported. */
   restart(): Promise<void>;
   /** Close the link: the box's CLIs carry on there (they were stopped first when the office quits for good). */
