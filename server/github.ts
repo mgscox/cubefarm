@@ -84,9 +84,9 @@ function fieldsPresent(result: DependencyResponse | undefined): Set<NativeField>
   return present;
 }
 
-function failedDependencyResponse(error: unknown): DependencyResponse | undefined {
+function failedDependencyResponse<T = DependencyResponse>(error: unknown): T | undefined {
   if (error instanceof CommandError && error.stdout.trim()) {
-    try { return JSON.parse(error.stdout) as DependencyResponse; } catch { /* Invalid output cannot prove lack of support. */ }
+    try { return JSON.parse(error.stdout) as T; } catch { /* Invalid output cannot prove dependency state or support. */ }
   }
   return undefined;
 }
@@ -144,13 +144,17 @@ async function resolveBodyBlockers(issues: IssueInfo[], api: RestQuery) {
       const [owner, name] = r.repo.split('/');
       return `d${n}: repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}) { issue(number:${r.number}) { state } }`;
     }).join('\n');
+    let result: { data?: Record<string, { issue?: { state?: string } } | null> } | undefined;
     try {
-      const result = await api(['api', 'graphql', '-f', `query={ ${fields} }`]) as { data?: Record<string, { issue?: { state?: string } } | null> };
-      batch.forEach((r, n) => {
-        const state = result.data?.[`d${n}`]?.issue?.state;
-        if (state === 'OPEN' || state === 'CLOSED') states.set(`${r.repo}#${r.number}`, state);
-      });
-    } catch { /* Unknown dependencies remain open. */ }
+      result = await api(['api', 'graphql', '-f', `query={ ${fields} }`]) as typeof result;
+    } catch (error) {
+      // gh exits nonzero for any failed alias, even when other aliases have readable states.
+      result = failedDependencyResponse<typeof result>(error);
+    }
+    batch.forEach((r, n) => {
+      const state = result?.data?.[`d${n}`]?.issue?.state;
+      if (state === 'OPEN' || state === 'CLOSED') states.set(`${r.repo}#${r.number}`, state);
+    });
   }
   for (const issue of issues) {
     const urls = dependencyUrls(issue.body);
