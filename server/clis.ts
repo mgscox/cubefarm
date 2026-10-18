@@ -138,6 +138,7 @@ export interface LaunchContext {
   effort: EffortLevel | '';
   resumeId?: string;
   sessionId: string; // the id the office gives a new Claude Code session
+  cwd: string; // the agent's desk, where the CLI runs
   name: string; // shown in Claude Code's prompt box and the terminal title
   role: AgentRole;
   additionalDirectories: string[];
@@ -228,7 +229,9 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         // the credential store, so git and gh fail in it).
         '--dangerously-bypass-approvals-and-sandbox',
       ];
-      return { args: ctx.resumeId ? ['resume', ...args, ctx.resumeId, ctx.prompt] : [...args, '--', ctx.prompt], env: { CUBEFARM_HOOK_URL: ctx.notify.url } };
+      // A thread recorded in another desk (a fix by someone other than the PR's author) makes Codex ask which folder to
+      // resume in, and nobody answers: --cd picks the desk it runs in without asking.
+      return { args: ctx.resumeId ? ['resume', ...args, '--cd', ctx.cwd, ctx.resumeId, ctx.prompt] : [...args, '--', ctx.prompt], env: { CUBEFARM_HOOK_URL: ctx.notify.url } };
     }
     case 'opencode': {
       const config = {
@@ -457,6 +460,39 @@ export function trustKey(screen: string): 'enter' | 'down' | null {
   if (/^(yes|trust|continue|proceed)\b/i.test(selected.trim())) return 'enter';
   if (/^(no|exit|quit|cancel)\b/i.test(selected.trim())) return 'down';
   return null;
+}
+
+/** A working CLI sat at a menu this long, its screen unchanged and nothing from its hooks or the keyboard, is stuck. */
+export const STUCK_MS = 10 * 60_000;
+
+/** The selected option of a numbered menu on screen (Codex's resume picker or sign-in, Claude Code's selects), or null. */
+export function menuOnScreen(screen: string): string | null {
+  const selected = screen.match(/^\s*[❯›>]\s*(\d+)\.\s+(\S.*)$/m);
+  if (!selected) return null;
+  const others = [...screen.matchAll(/^\s*(?:[❯›>]\s*)?(\d+)\.\s+\S/gm)].filter((m) => m[1] !== selected[1]);
+  return others.length ? selected[2].trim() : null;
+}
+
+/**
+ * Watches a working CLI for a question the office can't answer. look(screen) returns the menu's selected option once
+ * the screen has shown a menu, unchanged, for limitMs with no stir() (a hook or a key) meanwhile; else null. A long
+ * tool call doesn't count: there's no menu, and the CLI's spinner keeps changing the screen.
+ */
+export function menuWatch(limitMs = STUCK_MS, now = Date.now()) {
+  let last = '';
+  let since = now;
+  return {
+    stir(at = Date.now()) {
+      since = at;
+    },
+    look(screen: string, at = Date.now()): string | null {
+      if (screen !== last) {
+        last = screen;
+        since = at;
+      }
+      return at - since >= limitMs ? menuOnScreen(screen) : null;
+    },
+  };
 }
 
 /**

@@ -5,7 +5,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, interruptions, launchArgs, lostConversation, NOTIFY_SOURCE, oneAtATime, resumableSession, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
@@ -69,6 +69,44 @@ describe('hookReviewKey', () => {
   });
 });
 
+describe('the stuck-at-a-menu watchdog', () => {
+  const picker = ['Working directory · resume', '› 1. Use session directory (/w/desks/dennis-5cfb)', '  2. Use current directory (/w/desks/barbara-8528)', '', 'Press enter to continue'].join('\n');
+
+  it("spots a numbered menu waiting for a choice, not a CLI's prompt or its output", () => {
+    expect(menuOnScreen(picker)).toBe('Use session directory (/w/desks/dennis-5cfb)');
+    expect(menuOnScreen(['Do you want to proceed?', '❯ 1. Yes', '  2. No'].join('\n'))).toBe('Yes');
+    expect(menuOnScreen(['  Sign in with ChatGPT to use Codex', '> 1. Sign in with ChatGPT', '     Usage included with Plus', '  2. Sign in with Device Code'].join('\n'))).toBe('Sign in with ChatGPT');
+    expect(menuOnScreen('› Ask Codex to do anything')).toBeNull();
+    expect(menuOnScreen(['● Plan:', '  1. Read the issue', '  2. Fix it', '❯ '].join('\n'))).toBeNull();
+    expect(menuOnScreen('› 1. Only option')).toBeNull();
+  });
+
+  it('gives up on a menu that sat unchanged, with no hooks or keys, for the whole limit', () => {
+    const watch = menuWatch(STUCK_MS, 0);
+    expect(watch.look(picker, 1000)).toBeNull();
+    expect(watch.look(picker, STUCK_MS - 1)).toBeNull();
+    expect(watch.look(picker, STUCK_MS + 1000)).toBe('Use session directory (/w/desks/dennis-5cfb)');
+  });
+
+  it('starts over when the screen changes, a hook arrives or the manager types', () => {
+    const watch = menuWatch(STUCK_MS, 0);
+    watch.look(picker, 0);
+    watch.stir(STUCK_MS - 1000); // a hook, or a key pressed in the terminal
+    expect(watch.look(picker, STUCK_MS + 1000)).toBeNull();
+    watch.look(`${picker}\n`, 2 * STUCK_MS); // redrawn
+    expect(watch.look(`${picker}\n`, 3 * STUCK_MS - 1)).toBeNull();
+    expect(watch.look(`${picker}\n`, 3 * STUCK_MS)).not.toBeNull();
+  });
+
+  it("never fires on a long tool call: no menu, and the spinner's clock keeps changing the screen", () => {
+    expect(STUCK_MS).toBeGreaterThanOrEqual(10 * 60_000); // longer than a CLI's own foreground-command timeout
+    const watch = menuWatch(STUCK_MS, 0);
+    for (let t = 0; t <= 3 * STUCK_MS; t += 30_000) expect(watch.look(`• Running npm run test:e2e\n◦ Working (${t / 1000}s • esc to interrupt)`, t)).toBeNull();
+    const quiet = menuWatch(STUCK_MS, 0);
+    expect(quiet.look('• Running npm run test:e2e', 3 * STUCK_MS)).toBeNull();
+  });
+});
+
 describe('interruptions', () => {
   it('counts the lines where a CLI says it interrupted a turn', () => {
     expect(interruptions(['● Bash(sleep 4)', '  ⎿  Interrupted · What should Claude do instead?', '❯ '].join('\n'))).toBe(1);
@@ -84,6 +122,7 @@ describe('launchArgs', () => {
     model: '',
     effort: 'medium',
     sessionId: '11111111-1111-1111-1111-111111111111',
+    cwd: path.join('desks', 'ada-1'),
     name: 'Ada · #1',
     role: 'dev',
     additionalDirectories: [],
@@ -127,6 +166,20 @@ describe('launchArgs', () => {
     expect(resumed[0]).toBe('resume');
     expect(resumed.slice(-2)).toEqual(['thread-1', '--looks like a flag']);
     expect(resumed).toContain('--dangerously-bypass-approvals-and-sandbox');
+  });
+
+  it("resumes a Codex thread in the agent's own desk, so a thread from another desk can't stop at Codex's folder picker", () => {
+    // Ken fixes Barbara's PR: her thread was recorded in her desk, his CLI runs in his.
+    const ken = path.join('desks', 'ken-cfe2');
+    const resumed = launchArgs('codex', ctx({ resumeId: 'barbaras-thread', cwd: ken })).args;
+    expect(resumed.slice(resumed.indexOf('--cd'), resumed.indexOf('--cd') + 2)).toEqual(['--cd', ken]);
+    expect(resumed.indexOf('--cd')).toBeLessThan(resumed.indexOf('barbaras-thread'));
+    expect(resumed.slice(-2)).toEqual(['barbaras-thread', '--looks like a flag']);
+    // The same developer resuming in their own desk gets the same folder they'd have had anyway.
+    const own = launchArgs('codex', ctx({ resumeId: 'adas-thread' })).args;
+    expect(own.slice(own.indexOf('--cd'), own.indexOf('--cd') + 2)).toEqual(['--cd', path.join('desks', 'ada-1')]);
+    // A new session starts in its terminal's folder, as before.
+    expect(launchArgs('codex', ctx()).args).not.toContain('--cd');
   });
 
   it.each([undefined, 'thread-1'])('passes the lowercase Codex model ID (resume %s)', (resumeId) => {

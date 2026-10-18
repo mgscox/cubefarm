@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, codexTurnThread, hookReviewKey, interruptions, isCli, LOST_CONVERSATION, resumableSession, trustKey } from './clis.ts';
+import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, codexTurnThread, hookReviewKey, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, STUCK_MS, trustKey } from './clis.ts';
 import { terminalsAvailable, type Pty } from './ptyClient.ts';
 import { ALLOW } from './ptyProtocol.ts';
 import { localCliHost } from './localCliHost.ts';
@@ -46,6 +46,8 @@ const BOOT_MS = 60_000;
 const BOOT_LOOK_MS = 10_000;
 /** Working with no hooks reaching the office: how often it reads the CLI's transcript for the end of its turn. */
 const HOOKLESS_LOOK_MS = 5000;
+/** How often the office looks for a CLI stuck at a menu (see menuWatch). */
+const STUCK_LOOK_MS = 30_000;
 /** Claude's usage warning, the way the SDK's allowed_warning is used: pace new work from here. */
 const USAGE_WARN_PCT = 90;
 
@@ -358,6 +360,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let bootTimer: NodeJS.Timeout | undefined;
   let screenTimer: NodeJS.Timeout | undefined;
   let shotTimer: NodeJS.Timeout | undefined;
+  let stuckTimer: NodeJS.Timeout | undefined;
+  const stuck = menuWatch();
   const nudged = new Set<string>();
   let trustKeys = 0; // keys pressed on a folder-trust question (a few at most)
   let trustedAt = 0;
@@ -399,6 +403,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     clearInterval(screenTimer);
     setBoot(null);
     clearInterval(shotTimer);
+    clearInterval(stuckTimer);
     const lastShots = collectShots(true);
     if (term.onInput === watchKeys) term.onInput = null;
     const l = live;
@@ -448,6 +453,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
 
   /** Esc typed in the terminal while the agent works: if the CLI then says it interrupted the turn, it's over. */
   const watchKeys = (data: string) => {
+    stuck.stir();
     if (data !== '\x1b' || done || !begun) return;
     const before = interruptions(term.screen());
     let looks = 0;
@@ -492,6 +498,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const hook = (b: Record<string, unknown>): Record<string, unknown> => {
     const event = String(b.hook_event_name ?? '');
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
+    if (fromMain(b)) stuck.stir();
     if (fromMain(b) && !heard) {
       heard = true;
       if (boot === 'no-hooks') log([{ kind: 'system', text: `✓ The office is receiving ${label}'s hooks now.` }]);
@@ -687,6 +694,22 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     bootTimer = setTimeout(() => void look(), first);
   };
 
+  /**
+   * A CLI waiting at a menu nobody answers (Codex's resume picker, say) would leave its desk working forever: once it
+   * has sat there for STUCK_MS, the session ends as failed, which takes the office's usual retry or failure path.
+   */
+  const watchStuck = () => {
+    stuckTimer = setInterval(() => {
+      if (done || !live?.proc) return;
+      const option = stuck.look(term.screen());
+      if (option === null) return;
+      const minutes = Math.round(STUCK_MS / 60_000);
+      const error = `${label} sat at a question nobody answered ("${clip(option, 80)}") for ${minutes} minutes, so the office ended the session`;
+      term.note(`── ${error} ──`);
+      finish({ ok: false, text: lastText, errors: [error] });
+    }, STUCK_LOOK_MS);
+  };
+
   const handle: SessionHandle = {
     send(text) {
       const proc = live?.proc;
@@ -717,6 +740,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     else if (opts.typed) busy();
     else handle.send(opts.prompt);
     shotTimer = setInterval(collectShots, 2000);
+    watchStuck();
     if (live.hookless) watchHookless(HOOKLESS_LOOK_MS, !opts.reattach && !live.transcriptBase); // a restart must catch completions written while away
     return handle;
   }
@@ -768,6 +792,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       live = l;
       wire(l, opts.office);
       shotTimer = setInterval(collectShots, 2000);
+      watchStuck();
 
       // Starting up: answer the folder-trust question for the office's own worktrees (the answer that trusts it), and
       // say so when a CLI is waiting on something only the manager can do (signing in).
