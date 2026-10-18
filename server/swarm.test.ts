@@ -1501,6 +1501,31 @@ describe('ready-for-human issues', () => {
     expect(runTask.mock.calls[0][2].number).toBe(2);
   });
 
+  it('are set and cleared on an existing issue by route_issue, flipping company_status at once', async () => {
+    setIssues(issue(1), issue(2));
+    const edit = vi.spyOn(s.backend, 'editIssue').mockResolvedValue();
+    vi.spyOn(swarm, 'syncRepo').mockResolvedValue(); // no refresh: the tool updates the cache itself
+    const backlog = () => JSON.parse(s.companyStatus()).floors[0].backlog.find((i: { number: number }) => i.number === 1);
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 1, ready_for_human: true })).toBe('#1 on floor 1: reserved for a person (ready-for-human).');
+    expect(edit).toHaveBeenLastCalledWith(repo.fullName, 1, { body: undefined, addLabels: ['ready-for-human'], removeLabels: [] });
+    expect(backlog()).toMatchObject({ readyForHuman: true });
+    expect(ready()).toEqual([2]);
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 1, ready_for_human: true })).toContain('already ready-for-human, unchanged');
+    expect(edit).toHaveBeenCalledOnce();
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 1, ready_for_human: false })).toBe('#1 on floor 1: ready-for-human removed, agents can start it.');
+    expect(edit).toHaveBeenLastCalledWith(repo.fullName, 1, { body: undefined, addLabels: [], removeLabels: ['ready-for-human'] });
+    expect(backlog().readyForHuman).toBeUndefined();
+    expect(ready()).toEqual([1, 2]);
+  });
+
+  it('refuses route_issue ready_for_human on an unknown issue without editing', async () => {
+    setIssues(issue(1));
+    const edit = vi.spyOn(s.backend, 'editIssue');
+    vi.spyOn(s.backend, 'issueState').mockResolvedValue(null);
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 42, ready_for_human: false })).toContain('There is no open issue #42 on floor 1.');
+    expect(edit).not.toHaveBeenCalled();
+  });
+
   it('are marked in company_status and left out of its capacity', () => {
     setIssues(issue(1, ['ready-for-human']), issue(2));
     const floor = JSON.parse(s.companyStatus()).floors[0];
