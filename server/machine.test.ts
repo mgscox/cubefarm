@@ -280,6 +280,53 @@ describe('startCliSession on a host', () => {
     term.releaseIdle?.();
   });
 
+  for (const cli of ['claude', 'codex'] as const) it(`rejects a previous ${cli} completion with a known ID but no durable baseline`, async () => {
+    const since = Date.now();
+    const old = { ...turn({ ended: true, mark: 'old', text: '{"verdict":"pass"}' }), completedAt: since - 3_600_000 };
+    const meta = { agentId: 'ada', cli, token: 'stale', dir: 'sessions/t', busy: true, resumeId: 'known' };
+    const term = { ...terminal(), screen: () => '›' } as unknown as AgentTerminal;
+    const h = { ...host(vi.fn()), recoverTurn: async () => old, reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+    await reconnectClis(() => term, h);
+    const cb = claudeCallbacks();
+    startCliSession({ ...opts, cli, terminal: term, reattach: true, reattachSince: since }, cb, h);
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(cb.turn).not.toHaveBeenCalled();
+    expect(cb.finished).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(65_000);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, text: '' }));
+  });
+
+  it.each([false, true])('retains the result through a second restart during box screenshot collection (keepAlive=%s)', async (keepAlive) => {
+    let meta: unknown = { agentId: 'ada', cli: 'codex', token: 'shots', dir: 'sessions/t', busy: true, resumeId: 'known' };
+    const reply = turn({ ended: true, mark: 'reply', text: '{"verdict":"pass"}' });
+    const h = { ...host(vi.fn()), recoverTurn: async () => reply,
+      newShots: () => new Promise<[]>(() => {}),
+      reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }],
+      adopt: () => ({ ...pty, setMeta: (next: unknown) => { meta = next; } }),
+    };
+    const first = terminal();
+    await reconnectClis(() => first, h);
+    const cb1 = claudeCallbacks();
+    startCliSession({ ...opts, cli: 'codex', terminal: first, reattach: true, keepAlive }, cb1, h);
+    await vi.advanceTimersByTimeAsync(8000);
+    handleHook('shots', { hook_event_name: 'UserPromptSubmit', prompt: 'Late hook during final screenshots' });
+    expect(cb1.finished).not.toHaveBeenCalled();
+    expect(meta).toMatchObject({ busy: true, transcriptPending: true });
+    vi.clearAllTimers(); // old office dies before its screenshot RPC/finish timeout resolves
+    const second = terminal();
+    const nextHost = { ...h, newShots: async () => [] };
+    expect((await reconnectClis(() => second, nextHost))[0].busy).toBe(true);
+    const cb2 = claudeCallbacks();
+    vi.mocked(cb2.finished).mockImplementation(() => { expect(meta).toMatchObject({ busy: true, transcriptPending: true }); });
+    startCliSession({ ...opts, cli: 'codex', terminal: second, reattach: true, keepAlive }, cb2, nextHost);
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(cb1.finished).not.toHaveBeenCalled();
+    expect(cb2.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: reply.text }));
+    expect(cb2.turn).not.toHaveBeenCalled();
+    expect(meta).toMatchObject({ busy: false, transcriptPending: false });
+    second.releaseIdle?.();
+  });
+
   it('ends visibly when a restarted idle CLI has no readable result', async () => {
     const meta = { agentId: 'ada', cli: 'codex', token: 'lost', dir: 'sessions/t', busy: true, resumeId: null };
     const term = { ...terminal(), screen: () => 'Worked for 45m 38s\n› Ask anything' } as unknown as AgentTerminal;

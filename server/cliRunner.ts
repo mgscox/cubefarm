@@ -5,6 +5,7 @@ import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cod
 import { terminalsAvailable, type Pty } from './ptyClient.ts';
 import { ALLOW } from './ptyProtocol.ts';
 import { localCliHost } from './localCliHost.ts';
+import { currentTaskTurn } from './cliTranscript.ts';
 import { planCli, type CliHost, type PreparedCli } from './machine.ts';
 import {
   clip,
@@ -405,16 +406,22 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     const lastShots = collectShots(true);
     if (term.onInput === watchKeys) term.onInput = null;
     const l = live;
-    if (l && lives.get(term) === l) {
-      l.transcriptPending = false;
-      l.session = null;
-      if (keep && opts.keepAlive && l.proc) waitAtPrompt(l);
-      else endLive(l);
-    }
     cb.tool(null);
-    // On a box, the last screenshots come back over the link: QA's evidence must be in before the session is over.
-    if (!lastShots) return cb.finished({ ...r, costUsd, turns });
-    void Promise.race([lastShots, new Promise((res) => setTimeout(res, 10_000))]).then(() => cb.finished({ ...r, costUsd, turns }));
+    const deliver = () => {
+      cb.finished({ ...r, costUsd, turns });
+      // The keeper must still advertise a recoverable result until screenshots and the handoff finish.
+      if (l && lives.get(term) === l) {
+        l.transcriptPending = false;
+        l.session = null;
+        if (keep && opts.keepAlive && l.proc) waitAtPrompt(l);
+        else {
+          remember(l);
+          endLive(l);
+        }
+      }
+    };
+    if (!lastShots) return deliver();
+    void Promise.race([lastShots, new Promise((res) => setTimeout(res, 10_000))]).then(deliver);
   };
 
   /** A turn ended: finished, unless the CLI picks up another prompt within the grace period. */
@@ -495,6 +502,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
 
   const hook = (b: Record<string, unknown>): Record<string, unknown> => {
     const event = String(b.hook_event_name ?? '');
+    if (done) return event === 'PreToolUse' ? ALLOW : {};
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
     if (fromMain(b)) heardAt = Date.now();
     if (fromMain(b) && !heard) {
@@ -633,7 +641,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   /** The session transcript on its own machine; recovery also discovers an unreported session id. */
   const readTurn = async (): Promise<ClaudeTurn | null> => {
     if (opts.reattach) {
-      const t = await host.recoverTurn(opts.cwd, cli, live?.resumeId ?? opts.resumeSessionId ?? null, opts.reattachSince ?? 0);
+      const read = await host.recoverTurn(opts.cwd, cli, live?.resumeId ?? opts.resumeSessionId ?? null, opts.reattachSince ?? 0);
+      const t = opts.reattachSince ? currentTaskTurn(read, opts.reattachSince) : read;
       if (t?.sessionId && live && live.resumeId !== t.sessionId) {
         live.resumeId = t.sessionId;
         mainThread = t.sessionId;

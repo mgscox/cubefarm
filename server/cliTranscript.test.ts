@@ -25,7 +25,7 @@ const fixture = () => {
       { type: 'session_meta', payload: { id, source, cwd: dir, timestamp, base_instructions: { text: 'x'.repeat(100_000) } } },
       { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-1' } },
       { type: 'event_msg', payload: { type: 'agent_message', message: '{"verdict":"pass"}' } },
-      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1', last_agent_message: '{"verdict":"pass"}' } },
+      { type: 'event_msg', timestamp: new Date(Date.parse(timestamp) + 1000).toISOString(), payload: { type: 'task_complete', turn_id: 'turn-1', last_agent_message: '{"verdict":"pass"}' } },
     ].map((e) => JSON.stringify(e)).join('\n') + '\n');
     return file;
   };
@@ -51,6 +51,31 @@ describe('restart transcript recovery', () => {
     expect(recoverCliTurn(f.cwd, 'codex', id, f.since, f.home)).toMatchObject({ sessionId: 'main', ended: true, mark: 'turn-1', text: '{"verdict":"pass"}' });
   });
 
+  it('rejects an old completion even with a known Codex ID, but accepts a new turn in that older conversation', () => {
+    const f = fixture();
+    const file = f.save('known', 'cli', f.cwd, '2026-10-17T06:00:00Z');
+    expect(recoverCliTurn(f.cwd, 'codex', 'known', f.since, f.home)).toBeNull();
+    fs.appendFileSync(file, JSON.stringify({ type: 'event_msg', timestamp: '2026-10-18T06:02:00Z', payload: { type: 'task_complete', turn_id: 'new', last_agent_message: 'Current task' } }) + '\n');
+    expect(recoverCliTurn(f.cwd, 'codex', 'known', f.since, f.home)).toMatchObject({ mark: 'new', text: 'Current task' });
+  });
+
+  it('rejects a known Claude conversation whose last completion predates this task', () => {
+    const f = fixture();
+    const dir = path.join(f.home, '.claude', 'projects', path.resolve(f.cwd).replace(/[^a-zA-Z0-9]/g, '-'));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'known.jsonl'), JSON.stringify({ type: 'assistant', timestamp: '2026-10-17T06:00:00Z', message: { id: 'old', content: [{ type: 'text', text: 'Previous task' }], stop_reason: 'end_turn' } }));
+    expect(recoverCliTurn(f.cwd, 'claude', 'known', f.since, f.home)).toBeNull();
+  });
+
+  it('rejects known-ID completed evidence without a timestamp or a task start bound', () => {
+    const f = fixture();
+    const file = f.save('known');
+    expect(recoverCliTurn(f.cwd, 'codex', 'known', 0, f.home)).toBeNull();
+    const lines = fs.readFileSync(file, 'utf8').trim().split('\n').map((line) => { const e = JSON.parse(line); delete e.timestamp; return JSON.stringify(e); });
+    fs.writeFileSync(file, lines.join('\n'));
+    expect(recoverCliTurn(f.cwd, 'codex', 'known', f.since, f.home)).toBeNull();
+  });
+
   it('refuses ambiguous discovery and never guesses without a start bound', () => {
     const f = fixture();
     f.save('main');
@@ -70,7 +95,7 @@ describe('restart transcript recovery', () => {
     const f = fixture();
     const dir = path.join(f.home, '.claude', 'projects', path.resolve(f.cwd).replace(/[^a-zA-Z0-9]/g, '-'));
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'claude-main.jsonl'), JSON.stringify({ type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' } }));
+    fs.writeFileSync(path.join(dir, 'claude-main.jsonl'), JSON.stringify({ type: 'assistant', timestamp: '2026-10-18T06:02:00Z', message: { id: 'm1', content: [{ type: 'text', text: 'Done' }], stop_reason: 'end_turn' } }));
     expect(recoverCliTurn(f.cwd, 'claude', id, f.since, f.home)).toMatchObject({ ended: true, mark: 'm1', text: 'Done' });
   });
 });

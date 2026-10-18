@@ -23,6 +23,7 @@ export function codexTurn(tail: string, bytes: number): ClaudeTurn {
   let ended = false;
   let text = '';
   let mark = '';
+  let completedAt: number | undefined;
   for (const line of tail.split('\n')) {
     try {
       const e = JSON.parse(line);
@@ -33,17 +34,24 @@ export function codexTurn(tail: string, bytes: number): ClaudeTurn {
       if (p.type === 'task_complete') {
         ended = true;
         mark = String(p.turn_id ?? e.timestamp ?? '');
+        completedAt = Date.parse(String(e.timestamp ?? ''));
         if (typeof p.last_agent_message === 'string') text = p.last_agent_message;
       }
     } catch { /* A partial JSON line is not completion evidence. */ }
   }
-  return { bytes, ended, mark, text: text.trim() };
+  return { bytes, ended, mark, text: text.trim(), ...(Number.isFinite(completedAt) && { completedAt }) };
+}
+
+/** A conversation id can span tasks: only completion evidence from this task is safe to collect. */
+export function currentTaskTurn<T extends ClaudeTurn>(turn: T | null, since: number): T | null {
+  if (turn?.ended && (!(since > 0) || !Number.isFinite(turn.completedAt) || turn.completedAt! < since)) return null;
+  return turn;
 }
 
 /** Ambiguous discoveries are left for the visible recovery failure, rather than collecting another session's reply. */
 export function recoverCliTurn(cwd: string, cli: AgentCli, sessionId: string | null, since: number, home = os.homedir()): RecoveredTurn | null {
   if (cli === 'opencode') return null;
-  if (cli === 'claude' && sessionId) return readClaudeTurn(cwd, sessionId, home);
+  if (cli === 'claude' && sessionId) return currentTaskTurn(readClaudeTurn(cwd, sessionId, home), since);
   const root = cli === 'claude' ? path.join(home, '.claude', 'projects', path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-')) : path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'sessions');
   const candidates: { file: string; id: string }[] = [];
   const visit = (dir: string, depth: number) => {
@@ -75,6 +83,6 @@ export function recoverCliTurn(cwd: string, cli: AgentCli, sessionId: string | n
     if (candidates.length !== 1) return null;
     const { file, id } = candidates[0];
     const { text, bytes } = read(file, true);
-    return { ...(cli === 'claude' ? claudeTurn(text, bytes) : codexTurn(text, bytes)), sessionId: id };
+    return currentTaskTurn({ ...(cli === 'claude' ? claudeTurn(text, bytes) : codexTurn(text, bytes)), sessionId: id }, since);
   } catch { return null; }
 }
