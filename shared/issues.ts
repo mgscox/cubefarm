@@ -1,6 +1,22 @@
 // Issue conventions shared by the server's scheduler and the client's whiteboard.
 import type { IssueInfo } from './types.ts';
 
+export const AGENT_COMMENT_MARKER = '<!-- cubefarm:agent -->';
+const ISSUE_URL = 'https://github\\.com/([\\w.-]+)/([\\w.-]+)/issues/(\\d+)';
+const DEPENDENCY = new RegExp(`\\b(?:depends\\s+on|blocked\\s+by)\\s*:?\\s*(?:(?:#\\d+|${ISSUE_URL})(?:\\s*(?:,|and|&)\\s*)?)+`, 'gi');
+
+/** Full issue URLs in dependency statements; unrelated links do not block work. */
+export function dependencyUrls(body: string) {
+  const refs = new Map<string, { repo: string; number: number }>();
+  for (const statement of (body ?? '').matchAll(DEPENDENCY)) {
+    for (const m of statement[0].matchAll(new RegExp(ISSUE_URL, 'gi'))) {
+      const repo = `${m[1]}/${m[2]}`.toLowerCase();
+      refs.set(`${repo}#${m[3]}`, { repo, number: Number(m[3]) });
+    }
+  }
+  return [...refs.values()];
+}
+
 /** The specialty an issue is routed to, from its swarm:<specialty> label ('' = anyone). */
 export function issueSpecialty(labels: string[]) {
   const l = labels.find((x) => /^swarm:/i.test(x) && !/^swarm:skip$/i.test(x));
@@ -31,18 +47,23 @@ export function schedulable(labels: string[]) {
 /** Open issues this issue waits for, from "Depends on #3" / "Blocked by #4, #5" in its body. */
 export function blockers(body: string, open: Set<number>) {
   const out = new Set<number>();
-  for (const m of (body ?? '').matchAll(/\b(?:depends\s+on|blocked\s+by)\s*:?\s*((?:#\d+(?:\s*(?:,|and|&)\s*)?)+)/gi)) {
-    for (const n of m[1].matchAll(/#(\d+)/g)) if (open.has(Number(n[1]))) out.add(Number(n[1]));
+  for (const m of (body ?? '').matchAll(DEPENDENCY)) {
+    for (const n of m[0].replace(new RegExp(`${ISSUE_URL}(?:#[\\w-]+)?`, 'gi'), '').matchAll(/#(\d+)/g)) if (open.has(Number(n[1]))) out.add(Number(n[1]));
   }
   return [...out];
 }
 
 export type IssueRef = number | string;
-type DependencyIssue = Pick<IssueInfo, 'body' | 'nativeBlockers'>;
+type DependencyIssue = Pick<IssueInfo, 'body' | 'nativeBlockers' | 'bodyBlockers'> & Partial<Pick<IssueInfo, 'url'>>;
 
 /** Union body dependencies with open native blockers, including blockers outside the fetched backlog. */
 export function issueBlockers(issue: DependencyIssue, open: Set<number>): IssueRef[] {
   const out = new Set<IssueRef>(blockers(issue.body, open));
+  const repo = issue.url?.match(new RegExp(ISSUE_URL, 'i'))?.slice(1, 3).join('/').toLowerCase();
+  for (const ref of dependencyUrls(issue.body)) {
+    const known = issue.bodyBlockers?.find((b) => b.repo?.toLowerCase() === ref.repo && b.number === ref.number);
+    if (known ? known.state === 'OPEN' : ref.repo !== repo || open.has(ref.number)) out.add(ref.repo === repo ? ref.number : `${ref.repo}#${ref.number}`);
+  }
   for (const b of issue.nativeBlockers ?? []) {
     if (b.state === 'OPEN') out.add(b.repo ? `${b.repo}#${b.number}` : b.number);
   }
@@ -73,7 +94,6 @@ export function issueWaitReason(issue: IssueInfo, open: Set<number>): string | n
   return null;
 }
 
-const DEPENDENCY = /\b(?:depends\s+on|blocked\s+by)\s*:?\s*(?:#\d+(?:\s*(?:,|and|&)\s*)?)+/gi;
 const STATEMENT = new RegExp(`\\s*${DEPENDENCY.source}[.;,]?`, 'gi'); // with the space before it and a full stop after
 
 /**

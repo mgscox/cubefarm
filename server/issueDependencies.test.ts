@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
 import { dependenciesUnsupported, listIssues, unsupportedFields } from './github.ts';
+import { AGENT_COMMENT_MARKER, issueBlockers, issueWaitReason } from '../shared/issues.ts';
+import { recordNoWork, retainNoWork } from './issueWork.ts';
 
 type Query = NonNullable<Parameters<typeof listIssues>[1]>;
 type Api = NonNullable<Parameters<typeof listIssues>[2]>;
@@ -11,6 +13,59 @@ const result = (blockedBy = connection()) => ({ data: { repository: { i2: { bloc
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('native dependency sync', () => {
+  it.each([null, { issue: null }])('keeps an independent issue ready when another dependency is unread: %j', async (unread) => {
+    const query = vi.fn<Query>().mockResolvedValue([
+      { ...raw(2), body: 'Depends on https://github.com/demo/repo/issues/1' },
+      { ...raw(3), body: 'Depends on https://github.com/missing/private/issues/1' },
+    ]);
+    const partial = { data: { d0: { issue: { state: 'CLOSED' } }, d1: unread }, errors: [{ message: 'Could not resolve dependency', path: ['d1'] }] };
+    const api = vi.fn<Api>().mockRejectedValueOnce(new CommandError('GraphQL lookup failed', 'Could not resolve dependency', 1, JSON.stringify(partial)))
+      .mockResolvedValueOnce({ data: { repository: { i2: result(connection([])).data.repository.i2, i3: result(connection([])).data.repository.i2 } } });
+
+    const issues = await listIssues('demo/repo', query, api);
+    const open = new Set(issues.map((i) => i.number));
+    expect(issues[0].bodyBlockers).toEqual([{ repo: 'demo/repo', number: 1, state: 'CLOSED' }]);
+    expect(issueBlockers(issues[0], open)).toEqual([]);
+    expect(issueWaitReason(issues[0], open)).toBeNull();
+    expect(issueBlockers(issues[1], open)).toEqual(['missing/private#1']);
+    expect(issueWaitReason(issues[1], open)).toBe('open blockers');
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(api.mock.calls[0][0][3]).toContain('repository(owner:"demo",name:"repo")');
+    expect(api.mock.calls[0][0][3]).toContain('repository(owner:"missing",name:"private")');
+  });
+
+  it('resolves mixed same-repo and cross-repo URL states on every sync', async () => {
+    const query = vi.fn<Query>().mockResolvedValue([{ ...raw(2), url: 'https://github.com/demo/repo/issues/2', body: 'Depends on #3 and https://github.com/demo/repo/issues/1, https://github.com/other/repo/issues/1' }]);
+    const api = vi.fn<Api>().mockResolvedValueOnce({ data: { d0: { issue: { state: 'OPEN' } }, d1: { issue: { state: 'OPEN' } } } }).mockResolvedValueOnce(result(connection([])));
+    const [issue] = await listIssues('demo/repo', query, api);
+    expect(issueBlockers(issue, new Set([3]))).toEqual([3, 1, 'other/repo#1']);
+    expect(api.mock.calls[0][0][3]).toContain('repository(owner:"other",name:"repo")');
+    api.mockResolvedValueOnce({ data: { d0: { issue: { state: 'CLOSED' } }, d1: { issue: { state: 'CLOSED' } } } }).mockResolvedValueOnce(result(connection([])));
+    expect(issueBlockers((await listIssues('demo/repo', query, api))[0], new Set())).toEqual([]);
+  });
+
+  it('holds URL dependencies after a failed or partial lookup', async () => {
+    const query = vi.fn<Query>().mockResolvedValue([{ ...raw(2), body: 'Depends on https://github.com/other/repo/issues/1' }]);
+    const api = vi.fn<Api>().mockRejectedValueOnce(new Error('network')).mockResolvedValueOnce(result(connection([])));
+    expect(issueBlockers((await listIssues('demo/repo', query, api))[0], new Set())).toEqual(['other/repo#1']);
+    api.mockResolvedValueOnce({ data: { d0: null } }).mockResolvedValueOnce(result(connection([])));
+    expect(issueBlockers((await listIssues('demo/repo', query, api))[0], new Set())).toEqual(['other/repo#1']);
+  });
+
+  it('agent comments through the owner account preserve two empty endings; human comments reset them', async () => {
+    const query = vi.fn<Query>().mockResolvedValue([raw(2)]);
+    const nodes: { author: { login: string }; createdAt: string; body: string }[] = [];
+    const api = vi.fn<Api>().mockImplementation(async () => ({ data: { repository: { i2: { ...result(connection([])).data.repository.i2, comments: { nodes: [...nodes] } } } } }));
+    const first = (await listIssues('demo/repo', query, api))[0];
+    let records = recordNoWork([], first);
+    nodes.push({ author: { login: 'demo' }, createdAt: '2026-10-18T12:00:00Z', body: `Blocked by dependencies. ${AGENT_COMMENT_MARKER}` });
+    const second = (await listIssues('demo/repo', query, api))[0];
+    records = recordNoWork(retainNoWork(records, [second]), second);
+    expect(records[0].count).toBe(2);
+    nodes.push({ author: { login: 'demo' }, createdAt: '2026-10-18T12:01:00Z', body: 'I fixed the prerequisite; try again.' });
+    const human = (await listIssues('demo/repo', query, api))[0];
+    expect(retainNoWork(records, [human])).toEqual([]);
+  });
   it('retries a failed board listing before enriching native blockers', async () => {
     const query = vi.fn<Query>().mockRejectedValueOnce(new Error('HTTP 502')).mockResolvedValue([raw(2)]);
     const api = vi.fn<Api>().mockResolvedValue(result());

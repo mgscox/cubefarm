@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CommandError, gh, ghJson } from './exec.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo, PullRefresh } from '../shared/types.ts';
+import { AGENT_COMMENT_MARKER, dependencyUrls } from '../shared/issues.ts';
 
 // All GitHub access goes through the gh CLI so it reuses the user's existing `gh auth login`.
 
@@ -64,7 +65,7 @@ interface BlockerConnection {
 interface NativeIssue {
   blockedBy?: BlockerConnection;
   subIssuesSummary?: { total: number; completed: number };
-  comments?: { nodes: { author: { login: string } | null; createdAt: string }[] };
+  comments?: { nodes: { author: { login: string } | null; createdAt: string; body?: string }[] };
 }
 
 interface DependencyResponse {
@@ -83,9 +84,9 @@ function fieldsPresent(result: DependencyResponse | undefined): Set<NativeField>
   return present;
 }
 
-function failedDependencyResponse(error: unknown): DependencyResponse | undefined {
+function failedDependencyResponse<T = DependencyResponse>(error: unknown): T | undefined {
   if (error instanceof CommandError && error.stdout.trim()) {
-    try { return JSON.parse(error.stdout) as DependencyResponse; } catch { /* Invalid output cannot prove lack of support. */ }
+    try { return JSON.parse(error.stdout) as T; } catch { /* Invalid output cannot prove dependency state or support. */ }
   }
   return undefined;
 }
@@ -133,12 +134,41 @@ export function dependenciesUnsupported(error: unknown): boolean {
   return unsupportedFields(error) !== null;
 }
 
+/** Batch URL dependencies across repositories. Missing/private issues fail closed and are retried next sync. */
+async function resolveBodyBlockers(issues: IssueInfo[], api: RestQuery) {
+  const refs = [...new Map(issues.flatMap((i) => dependencyUrls(i.body)).map((r) => [`${r.repo}#${r.number}`, r])).values()];
+  const states = new Map<string, 'OPEN' | 'CLOSED'>();
+  for (let start = 0; start < refs.length; start += 25) {
+    const batch = refs.slice(start, start + 25);
+    const fields = batch.map((r, n) => {
+      const [owner, name] = r.repo.split('/');
+      return `d${n}: repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}) { issue(number:${r.number}) { state } }`;
+    }).join('\n');
+    let result: { data?: Record<string, { issue?: { state?: string } } | null> } | undefined;
+    try {
+      result = await api(['api', 'graphql', '-f', `query={ ${fields} }`]) as typeof result;
+    } catch (error) {
+      // gh exits nonzero for any failed alias, even when other aliases have readable states.
+      result = failedDependencyResponse<typeof result>(error);
+    }
+    batch.forEach((r, n) => {
+      const state = result?.data?.[`d${n}`]?.issue?.state;
+      if (state === 'OPEN' || state === 'CLOSED') states.set(`${r.repo}#${r.number}`, state);
+    });
+  }
+  for (const issue of issues) {
+    const urls = dependencyUrls(issue.body);
+    if (urls.length) issue.bodyBlockers = urls.map((r) => ({ ...r, state: states.get(`${r.repo}#${r.number}`) ?? 'OPEN' }));
+  }
+}
+
 /** Repo sync batches native reads (blockers, sub-issue summaries, owner comments); scheduling uses the resulting IssueInfo cache. */
 export async function listIssues(fullName: string, query: BoardQuery<RawIssue[]> = ghJson, api: RestQuery = ghJson): Promise<IssueInfo[]> {
   const raw = await readTwice(() => query(['issue', 'list', '-R', fullName, '--state', 'open', '--limit', '100', '--json', 'number,title,body,url,labels,createdAt'], SYNC_READ));
   const issues: IssueInfo[] = raw
     .map((i) => ({ number: i.number, title: i.title, body: i.body ?? '', url: i.url, labels: i.labels.map((l) => l.name), createdAt: i.createdAt }))
     .sort((a, b) => a.number - b.number);
+  await resolveBodyBlockers(issues, api);
   let caches = dependencyCaches.get(api);
   if (!caches) dependencyCaches.set(api, caches = new Map());
   const key = fullName.toLowerCase();
@@ -158,7 +188,7 @@ export async function listIssues(fullName: string, query: BoardQuery<RawIssue[]>
         while (pending.length) {
           const fields = pending.map(({ issue, cursor }) => `i${issue.number}: issue(number:${issue.number}) { ${[
             cursor === null && want.includes('subIssuesSummary') && 'subIssuesSummary { total completed }',
-            cursor === null && want.includes('comments') && 'comments(last:100) { nodes { author { login } createdAt } }',
+            cursor === null && want.includes('comments') && 'comments(last:100) { nodes { author { login } createdAt body } }',
             want.includes('blockedBy') && `blockedBy(first:100${cursor ? `,after:${JSON.stringify(cursor)}` : ''}) { nodes { number state repository { nameWithOwner } } pageInfo { hasNextPage endCursor } }`,
           ].filter(Boolean).join(' ')} }`).join('\n');
           const result = await api(['api', 'graphql', '-f', `query=query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { ${fields} } }`, '-f', `owner=${owner}`, '-f', `name=${name}`]) as DependencyResponse;
@@ -174,7 +204,7 @@ export async function listIssues(fullName: string, query: BoardQuery<RawIssue[]>
               if (!summary || !Number.isSafeInteger(summary.total) || !Number.isSafeInteger(summary.completed) || summary.total < 0 || summary.completed < 0 || summary.completed > summary.total) throw new Error('Sub-issue query incomplete');
               parents.set(issue.number, { total: summary.total, completed: summary.completed });
             }
-            const commentAt = node.comments?.nodes.filter((c) => c.author?.login.toLowerCase() === owner.toLowerCase()).map((c) => c.createdAt).sort().at(-1);
+            const commentAt = node.comments?.nodes.filter((c) => c.author?.login.toLowerCase() === owner.toLowerCase() && !c.body?.includes(AGENT_COMMENT_MARKER)).map((c) => c.createdAt).sort().at(-1);
             if (commentAt) comments.set(issue.number, commentAt);
             if (!want.includes('blockedBy')) continue;
             const connection = node.blockedBy;

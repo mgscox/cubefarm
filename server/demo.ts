@@ -9,7 +9,7 @@ import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionH
 import { bootNotice, CLIS } from './clis.ts';
 import { updateFailure } from './fleet.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
-import { READY_FOR_HUMAN, RESEARCH } from '../shared/issues.ts';
+import { dependencyUrls, READY_FOR_HUMAN, RESEARCH } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR } from './config.ts';
 import { takeLastUpdate, underLauncher, type OfficeHost } from './officeUpdate.ts';
@@ -74,6 +74,7 @@ const parent = issue(parentRepo.nextNumber++, 'Todo release plan', 'Implementati
 parent.subIssues = { total: 6, completed: 6 };
 parentRepo.issues.push(parent);
 repos.get('demo-co/pixel-todo')!.issues[2].nativeBlockers = [{ number: 2, state: 'OPEN' }];
+repos.get('demo-co/pixel-todo')!.issues[2].body += '\n\nDepends on https://github.com/demo-co/pixel-todo/issues/2';
 seed('demo-co/weather-api', 'Tiny weather REST API', [
   ['Add /forecast endpoint', 'Return a 5-day forecast for a city.'],
   ['Rate limit anonymous callers', '60 requests per minute per IP.'],
@@ -632,6 +633,7 @@ export function createDemoBackend(): Backend {
       return { fullName: newRepo(name, opts.description), path: `/demo/projects/${name}` };
     },
     listIssues: async (fullName) => (repos.get(fullName)?.issues ?? []).map((i) => ({ ...i,
+      bodyBlockers: dependencyUrls(i.body).map((b) => ({ ...b, state: closedIssues.has(`${b.repo}#${b.number}`) ? 'CLOSED' : 'OPEN' })),
       subIssues: i.subIssues ?? { total: 0, completed: 0 },
       nativeBlockers: (i.nativeBlockers ?? []).map((b) => ({ ...b,
         state: closedIssues.has(`${b.repo ?? fullName}#${b.number}`) ? 'CLOSED' : b.state,

@@ -32,7 +32,8 @@ export interface IssueInfo {
   labels: string[];
   createdAt: string;
   subIssues?: { total: number; completed: number } | null; // null: unread; last successful native summary otherwise
-  ownerCommentAt?: string; // newest comment by the repository owner
+  ownerCommentAt?: string; // newest unmarked (human) comment by the repository owner
+  bodyBlockers?: IssueDependency[]; // resolved dependency URLs; unread URLs are held open
   stalled?: string;
   nativeBlockers?: IssueDependency[] | null; // null: unread, undefined: unsupported; otherwise last successful sync
 }
@@ -91,6 +92,7 @@ export interface NoWorkEnding {
   body: string;
   labels: string[];
   ownerCommentAt?: string;
+  retryAfterSync?: number; // no automatic retry until an issue refresh starts after this ending
 }
 
 export interface RepoView {
