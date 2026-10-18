@@ -8,7 +8,7 @@ import type { PreviewBackend } from './previewRunner.ts';
 import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
 import { bootNotice, CLIS } from './clis.ts';
 import { updateFailure } from './fleet.ts';
-import type { GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
+import type { CliView, GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
 import { dependencyUrls, READY_FOR_HUMAN, RESEARCH } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR } from './config.ts';
@@ -460,21 +460,23 @@ const fakeClis = () => CLIS.map((c) => ({ id: c.id, label: c.label, installed: t
  * its name in the terminal. One whose destination starts with "stale" runs an older commit than the office, so it's
  * brought up to date; "stale-keeper": and that update changes its terminal keeper, which restarts once its agents finish.
  * One starting with "old" too, but its cubefarm predates --update: the first try fails, as if the manager then updated
- * it by hand, so Check again moves it.
+ * it by hand, so Look again moves it.
  */
 function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
   let status: 'connecting' | 'online' | 'offline' = 'connecting';
   let running = 0;
   const offline = /^offline/i.test(opts.box.destination);
   const claudeOnly = /^claude-only/i.test(opts.box.destination);
+  let clis: CliView[] = [];
   const noHooks = /^no-hooks/i.test(opts.box.destination);
   let tooOld = /^old/i.test(opts.box.destination);
   let commit = /^(stale|old)/i.test(opts.box.destination) ? `5ta1e00${'0'.repeat(33)}` : DEMO_HEAD;
   let pulled = commit;
   let keeperStale = false;
   const keeperChanges = /^stale-keeper/i.test(opts.box.destination);
-  let timer = setTimeout(() => {
+  let timer = setTimeout(async () => {
     status = offline ? 'offline' : 'online';
+    if (!offline) clis = await machine.detectClis();
     opts.changed();
   }, 1500);
   const workspaces = `/boxes/${opts.box.name}/workspaces`;
@@ -504,7 +506,7 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
       });
     },
     terminals: true,
-    detectClis: async () => fakeClis(),
+    detectClis: async () => fakeClis().map((c) => (claudeOnly && c.id !== 'claude' ? { ...c, installed: false, version: null } : c)),
   };
   return {
     machine,
@@ -513,15 +515,19 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
       error: offline && status === 'offline' ? 'ssh: connect to host: Connection timed out (demo)' : null,
       info: status === 'online' ? { platform: 'linux', version: 'demo', commit, git: 'git version 2.47.0 (demo)', ghReady: true, hookError: noHooks ? 'http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED (demo)' : null, workspaces, sep: '/', keeperStale } : null,
       // A box whose destination starts with "claude-only" has just Claude Code: other agents can't move there.
-      clis: status === 'online' ? fakeClis().map((c) => (claudeOnly && c.id !== 'claude' ? { ...c, installed: false, version: null } : c)) : [],
+      clis: status === 'online' ? clis : [],
       running,
       reported: status === 'online',
       refused: false,
     }),
     reconnected: Promise.resolve([]), // fake sessions end with the office
     hooksReady: () => undefined,
-    // An offline one tries again for a moment and stays offline (the check fails, as a real one would); an online one has nothing new to say.
+    // An online box detects again on the same link; an offline one tries connecting and still fails.
     check: async () => {
+      if (status === 'online') {
+        clis = await machine.detectClis();
+        return opts.changed();
+      }
       if (status !== 'offline') return opts.changed();
       status = 'connecting';
       opts.changed();

@@ -6,7 +6,7 @@ import { createDemoTelegram } from './demo.ts';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
 import type { BoxConnection, Machine } from './machine.ts';
-import { agentBox, boxSync, boxSyncText, startPlace, syncRetryDue, validDestination, type BoxStep, type BoxSyncState, type PersistedBox, type StartPlace } from './fleet.ts';
+import { agentBox, boxCliCheckDue, boxSync, boxSyncText, startPlace, syncRetryDue, validDestination, type BoxStep, type BoxSyncState, type PersistedBox, type StartPlace } from './fleet.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { ReconnectedCli } from './cliRunner.ts';
 import type { PrDetails } from './github.ts';
@@ -29,7 +29,7 @@ import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { officeLifecycle } from './officeLifecycle.ts';
 import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type LastUpdate } from './officeUpdate.ts';
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
-import { cliLabel, isCli, ONE_TURN } from './clis.ts';
+import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, issueBlockers, issueParent, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
 import { effectiveModel } from '../shared/models.ts';
@@ -1028,7 +1028,7 @@ export class Swarm {
       (id) => {
         // Its CLIs are looked for once it connects: until they're known, a new task waits for the list.
         const clis = this.boxConns.get(id)?.state().clis ?? [];
-        return clis.some((c) => c.id === cli && c.installed) ? null : cliLabel(cli);
+        return clis.some((c) => c.id === cli && c.installed) ? null : cli;
       },
     );
   }
@@ -1038,7 +1038,8 @@ export class Swarm {
     const name = this.boxName(where.wait);
     if (this.boxMoving(where.wait)) return `${name} is moving to the office's version`;
     if (!where.lacks) return `${name} is offline`;
-    return this.boxConns.get(where.wait)?.state().clis.length ? `${name} hasn't got ${where.lacks}` : `${name} is still looking for its coding agents`;
+    if (!this.boxConns.get(where.wait)?.state().clis.length) return `${name} is still looking for its coding agents`;
+    return isCli(where.lacks) ? `${name} hasn't got ${cliLabel(where.lacks)} (not on the login-shell ${cliSearchLocations(where.lacks)})` : `${name} hasn't got ${where.lacks}`;
   }
 
   private boxName(id: string) {
@@ -1048,6 +1049,19 @@ export class Swarm {
   private removedBoxes = new Map<string, string>();
 
   // ---------- boxes ----------
+
+  private boxCliCheckedAt = new Map<string, number>();
+  private boxChecks = new Map<string, Promise<void>>();
+
+  private refreshWaitingBoxClis() {
+    const now = Date.now();
+    for (const a of this.state.agents) {
+      if (a.heldRetry || !(FREE.includes(a.status) || (a.status === 'error' && now - (a.endedAt ?? 0) >= ERROR_COOLDOWN_MS))) continue;
+      const where = this.place(a, 'new');
+      if (!('wait' in where) || !where.lacks || !this.boxConns.get(where.wait)?.state().reported || this.boxChecks.has(where.wait) || !boxCliCheckDue(this.boxCliCheckedAt.get(where.wait), now)) continue;
+      void this.checkBox(where.wait).catch((err) => console.warn('could not check box coding agents', err));
+    }
+  }
 
   /** An agent's terminal, for a CLI a keeper or box kept running (the CEO and the lobby researcher's are resumed instead). */
   private keptTerminal(agentId: string) {
@@ -1140,7 +1154,7 @@ export class Swarm {
 
   // ---------- boxes following the office's version (#94) ----------
 
-  /** Boxes moving to the office's version, or that failed to (tried again after a while, or on Check again). */
+  /** Boxes moving to the office's version, or that failed to (tried again after a while, or on Look again). */
   private boxSyncs = new Map<string, BoxSyncState>();
 
   /** Nothing new starts on a box while it moves to the office's version. */
@@ -1258,11 +1272,20 @@ export class Swarm {
       this.broadcast({ type: 'box', box: this.boxView(box) });
     }
     try {
-      await conn.check();
+      let checking = this.boxChecks.get(id);
+      if (!checking) {
+        this.boxCliCheckedAt.set(id, Date.now());
+        checking = conn.check();
+        this.boxChecks.set(id, checking);
+      }
+      await checking;
     } catch (err) {
       throw new HttpError(502, `${box.name} didn't answer: ${(err as Error).message}`);
+    } finally {
+      this.boxChecks.delete(id);
     }
     this.syncBoxes();
+    if (this.scheduling) setTimeout(() => this.schedule(), 200);
     return this.boxView(box);
   }
 
@@ -1273,6 +1296,7 @@ export class Swarm {
     this.state.boxes = this.state.boxes.filter((b) => b !== box);
     this.removedBoxes.set(id, box.name);
     this.boxSyncs.delete(id);
+    this.boxCliCheckedAt.delete(id);
     for (const r of this.state.repos.filter((x) => x.box === id)) {
       r.box = '';
       this.emitRepo(r);
@@ -3417,6 +3441,7 @@ export class Swarm {
       void this.refreshOfficeLifecycle().catch((err) => console.warn('could not save closing office state', err));
       return;
     }
+    this.refreshWaitingBoxClis();
     if (this.officeUpdateTick()) return; // draining for the office's own update
     if (this.limited()) return;
     this.runDeferredResumes();

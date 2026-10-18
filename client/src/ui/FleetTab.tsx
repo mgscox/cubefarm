@@ -114,12 +114,12 @@ function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos:
             box.sync?.failed
               ? "Try moving it to the office's version again now, after you fixed it on the box"
               : box.status === 'online'
-                ? 'Ask the box again what it has set up, after you changed something there'
+                ? 'Ask the box again what it has set up. Missing coding agents are also checked every five minutes while agents wait.'
                 : 'Connect to it now instead of waiting for the next try'
           }
           onClick={check}
         >
-          {checking ? 'Checking…' : 'Check again'}
+          {checking ? 'Checking…' : 'Look again'}
         </button>
         <button className="btn btn-small btn-ghost" onClick={remove}>
           Remove

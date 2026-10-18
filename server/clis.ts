@@ -30,6 +30,11 @@ export const cliLabel = (id: AgentCli) => CLIS.find((c) => c.id === id)?.label ?
 
 const WIN = process.platform === 'win32';
 
+/** Installer defaults that may only be added to an interactive shell's PATH. */
+export const cliInstallFolders = (id: AgentCli) => [...(id === 'opencode' ? ['~/.opencode/bin'] : []), '~/.local/bin', '~/.bun/bin', '~/.npm-global/bin'];
+
+export const cliSearchLocations = (id: AgentCli) => `PATH or in ${cliInstallFolders(id).join(', ')}`;
+
 /** The executable for a command name on PATH: on Windows only .exe/.cmd/.bat/.com, never an extensionless sh shim. */
 export function resolveCommand(name: string, env: NodeJS.ProcessEnv = process.env): string | null {
   const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
@@ -106,7 +111,10 @@ export function commandFor(id: AgentCli): { file: string; args: string[] } | nul
   const bundled = id === 'claude' ? bundledClaude() : null;
   if (bundled) return { file: bundled, args: [] };
   const def = CLIS.find((c) => c.id === id);
-  const found = def && resolveCommand(def.command);
+  const found = def && (resolveCommand(def.command) ?? resolveCommand(def.command, {
+    PATH: cliInstallFolders(id).map((folder) => path.join(os.homedir(), ...folder.slice(2).split('/'))).join(path.delimiter),
+    PATHEXT: process.env.PATHEXT,
+  }));
   if (!found) return null;
   if (WIN && /\.(cmd|bat)$/i.test(found)) {
     try {

@@ -4,7 +4,8 @@ import { CommandError, ghJson, run } from './exec.ts';
 import { branchAhead, listIssues } from './github.ts';
 import { LOST_CONVERSATION, STUCK_MS } from './clis.ts';
 import { startCliSession } from './cliRunner.ts';
-import type { CliHost } from './machine.ts';
+import type { BoxConnection, CliHost } from './machine.ts';
+import { BOX_CLI_CHECK_MS } from './fleet.ts';
 import type { AgentTerminal } from './terminal.ts';
 import { createDemoBackend } from './demo.ts';
 import { HttpError, Swarm } from './swarm.ts';
@@ -3293,7 +3294,7 @@ describe('boxes', () => {
     Object.assign(ada, { cli: 'codex', box: box.id });
     expect(internals().available(repo, 'dev')).toEqual([]);
     s.repoRt.get(repo.id)!.issues = [issue(8)];
-    expect(((await swarm.assign('a1', 8)) as { warning?: string }).warning).toBe("waiting: Mac mini hasn't got Codex");
+    expect(((await swarm.assign('a1', 8)) as { warning?: string }).warning).toBe("waiting: Mac mini hasn't got Codex (not on the login-shell PATH or in ~/.local/bin, ~/.bun/bin, ~/.npm-global/bin)");
     ada.cli = 'claude';
     expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
   });
@@ -3309,6 +3310,97 @@ describe('boxes', () => {
     await vi.advanceTimersByTimeAsync(1000);
     await failed;
     await expect(swarm.checkBox('box-gone')).rejects.toThrow(HttpError);
+  });
+
+  it.each(['automatic', 'manager'])('detects a newly installed CLI without relinking (%s), then gives its waiting agent work', async (how) => {
+    const box = swarm.addBox('Mac mini', 'ada@mini');
+    const conn = internals().boxConns.get(box.id) as unknown as BoxConnection;
+    const installed = await conn.machine.detectClis();
+    const missing = installed.map((c) => c.id === 'opencode' ? { ...c, installed: false, version: null } : c);
+    const detect = vi.spyOn(conn.machine, 'detectClis').mockResolvedValueOnce(missing).mockResolvedValue(installed);
+    const relink = vi.spyOn(conn, 'relink');
+    const restart = vi.spyOn(conn, 'restart');
+    await vi.advanceTimersByTimeAsync(1600);
+    Object.assign(s.state.agents[0], { cli: 'opencode', box: box.id });
+    setIssues(issue(8));
+    const waiting = await swarm.assign('a1', 8) as { warning?: string };
+    expect(waiting.warning).toContain("hasn't got OpenCode (not on the login-shell PATH or in ~/.opencode/bin, ~/.local/bin, ~/.bun/bin, ~/.npm-global/bin)");
+    expect(internals().available(repo, 'dev')).toEqual([]);
+    expect(runTask).not.toHaveBeenCalled();
+
+    if (how === 'manager') await swarm.checkBox(box.id);
+    else {
+      // Restore the real scheduler; work stays blocked until the asynchronous report comes back.
+      (s.schedule as Mock).mockRestore();
+      Object.assign(s, { scheduling: true, officeHead: `0ff1ce5${'0'.repeat(33)}` });
+      vi.spyOn(s, 'startCeoWork').mockImplementation(() => {});
+      vi.spyOn(s, 'maybeHeartbeat').mockImplementation(() => {});
+      Object.assign(s.repoRt.get(repo.id)!, { lastSync: Date.now() });
+      s.schedule();
+      expect(runTask).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(200);
+    }
+    expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
+    if (how === 'manager') s.startIssueWork(repo);
+    expect(runTask).toHaveBeenCalledWith(s.state.agents[0], repo, expect.objectContaining({ number: 8 }), undefined);
+    expect(detect).toHaveBeenCalledTimes(2);
+    expect(relink).not.toHaveBeenCalled();
+    expect(restart).not.toHaveBeenCalled();
+  });
+
+  it('coalesces missing CLI checks per box and retries after five minutes, even after a failure', async () => {
+    const box = swarm.addBox('Mac mini', 'claude-only-mini');
+    await vi.advanceTimersByTimeAsync(1600);
+    const conn = internals().boxConns.get(box.id) as unknown as BoxConnection;
+    const check = vi.spyOn(conn, 'check');
+    Object.assign(s.state.agents[0], { cli: 'opencode', box: box.id });
+    s.state.agents.push({ ...s.state.agents[0], id: 'a2', cli: 'codex' });
+    const office = swarm as unknown as { refreshWaitingBoxClis(): void };
+    office.refreshWaitingBoxClis();
+    office.refreshWaitingBoxClis();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(check).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(BOX_CLI_CHECK_MS - 1);
+    office.refreshWaitingBoxClis();
+    expect(check).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    check.mockRejectedValueOnce(new Error('temporary report failure'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    office.refreshWaitingBoxClis();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(check).toHaveBeenCalledTimes(2);
+    office.refreshWaitingBoxClis();
+    expect(check).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(BOX_CLI_CHECK_MS);
+    office.refreshWaitingBoxClis();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(check).toHaveBeenCalledTimes(3);
+    s.state.agents[0].status = 'working';
+    s.state.agents[2].status = 'working';
+    await vi.advanceTimersByTimeAsync(BOX_CLI_CHECK_MS);
+    office.refreshWaitingBoxClis();
+    expect(check).toHaveBeenCalledTimes(3);
+  });
+
+  it('shares a slow report with the manager and does not overlap it after the cooldown', async () => {
+    const box = swarm.addBox('Mac mini', 'claude-only-mini');
+    await vi.advanceTimersByTimeAsync(1600);
+    const conn = internals().boxConns.get(box.id) as unknown as BoxConnection;
+    let finish!: () => void;
+    const check = vi.spyOn(conn, 'check').mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    Object.assign(s.state.agents[0], { cli: 'opencode', box: box.id });
+    const office = swarm as unknown as { refreshWaitingBoxClis(): void };
+    office.refreshWaitingBoxClis();
+    const manager = swarm.checkBox(box.id);
+    await vi.advanceTimersByTimeAsync(BOX_CLI_CHECK_MS);
+    office.refreshWaitingBoxClis();
+    expect(check).toHaveBeenCalledOnce();
+    finish();
+    await manager;
+    // The manager can ask again immediately; automatic checks respect that new timestamp.
+    await swarm.checkBox(box.id);
+    office.refreshWaitingBoxClis();
+    expect(check).toHaveBeenCalledTimes(2);
   });
 
   it("moves a box to the office's commit at once, its agents carrying on, and nothing new starts there meanwhile", async () => {
@@ -3428,7 +3520,7 @@ describe('boxes', () => {
     const update = vi.spyOn(conn, 'update').mockRejectedValue(new Error('cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>'));
     await vi.advanceTimersByTimeAsync(1600);
     expect(update).toHaveBeenCalledWith(VERSION);
-    expect(office.boxView(box).sync).toEqual({ text: `Couldn't move to the office's v${VERSION}: cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>. Check again tries now; it also tries again in 30 min.`, failed: true });
+    expect(office.boxView(box).sync).toEqual({ text: `Couldn't move to the office's v${VERSION}: cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>. Look again tries now; it also tries again in 30 min.`, failed: true });
     expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'toast', level: 'error', text: expect.stringMatching(/^Tower couldn't move to the office's version/) }));
     office.syncBoxes();
     expect(update).toHaveBeenCalledTimes(1); // not retried for the same version yet
@@ -3444,14 +3536,14 @@ describe('boxes', () => {
     expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'toast' }));
   });
 
-  it('tries a failed move again on Check again, once the manager updated the box by hand', async () => {
+  it('tries a failed move again on Look again, once the manager updated the box by hand', async () => {
     const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
     Object.assign(office, { scheduling: true, officeHead: `0ff1ce5${'0'.repeat(33)}` }); // the demo office's commit
     vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
     const box = swarm.addBox('Tower', 'old-tower'); // its cubefarm predates --update
     await vi.advanceTimersByTimeAsync(1600 + 3000);
     expect(office.boxView(box).sync).toEqual({
-      text: "Couldn't move to the office's 0ff1ce5: Tower's cubefarm predates self-update: run git pull, npm install and node scripts/build-server.mjs in its cubefarm folder once, then Check again",
+      text: "Couldn't move to the office's 0ff1ce5: Tower's cubefarm predates self-update: run git pull, npm install and node scripts/build-server.mjs in its cubefarm folder once, then Look again",
       failed: true,
     });
     office.syncBoxes();
