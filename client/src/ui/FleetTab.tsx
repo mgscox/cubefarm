@@ -110,7 +110,13 @@ function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos:
         <button
           className="btn btn-small btn-ghost"
           disabled={checking || box.status === 'connecting'}
-          title={box.status === 'online' ? 'Ask the box again what it has set up, after you changed something there' : 'Connect to it now instead of waiting for the next try'}
+          title={
+            box.sync?.failed
+              ? "Try moving it to the office's version again now, after you fixed it on the box"
+              : box.status === 'online'
+                ? 'Ask the box again what it has set up, after you changed something there'
+                : 'Connect to it now instead of waiting for the next try'
+          }
           onClick={check}
         >
           {checking ? 'Checking…' : 'Check again'}

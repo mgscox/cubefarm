@@ -3284,11 +3284,39 @@ describe('boxes', () => {
     const update = vi.spyOn(conn, 'update').mockRejectedValue(new Error('cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>'));
     await vi.advanceTimersByTimeAsync(1600);
     expect(update).toHaveBeenCalledWith(VERSION);
-    expect(office.boxView(box).sync).toEqual({ text: `Couldn't move to the office's v${VERSION}: cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>`, failed: true });
+    expect(office.boxView(box).sync).toEqual({ text: `Couldn't move to the office's v${VERSION}: cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>. Check again tries now; it also tries again in 30 min.`, failed: true });
     expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'toast', level: 'error', text: expect.stringMatching(/^Tower couldn't move to the office's version/) }));
     office.syncBoxes();
-    expect(update).toHaveBeenCalledTimes(1); // not retried for the same version
+    expect(update).toHaveBeenCalledTimes(1); // not retried for the same version yet
     expect(internals().available(repo, 'dev').length).toBeGreaterThan(0); // agents can still work there
+
+    // Half an hour on it tries again by itself, without another toast for the same error.
+    events.mockClear();
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    office.syncBoxes();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(office.boxView(box).sync?.failed).toBe(true);
+    expect(events).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'toast' }));
+  });
+
+  it('tries a failed move again on Check again, once the manager updated the box by hand', async () => {
+    const office = swarm as unknown as { scheduling: boolean; officeHead: string | null; schedule(): void; syncBoxes(): void; boxView(b: unknown): { status: string; sync: { text: string; failed: boolean } | null } };
+    Object.assign(office, { scheduling: true, officeHead: `0ff1ce5${'0'.repeat(33)}` }); // the demo office's commit
+    vi.spyOn(office, 'schedule').mockImplementation(() => undefined);
+    const box = swarm.addBox('Tower', 'old-tower'); // its cubefarm predates --update
+    await vi.advanceTimersByTimeAsync(1600 + 3000);
+    expect(office.boxView(box).sync).toEqual({
+      text: "Couldn't move to the office's 0ff1ce5: Tower's cubefarm predates self-update: run git pull, npm install and node scripts/build-server.mjs in its cubefarm folder once, then Check again",
+      failed: true,
+    });
+    office.syncBoxes();
+    expect(office.boxView(box).sync?.failed).toBe(true); // it waits for the manager
+
+    await swarm.checkBox(box.id);
+    expect(office.boxView(box).sync?.text).toBe("Updating to the office's 0ff1ce5: its agents carry on…");
+    await vi.advanceTimersByTimeAsync(3000 + 1500);
+    expect(office.boxView(box)).toMatchObject({ status: 'online', sync: null });
   });
 
   it('refuses bad boxes', () => {

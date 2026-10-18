@@ -203,8 +203,8 @@ is asked to update too, and a box refused for another protocol version is update
 Only when an update changed the host's own code (the bridge finds the host's reported `keeperBuild` differs from the
 one on disk: `keeperStale` in its info) does the box drain: nothing new starts there while its agents finish, then the
 office shuts the host down and redials it (its idle CLIs stop). A host from before the bridge ran the box's methods
-counts as changed, so that happens once. A failure shows on the box's card and isn't retried until the office runs
-another commit or restarts. Rules: `fleet.boxSync`; flow: `Swarm.syncBoxes`.
+counts as changed, so that happens once. A failure shows on the box's card and is tried again after 30 minutes, or at
+once on Check again (`fleet.syncRetryDue`). Rules: `fleet.boxSync`; flow: `Swarm.syncBoxes`.
 
 ## Phases
 

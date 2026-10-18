@@ -7,6 +7,7 @@ import type { BoxConnection, BoxOptions, Machine } from './machine.ts';
 import type { PreviewBackend } from './previewRunner.ts';
 import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
 import { bootNotice, CLIS } from './clis.ts';
+import { updateFailure } from './fleet.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
 import { READY_FOR_HUMAN, RESEARCH } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
@@ -457,6 +458,8 @@ const fakeClis = () => CLIS.map((c) => ({ id: c.id, label: c.label, installed: t
  * CLIs can't reach its hook URL), and its desks and fake sessions are the demo's own under its folder, labelled with
  * its name in the terminal. One whose destination starts with "stale" runs an older commit than the office, so it's
  * brought up to date; "stale-keeper": and that update changes its terminal keeper, which restarts once its agents finish.
+ * One starting with "old" too, but its cubefarm predates --update: the first try fails, as if the manager then updated
+ * it by hand, so Check again moves it.
  */
 function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
   let status: 'connecting' | 'online' | 'offline' = 'connecting';
@@ -464,7 +467,8 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
   const offline = /^offline/i.test(opts.box.destination);
   const claudeOnly = /^claude-only/i.test(opts.box.destination);
   const noHooks = /^no-hooks/i.test(opts.box.destination);
-  let commit = /^stale/i.test(opts.box.destination) ? `5ta1e00${'0'.repeat(33)}` : DEMO_HEAD;
+  let tooOld = /^old/i.test(opts.box.destination);
+  let commit = /^(stale|old)/i.test(opts.box.destination) ? `5ta1e00${'0'.repeat(33)}` : DEMO_HEAD;
   let pulled = commit;
   let keeperStale = false;
   const keeperChanges = /^stale-keeper/i.test(opts.box.destination);
@@ -528,6 +532,10 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
     // A pull and a build take a moment; a new link runs the new commit (its sessions carry on), a restart its keeper too.
     update: async (target) => {
       await new Promise((r) => setTimeout(r, 3000));
+      if (tooOld) {
+        tooOld = false;
+        throw new Error(updateFailure(opts.box.name, 'cubefarm box: an office starts this over ssh: cubefarm box --stdio --office <office id>', 1));
+      }
       const from = pulled;
       pulled = target;
       return { ok: true, checkout: true, from, to: target };
