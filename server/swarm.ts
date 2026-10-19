@@ -14,6 +14,7 @@ import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type MergePrRequest, type OfficeTools, type ParkPrRequest, type ResearchRequest, type StartIssueRequest } from './ceo.ts';
 import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
+import { issueHolder, duplicateIssueSessions } from './issueClaims.ts';
 import { orphanedQa } from './qaOwnership.ts';
 import { QA_RESUME_PROMPT, qaRetry } from './qaRetry.ts';
 import { planDevFix, type FixReason } from './fixPlan.ts';
@@ -642,6 +643,7 @@ export class Swarm {
     // The boxes' CLIs too, from the boxes that answer in time; one that answers later is picked up then (boxBack).
     const early = await Promise.all(this.state.boxes.map((b) => this.openBox(b)));
     back.push(...early.flat());
+    this.repairDuplicateIssues();
     const carryOn: PersistedAgent[] = [];
     const preparing = new Set<PersistedAgent>(); // their task's session hadn't started: nothing of it to resume
     for (const a of this.state.agents) {
@@ -729,6 +731,7 @@ export class Swarm {
    */
   private recover(agents: PersistedAgent[], preparing = new Set<PersistedAgent>()) {
     for (const a of agents) {
+      if (a.status === 'idle') continue; // duplicate repair may have cleared this desk
       if (!resumesAfterRestart(a, preparing.has(a), this.backend.demo)) {
         const repo = this.state.repos.find((r) => r.id === a.repoId);
         const request = a.task === 'issue' ? repo?.requestedStarts.find((r) => r.issueNumber === a.issueNumber) : undefined;
@@ -2088,6 +2091,9 @@ export class Swarm {
   private reattachSession(a: PersistedAgent) {
     const repo = this.state.repos.find((r) => r.id === a.repoId);
     if (!repo) return;
+    a.status = 'working';
+    this.repairDuplicateIssues();
+    if (a.status !== 'working') return;
     this.appendLog(a, [{ kind: 'system', text: '↻ The office restarted; their CLI kept working and the office is following it again.' }]);
     this.startAgentSession(a, repo, this.machineFor(a).deskDir(repo.fullName, this.agentSlug(a)), '', '', a.sessionId ?? undefined, undefined, 'reattach');
   }
@@ -2113,6 +2119,39 @@ export class Swarm {
     this.clearTask(a);
     this.appendLog(a, [{ kind: 'system', text: '↺ Cleared desk. Ready for new work.' }]);
     this.save();
+  }
+
+  private checkIssueClaim(a: PersistedAgent, issueNumber: number | null) {
+    const holder = issueHolder(this.state.agents, a.repoId, issueNumber, a.id);
+    if (holder) throw new HttpError(409, `${holder.name} is already working on #${issueNumber}`);
+  }
+
+  /** Check and reserve without yielding: every issue start, including a resume, shares this claim. */
+  private claimIssue(a: PersistedAgent, issueNumber: number | null, status: AgentStatus) {
+    this.checkIssueClaim(a, issueNumber);
+    Object.assign(a, { issueNumber, status });
+  }
+
+  private repairDuplicateIssues() {
+    for (const { keep, stop } of duplicateIssueSessions(this.state.agents)) {
+      const issueNumber = stop.issueNumber;
+      const rt = this.agentRt.get(stop.id);
+      const session = rt?.session;
+      if (rt) rt.session = null;
+      // Revoke callbacks and in-flight preparation before stopping the losing session.
+      this.clearTask(stop);
+      stop.sessionId = null;
+      this.state.deferredResumes = this.state.deferredResumes.filter((id) => id !== stop.id);
+      session?.stop();
+      rt?.terminal?.releaseIdle?.();
+      for (const rec of this.state.qa) {
+        if (rec.repoId === stop.repoId && rec.devAgentId === stop.id && rec.status === 'fixing') this.setQa(rec, { status: 'failed' });
+      }
+      const text = `Ended ${stop.name}'s duplicate session on #${issueNumber} (${this.repo(stop.repoId).fullName}); ${keep.name} keeps working${keep.prNumber != null ? ` with PR #${keep.prNumber}` : ' with the older session'}.`;
+      this.appendLog(stop, [{ kind: 'system', text }]);
+      this.postMessage('office', text);
+      this.save();
+    }
   }
 
   private issueTaken(repo: PersistedRepo, n: number) {
@@ -2149,8 +2188,7 @@ export class Swarm {
       throw new HttpError(409, `#${issueNumber} is labelled ${READY_FOR_HUMAN}: an agent can't complete it. Remove the label to hand it to a developer.`);
     }
     if (!explicit && (issueWaitReason(this.workIssue(repo, issue), new Set(this.repoRt.get(repo.id)!.issues.map((i) => i.number))) || noWorkCoolingDown(repo.noWorkEndings?.find((r) => r.issueNumber === issueNumber), this.repoRt.get(repo.id)!.issuesFetchedAt))) throw new HttpError(409, `#${issueNumber} is not ready for automatic work`);
-    const holder = this.state.agents.find((x) => x.id !== a.id && x.repoId === repo.id && x.issueNumber === issueNumber && BUSY.includes(x.status));
-    if (holder) throw new HttpError(409, `${holder.name} is already working on #${issueNumber}`);
+    this.checkIssueClaim(a, issueNumber);
     if (explicit) {
       this.setNoWorkEndings(repo, (repo.noWorkEndings ?? []).filter((r) => r.issueNumber !== issueNumber));
       this.issueFailures.delete(`${repo.id}#${issueNumber}`);
@@ -2167,6 +2205,13 @@ export class Swarm {
       this.appendLog(a, [{ kind: 'system', text: `⏸ #${issueNumber} waits: ${this.waitReason(where)}.` }]);
       return { ...this.agentView(a, false), warning: `waiting: ${this.waitReason(where)}` };
     }
+    const branch = a.role === 'researcher' ? researchIssueBranch(issue.number, slugify(a.name)) : `swarm/issue-${issue.number}-${slugify(a.name)}`;
+    this.beginTask(
+      a,
+      { task: 'issue', issueNumber: issue.number, issueTitle: issue.title, branch, prNumber: null, prUrl: null, sessionId: null },
+      `Issue #${issue.number}: ${issue.title}`,
+      `Preparing worktree on ${branch}…`,
+    );
     void this.runTask(a, repo, issue, note);
     const warning = explicit && issueParent(issue) ? `parent: ${issueParent(issue)}` : explicit && issue.subIssues === null ? 'sub-issues have not loaded' : undefined;
     return { ...this.agentView(a, false), ...(warning && { warning }) };
@@ -2285,6 +2330,7 @@ export class Swarm {
   }
 
   private beginTask(a: PersistedAgent, patch: Partial<PersistedAgent>, banner: string, preparing: string) {
+    if (patch.task === 'issue' || patch.task === 'fix') this.claimIssue(a, patch.issueNumber ?? null, 'preparing');
     const rt = this.agentRt.get(a.id)!;
     this.nextGeneration(a);
     Object.assign(a, {
@@ -2377,13 +2423,7 @@ export class Swarm {
 
   private async prepareTask(a: PersistedAgent, repo: PersistedRepo, issue: IssueInfo, note?: string) {
     const research = a.role === 'researcher';
-    const branch = research ? researchIssueBranch(issue.number, slugify(a.name)) : `swarm/issue-${issue.number}-${slugify(a.name)}`;
-    this.beginTask(
-      a,
-      { task: 'issue', issueNumber: issue.number, issueTitle: issue.title, branch, prNumber: null, prUrl: null, sessionId: null },
-      `Issue #${issue.number}: ${issue.title}`,
-      `Preparing worktree on ${branch}…`,
-    );
+    const branch = a.branch!;
     const cwd = await this.prepare(a, repo, {}, branch);
     if (!cwd) return;
 
@@ -2417,6 +2457,7 @@ export class Swarm {
       this.deferPrepared(a, repo);
       return;
     }
+    if (a.task === 'issue' || a.task === 'fix') this.claimIssue(a, a.issueNumber, 'working');
     const rt = this.agentRt.get(a.id)!;
     this.nextGeneration(a);
     const generation = rt.generation;
@@ -3046,7 +3087,6 @@ export class Swarm {
     const headRef = pull?.headRefName ?? dev.branch ?? `pr-${rec.prNumber}`;
     const qaAgent = rec.qaAgentId ? this.state.agents.find((x) => x.id === rec.qaAgentId) : null;
     const author = rec.devAgentId;
-    this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
     this.beginTask(
       dev,
       // The session they held was another task's (QA, say); the author's own is resumed below, from rec.devSessionId.
@@ -3054,6 +3094,7 @@ export class Swarm {
       rec.fixReason === 'conflict' ? `Resolving conflicts on PR #${rec.prNumber}` : rec.fixReason === 'checks' ? `Fixing checks on PR #${rec.prNumber}` : `Fixing PR #${rec.prNumber} after QA round ${rec.round}`,
       `Checking out PR #${rec.prNumber}…`,
     );
+    this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
     const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, headRef, { rec, task: 'fix', author });
     if (!cwd) {
       if (rec.status === 'fixing') this.setQa(rec, { status: 'failed' });
@@ -3179,6 +3220,7 @@ export class Swarm {
     if ('wait' in desk) throw new HttpError(409, `${a.name}'s desk is on ${this.boxName(desk.wait)}, which is offline. Try again once it's back.`);
     if (desk.fellBack) throw new HttpError(409, `${a.name}'s desk was on ${this.boxName(desk.fellBack)}, which was removed. Assign the issue again to start it afresh.`);
     this.ensureSlot();
+    this.checkIssueClaim(a, a.issueNumber);
     this.appendLog(a, [{ kind: 'manager', text: `▶ Manager: ${text}` }]);
     const cwd = this.machineFor(a).deskDir(repo.fullName, this.agentSlug(a));
     a.lastError = null;
@@ -3314,7 +3356,7 @@ export class Swarm {
       const to = fixGoesTo(author, !!author && pool.includes(author) && !('wait' in this.place(author, 'within')), rec.prNumber, headRef);
       if (to === 'wait') continue;
       const dev = to === 'author' ? author : this.pickDev(repo, pool, (a) => a.specialty.toLowerCase() === want);
-      if (!dev) continue;
+      if (!dev || issueHolder(this.state.agents, repo.id, rec.issueNumber, dev.id)) continue;
       void this.runFix(dev, repo, rec);
       return true;
     }
@@ -3434,6 +3476,7 @@ export class Swarm {
    * so no repo can hog the slots.
    */
   private schedule() {
+    this.repairDuplicateIssues();
     this.reconcileOrphanedQa();
     this.syncBoxes();
     this.tickUsage();
