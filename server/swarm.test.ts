@@ -89,6 +89,200 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('exclusive issue sessions', () => {
+  let starts: Mock;
+  const dev = () => s.state.agents[0];
+  const other = () => s.state.agents.find((a) => a.id === 'a2')!;
+  const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+
+  beforeEach(() => {
+    Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [{ issueNumber: 66, prNumber: 13, branch: 'swarm/issue-66-barbara' }] });
+    Object.assign(dev(), { model: '', effort: '', cli: '' });
+    s.state.agents.push({ ...dev(), id: 'a2', name: 'Barbara', desk: 1 });
+    s.agentRt.set('a2', { log: [], pending: [], terminal: null });
+    s.runTask = (Swarm.prototype as unknown as Pick<Internals, 'runTask'>).runTask;
+    vi.spyOn(s, 'prepare').mockResolvedValue('/fake-desk');
+    vi.spyOn(s.backend, 'deskHead').mockResolvedValue('base');
+    starts = vi.spyOn(s.backend, 'startSession').mockReturnValue({ send: vi.fn(), stop: vi.fn() });
+    setIssues(issue(66), issue(67));
+  });
+
+  it('gives two newly ready issues to one developer each, including parked work', async () => {
+    const waiting = [issue(66, [], 'Depends on #65'), issue(67, [], 'Depends on #65')];
+    setIssues(issue(65), ...waiting);
+    expect(ready()).toEqual([65]);
+    setIssues(...waiting); // one refresh sees their common prerequisite close
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(s.startIssueWork(repo)).toBe(false);
+    await flush();
+    expect([dev().issueNumber, other().issueNumber]).toEqual([66, 67]);
+    expect(starts).toHaveBeenCalledTimes(2);
+    expect(starts.mock.calls[0][0].prompt).toContain('Parked PR #13');
+  });
+
+  it.each(['explicit', 'automatic'] as const)('reserves before preparation when %s assignment wins', async (first) => {
+    let prepared!: (cwd: string) => void;
+    vi.mocked(s.prepare).mockReturnValue(new Promise((resolve) => { prepared = resolve; }));
+    setIssues(issue(66));
+    if (first === 'explicit') {
+      const assigning = swarm.assign('a2', 66);
+      expect(s.startIssueWork(repo)).toBe(false);
+      await assigning;
+    } else {
+      expect(s.startIssueWork(repo)).toBe(true);
+      await expect(swarm.assign('a2', 66)).rejects.toMatchObject({ status: 409 });
+    }
+    expect(s.state.agents.filter((a) => a.issueNumber === 66 && a.status === 'preparing')).toHaveLength(1);
+    expect(starts).not.toHaveBeenCalled();
+    prepared('/fake-desk');
+    await flush();
+    expect(starts).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an old parked-PR session resuming after automatic assignment', async () => {
+    Object.assign(other(), { status: 'error', task: 'issue', issueNumber: 66, prNumber: 13, sessionId: 'old-session', branch: 'swarm/issue-66-barbara' });
+    expect(s.startIssueWork(repo)).toBe(true);
+    await expect(swarm.message('a2', 'Continue the parked work')).rejects.toMatchObject({ status: 409 });
+    await flush();
+    expect(starts).toHaveBeenCalledOnce();
+  });
+
+  it('reserves requested restarts before an explicit assignment can take them', async () => {
+    repo.requestedStarts = [{ issueNumber: 66, preferredAgentId: 'a2', restartPending: true }];
+    expect(s.startIssueWork(repo)).toBe(true);
+    await expect(swarm.assign('a1', 66)).rejects.toMatchObject({ status: 409 });
+    await flush();
+    expect(other()).toMatchObject({ issueNumber: 66, status: 'working' });
+    expect(starts).toHaveBeenCalledOnce();
+  });
+
+  it('makes a fix wait while another developer holds its issue', async () => {
+    await swarm.assign('a1', 66);
+    const rec = { repoId: repo.id, prNumber: 13, issueNumber: 66, devAgentId: 'a2', status: 'failed', checks: [], fixCrashes: [], round: 1 } as unknown as QaRec;
+    s.state.qa.push(rec);
+    expect(s.startPipelineWork(repo)).toBe(false);
+    await expect(s.runFix(other(), repo, rec)).rejects.toMatchObject({ status: 409 });
+    await flush();
+    expect(rec.status).toBe('failed');
+    expect(other().status).toBe('idle');
+    expect(starts).toHaveBeenCalledOnce();
+  });
+
+  it('preserves a held retry against explicit assignment', async () => {
+    Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'error', heldRetry: { issueNumber: 66, ahead: 1, why: 'cut off' } });
+    await expect(swarm.assign('a1', 66)).rejects.toMatchObject({ status: 409 });
+    expect(starts).not.toHaveBeenCalled();
+  });
+
+  it('repairs a late reconnect before following its CLI, retaining its linked PR', async () => {
+    await swarm.assign('a1', 66);
+    await flush();
+    Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped', prNumber: 13, startedAt: 100, sessionId: 'kept-session', branch: 'swarm/issue-66-barbara' });
+    const reconnect = s as unknown as { reattachSession(a: unknown): void };
+    reconnect.reattachSession(other());
+    await flush();
+    expect(dev()).toMatchObject({ status: 'idle', issueNumber: null });
+    expect(other()).toMatchObject({ status: 'working', issueNumber: 66, prNumber: 13 });
+    expect(starts.mock.calls[1][0].reattach).toBe(true);
+  });
+
+  it('revokes a duplicate that is still reading its starting head', async () => {
+    let head!: (value: string) => void;
+    vi.mocked(s.backend.deskHead).mockReturnValueOnce(new Promise((resolve) => { head = resolve; }));
+    await swarm.assign('a1', 66);
+    await flush();
+    Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'working', prNumber: 13 });
+    (s as unknown as { repairDuplicateIssues(): void }).repairDuplicateIssues();
+    head('base');
+    await flush();
+    expect(dev()).toMatchObject({ status: 'idle', issueNumber: null });
+    expect(other().status).toBe('working');
+    expect(starts).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('reconciles an errored held retry with a reconnecting CLI (linked reconnect: %s)', async (linked) => {
+    Object.assign(dev(), { task: 'issue', issueNumber: 66, status: 'error', startedAt: 100, heldRetry: { issueNumber: 66, ahead: 1, why: 'cut off' } });
+    Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped', startedAt: 200, prNumber: linked ? 13 : null, sessionId: 'kept-session', branch: 'swarm/issue-66-barbara' });
+    const loser = linked ? dev() : other();
+    const stop = vi.fn();
+    const releaseIdle = vi.fn();
+    Object.assign(s.agentRt.get(String(loser.id))!, { session: { stop }, terminal: { write: vi.fn(), releaseIdle } });
+    const feed = vi.spyOn(s, 'postMessage');
+    (s as unknown as { reattachSession(a: unknown): void }).reattachSession(other());
+    await flush();
+    expect(loser).toMatchObject({ status: 'idle', task: null, issueNumber: null, heldRetry: null, sessionId: null });
+    expect(s.agentRt.get(String(loser.id))).toMatchObject({ session: null });
+    expect(stop).toHaveBeenCalledOnce();
+    expect(releaseIdle).toHaveBeenCalledOnce();
+    expect(feed).toHaveBeenCalledWith('office', expect.stringContaining('duplicate session on #66'));
+    expect(s.state.agents.filter((a) => a.issueNumber === 66 && (a.heldRetry || a.status === 'working'))).toHaveLength(1);
+    if (linked) {
+      expect(other()).toMatchObject({ status: 'working', prNumber: 13 });
+      expect(starts).toHaveBeenCalledOnce();
+      expect(starts.mock.calls[0][0].reattach).toBe(true);
+    } else {
+      expect(dev()).toMatchObject({ status: 'error', heldRetry: { issueNumber: 66 } });
+      expect(starts).not.toHaveBeenCalled();
+    }
+  });
+
+  it('handles a reconnect startup conflict without an unhandled rejection or phantom worker', async () => {
+    Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped', sessionId: 'kept-session' });
+    const claim = s as unknown as { checkIssueClaim(a: unknown, n: number | null): void; reattachSession(a: unknown): void };
+    vi.spyOn(claim, 'checkIssueClaim').mockImplementationOnce(() => { throw new HttpError(409, 'Ada is already working on #66'); });
+    claim.reattachSession(other());
+    await flush();
+    expect(other()).toMatchObject({ status: 'stopped', lastError: 'Ada is already working on #66' });
+    expect(starts).not.toHaveBeenCalled();
+    expect(s.save).toHaveBeenCalled();
+  });
+
+  it('stops a failed reconnect and preserves its recovery details', async () => {
+    Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped', sessionId: 'kept-session', branch: 'swarm/issue-66-barbara' });
+    const stop = vi.fn();
+    const releaseIdle = vi.fn();
+    Object.assign(s.agentRt.get('a2')!, { session: { stop }, terminal: { write: vi.fn(), releaseIdle } });
+    starts.mockImplementationOnce(() => { throw new Error('Runner unavailable'); });
+    (s as unknown as { reattachSession(a: unknown): void }).reattachSession(other());
+    await flush();
+    expect(other()).toMatchObject({ status: 'stopped', task: 'issue', issueNumber: 66, sessionId: 'kept-session', branch: 'swarm/issue-66-barbara', lastError: 'Runner unavailable' });
+    expect(s.agentRt.get('a2')).toMatchObject({ session: null });
+    expect(stop).toHaveBeenCalledOnce();
+    expect(releaseIdle).toHaveBeenCalledOnce();
+  });
+
+  it('does not let a stale reconnect rejection stop a replacement task', async () => {
+    Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped' });
+    starts.mockImplementationOnce(() => { throw new Error('Runner unavailable'); });
+    (s as unknown as { reattachSession(a: unknown): void }).reattachSession(other());
+    s.clearTask(other());
+    await swarm.assign('a2', 67);
+    await flush();
+    expect(other()).toMatchObject({ status: 'working', issueNumber: 67, lastError: null });
+    expect(starts).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([true, false])('repairs duplicate sessions, preferring a linked PR then the older start (PR: %s)', async (linkedPr) => {
+    Object.assign(dev(), { status: 'working', task: 'issue', issueNumber: 66, startedAt: 100, prNumber: null });
+    Object.assign(other(), { status: 'working', task: 'issue', issueNumber: 66, startedAt: 200, prNumber: linkedPr ? 13 : null });
+    const loser = linkedPr ? dev() : other();
+    const keeper = linkedPr ? other() : dev();
+    const stop = vi.fn();
+    const rt = s.agentRt.get(String(loser.id))!;
+    Object.assign(rt, { session: { stop, send: vi.fn() }, generation: 1 });
+    const feed = vi.spyOn(s, 'postMessage');
+    const repair = s as unknown as { repairDuplicateIssues(): void };
+    repair.repairDuplicateIssues();
+    repair.repairDuplicateIssues();
+    expect(keeper.status).toBe('working');
+    expect(loser).toMatchObject({ status: 'idle', task: null, issueNumber: null });
+    expect(stop).toHaveBeenCalledOnce();
+    expect(feed).toHaveBeenCalledWith('office', expect.stringContaining('duplicate session on #66'));
+    expect(starts).not.toHaveBeenCalled();
+  });
+});
+
 describe('PR fixes with an occupied author branch', () => {
   it.each([false, true])('prepares the PR branch and explicitly pushes HEAD (recorded developer: %s)', async (recordedDeveloper) => {
     Object.assign(repo, { links: [] });
@@ -1228,6 +1422,7 @@ describe('native parent issues', () => {
     const result = await swarm.assign('a1', 49);
     expect(result.warning).toContain('parent: 8/8');
     expect(runTask).toHaveBeenCalledOnce();
+    s.clearTask(s.state.agents[0]);
     expect(await s.officeTools().call('start_issue', { floor: 1, number: 49 })).toContain('Warning: parent: 8/8');
   });
 
@@ -1643,7 +1838,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
     list.mockResolvedValue([issue(66), issue(67)]);
     await f.syncRepo(repo.id);
     expect(ready()).toEqual([67, 66]);
-    expect(s.startIssueWork(repo)).toBe(false); // mocked runTask does not occupy a desk
+    expect(s.startIssueWork(repo)).toBe(true); // assignment reserves the desk before runTask
     expect(runTask).toHaveBeenLastCalledWith(ada(), repo, expect.objectContaining({ number: 67 }), undefined);
   });
 
@@ -1680,7 +1875,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
     await emptyEnding();
     await swarm.assign('a1', 66);
     expect(repo.noWorkEndings).toEqual([]);
-    expect(ready()).toEqual([66]);
+    expect(ready()).toEqual([]); // the issue is already claimed
     await emptyEnding();
     expect(repo.noWorkEndings?.[0].count).toBe(1);
   });
@@ -3157,7 +3352,7 @@ describe('researchers', () => {
 
   it('hands research issues to researchers and everything else to developers', () => {
     setIssues(issue(5, ['swarm:research']), issue(6));
-    expect(s.startIssueWork(repo)).toBe(false); // the mocked task leaves them free; what matters is who got what
+    expect(s.startIssueWork(repo)).toBe(true);
     expect(runTask.mock.calls.map(([a, , i]) => [(a as { id: string }).id, i.number])).toEqual([['d1', 5]]);
     s.state.agents.find((a) => a.id === 'd1')!.status = 'working';
     s.startIssueWork(repo);
@@ -3340,7 +3535,7 @@ describe('boxes', () => {
       expect(runTask).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(200);
     }
-    expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(['a1']);
+    expect(internals().available(repo, 'dev').map((a) => a.id)).toEqual(how === 'manager' ? ['a1'] : []);
     if (how === 'manager') s.startIssueWork(repo);
     expect(runTask).toHaveBeenCalledWith(s.state.agents[0], repo, expect.objectContaining({ number: 8 }), undefined);
     expect(detect).toHaveBeenCalledTimes(2);
