@@ -2095,7 +2095,25 @@ export class Swarm {
     this.repairDuplicateIssues();
     if (a.status !== 'working') return;
     this.appendLog(a, [{ kind: 'system', text: '↻ The office restarted; their CLI kept working and the office is following it again.' }]);
-    this.startAgentSession(a, repo, this.machineFor(a).deskDir(repo.fullName, this.agentSlug(a)), '', '', a.sessionId ?? undefined, undefined, 'reattach');
+    const starting = this.startAgentSession(a, repo, this.machineFor(a).deskDir(repo.fullName, this.agentSlug(a)), '', '', a.sessionId ?? undefined, undefined, 'reattach');
+    const rt = this.agentRt.get(a.id);
+    const generation = rt?.generation;
+    void starting.catch((err) => {
+      if (!this.state.agents.includes(a) || rt?.generation !== generation) return;
+      this.nextGeneration(a);
+      const session = rt?.session;
+      if (rt) rt.session = null;
+      a.status = 'stopped'; // Keep recovery details, but don't automatically restart a CLI we could not follow.
+      a.heldRetry = null;
+      a.lastError = (err as Error).message;
+      session?.stop();
+      rt?.terminal?.releaseIdle?.();
+      const text = `Could not reconnect ${a.name}'s CLI: ${a.lastError}`;
+      this.appendLog(a, [{ kind: 'system', text }]);
+      this.postMessage('office', text);
+      this.emitAgent(a);
+      this.save();
+    });
   }
 
   /** The manager pressed Esc in the agent's terminal and the CLI stopped its turn: a Stop that leaves the CLI to them. */

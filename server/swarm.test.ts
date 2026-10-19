@@ -201,6 +201,68 @@ describe('exclusive issue sessions', () => {
     expect(starts).not.toHaveBeenCalled();
   });
 
+  it.each([true, false])('reconciles an errored held retry with a reconnecting CLI (linked reconnect: %s)', async (linked) => {
+    Object.assign(dev(), { task: 'issue', issueNumber: 66, status: 'error', startedAt: 100, heldRetry: { issueNumber: 66, ahead: 1, why: 'cut off' } });
+    Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped', startedAt: 200, prNumber: linked ? 13 : null, sessionId: 'kept-session', branch: 'swarm/issue-66-barbara' });
+    const loser = linked ? dev() : other();
+    const stop = vi.fn();
+    const releaseIdle = vi.fn();
+    Object.assign(s.agentRt.get(String(loser.id))!, { session: { stop }, terminal: { write: vi.fn(), releaseIdle } });
+    const feed = vi.spyOn(s, 'postMessage');
+    (s as unknown as { reattachSession(a: unknown): void }).reattachSession(other());
+    await flush();
+    expect(loser).toMatchObject({ status: 'idle', task: null, issueNumber: null, heldRetry: null, sessionId: null });
+    expect(s.agentRt.get(String(loser.id))).toMatchObject({ session: null });
+    expect(stop).toHaveBeenCalledOnce();
+    expect(releaseIdle).toHaveBeenCalledOnce();
+    expect(feed).toHaveBeenCalledWith('office', expect.stringContaining('duplicate session on #66'));
+    expect(s.state.agents.filter((a) => a.issueNumber === 66 && (a.heldRetry || a.status === 'working'))).toHaveLength(1);
+    if (linked) {
+      expect(other()).toMatchObject({ status: 'working', prNumber: 13 });
+      expect(starts).toHaveBeenCalledOnce();
+      expect(starts.mock.calls[0][0].reattach).toBe(true);
+    } else {
+      expect(dev()).toMatchObject({ status: 'error', heldRetry: { issueNumber: 66 } });
+      expect(starts).not.toHaveBeenCalled();
+    }
+  });
+
+  it('handles a reconnect startup conflict without an unhandled rejection or phantom worker', async () => {
+    Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped', sessionId: 'kept-session' });
+    const claim = s as unknown as { checkIssueClaim(a: unknown, n: number | null): void; reattachSession(a: unknown): void };
+    vi.spyOn(claim, 'checkIssueClaim').mockImplementationOnce(() => { throw new HttpError(409, 'Ada is already working on #66'); });
+    claim.reattachSession(other());
+    await flush();
+    expect(other()).toMatchObject({ status: 'stopped', lastError: 'Ada is already working on #66' });
+    expect(starts).not.toHaveBeenCalled();
+    expect(s.save).toHaveBeenCalled();
+  });
+
+  it('stops a failed reconnect and preserves its recovery details', async () => {
+    Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped', sessionId: 'kept-session', branch: 'swarm/issue-66-barbara' });
+    const stop = vi.fn();
+    const releaseIdle = vi.fn();
+    Object.assign(s.agentRt.get('a2')!, { session: { stop }, terminal: { write: vi.fn(), releaseIdle } });
+    starts.mockImplementationOnce(() => { throw new Error('Runner unavailable'); });
+    (s as unknown as { reattachSession(a: unknown): void }).reattachSession(other());
+    await flush();
+    expect(other()).toMatchObject({ status: 'stopped', task: 'issue', issueNumber: 66, sessionId: 'kept-session', branch: 'swarm/issue-66-barbara', lastError: 'Runner unavailable' });
+    expect(s.agentRt.get('a2')).toMatchObject({ session: null });
+    expect(stop).toHaveBeenCalledOnce();
+    expect(releaseIdle).toHaveBeenCalledOnce();
+  });
+
+  it('does not let a stale reconnect rejection stop a replacement task', async () => {
+    Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped' });
+    starts.mockImplementationOnce(() => { throw new Error('Runner unavailable'); });
+    (s as unknown as { reattachSession(a: unknown): void }).reattachSession(other());
+    s.clearTask(other());
+    await swarm.assign('a2', 67);
+    await flush();
+    expect(other()).toMatchObject({ status: 'working', issueNumber: 67, lastError: null });
+    expect(starts).toHaveBeenCalledTimes(2);
+  });
+
   it.each([true, false])('repairs duplicate sessions, preferring a linked PR then the older start (PR: %s)', async (linkedPr) => {
     Object.assign(dev(), { status: 'working', task: 'issue', issueNumber: 66, startedAt: 100, prNumber: null });
     Object.assign(other(), { status: 'working', task: 'issue', issueNumber: 66, startedAt: 200, prNumber: linkedPr ? 13 : null });
