@@ -198,6 +198,55 @@ test('the demo backlog marks parents and stalled work for the manager', async ({
   await page.screenshot({ path: testInfo.outputPath('parent-and-stalled-backlog.png') });
 });
 
+test('Fleet machine summaries prefix worker lists with their floor and repo', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.routeWebSocket('**/ws', (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((message) => {
+      const event = JSON.parse(message.toString()) as ServerEvent;
+      if (event.type === 'snapshot') {
+        event.data.settings.tutorialStep = -1;
+        event.data.settings.runtime = 'terminal';
+        event.data.boxes = [{
+          id: 'fleet-test', name: 'Studio', destination: 'studio.local', status: 'offline',
+          platform: null, version: null, git: null, ghReady: false, hookError: null,
+          clis: [], error: null, running: 0, sync: null,
+        }];
+        const template = event.data.agents.find((a) => a.role === 'dev')!;
+        event.data.agents = event.data.repos.flatMap((repo) => {
+          repo.box = 'fleet-test';
+          return [
+            { ...template, id: `${repo.id}-assigned`, repoId: repo.id, name: 'Ada', desk: 0, box: null, deskBox: 'fleet-test', status: 'idle' as const },
+            { ...template, id: `${repo.id}-moving`, repoId: repo.id, name: 'Ken', desk: 1, box: '', deskBox: 'fleet-test', status: 'working' as const },
+          ];
+        });
+      }
+      // Keep the display fixture stable while the demo's unrelated background tasks run.
+      if (event.type === 'agent' || event.type === 'repo') return;
+      ws.send(JSON.stringify(event));
+    });
+  });
+  const spot: SavedView = { floor: 0, x: MANAGER_DESK.x, z: MANAGER_DESK.z + MANAGER_DESK.d / 2 + 0.8, yaw: 0, pitch: -0.6 };
+  await page.addInitScript(([key, view]) => localStorage.setItem(key, view), [VIEW_KEY, JSON.stringify(spot)] as const);
+  await enterOffice(page);
+  await expect(page.getByText("Open the manager's console")).toBeVisible();
+  await page.keyboard.press('e');
+  const tab = page.getByRole('button', { name: '🖥 Fleet' });
+  await expect(async () => {
+    await tab.click();
+    await expect(tab).toHaveClass(/tab-on/, { timeout: 1000 });
+  }).toPass();
+  const office = page.locator('.fleet-card').first();
+  const box = page.locator('[data-box="fleet-test"]');
+  for (const [floor, repo] of [[1, 'demo-co/pixel-todo'], [2, 'demo-co/weather-api']] as const) {
+    await expect(office.getByText(`👥 Floor ${floor} · ${repo}: Ken`, { exact: true })).toBeVisible();
+    await expect(box.getByText(`👥 Floor ${floor} · ${repo}: Ada`, { exact: true })).toBeVisible();
+    await expect(box.getByText(`Floor ${floor} · ${repo}: Ken`, { exact: true })).toBeVisible();
+  }
+  await expect(box.getByText('Finishing here before they move:')).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('fleet-floor-worker-lists.png') });
+});
+
 test('a long agent desks path wraps inside the Settings card on narrow screens', async ({ page }, testInfo) => {
   // No spaces or hyphens: nothing the browser would break the line at on its own.
   const longPath = '/Users/someone/.cubefarm/workspaces/' + 'averylongfoldername/'.repeat(6);

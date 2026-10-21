@@ -18,6 +18,26 @@ export function boxName(boxes: Pick<BoxView, 'id' | 'name'>[], id: string): stri
 /** The box an agent's next task starts on: their own, else their floor's. */
 export const agentBox = (a: Pick<AgentView, 'box'>, floor: Pick<RepoView, 'box'> | undefined) => a.box ?? floor?.box ?? '';
 
+/** A machine's worker lists, prefixed by floor and repo so names can be placed without scrolling to the floors. */
+export function workerLists(agents: Pick<AgentView, 'repoId' | 'name'>[], repos: Pick<RepoView, 'id' | 'floor' | 'fullName'>[]) {
+  const groups = new Map<string, { repoId: string; floor: number; label: string; names: string[] }>();
+  for (const agent of agents) {
+    let group = groups.get(agent.repoId);
+    if (!group) {
+      const repo = repos.find((r) => r.id === agent.repoId);
+      group = {
+        repoId: agent.repoId,
+        floor: repo?.floor ?? Infinity,
+        label: repo ? `Floor ${repo.floor} · ${repo.fullName}` : 'Unassigned floor',
+        names: [],
+      };
+      groups.set(agent.repoId, group);
+    }
+    group.names.push(agent.name);
+  }
+  return [...groups.values()].sort((a, b) => a.floor - b.floor);
+}
+
 /** Moving a whole floor to a box: who ends up somewhere new, how many of them finish a task first, and how many own boxes it clears. */
 export function floorMove(repo: Pick<RepoView, 'box'>, agents: Pick<AgentView, 'role' | 'box' | 'status'>[], to: string) {
   const team = agents.filter(movable);
