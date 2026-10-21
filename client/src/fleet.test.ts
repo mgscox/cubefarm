@@ -1,9 +1,31 @@
 import { describe, expect, it } from 'vitest';
-import { agentBox, boxName, boxNotes, floorMove, floorMoveText, missingClis } from './fleet';
+import { agentBox, boxName, boxNotes, floorMove, floorMoveText, missingClis, workerLists } from './fleet';
 import type { AgentStatus, BoxView } from '../../shared/types';
 
 const boxes = [{ id: 'b1', name: 'Tower' }];
 const dev = (box: string | null, status: AgentStatus = 'idle') => ({ role: 'dev' as const, box, status });
+
+describe('workerLists', () => {
+  const repos = [
+    { id: 'web', floor: 2, fullName: 'demo/web' },
+    { id: 'api', floor: 1, fullName: 'demo/api' },
+  ];
+
+  it('groups workers by repo in floor order, including identical names on different floors', () => {
+    const agents = [{ repoId: 'web', name: 'Ada' }, { repoId: 'api', name: 'Ada' }, { repoId: 'web', name: 'Ken' }];
+    expect(workerLists(agents, repos)).toEqual([
+      { repoId: 'api', floor: 1, label: 'Floor 1 · demo/api', names: ['Ada'] },
+      { repoId: 'web', floor: 2, label: 'Floor 2 · demo/web', names: ['Ada', 'Ken'] },
+    ]);
+  });
+
+  it('keeps workers visible if their repo is missing and omits empty floors', () => {
+    expect(workerLists([{ repoId: 'gone', name: 'Ken' }], repos)).toEqual([
+      { repoId: 'gone', floor: Infinity, label: 'Unassigned floor', names: ['Ken'] },
+    ]);
+    expect(workerLists([], repos)).toEqual([]);
+  });
+});
 
 describe('boxName', () => {
   it("names the office's machine, a box, and a box that's gone", () => {

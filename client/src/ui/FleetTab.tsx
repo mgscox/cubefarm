@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api';
-import { agentBox, boxName, boxNotes, busy, floorMove, floorMoveText, missingClis, movable } from '../fleet';
+import { agentBox, boxName, boxNotes, busy, floorMove, floorMoveText, missingClis, movable, workerLists } from '../fleet';
 import { agentsOnRepo, useStore, type Agent } from '../store';
 import type { BoxView, CliView, RepoView } from '../../../shared/types';
 import { confirmDialog } from './Confirm';
@@ -41,8 +41,17 @@ function Workers({ id, agents, repos }: { id: string; agents: Agent[]; repos: Re
   if (!here.length && !elsewhere.length) return <div className="muted small">Nobody is assigned here.</div>;
   return (
     <div className="small">
-      {here.length > 0 && <>👥 {here.map((a) => a.name).join(', ')}</>}
-      {elsewhere.length > 0 && <div className="muted">Finishing here before they move: {elsewhere.map((a) => a.name).join(', ')}</div>}
+      {workerLists(here, repos).map((group) => (
+        <div key={group.repoId}>👥 {group.label}: {group.names.join(', ')}</div>
+      ))}
+      {elsewhere.length > 0 && (
+        <div className="muted">
+          Finishing here before they move:
+          {workerLists(elsewhere, repos).map((group) => (
+            <div key={group.repoId}>{group.label}: {group.names.join(', ')}</div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
