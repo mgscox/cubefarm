@@ -9,6 +9,7 @@ import { screenshotFile } from './agentRunner.ts';
 import { checkoutCommit } from './boxUpdate.ts';
 import { BIN_DIR, removeSessionDir, SESSIONS_DIR, sessionShots, writeCliSession, type CliLaunch } from './cliFiles.ts';
 import { probeHookUrl, type BoxInfo } from './fleet.ts';
+import { rebootStatus } from './rebootStatus.ts';
 import type { CliPlan } from './machine.ts';
 import type { DeskBase } from './workspace.ts';
 
@@ -44,7 +45,8 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
       const hookError = await Promise.resolve()
         .then(() => probeHookUrl(ctx.hookUrl()))
         .catch((err: Error) => err.message);
-      return { platform: process.platform, version: VERSION, commit: await commit, git: git?.trim() || null, ghReady: gh, hookError, workspaces: WORKSPACE_ROOT, sep: path.sep as '/' | '\\', keeperStale: ctx.keeperStale ?? false };
+      const reboot = await rebootStatus();
+      return { platform: process.platform, version: VERSION, commit: await commit, git: git?.trim() || null, ghReady: gh, hookError, workspaces: WORKSPACE_ROOT, sep: path.sep as '/' | '\\', keeperStale: ctx.keeperStale ?? false, reboot };
     },
     detectClis: () => detectClis(),
     async prepareDesk(fullName, base, slug, branch) {

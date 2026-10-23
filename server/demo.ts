@@ -472,7 +472,7 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
   let tooOld = /^old/i.test(opts.box.destination);
   let commit = /^(stale|old)/i.test(opts.box.destination) ? `5ta1e00${'0'.repeat(33)}` : DEMO_HEAD;
   let pulled = commit;
-  let keeperStale = false;
+  let keeperStale = /^restart-demo/i.test(opts.box.destination);
   const keeperChanges = /^stale-keeper/i.test(opts.box.destination);
   let timer = setTimeout(async () => {
     status = offline ? 'offline' : 'online';
@@ -513,7 +513,7 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
     state: () => ({
       status,
       error: offline && status === 'offline' ? 'ssh: connect to host: Connection timed out (demo)' : null,
-      info: status === 'online' ? { platform: 'linux', version: 'demo', commit, git: 'git version 2.47.0 (demo)', ghReady: true, hookError: noHooks ? 'http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED (demo)' : null, workspaces, sep: '/', keeperStale } : null,
+      info: status === 'online' ? { platform: 'linux', version: 'demo', commit, git: 'git version 2.47.0 (demo)', ghReady: true, hookError: noHooks ? 'http://127.0.0.1:41234/api/hooks/cubefarm-probe: ECONNREFUSED (demo)' : null, workspaces, sep: '/', keeperStale, reboot: /^restart-demo/i.test(opts.box.destination) ? { required: true, reason: 'A software update is available and needs an OS restart to install (demo).' } : { required: false, reason: null } } : null,
       // A box whose destination starts with "claude-only" has just Claude Code: other agents can't move there.
       clis: status === 'online' ? clis : [],
       running,

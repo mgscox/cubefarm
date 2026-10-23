@@ -1,6 +1,8 @@
 // The office's boxes: other machines an agent's desk and CLI can run on, reached over SSH (see docs/fleet-design.md).
 // Pure rules here: which machine a session starts on, the ssh command line, and paths built the box's way.
 
+import type { RebootStatus } from '../shared/types.ts';
+
 /** A box as the office stores it. What it last reported is kept so its paths are known while it's offline. */
 export interface PersistedBox {
   id: string;
@@ -28,6 +30,7 @@ export interface BoxInfo extends BoxLayout {
    * nothing runs there. Missing: a box whose keeper ran its methods itself, so commit is the keeper's too.
    */
   keeperStale?: boolean;
+  reboot?: RebootStatus;
   git: string | null;
   ghReady: boolean;
   /** Why its CLIs can't reach the hook URL they post to (null: they can; missing: a box from before it was checked). */
