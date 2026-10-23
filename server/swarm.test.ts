@@ -2992,6 +2992,91 @@ describe('manual office closure', () => {
     expect(repo.autoAssign).toBe(true);
   });
 
+  it('automatically upgrades a closed office from the scheduler without admitting any work', async () => {
+    await swarm.closeOffice();
+    f.officeHead = 'old';
+    f.officeUpdate.behind = 3;
+    s.backend.office.launcher = true;
+    const update = vi.spyOn(s.backend.office, 'update').mockResolvedValue(null);
+    const heartbeat = vi.spyOn(s, 'maybeHeartbeat');
+    const ceo = vi.spyOn(s, 'startCeoWork');
+    const researcher = vi.spyOn(s as unknown as { startResearchWork(): void }, 'startResearchWork');
+    f.state.deferredResumes.push('a1');
+    f.state.ceo.queue.push({ id: 'queued' });
+    (s.schedule as Mock).mockRestore();
+    s.schedule();
+    await drain();
+    expect(update).toHaveBeenCalledExactlyOnceWith('old');
+    expect(f.state.officeHeld).toBe(true);
+    expect(f.officeLifecycleView()).toEqual({ state: 'closed', running: 0 });
+    expect(sessions).toHaveLength(0);
+    expect(heartbeat).not.toHaveBeenCalled();
+    expect(ceo).not.toHaveBeenCalled();
+    expect(researcher).not.toHaveBeenCalled();
+    expect(f.state.deferredResumes).toContain('a1');
+  });
+
+  it.each([true, false])('keeps the office closed after an update completes with ok=%s', async (ok) => {
+    await swarm.closeOffice();
+    f.officeHead = 'old';
+    s.backend.office.launcher = true;
+    vi.spyOn(s.backend, 'syncMain').mockResolvedValue({ status: ok ? 'in sync' : 'update ready (3 commits)', behind: ok ? 0 : 3, updatable: !ok });
+    const update = vi.spyOn(s.backend.office, 'update').mockImplementation(async () => {
+      if (ok) f.officeUpdate.behind = 0;
+      return { from: 'old', to: ok ? 'new' : 'old', ok, error: ok ? undefined : 'build failed', installed: false, built: ok, at: Date.now() };
+    });
+    (s.schedule as Mock).mockRestore();
+    f.setOfficeBehind(3);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(update).toHaveBeenCalledOnce();
+    expect(f.state.officeHeld).toBe(true);
+    expect(f.officeLifecycleView()).toEqual({ state: 'closed', running: 0 });
+    expect(f.officeUpdateView().state).toBe(ok ? 'none' : 'failed');
+    expect(sessions).toHaveLength(0);
+  });
+
+  it.each([
+    { name: 'disabled automatic updates', autoUpdate: false, update: {}, state: 'available' },
+    { name: 'a postponement', autoUpdate: true, update: { postponedBehind: 3 }, state: 'waiting' },
+    { name: 'a failed update', autoUpdate: true, update: { failed: 'build failed', failedBehind: 3 }, state: 'failed' },
+  ])('respects $name while closed', async ({ autoUpdate, update: patch, state }) => {
+    await swarm.closeOffice();
+    f.officeHead = 'old';
+    f.state.settings.autoUpdate = autoUpdate;
+    Object.assign(f.officeUpdate, patch, state === 'waiting' ? { postponedUntil: Date.now() + 60_000 } : {});
+    s.backend.office.launcher = true;
+    const update = vi.spyOn(s.backend.office, 'update').mockResolvedValue(null);
+    f.setOfficeBehind(3);
+    await drain();
+    expect(update).not.toHaveBeenCalled();
+    expect(f.officeUpdateView().state).toBe(state);
+    expect(f.state.officeHeld).toBe(true);
+    expect(sessions).toHaveLength(0);
+  });
+
+  it('waits for closing state to be saved before upgrading, then retries from the scheduler', async () => {
+    await swarm.closeOffice();
+    Object.assign(f, { officeSaved: false });
+    writes.mockRejectedValue(new Error('disk full'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    f.officeHead = 'old';
+    f.officeUpdate.behind = 3;
+    s.backend.office.launcher = true;
+    const update = vi.spyOn(s.backend.office, 'update').mockResolvedValue(null);
+    (s.schedule as Mock).mockRestore();
+    s.schedule();
+    await vi.advanceTimersByTimeAsync(21 * 60_000);
+    expect(f.officeLifecycleView()).toEqual({ state: 'closing', running: 0 });
+    expect(update).not.toHaveBeenCalled();
+    writes.mockResolvedValue(undefined);
+    s.schedule();
+    await drain();
+    expect(update).toHaveBeenCalledOnce();
+    expect(f.officeLifecycleView()).toEqual({ state: 'closed', running: 0 });
+    expect(f.state.officeHeld).toBe(true);
+    expect(sessions).toHaveLength(0);
+  });
+
   it('establishes admission before the close command finishes writing', async () => {
     let saved!: () => void;
     writes.mockReturnValueOnce(new Promise<void>((r) => { saved = r; }));
@@ -3287,7 +3372,7 @@ describe('manual office closure', () => {
     expect(rec.status).toBe('passed');
   });
 
-  it('round-trips the hold through atomic persistence and startup before scheduling', async () => {
+  it('round-trips the hold through an automatic upgrade hand-off and startup before scheduling', async () => {
     writes.mockRestore();
     const mkdir = vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
     const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
@@ -3295,6 +3380,12 @@ describe('manual office closure', () => {
     await swarm.closeOffice();
     expect(mkdir).toHaveBeenCalled();
     expect(rename).toHaveBeenCalled();
+    f.officeHead = 'old';
+    s.backend.office.launcher = true;
+    const update = vi.spyOn(s.backend.office, 'update').mockResolvedValue(null);
+    f.setOfficeBehind(1);
+    await drain();
+    expect(update).toHaveBeenCalledExactlyOnceWith('old');
     const persisted = JSON.parse(String(write.mock.calls.at(-1)![1]));
     expect(persisted.officeHeld).toBe(true);
     // Startup without floors isolates the hold load from unrelated demo onboarding.
@@ -3305,11 +3396,11 @@ describe('manual office closure', () => {
     restored.backend.demo = false;
     vi.spyOn(restored, 'save').mockImplementation(() => {});
     vi.spyOn(fs, 'readFile').mockResolvedValueOnce(JSON.stringify(persisted));
+    const start = vi.spyOn(restored.backend, 'startSession');
     await fresh.init();
     await restored.refreshOfficeLifecycle();
     expect(fresh.snapshot().officeLifecycle).toEqual({ state: 'closed', running: 0 });
     expect(restored.state.officeHeld).toBe(true);
-    const start = vi.spyOn(restored.backend, 'startSession');
     restored.schedule();
     expect(start).not.toHaveBeenCalled();
     await fresh.reopenOffice();

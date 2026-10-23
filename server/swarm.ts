@@ -3501,7 +3501,9 @@ export class Swarm {
     this.syncBoxes();
     this.tickUsage();
     if (this.state.officeHeld) {
-      void this.refreshOfficeLifecycle().catch((err) => console.warn('could not save closing office state', err));
+      void this.refreshOfficeLifecycle()
+        .then(() => this.officeUpdateTick())
+        .catch((err) => console.warn('could not save closing office state', err));
       return;
     }
     this.refreshWaitingBoxClis();
@@ -3681,10 +3683,11 @@ export class Swarm {
   private officeUpdateView(): OfficeUpdateView {
     const u = this.officeUpdate;
     const input = this.drainInput();
-    const d = drainDecision(this.state.officeHeld ? { ...input, autoUpdate: false, requested: false, drainingSince: null } : input);
+    const closing = this.state.officeHeld && this.officeLifecycleView().state !== 'closed';
+    const d = drainDecision(closing ? { ...input, autoUpdate: false, requested: false, drainingSince: null } : input);
     const until = u.postponedUntil ? new Date(u.postponedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-    const detail = this.state.officeHeld && input.behind > 0 ? 'Updates wait until Reopen Office is chosen in Settings.' : d.state === 'failed' ? u.failed : d.state === 'waiting' ? `Postponed until ${until}, or until a newer commit lands.` : null;
-    return { state: d.state, behind: input.behind, launcher: input.launcher, drainingSince: this.state.officeHeld ? null : u.drainingSince ?? d.drainingSince, running: input.running, detail };
+    const detail = closing && input.behind > 0 ? 'Updates wait until the office finishes closing and saves its work.' : d.state === 'failed' ? u.failed : d.state === 'waiting' ? `Postponed until ${until}, or until a newer commit lands.` : null;
+    return { state: d.state, behind: input.behind, launcher: input.launcher, drainingSince: closing ? null : u.drainingSince ?? d.drainingSince, running: input.running, detail };
   }
 
   private emitOfficeUpdate() {
@@ -3710,7 +3713,10 @@ export class Swarm {
    * out, hand it to the launcher. True while nothing new may start.
    */
   private officeUpdateTick(): boolean {
-    if (this.state.officeHeld) return true;
+    if (this.state.officeHeld && this.officeLifecycleView().state !== 'closed') {
+      this.emitOfficeUpdate();
+      return true; // Closing jobs and unsaved outcomes must never consume the update timeout.
+    }
     if (!this.officeHead) return false;
     const u = this.officeUpdate;
     const d = drainDecision(this.drainInput());
