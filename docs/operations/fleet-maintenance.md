@@ -2,7 +2,7 @@
 
 The office starts workers over SSH using `cubefarm box --stdio --office <id>`. It retries a lost connection after 2, 5, 10 and 30 seconds, then every minute. Enable SSH and the network connection at boot on each worker. A worker reboot ends its old terminals; reconnecting makes it available for new tasks.
 
-Fork checkouts with the same package version as upstream must point `SWARM_BOX_COMMAND` at the fork. Upstream npm `cubefarm@0.3.19` has no `box` command. For the current LAN installation, both workers have a checkout at `~/.local/share/cubefarm-worker`, with runtime dependencies and the server bundle built from the office's commit. The office launcher exports:
+Fork checkouts with the same package version as upstream must point `SWARM_BOX_COMMAND` at the fork. Upstream npm `cubefarm@0.3.19` has no `box` command. For the current LAN installation, both workers have a checkout at `~/.local/share/cubefarm-worker`, with dependencies for rebuilding (including esbuild) and the server bundle built from the office's commit. The office launcher exports:
 
 ```sh
 export SWARM_BOX_COMMAND='node "$HOME/.local/share/cubefarm-worker/bin/cubefarm.js" box'
