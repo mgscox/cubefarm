@@ -3,7 +3,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** Refreshes state without overriding Automatic updates, Later, Close Office, or failed-update holds. */
+/** Refreshes state without overriding Automatic updates, Later, or failed-update holds; the office stays closed during upgrades. */
 export async function maintainOffice({ url = 'http://127.0.0.1:4317', repo = 'mgscox/cubefarm', request = fetch } = {}) {
   const expires = Date.now() + 12 * 60_000;
   const call = async (route, method = 'GET') => {
