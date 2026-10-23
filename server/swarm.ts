@@ -1126,6 +1126,8 @@ export class Swarm {
       clis: st?.clis ?? [],
       running: st?.running ?? 0,
       sync: sync ? { text: boxSyncText(sync, this.boxBusy(b.id)), failed: sync.state === 'failed' } : null,
+      restartRequired: st?.info?.keeperStale === true || sync?.step === 'restart',
+      reboot: st?.info?.reboot ?? null,
     };
   }
 

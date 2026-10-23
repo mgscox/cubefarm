@@ -209,6 +209,12 @@ export interface CliView {
 
 export type BoxStatus = 'connecting' | 'online' | 'offline';
 
+/** Whether the worker's operating system reports a pending restart, when supported. */
+export interface RebootStatus {
+  required: boolean | null;
+  reason: string | null;
+}
+
 /** Another machine agents' desks and CLIs can run on, reached over ssh. */
 export interface BoxView {
   id: string;
@@ -224,6 +230,8 @@ export interface BoxView {
   clis: CliView[];
   running: number; // CLIs running there now
   sync: { text: string; failed: boolean } | null; // moving to the office's version (#94), or why it couldn't
+  restartRequired: boolean;
+  reboot: RebootStatus | null;
 }
 
 /** Messages on an agent's terminal socket (/ws/term?agent=<id>), server to browser. */

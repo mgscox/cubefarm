@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api';
-import { agentBox, boxName, boxNotes, busy, floorMove, floorMoveText, missingClis, movable, workerLists } from '../fleet';
+import { agentBox, boxName, boxNotes, boxWarnings, busy, floorMove, floorMoveText, missingClis, movable, workerLists } from '../fleet';
 import { agentsOnRepo, useStore, type Agent } from '../store';
 import type { BoxView, CliView, RepoView } from '../../../shared/types';
 import { confirmDialog } from './Confirm';
@@ -79,6 +79,7 @@ function OfficeMachine({ agents, repos }: { agents: Agent[]; repos: RepoView[] }
 
 function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos: RepoView[] }) {
   const { info, missing, hooks } = boxNotes(box);
+  const warnings = boxWarnings(box);
   const [checking, setChecking] = useState(false);
   const check = () => {
     setChecking(true);
@@ -111,6 +112,7 @@ function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos:
       </div>
       {box.error && <div className="term-error small">{box.error}</div>}
       {box.sync && <div className={`small ${box.sync.failed ? 'term-error' : 'muted'}`}>⬆ {box.sync.text}</div>}
+      {warnings.map((warning) => <div key={warning.kind} role="status" className={`small ${warning.kind === 'unknown' ? 'muted' : 'fleet-missing'}`}>{warning.kind === 'unknown' ? 'ⓘ' : '⚠'} {warning.text}</div>)}
       {missing.length > 0 && <div className="small fleet-missing">⚠ Set up on the box: {missing.join(', ')}</div>}
       {hooks && <div className="small fleet-missing">⚠ {hooks}</div>}
       <Workers id={box.id} agents={agents} repos={repos} />

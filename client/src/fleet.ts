@@ -5,6 +5,18 @@ import type { AgentCli, AgentStatus, AgentView, BoxView, RepoView } from '../../
 /** Agents who take desks on a box (the CEO and researchers stay on the office's machine). */
 export const movable = (a: Pick<AgentView, 'role'>) => a.role === 'dev' || a.role === 'qa';
 
+/** Warnings to show on each worker card, preserving unknown OS status for older workers. */
+export function boxWarnings(box: Pick<BoxView, 'status' | 'restartRequired' | 'reboot'>): { kind: 'worker' | 'os' | 'unknown'; text: string }[] {
+  const warnings: { kind: 'worker' | 'os' | 'unknown'; text: string }[] = [];
+  if (box.restartRequired) warnings.push({ kind: 'worker', text: 'CubeFarm worker restart required. It will restart automatically after active agents finish.' });
+  if (box.status === 'online' && (box.reboot == null || box.reboot.required === null)) {
+    warnings.push({ kind: 'unknown', text: 'OS restart status unavailable.' });
+  } else if (box.status === 'online' && box.reboot?.required) {
+    warnings.push({ kind: 'os', text: box.reboot.reason ?? 'The operating system reports that a restart is required.' });
+  }
+  return warnings;
+}
+
 const BUSY: AgentStatus[] = ['preparing', 'working'];
 /** On a task now: it finishes where it started. */
 export const busy = (a: Pick<AgentView, 'status'>) => BUSY.includes(a.status);

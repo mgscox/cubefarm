@@ -198,7 +198,7 @@ test('the demo backlog marks parents and stalled work for the manager', async ({
   await page.screenshot({ path: testInfo.outputPath('parent-and-stalled-backlog.png') });
 });
 
-test('Fleet machine summaries prefix worker lists with their floor and repo', async ({ page }, testInfo) => {
+test('Fleet machine summaries show restart warnings and workers by floor and repo', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.routeWebSocket('**/ws', (ws) => {
     const server = ws.connectToServer();
@@ -208,9 +208,9 @@ test('Fleet machine summaries prefix worker lists with their floor and repo', as
         event.data.settings.tutorialStep = -1;
         event.data.settings.runtime = 'terminal';
         event.data.boxes = [{
-          id: 'fleet-test', name: 'Studio', destination: 'studio.local', status: 'offline',
+          id: 'fleet-test', name: 'Studio', destination: 'studio.local', status: 'online',
           platform: null, version: null, git: null, ghReady: false, hookError: null,
-          clis: [], error: null, running: 0, sync: null,
+          clis: [], error: null, running: 0, sync: null, restartRequired: true, reboot: { required: true, reason: 'The operating system has requested a reboot.' },
         }];
         const template = event.data.agents.find((a) => a.role === 'dev')!;
         event.data.agents = event.data.repos.flatMap((repo) => {
@@ -244,6 +244,8 @@ test('Fleet machine summaries prefix worker lists with their floor and repo', as
     await expect(box.getByText(`Floor ${floor} · ${repo}: Ken`, { exact: true })).toBeVisible();
   }
   await expect(box.getByText('Finishing here before they move:')).toBeVisible();
+  await expect(page.getByText('CubeFarm worker restart required. It will restart automatically after active agents finish.')).toBeVisible();
+  await expect(page.getByText('The operating system has requested a reboot.')).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('fleet-floor-worker-lists.png') });
 });
 

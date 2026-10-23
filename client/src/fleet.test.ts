@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agentBox, boxName, boxNotes, floorMove, floorMoveText, missingClis, workerLists } from './fleet';
+import { agentBox, boxName, boxNotes, boxWarnings, floorMove, floorMoveText, missingClis, workerLists } from './fleet';
 import type { AgentStatus, BoxView } from '../../shared/types';
 
 const boxes = [{ id: 'b1', name: 'Tower' }];
@@ -83,6 +83,27 @@ describe('boxNotes', () => {
 
   it("doesn't guess while it's offline", () => {
     expect(boxNotes({ ...box, status: 'offline', ghReady: false, hookError: 'stale' })).toMatchObject({ missing: [], hooks: null });
+  });
+});
+
+describe('boxWarnings', () => {
+  const box = { status: 'online' as const, restartRequired: false, reboot: null };
+
+  it('explains automatic worker restart and preserves the OS reason', () => {
+    expect(boxWarnings({ ...box, restartRequired: true, reboot: { required: true, reason: 'An update needs a restart to install.' } })).toEqual([
+      { kind: 'worker', text: 'CubeFarm worker restart required. It will restart automatically after active agents finish.' },
+      { kind: 'os', text: 'An update needs a restart to install.' },
+    ]);
+  });
+
+  it('shows unavailable only for online workers whose OS status is unknown or missing', () => {
+    expect(boxWarnings(box)).toEqual([{ kind: 'unknown', text: 'OS restart status unavailable.' }]);
+    expect(boxWarnings({ ...box, reboot: { required: null, reason: null } })).toEqual([{ kind: 'unknown', text: 'OS restart status unavailable.' }]);
+  });
+
+  it('does not infer status for offline or old workers', () => {
+    expect(boxWarnings({ status: 'offline', restartRequired: false, reboot: null })).toEqual([]);
+    expect(boxWarnings({ status: 'online', restartRequired: false, reboot: { required: false, reason: null } })).toEqual([]);
   });
 });
 
