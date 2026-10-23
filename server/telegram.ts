@@ -49,6 +49,11 @@ export class TelegramFailure extends Error {
   constructor(public kind: 'retry' | 'uncertain' | 'fatal', message: string, public retryAfter = 2) { super(message); }
 }
 
+/** The bot token: the server's environment wins over the manager's config file. */
+export function telegramToken(env: NodeJS.ProcessEnv, config: NodeJS.Dict<string>): string | null {
+  return env.CUBEFARM_TELEGRAM_TOKEN || config.CUBEFARM_TELEGRAM_TOKEN || null;
+}
+
 /** Only fixed errors escape this seam: fetch errors and Bot API descriptions can contain credentials. */
 export function telegramTransport(token: string): TelegramTransport {
   return {
@@ -144,7 +149,7 @@ export class TelegramMirror {
   }
   async command(action: string, body: Record<string, unknown> = {}) {
     const s = this.commands.state();
-    if (!this.transport) throw new HttpError(409, 'Configure CUBEFARM_TELEGRAM_TOKEN locally and restart the server.');
+    if (!this.transport) throw new HttpError(409, 'Put CUBEFARM_TELEGRAM_TOKEN in ~/.config/cubefarm/.env (or the server environment) and restart the server.');
     if (action === 'pair') {
       this.pairing = { code: crypto.randomBytes(8).toString('hex'), expiresAt: Date.now() + 5 * 60_000, candidate: null };
     } else if (action === 'confirm') {

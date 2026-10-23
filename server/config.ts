@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { parseEnv } from 'node:util';
 import { officeHost } from '../bin/officeNetwork.js';
 
 export const PORT = Number(process.env.SWARM_PORT ?? 4317);
@@ -14,6 +15,9 @@ export const HOME_DIR = process.env.SWARM_HOME ?? path.join(os.homedir(), '.cube
 export const WORKSPACE_ROOT = path.join(HOME_DIR, 'workspaces');
 export const DEMO = process.argv.includes('--demo') || process.env.SWARM_DEMO === '1' || process.env.SWARM_DEMO === 'true';
 export const STATE_FILE = path.join(HOME_DIR, DEMO ? 'demo-state.json' : 'state.json');
+// The manager's own settings and secrets, apart from the office's state, where other tools keep theirs.
+export const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'cubefarm');
+export const CONFIG_ENV_FILE = path.join(CONFIG_DIR, '.env');
 
 // How often each connected repo's issues and PRs are refreshed from GitHub.
 export const SYNC_INTERVAL_MS = 45_000;
@@ -31,4 +35,12 @@ export function defaultProjectsDir(appDir: string, home = os.homedir()): string 
   if (!appDir.split(/[\\/]/).includes('node_modules')) return path.resolve(appDir, '..');
   const names = ['Projects', 'projects', 'code', 'Code', 'dev', 'Developer', 'src', 'repos', 'git', 'GitHub'];
   return names.map((n) => path.join(home, n)).find((d) => fs.existsSync(d)) ?? path.join(home, 'Projects');
+}
+
+/**
+ * The manager's config file (KEY=value lines, `export ` allowed). Its values are read where needed and kept out of
+ * process.env, which agents and previews inherit. A missing or unreadable file has none.
+ */
+export function readConfigEnv(file = CONFIG_ENV_FILE): NodeJS.Dict<string> {
+  try { return parseEnv(fs.readFileSync(file, 'utf8')); } catch { return {}; }
 }

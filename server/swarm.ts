@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { emptyTelegram, TelegramMirror, telegramTransport, type TelegramState, type TelegramTransport } from './telegram.ts';
+import { emptyTelegram, TelegramMirror, telegramToken, telegramTransport, type TelegramState, type TelegramTransport } from './telegram.ts';
 import { createDemoTelegram } from './demo.ts';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
@@ -10,7 +10,7 @@ import { agentBox, boxCliCheckDue, boxSync, boxSyncText, startPlace, syncRetryDu
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import type { ReconnectedCli } from './cliRunner.ts';
 import type { PrDetails } from './github.ts';
-import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, VERSION, WORKSPACE_ROOT } from './config.ts';
+import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, readConfigEnv, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, VERSION, WORKSPACE_ROOT } from './config.ts';
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type MergePrRequest, type OfficeTools, type ParkPrRequest, type ResearchRequest, type StartIssueRequest } from './ceo.ts';
 import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
@@ -519,7 +519,8 @@ export class Swarm {
 
   constructor(private backend: Backend, transport?: TelegramTransport | null) {
     this.demoTelegram = backend.demo ? createDemoTelegram() : null;
-    this.telegram = new TelegramMirror(transport === undefined ? this.demoTelegram ?? (process.env.CUBEFARM_TELEGRAM_TOKEN ? telegramTransport(process.env.CUBEFARM_TELEGRAM_TOKEN) : null) : transport, {
+    const token = transport === undefined && !this.demoTelegram ? telegramToken(process.env, readConfigEnv()) : null;
+    this.telegram = new TelegramMirror(transport === undefined ? this.demoTelegram ?? (token ? telegramTransport(token) : null) : transport, {
       state: () => this.state.telegram,
       commit: () => this.writeState(),
       recover: () => this.recoverManagerInputs(),
