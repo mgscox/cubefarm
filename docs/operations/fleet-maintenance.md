@@ -22,7 +22,7 @@ This installs a standalone checker in `~/.local/lib/cubefarm/` and adds one tagg
 
 The checker calls the running office's existing APIs. With Automatic updates enabled, it refreshes the configured office floor's local folder; the office's existing coordinator decides when to drain, install and restart. Workers follow the office's commit, update their checkouts and reconnect. Their terminal keepers restart after busy agents finish. The checker also refreshes every worker report, including restart notices. It does not force Update now, clear a postponement or failed-update hold, override Close Office, install OS updates, or reboot machines.
 
-The defaults are `http://127.0.0.1:4317` and floor `mgscox/cubefarm`. For a different office, set `CUBEFARM_OFFICE_URL`, `CUBEFARM_OFFICE_REPO`, and optionally `SWARM_HOME` in the cron environment. Keep the office floor's local folder pointed at the running office checkout. Failed checks return a nonzero exit and record the error in the log. A process-owned lock prevents concurrent scheduled checks; an obsolete dead process lock is recovered on the next run.
+The defaults are `http://127.0.0.1:4317` and floor `mgscox/cubefarm`. For a different office, set `CUBEFARM_OFFICE_URL`, `CUBEFARM_OFFICE_REPO` in the cron environment. Keep the office floor's local folder pointed at the running office checkout. Failed checks return a nonzero exit and record the error in the log. Each check retries transient connection failures for up to 30 seconds so a supervised office restart can finish. Runs have a 12-minute budget, shorter than the schedule interval; all API operations are idempotent checks, so a manual repeat is safe.
 
 ## Fleet warnings
 

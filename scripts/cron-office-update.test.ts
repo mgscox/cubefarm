@@ -1,9 +1,6 @@
-import fs from 'node:fs/promises';
 import http from 'node:http';
-import os from 'node:os';
-import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { maintainOffice, maintenanceLock } from './cron-office-update.mjs';
+import { maintainOffice } from './cron-office-update.mjs';
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { await Promise.all(cleanups.splice(0).map((f) => f())); });
@@ -76,16 +73,5 @@ describe('cron office maintenance', () => {
     expect((await maintainOffice({ url: fake.url, request })).errors).toEqual([]);
     expect(disconnected).toBe(true);
     expect(fake.calls.filter((c) => c.includes('sync-folder'))).toHaveLength(1);
-  });
-  it('does not overlap an existing maintenance process', async () => {
-    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cubefarm-maintenance-'));
-    cleanups.push(() => fs.rm(home, { recursive: true, force: true }));
-    const unlock = await maintenanceLock(home);
-    expect(unlock).not.toBeNull();
-    expect(await maintenanceLock(home)).toBeNull();
-    await unlock!();
-    const unlockAgain = await maintenanceLock(home);
-    expect(unlockAgain).not.toBeNull();
-    await unlockAgain!();
   });
 });

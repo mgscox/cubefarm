@@ -6,4 +6,3 @@ export interface MaintenanceResult {
   errors: string[];
 }
 export function maintainOffice(opts?: { url?: string; repo?: string; request?: typeof fetch }): Promise<MaintenanceResult>;
-export function maintenanceLock(home: string): Promise<(() => Promise<void>) | null>;

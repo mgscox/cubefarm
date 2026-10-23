@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Cron entrypoint: refresh the office's own folder and fleet reports; its existing scheduler handles safe upgrades.
-import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** Refreshes state without overriding Automatic updates, Later, Close Office, or failed-update holds. */
 export async function maintainOffice({ url = 'http://127.0.0.1:4317', repo = 'mgscox/cubefarm', request = fetch } = {}) {
+  const expires = Date.now() + 12 * 60_000;
   const call = async (route, method = 'GET') => {
-    const deadline = Date.now() + 30000;
+    if (Date.now() >= expires) throw new Error('Maintenance exceeded its 12-minute budget');
+    const deadline = Math.min(expires, Date.now() + 30000);
     for (;;) {
       try {
         const response = await request(new URL(route, url), { method, signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
@@ -50,38 +50,10 @@ export async function maintainOffice({ url = 'http://127.0.0.1:4317', repo = 'mg
     boxes: (after.boxes ?? []).map((b) => ({ name: b.name, status: b.status, sync: b.sync ?? null })), errors };
 }
 
-/** A process-owned lock prevents overlapping cron runs; a dead process's lock is recovered on the next run. */
-export async function maintenanceLock(home) {
-  await fs.mkdir(home, { recursive: true });
-  const file = path.join(home, 'maintenance.lock');
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const handle = await fs.open(file, 'wx', 0o600);
-      await handle.writeFile(String(process.pid));
-      await handle.close();
-      return () => fs.unlink(file);
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-      const pid = Number(await fs.readFile(file, 'utf8').catch(() => ''));
-      if (!Number.isSafeInteger(pid) || pid <= 0) return null; // another process may still be writing it
-      try { process.kill(pid, 0); return null; }
-      catch (probe) {
-        if (probe.code !== 'ESRCH') return null;
-        await fs.unlink(file).catch((remove) => { if (remove.code !== 'ENOENT') throw remove; });
-      }
-    }
-  }
-  return null;
-}
-
 async function main() {
-  const unlock = await maintenanceLock(process.env.SWARM_HOME || path.join(os.homedir(), '.cubefarm'));
-  if (!unlock) return;
-  try {
-    const result = await maintainOffice({ url: process.env.CUBEFARM_OFFICE_URL, repo: process.env.CUBEFARM_OFFICE_REPO });
-    console.log(JSON.stringify({ at: new Date().toISOString(), ...result }));
-    if (result.errors.length) process.exitCode = 1;
-  } finally { await unlock(); }
+  const result = await maintainOffice({ url: process.env.CUBEFARM_OFFICE_URL, repo: process.env.CUBEFARM_OFFICE_REPO });
+  console.log(JSON.stringify({ at: new Date().toISOString(), ...result }));
+  if (result.errors.length) process.exitCode = 1;
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((err) => { console.error(`CubeFarm maintenance: ${err.message}`); process.exitCode = 1; });
