@@ -367,6 +367,7 @@ export interface SwarmSettings {
   defaultEffort: EffortLevel;
   runtime: AgentRuntime;
   defaultCli: AgentCli; // what developers and QA testers run in their terminals unless they have their own
+  defaultModels?: Partial<Record<AgentCli, string>>; // each coding agent's last default model, restored when it's the default again
   hiring: 'approve' | 'auto'; // CEO proposals wait for the manager, or go through while the floor is under teamCap
   teamCap: number; // most agents per floor the CEO may reach without the manager's approval (auto mode)
   ceoHeartbeatMin: number; // minutes between the CEO's periodic reviews; 0 = off
