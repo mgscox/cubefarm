@@ -54,7 +54,8 @@ before you open a PR.
 Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bundles it into `dist-server/` for npm):
 - `index.ts`: entry; picks the real or demo backend, REST routes under `/api`, the `/ws` and `/ws/term` websockets, serves `dist/`, shutdown.
 - `config.ts`: `SWARM_PORT` (default 4317), `SWARM_HOME` (default `~/.cubefarm`), `--demo`, state file, intervals,
-  the default projects folder.
+  the default projects folder, and `readConfigEnv()` for the manager's config file (`~/.config/cubefarm/.env`,
+  `docs/configuration.md`).
 - `swarm.ts`: the orchestrator. Floors, agents, scheduling/auto-assign, dev → QA → fix → merge loop, dev and QA
   prompts, CEO job queue, phone messages, persistence (`state.json` / `demo-state.json`), websocket fan-out.
 - `agentRunner.ts`: one Agent SDK session; options, env stripping, Playwright MCP, and turning the SDK stream into

@@ -5,7 +5,7 @@ Telegram presents the same manager–Joi phone conversation as the WebUI. There 
 ## Local setup
 
 1. In Telegram, open the official [BotFather](https://t.me/BotFather), use `/newbot`, and follow its instructions. Use a dedicated bot for this office. Do not paste the token into the WebUI, a phone message, an issue or an agent session.
-2. Set `CUBEFARM_TELEGRAM_TOKEN` in the environment of the CubeFarm server using your local service/terminal's secret configuration, then restart CubeFarm normally. Keep any local secret file private and outside version control. CubeFarm stores only a fingerprint, never the token, in its state. Agent/preview environments exclude this variable.
+2. Put `CUBEFARM_TELEGRAM_TOKEN=<token>` in CubeFarm's [config file](configuration.md), `~/.config/cubefarm/.env` (`$XDG_CONFIG_HOME/cubefarm/.env` when that is set; `%USERPROFILE%\.config\cubefarm\.env` on Windows), readable only by you, then restart CubeFarm normally. The server reads it at startup without adding its values to the environment agents inherit; a `CUBEFARM_TELEGRAM_TOKEN` already in the server's environment takes precedence. Keep the file outside version control. CubeFarm stores only a fingerprint, never the token, in its state. Agent/preview environments exclude this variable.
 3. Open Phone → Chat → Telegram, choose **Create pairing code**, and send the displayed `/start CODE` to your bot in a **private** chat within five minutes.
 4. Compare the numeric user and chat identity in the WebUI with the account you intended to authorize, then choose **Confirm pairing** locally. A code alone never grants office access. If the candidate is wrong, generate a fresh code. Codes expire and do not survive a server restart.
 

@@ -28,7 +28,7 @@ export function TelegramSettings() {
         <div className="small" style={{ display: 'grid', gap: 7, paddingTop: 8 }}>
           <div><b>{telegram.state}</b>{telegram.detail ? ` · ${telegram.detail}` : ''}</div>
           <div>Pending deliveries: {telegram.pending}{telegram.uncertain ? ' · delivery status uncertain' : ''}</div>
-          {!telegram.configured && <p className="muted">Set CUBEFARM_TELEGRAM_TOKEN in the server environment and restart the server. The bot token is never entered or shown here.</p>}
+          {!telegram.configured && <p className="muted">Put CUBEFARM_TELEGRAM_TOKEN in ~/.config/cubefarm/.env (or the server environment) and restart the server. The bot token is never entered or shown here.</p>}
           {telegram.pairing && (
             <div>
               <p>Pairing code: <b>{telegram.pairing.code}</b> (expires {new Date(telegram.pairing.expiresAt).toLocaleTimeString()})</p>

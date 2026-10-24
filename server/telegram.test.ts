@@ -5,7 +5,7 @@ import path from 'node:path';
 import { Swarm } from './swarm.ts';
 import { createDemoBackend, createDemoTelegram } from './demo.ts';
 import { CEO_ID, type HireRequestView, type PhoneMessage, type ServerEvent } from '../shared/types.ts';
-import { TelegramFailure, telegramParts, telegramTransport, TELEGRAM_PENDING_LIMIT, type TelegramState, type TelegramTransport, type TelegramUpdate } from './telegram.ts';
+import { TelegramFailure, telegramParts, telegramToken, telegramTransport, TELEGRAM_PENDING_LIMIT, type TelegramState, type TelegramTransport, type TelegramUpdate } from './telegram.ts';
 import type { SessionHandle } from './agentRunner.ts';
 
 type TestState = {
@@ -494,4 +494,15 @@ it('retries a failed idle handoff without Telegram or another manager message', 
   expect(starts[0]).toContain('Web request');
   expect(saved.managerInputs).toEqual([]);
   expect(s.state.ceo.queue).toEqual([]);
+});
+
+describe('bot token configuration', () => {
+  it('prefers the server environment over the config file', () => {
+    expect(telegramToken({ CUBEFARM_TELEGRAM_TOKEN: 'from-env' }, { CUBEFARM_TELEGRAM_TOKEN: 'from-file' })).toBe('from-env');
+    expect(telegramToken({}, { CUBEFARM_TELEGRAM_TOKEN: 'from-file' })).toBe('from-file');
+  });
+  it('is not configured when neither has a token', () => {
+    expect(telegramToken({}, {})).toBeNull();
+    expect(telegramToken({ CUBEFARM_TELEGRAM_TOKEN: '' }, { CUBEFARM_TELEGRAM_TOKEN: '' })).toBeNull();
+  });
 });

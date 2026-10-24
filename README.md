@@ -104,7 +104,7 @@ Running it from a clone of this repo (`npm start`)? Then the office updates itse
 
 - **It runs on your coding agents' subscriptions.** Agents on the same coding agent draw on the same usage limits. To cap how many work at once, set a session limit in the manager's console.
 - **Agents work on your machine, like your own coding agents**: with your skills, MCP servers and settings, each in its own copy of the repo. They can't push to your main branch or merge: the office merges, after QA.
-- **Your office lives in `~/.cubefarm`**: settings, clones of your repos and one working copy per agent. Set `SWARM_HOME` to use another folder.
+- **Your office lives in `~/.cubefarm`**: settings, clones of your repos and one working copy per agent. Set `SWARM_HOME` to use another folder. Private settings such as the Telegram bot token go in [`~/.config/cubefarm/.env`](docs/configuration.md).
 
 ## Learn more
 
