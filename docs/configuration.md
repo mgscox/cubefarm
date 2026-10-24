@@ -52,6 +52,17 @@ requested. Remote desk RPCs additionally have their own deadlines (the desk time
 - **Demo mode** (`--demo`) ignores it.
 - **It stays out of agents' environments.** The server reads the values it needs and doesn't copy the file into its own environment, which agents, previews and their tools inherit. `CUBEFARM_TELEGRAM_TOKEN` is also removed from agent and preview environments when it comes from the shell.
 
+## OpenCode desk models
+
+Set an OpenCode desk's model to `provider/model`, matching the provider ID in your OpenCode config (for example,
+`ollama/glm-5.3:cloud` or `openrouter/z-ai/glm-5.3`). Bare names such as `glm-5.3:cloud` are treated as Ollama models
+and sent as `ollama/glm-5.3:cloud`. The `ollama` provider must already be configured in OpenCode; CubeFarm does not
+create providers. Leave the model empty to use OpenCode's own default.
+
+CubeFarm passes the model as `model` in `OPENCODE_CONFIG_CONTENT`, following the
+[OpenCode config schema](https://opencode.ai/config.json). The interactive CLI does not accept `--model`
+(verified with OpenCode v2.0.32); it accepts `--auto`, `--session` and `--prompt`.
+
 ## Adding a setting (contributors)
 
 Read it with `readConfigEnv()` from `server/config.ts` where it's needed, let the environment win (`process.env.X || readConfigEnv().X`), keep the value out of `process.env`, logs and broadcasts if it's a secret, and add a row to the table above.
