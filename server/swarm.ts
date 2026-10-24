@@ -16,6 +16,8 @@ import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
 import { issueHolder, duplicateIssueSessions } from './issueClaims.ts';
 import { orphanedQa } from './qaOwnership.ts';
+import { startTimeouts, stuckStarting } from './sessionStart.ts';
+import { withOperation } from './operation.ts';
 import { QA_RESUME_PROMPT, qaRetry } from './qaRetry.ts';
 import { planDevFix, type FixReason } from './fixPlan.ts';
 import { fixNeedsHuman, fixOutcome } from './fixOutcome.ts';
@@ -220,6 +222,7 @@ interface AgentRuntime {
   shots: Shot[]; // every screenshot of the current session (QA evidence)
   terminal: AgentTerminal | null; // their terminal, once they've run in the terminal runtime
   starting?: number; // reserved while reading an issue session baseline
+  startWatch?: { since: number; controller: AbortController; timer: NodeJS.Timeout; job?: PrepJob };
   generation?: number; // bumped by every new task, cleared task and session: see nextGeneration
   qaResume?: { cwd: string; systemAppend: string } | null; // the QA run's one resume for a missing report, until used
   deskMoved?: boolean; // the task's desk had to move off a removed box: its conversation can't be resumed
@@ -1364,7 +1367,85 @@ export class Swarm {
   /** The agent's task or session changes: a session end still being handled for the old one must not act on it. */
   private nextGeneration(a: PersistedAgent) {
     const rt = this.agentRt.get(a.id);
-    if (rt) rt.generation = (rt.generation ?? 0) + 1;
+    if (rt) {
+      rt.generation = (rt.generation ?? 0) + 1;
+      delete rt.starting;
+      if (rt.startWatch) {
+        clearTimeout(rt.startWatch.timer);
+        rt.startWatch.controller.abort(new Error('Task replaced'));
+        delete rt.startWatch;
+      }
+    }
+  }
+
+  private startStall(a: PersistedAgent) {
+    const rt = this.agentRt.get(a.id);
+    const since = rt?.startWatch?.since ?? a.startedAt;
+    return stuckStarting(a, rt?.log ?? a.logTail ?? [], Date.now(), since == null ? since : Math.max(since, rt?.terminal?.lastOutputAt ?? 0));
+  }
+
+  private watchStart(a: PersistedAgent, job?: PrepJob) {
+    const rt = this.agentRt.get(a.id)!;
+    const timeout = () => startTimeouts()[a.status === 'preparing' ? 'preparing' : 'working'];
+    const check = () => {
+      if (this.startStall(a)) this.failedStart(a);
+      else if (rt.startWatch && !a.sessionId && a.endedAt == null && ['preparing', 'working'].includes(a.status)) {
+        rt.startWatch.timer = setTimeout(check, timeout());
+        rt.startWatch.timer.unref();
+      }
+    };
+    rt.startWatch = { since: Date.now(), controller: new AbortController(), timer: setTimeout(check, timeout()), job };
+    rt.startWatch.timer.unref();
+  }
+
+  /** Revoke the old task before stopping it: runners and remote checkouts may answer late. */
+  private failedStart(a: PersistedAgent) {
+    const stalled = this.startStall(a);
+    const repo = this.state.repos.find((r) => r.id === a.repoId);
+    if (!stalled || !repo) return false;
+    const rt = this.agentRt.get(a.id)!;
+    const session = rt.session;
+    const machine = this.machineFor(a);
+    const slug = this.agentSlug(a);
+    const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
+    const job = rt.startWatch?.job ?? (rec && a.task === 'qa' ? { rec, task: 'qa' as const } : rec && a.task === 'fix' ? { rec, task: 'fix' as const, author: rec.devAgentId } : undefined);
+    const error = `Session never started on ${this.boxName(a.deskBox) || 'office'}: ${stalled.phase}`;
+    if (a.task === 'issue') {
+      this.setRequestedStarts(repo, repo.requestedStarts.map((r) => r.issueNumber === a.issueNumber ? { ...r, restartPending: true } : r));
+    }
+    this.nextGeneration(a);
+    rt.session = null;
+    rt.currentTool = null;
+    rt.boot = null;
+    if (job) this.jobDeskFailed(a, repo, job, error);
+    else {
+      this.appendLog(a, [{ kind: 'error', text: `✗ ${error}` }]);
+      this.clearTask(a);
+    }
+    a.sessionId = null;
+    a.sessionCli = null;
+    a.endedAt = Date.now();
+    a.lastError = error;
+    session?.stop();
+    rt.terminal?.releaseIdle?.();
+    // Cleanup is bounded independently; a silent box must never hold a freed agent's slot.
+    const cleanup = new AbortController();
+    const timer = setTimeout(() => cleanup.abort(new Error('Desk cleanup timed out')), startTimeouts().preparing);
+    timer.unref();
+    void withOperation(cleanup.signal, () => machine.releaseDesk(repo.fullName, slug, this.port(a)))
+      .catch(() => undefined).finally(() => clearTimeout(timer));
+    this.emitAgent(a);
+    this.save();
+    return true;
+  }
+
+  private freeStuckTester(repo: PersistedRepo, number: number) {
+    const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number && q.status === 'testing');
+    const tester = rec && this.state.agents.find((a) => a.id === rec.qaAgentId && a.repoId === repo.id && a.task === 'qa' && a.prNumber === number);
+    if (!rec || !tester || !this.failedStart(tester)) return '';
+    // The CEO is taking over: don't let the scheduler launch QA during the GitHub preflight.
+    this.setQa(rec, { status: 'needs-human' });
+    return ` Stopped ${tester.name}'s stuck starting task.`;
   }
 
   private clearTask(a: PersistedAgent) {
@@ -2403,6 +2484,7 @@ export class Swarm {
       { kind: 'system', text: `━━━ ${banner} ━━━` },
       { kind: 'system', text: preparing },
     ]);
+    this.watchStart(a);
     this.emitAgent(a);
     this.save();
   }
@@ -2410,24 +2492,31 @@ export class Swarm {
   private async prepare(a: PersistedAgent, repo: PersistedRepo, base: { pr?: number }, branch: string, job?: PrepJob): Promise<string | null> {
     const generation = this.agentRt.get(a.id)?.generation;
     const gone = () => a.status !== 'preparing' || this.agentRt.get(a.id)?.generation !== generation;
+    const watch = this.agentRt.get(a.id)?.startWatch;
+    if (watch) watch.job = job;
     try {
-      if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') await this.cloneRepo(repo.id);
-      // A fix round for the PR's own author stays on the desk with their conversation; anything else is a new task.
-      const where = this.place(a, job?.task === 'fix' && job.author === a.id ? 'within' : 'new');
-      if ('wait' in where) throw new Error(`Waiting: ${this.waitReason(where)}.`);
-      if (where.fellBack) this.appendLog(a, [{ kind: 'system', text: `ℹ ${this.boxName(where.fellBack)} was removed: this task runs on the office's machine.` }]);
-      const rt = this.agentRt.get(a.id);
-      if (rt) rt.deskMoved = where.box !== a.deskBox;
-      if (where.box !== a.deskBox) {
-        a.deskBox = where.box;
-        this.emitAgent(a);
-      }
-      if (where.box) this.appendLog(a, [{ kind: 'system', text: `🖥 Working on ${this.boxName(where.box)}.` }]);
-      await this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
-      const cwd = await this.machineFor(a).prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch, (text) => this.appendLog(a, [{ kind: 'system', text }]));
-      if (gone()) return null;
-      if (job) this.setQa(job.rec, { preparation: { ...job.rec.preparation, [job.task]: undefined } });
-      return a.status === 'preparing' ? cwd : null; // null: stopped or fired while preparing
+      const desk = async () => {
+        if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') await this.cloneRepo(repo.id);
+        if (gone()) return null;
+        // A fix round for the PR's own author stays on the desk with their conversation; anything else is a new task.
+        const where = this.place(a, job?.task === 'fix' && job.author === a.id ? 'within' : 'new');
+        if ('wait' in where) throw new Error(`Waiting: ${this.waitReason(where)}.`);
+        if (where.fellBack) this.appendLog(a, [{ kind: 'system', text: `ℹ ${this.boxName(where.fellBack)} was removed: this task runs on the office's machine.` }]);
+        const rt = this.agentRt.get(a.id);
+        if (rt) rt.deskMoved = where.box !== a.deskBox;
+        if (where.box !== a.deskBox) {
+          a.deskBox = where.box;
+          this.emitAgent(a);
+        }
+        if (where.box) this.appendLog(a, [{ kind: 'system', text: `🖥 Working on ${this.boxName(where.box)}.` }]);
+        await this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
+        if (gone()) return null;
+        const cwd = await this.machineFor(a).prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch, (text) => { if (!gone()) this.appendLog(a, [{ kind: 'system', text }]); });
+        if (gone()) return null;
+        if (job) this.setQa(job.rec, { preparation: { ...job.rec.preparation, [job.task]: undefined } });
+        return a.status === 'preparing' ? cwd : null; // null: stopped or fired while preparing
+      };
+      return watch ? await withOperation(watch.controller.signal, desk) : await desk();
     } catch (err) {
       if (gone()) return null;
       if (job) {
@@ -2508,15 +2597,17 @@ export class Swarm {
     }
     if (a.task === 'issue' || a.task === 'fix') this.claimIssue(a, a.issueNumber, 'working');
     const rt = this.agentRt.get(a.id)!;
+    const job = rt.startWatch?.job;
     this.nextGeneration(a);
     const generation = rt.generation;
     a.status = 'working';
+    this.watchStart(a, job);
     const how = this.sessionRuntime(a, resumeSessionId);
     this.emitAgent(a);
     if (a.task === 'issue' && mode !== 'reattach') {
       rt.starting = generation;
       a.issueStartHead = null;
-      const head = await this.machineFor(a).deskHead(repo.fullName, this.agentSlug(a)).catch(() => null);
+      const head = await withOperation(rt.startWatch!.controller.signal, () => this.machineFor(a).deskHead(repo.fullName, this.agentSlug(a))).catch(() => null);
       if (rt.starting === generation) delete rt.starting;
       if (!this.state.agents.includes(a) || this.officeUpdate.handedOver || rt.generation !== generation || a.status !== 'working') return;
       if (this.state.officeHeld) return this.deferPrepared(a, repo);
@@ -2545,21 +2636,25 @@ export class Swarm {
         ...how,
       },
       {
-        log: (entries) => this.appendLog(a, entries),
+        log: (entries) => { if (rt.generation === generation) this.appendLog(a, entries); },
         tool: (name) => {
+          if (rt.generation !== generation) return;
           if (rt.currentTool === name) return;
           rt.currentTool = name;
           this.emitAgent(a);
         },
         sessionId: (id) => {
+          if (rt.generation !== generation) return;
           a.sessionId = id;
           a.sessionCli = id ? (how.cli ?? 'claude') : null;
         },
         browserUrl: (url) => {
+          if (rt.generation !== generation) return;
           rt.browserUrl = url;
           this.emitAgent(a);
         },
         screenshot: (data, mime) => {
+          if (rt.generation !== generation) return;
           const at = Date.now();
           rt.screenshot = { data, mime, at };
           rt.shots.push({ data, mime, url: rt.browserUrl, at });
@@ -2572,7 +2667,7 @@ export class Swarm {
         },
         limited: (at) => this.pauseForLimit(at),
         usageWarning: (info) => this.paceForWarning(info),
-        boot: (state) => this.setBoot(a, rt, state),
+        boot: (state) => { if (rt.generation === generation) this.setBoot(a, rt, state); },
         finished: (result) => void this.onFinished(a, repo, result, generation, session),
       },
     );
@@ -2916,15 +3011,19 @@ export class Swarm {
       `Checking out PR #${rec.prNumber}…`,
     );
 
+    const generation = this.agentRt.get(a.id)?.generation;
+    const gone = () => this.agentRt.get(a.id)?.generation !== generation || a.status === 'stopped';
     let pr: PrDetails;
     let issue: { title: string; body: string } | null = null;
     try {
       pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
       const issueNumber = rec.issueNumber ?? pr.closesIssues[0] ?? null;
       if (issueNumber) issue = await this.backend.issueDetails(repo.fullName, issueNumber).catch(() => null);
+      if (gone()) return;
       Object.assign(a, { issueTitle: pr.title, prUrl: pr.url });
       this.emitAgent(a);
     } catch (err) {
+      if (gone()) return;
       a.status = 'error';
       a.endedAt = Date.now();
       a.lastError = (err as Error).message;
@@ -2944,6 +3043,7 @@ export class Swarm {
     rec.testedSha = pr.headSha;
 
     const cwd = await this.prepare(a, repo, { pr: rec.prNumber }, branch, { rec, task: 'qa' });
+    if (gone()) return;
     if (!cwd) {
       if (this.state.qa.includes(rec) && rec.status === 'testing') this.setQa(rec, { status: 'queued', qaAgentId: null });
       return;
@@ -3144,7 +3244,9 @@ export class Swarm {
       `Checking out PR #${rec.prNumber}…`,
     );
     this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
+    const generation = this.agentRt.get(dev.id)?.generation;
     const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, headRef, { rec, task: 'fix', author });
+    if (this.agentRt.get(dev.id)?.generation !== generation) return;
     if (!cwd) {
       if (rec.status === 'fixing') this.setQa(rec, { status: 'failed' });
       return;
@@ -3525,6 +3627,7 @@ export class Swarm {
    * so no repo can hog the slots.
    */
   private schedule() {
+    for (const a of this.state.agents) if (a.repoId && this.startStall(a)) this.failedStart(a);
     this.repairDuplicateIssues();
     this.reconcileOrphanedQa();
     this.syncBoxes();
@@ -4595,6 +4698,8 @@ export class Swarm {
   }
 
   private agentDoing(a: PersistedAgent) {
+    const stalled = this.startStall(a);
+    if (stalled) return `stuck starting (${Math.floor(stalled.quietMs / 60_000)}m, ${this.boxName(a.deskBox) || 'office'})`;
     return !BUSY.includes(a.status) ? null : a.id === RESEARCHER_ID ? a.issueTitle : a.task === 'qa' ? `testing PR #${a.prNumber}` : a.task === 'fix' ? `fixing PR #${a.prNumber}` : `issue #${a.issueNumber}`;
   }
 
@@ -4905,16 +5010,20 @@ export class Swarm {
     const rt = this.repoRt.get(repo.id)!;
     const pull = rt.pulls.find((p) => p.number === x.number && p.state === 'OPEN');
     if (!pull) throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
+    let recovered = '';
     const record = () => this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number);
     const linkedAgents = (pr: Pick<PrDetails, 'headRefName' | 'closesIssues'>) => this.state.agents.filter((a) => a.repoId === repo.id && (
       a.prNumber === x.number || a.branch === pr.headRefName ||
       (a.task !== 'qa' && a.issueNumber != null && (pr.closesIssues.includes(a.issueNumber) ||
         a.issueNumber === record()?.issueNumber || pr.headRefName.startsWith(`swarm/issue-${a.issueNumber}-`)))
     ));
-    const preflight = (pr: Pick<PrDetails, 'headRefName' | 'closesIssues'>, reserved = false) => checkParkPr(x.number, repo.fullName, {
-      merging: rt.merging, syncing: rt.syncing, parking: !reserved && !!rt.parking,
-      busy: linkedAgents(pr).some((a) => BUSY.includes(a.status) || !!this.agentRt.get(a.id)?.session),
-    });
+    const preflight = (pr: Pick<PrDetails, 'headRefName' | 'closesIssues'>, reserved = false) => {
+      recovered += this.freeStuckTester(repo, x.number);
+      return checkParkPr(x.number, repo.fullName, {
+        merging: rt.merging, syncing: rt.syncing, parking: !reserved && !!rt.parking,
+        busy: linkedAgents(pr).some((a) => BUSY.includes(a.status) || !!this.agentRt.get(a.id)?.session),
+      });
+    };
     preflight(pull);
     // Reserve the floor before any await: no scheduler, refresh or other handoff can race the close.
     rt.parking = true;
@@ -4956,7 +5065,7 @@ export class Swarm {
       this.emitRepo(repo);
       this.save();
       this.postMessage('office', `${this.state.agents.find((a) => a.id === CEO_ID)?.name ?? 'Joi'} parked PR #${x.number}: ${reason}`);
-      return `PR #${x.number} on floor ${repo.floor} is parked; branch ${pr.headRefName} was kept and its issue is back in the backlog.`;
+      return `PR #${x.number} on floor ${repo.floor} is parked; branch ${pr.headRefName} was kept and its issue is back in the backlog.${recovered}`;
     } finally {
       rt.parking = false;
       setTimeout(() => this.schedule(), 200);
@@ -4969,8 +5078,10 @@ export class Swarm {
     const rt = this.repoRt.get(repo.id)!;
     const pull = rt.pulls.find((p) => p.number === x.number && p.state === 'OPEN');
     if (!pull) throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
+    let recovered = '';
     const getRecord = () => {
       if (rt.parking) throw new HttpError(409, 'Wait until PR parking finishes');
+      recovered += this.freeStuckTester(repo, x.number);
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number);
       const busy = this.state.agents.some((a) => a.repoId === repo.id &&
         ((a.prNumber === x.number && (a.task === 'qa' || a.task === 'fix')) ||
@@ -5007,7 +5118,7 @@ export class Swarm {
     const target = dev?.name ?? 'the next free developer';
     this.postMessage('office', `${this.state.agents.find((a) => a.id === CEO_ID)?.name ?? 'Joi'} sent PR #${x.number} back to ${target}: ${rec.fixReason}`);
     setTimeout(() => this.schedule(), 200);
-    return `PR #${x.number} on floor ${repo.floor} is queued for fixes with ${target}: ${rec.fixReason}.`;
+    return `PR #${x.number} on floor ${repo.floor} is queued for fixes with ${target}: ${rec.fixReason}.${recovered}`;
   }
 
   /** Shared routing validation; parking has already reserved and checked its linked agents. */

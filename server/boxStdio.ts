@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { encode, hostSocket, keeperBuild, keeperStale, PTY_PROTOCOL, runtimeFlags, type FromHost, type ToHost } from './ptyProtocol.ts';
 import { updateBox } from './boxUpdate.ts';
 import { isUpdateTarget } from './fleet.ts';
+import { withOperation } from './operation.ts';
 
 // `cubefarm box --stdio --office <id>`: this machine as one of an office's boxes. The office runs it over ssh; it
 // starts (or finds) the box's host, a keeper of its own (ptyHost.ts in box mode, detached, so ssh can drop and be
@@ -146,6 +147,7 @@ export async function main(argv: string[]): Promise<void> {
 
   // From the office: methods and launches are the bridge's, the rest goes to the keeper as it came.
   let given = '';
+  const calls = new Map<number, AbortController>();
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk: string) => {
     given += chunk;
@@ -161,10 +163,14 @@ export async function main(argv: string[]): Promise<void> {
       }
       if (m?.op === 'rpc') {
         const { rid } = m;
-        void ops.rpc(m.method, m.args).then(
+        const controller = new AbortController();
+        calls.set(rid, controller);
+        void withOperation(controller.signal, () => ops.rpc(m.method, m.args)).then(
           (value) => out({ op: 'rpcReply', rid, ok: true, value }),
           (err: unknown) => out({ op: 'rpcReply', rid, ok: false, error: (err as Error)?.message ?? String(err) }),
-        );
+        ).finally(() => calls.delete(rid));
+      } else if (m?.op === 'cancelRpc') {
+        calls.get(m.rid)?.abort(new Error('Office cancelled the operation'));
       } else if (m?.op === 'launch') {
         const cli = ops.take(m.token);
         if (!cli) out({ op: 'failed', id: m.id, error: 'the session was not prepared on this box' });
@@ -174,8 +180,12 @@ export async function main(argv: string[]): Promise<void> {
       }
     }
   });
-  process.stdin.on('end', () => sock.end());
-  process.stdin.on('error', () => sock.end());
+  const end = () => {
+    for (const c of calls.values()) c.abort(new Error('Office link closed'));
+    sock.end();
+  };
+  process.stdin.on('end', end);
+  process.stdin.on('error', end);
   process.stdout.on('error', () => sock.destroy()); // ssh went: the host keeps the terminals for the next office
   sock.on('close', () => process.exit(0));
   await new Promise(() => undefined);
