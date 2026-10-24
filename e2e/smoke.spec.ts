@@ -412,7 +412,7 @@ test('floor monitors discard screenshots cleared by a session handoff', async ({
         return;
       }
       // Freeze the handoff fixture: later demo tasks can publish a new image and clear it before its HTTP read.
-      if (event.type === 'agent') return;
+      if (event.type === 'agent' || event.type === 'screen') return;
       ws.send(JSON.stringify(event));
     });
   });
