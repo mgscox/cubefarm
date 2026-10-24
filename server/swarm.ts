@@ -34,7 +34,8 @@ import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, issueBlockers, issueParent, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
 import { effectiveModel } from '../shared/models.ts';
-import { CEO_ID, RESEARCHER_ID } from '../shared/types.ts';
+import { CEO_ID, RESEARCHER_ID, type MachineCapacity, type MachineTelemetry } from '../shared/types.ts';
+import { monitorResources } from './machineHealth.ts';
 import { isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchFiledAt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
 import type {
   AgentBoot,
@@ -199,6 +200,7 @@ interface Persisted {
   /** Names this office to its boxes (each keeps a home per office). */
   officeId: string;
   boxes: PersistedBox[];
+  officeCapacity?: MachineCapacity;
 }
 
 interface Shot {
@@ -461,6 +463,8 @@ export class Swarm {
   };
   /** Links to the boxes: removed ones stay until the CLIs still running there have ended. */
   private boxConns = new Map<string, BoxConnection>();
+  private officeTelemetry: MachineTelemetry | null = null;
+  private stopResources?: () => void;
   /**
    * The CEO's office tools. Every session gets its own server: one can only be connected to one session at a time, so
    * a shared one left the next session connected but without any tools while an earlier session still held it.
@@ -601,6 +605,7 @@ export class Swarm {
         managerInputs: loaded.managerInputs ?? [],
         officeId: typeof loaded.officeId === 'string' ? loaded.officeId : '',
         boxes: (loaded.boxes ?? []).filter((b) => b && typeof b.id === 'string' && typeof b.destination === 'string'),
+        officeCapacity: loaded.officeCapacity ?? 'unknown',
       };
       for (const m of this.state.messages) this.messageSeq = Math.max(this.messageSeq, m.id + 1);
       if (!EFFORTS.includes(this.state.settings.defaultEffort)) this.state.settings.defaultEffort = 'medium';
@@ -713,6 +718,10 @@ export class Swarm {
     setInterval(() => this.schedule(), SCHEDULER_INTERVAL_MS);
     this.scheduling = true;
     setInterval(() => void this.saveTerminals(), TERMINAL_SAVE_MS);
+    this.stopResources = monitorResources(() => this.backend.resources(), (telemetry) => {
+      this.officeTelemetry = telemetry;
+      this.broadcast({ type: 'officeTelemetry', telemetry, capacity: this.state.officeCapacity ?? 'unknown' });
+    });
     void this.backend
       .detectClis()
       .then((clis) => {
@@ -884,6 +893,8 @@ export class Swarm {
       usage: this.usageNow(),
       clis: this.clis,
       boxes: this.state.boxes.map((b) => this.boxView(b)),
+      officeTelemetry: this.officeTelemetry,
+      officeCapacity: this.state.officeCapacity ?? 'unknown',
       officeCommit: this.officeHead?.slice(0, 7) ?? null,
       officeLifecycle: this.officeLifecycleView(),
       officeUpdate: this.officeHead ? this.officeUpdateView() : undefined,
@@ -1128,6 +1139,8 @@ export class Swarm {
       sync: sync ? { text: boxSyncText(sync, this.boxBusy(b.id)), failed: sync.state === 'failed' } : null,
       restartRequired: st?.info?.keeperStale === true || sync?.step === 'restart',
       reboot: st?.info?.reboot ?? null,
+      capacity: b.capacity ?? 'unknown',
+      telemetry: st?.status === 'online' ? st.telemetry ?? null : null,
     };
   }
 
@@ -1251,6 +1264,20 @@ export class Swarm {
   }
   /** init() is done: the scheduler runs. */
   private scheduling = false;
+
+  setMachineCapacity(id: unknown, capacity: unknown) {
+    if (capacity !== 'fixed' && capacity !== 'resizable' && capacity !== 'unknown') throw new HttpError(400, 'Capacity must be fixed, resizable or unknown.');
+    if (id === '') {
+      this.state.officeCapacity = capacity;
+      this.broadcast({ type: 'officeTelemetry', telemetry: this.officeTelemetry, capacity });
+    } else {
+      const box = this.state.boxes.find((b) => b.id === id);
+      if (!box) throw new HttpError(404, 'No such machine');
+      box.capacity = capacity;
+      this.broadcast({ type: 'box', box: this.boxView(box) });
+    }
+    this.save();
+  }
 
   addBox(name: unknown, destination: unknown): BoxView {
     const dest = String(destination ?? '').trim();
@@ -1703,6 +1730,7 @@ export class Swarm {
    * through a restart (the terminal keeper holds them for the next start) and stop when the office quits.
    */
   async shutdown(restart = false): Promise<void> {
+    this.stopResources?.();
     await this.telegram.stop();
     if (this.handoffRetry) clearTimeout(this.handoffRetry);
     this.handoffRetry = null;

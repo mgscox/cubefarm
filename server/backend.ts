@@ -9,10 +9,13 @@ import { connectBox } from './boxLink.ts';
 import type { BoxConnection, BoxOptions, Machine } from './machine.ts';
 import type { AgentTerminal } from './terminal.ts';
 import type { GhRepoSummary, IssueInfo, PullRefresh } from '../shared/types.ts';
+import type { MachineSample } from '../shared/types.ts';
+import { createResourceReader } from './machineResources.ts';
 
 /** Everything the swarm needs from the outside world, the office's own machine included. The demo backend fakes all of it. */
 export interface Backend extends Machine {
   demo: boolean;
+  resources(): Promise<MachineSample>;
   user(): Promise<string>;
   listMyRepos(owner?: string): Promise<GhRepoSummary[]>;
   repoMeta(fullName: string): Promise<github.RepoMeta>;
@@ -61,6 +64,7 @@ export interface Backend extends Machine {
 
 export const realBackend: Backend = {
   demo: false,
+  resources: createResourceReader(),
   user: github.currentUser,
   listMyRepos: github.listMyRepos,
   repoMeta: github.repoMeta,

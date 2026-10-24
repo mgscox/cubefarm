@@ -1,5 +1,32 @@
 # Fleet: running agents' CLIs on other machines (design)
 
+## Resource diagnosis
+
+Fleet samples the whole office machine and every connected box every five seconds over the existing SSH link.
+It gives a diagnosis and recommended action first; supporting readings live under **Why this advice?**. Per-machine
+**Capacity** is saved as unknown, fixed hardware, or CPU/RAM can be increased. It is never inferred from a machine's
+name, provider or OS, so newly added LAN machines, VMs and VPSs use the same rules. This is advice only: it never
+resizes a host, reassigns workers or interrupts sessions.
+
+The rules distinguish busy machines from confirmed contention. CPU contention requires at least 85% average CPU use
+plus Linux PSI CPU stalls of at least 20% over the last minute. Without PSI, a full minute of high CPU use and a
+one-minute load above 1.1 times the logical CPU count is used only when I/O stall data is available and below 10%.
+macOS instead samples runnable thread states (excluding the sampling process) and requires a full minute of high
+CPU use with more runnable threads than 1.1 times the logical CPU count. This avoids treating uninterruptible I/O
+sleepers in load averages as CPU demand. Without queue evidence, high CPU use remains busy rather than a confirmed bottleneck.
+Memory contention uses macOS OS pressure warnings or Linux PSI memory stalls of at least 5% over the last minute.
+I/O contention uses Linux PSI I/O stalls of at least 10%. Sustained available RAM below 10% is a headroom warning,
+not proof of overload. Linux uses MemAvailable, including reclaimable caches; macOS uses OS pressure rather than
+free pages. Windows can report CPU use and available RAM, but lacks these queue and I/O pressure signals.
+
+Resizable machines get advice for the constrained resource. Fixed or unspecified machines get advice to reduce
+concurrency or move some work to another fresh, online machine with a full baseline, CPU use below 60%, at least
+25% RAM available and no measured contention. This is a candidate destination; an arbitrary floor is not guaranteed
+to fit. Missing, failed, offline or stale readings never imply spare capacity. Samples expire after 20 seconds;
+failed reads, connection loss and logical CPU count changes reset the baseline. These are diagnostic heuristics,
+not throughput predictions. A VM reports only its guest allocation; hypervisor contention and provider resize
+permissions are not discovered. Unsupported OS signals remain unavailable. Demo readings are labelled as simulated.
+
 Status: phases 1 and 2 are built: the `Machine` / `CliHost` seam (`server/machine.ts`), and boxes over SSH with
 assignment through REST (below); phase 3 adds the console UI (the Fleet tab, `client/src/ui/FleetTab.tsx`). The 3D touches
 and phase 4 are still a design. Goal: the manager adds and removes **boxes** (other machines on the LAN or the

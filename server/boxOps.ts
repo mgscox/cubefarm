@@ -12,6 +12,7 @@ import { probeHookUrl, type BoxInfo } from './fleet.ts';
 import { rebootStatus } from './rebootStatus.ts';
 import type { CliPlan } from './machine.ts';
 import type { DeskBase } from './workspace.ts';
+import { createResourceReader } from './machineResources.ts';
 
 // What a box does for an office on another machine, on the box's own disk: desks in its own clones (workspace.ts), CLI
 // session files and command lines (cliFiles.ts), screenshots. Paths are the box's. Its bridge (boxStdio.ts) runs these,
@@ -36,9 +37,11 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
   // office has to see the old one to redial it (say, when the office itself restarted in between).
   const commit = checkoutCommit(ctx.root);
   const prepared = new Map<string, { cli: CliLaunch; at: number }>();
+  const resources = createResourceReader();
   const str = (v: unknown) => String(v ?? '');
 
   const methods: Record<string, (...args: unknown[]) => unknown> = {
+    resources,
     async info(): Promise<BoxInfo> {
       const git = await run('git', ['--version'], { timeoutMs: 10_000 }).catch(() => null);
       const gh = await run('gh', ['auth', 'status'], { timeoutMs: 20_000 }).then(() => true, () => false);

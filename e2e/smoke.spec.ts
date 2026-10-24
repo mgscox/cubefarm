@@ -3,6 +3,7 @@ import { BLASTER_RACK, HALF_D, MANAGER_DESK } from '../client/src/world/layout';
 import { colourStats, decodePng } from './png';
 import type { RepoView, ServerEvent } from '../shared/types';
 import { issueParent } from '../shared/issues';
+import { machineHealth } from '../server/machineHealth';
 
 // Smoke tests against the demo office: it loads without errors, you can walk in, the 3D view renders and moves,
 // and the main panels open and close. Pointer lock may not work headless, so nothing here depends on it.
@@ -211,6 +212,8 @@ test('Fleet machine summaries show restart warnings and workers by floor and rep
           id: 'fleet-test', name: 'Studio', destination: 'studio.local', status: 'online',
           platform: null, version: null, git: null, ghReady: false, hookError: null,
           clis: [], error: null, running: 0, sync: null, restartRequired: true, reboot: { required: true, reason: 'The operating system has requested a reboot.' },
+          capacity: 'resizable',
+          telemetry: machineHealth([{ at: Date.now(), cpus: 4, cpuPercent: 97, load1: 8, memoryTotal: 16 * 1024 ** 3, memoryAvailable: 10 * 1024 ** 3, memoryPressure: null, cpuStall: 40, memoryStall: 0, ioStall: 0 }]),
         }];
         const template = event.data.agents.find((a) => a.role === 'dev')!;
         event.data.agents = event.data.repos.flatMap((repo) => {
@@ -244,9 +247,54 @@ test('Fleet machine summaries show restart warnings and workers by floor and rep
     await expect(box.getByText(`Floor ${floor} · ${repo}: Ken`, { exact: true })).toBeVisible();
   }
   await expect(box.getByText('Finishing here before they move:')).toBeVisible();
+  await expect(box.getByText('CPU constrained', { exact: true })).toBeVisible();
+  await expect(box.getByText('Increase the allocated CPUs, then recheck under the same workload.', { exact: true })).toBeVisible();
   await expect(page.getByText('CubeFarm worker restart required. It will restart automatically after active agents finish.')).toBeVisible();
   await expect(page.getByText('The operating system has requested a reboot.')).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('fleet-floor-worker-lists.png') });
+});
+
+test('Fleet diagnoses a newly added box and changes its advice when hardware is fixed', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  const created = await page.request.post('/api/boxes', { data: { name: 'New VPS', destination: 'cpu-busy.demo' } });
+  expect(created.ok()).toBe(true);
+  const box = await created.json() as { id: string };
+  try {
+    expect((await page.request.patch('/api/fleet/capacity', { data: { id: box.id, capacity: 'resizable' } })).ok()).toBe(true);
+    await page.routeWebSocket('**/ws', (ws) => {
+      const server = ws.connectToServer();
+      server.onMessage((message) => {
+        const event = JSON.parse(message.toString()) as ServerEvent;
+        if (event.type === 'snapshot') event.data.settings.tutorialStep = -1;
+        ws.send(JSON.stringify(event));
+      });
+    });
+    const spot: SavedView = { floor: 0, x: MANAGER_DESK.x, z: MANAGER_DESK.z + MANAGER_DESK.d / 2 + 0.8, yaw: 0, pitch: -0.6 };
+    await page.addInitScript(([key, view]) => localStorage.setItem(key, view), [VIEW_KEY, JSON.stringify(spot)] as const);
+    await enterOffice(page);
+    await page.keyboard.press('e');
+    const tab = page.getByRole('button', { name: '🖥 Fleet' });
+    await expect(async () => {
+      await tab.click();
+      await expect(tab).toHaveClass(/tab-on/, { timeout: 1000 });
+    }).toPass();
+    const card = page.locator(`[data-box="${box.id}"]`);
+    await expect(card.getByText('CPU constrained', { exact: true })).toBeVisible();
+    await expect(card.getByText(/Increase the allocated CPUs/)).toBeVisible();
+    await card.getByRole('combobox', { name: 'Capacity for New VPS' }).selectOption('fixed');
+    await expect(card.getByText(/Reduce concurrent agents here|has measured spare capacity/)).toBeVisible();
+    await expect(card.getByText(/Increase the allocated CPUs/)).toHaveCount(0);
+    await card.getByText('Why this advice?').click();
+    await expect(card.getByText('4 logical CPUs · 16.0 GiB RAM')).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath('fleet-pressure-advice.png') });
+    await page.reload();
+    await expect.poll(async () => {
+      const state = await (await page.request.get('/api/state')).json();
+      return state.boxes.find((b: { id: string }) => b.id === box.id)?.capacity;
+    }).toBe('fixed');
+  } finally {
+    await page.request.delete(`/api/boxes/${box.id}`);
+  }
 });
 
 test('a long agent desks path wraps inside the Settings card on narrow screens', async ({ page }, testInfo) => {

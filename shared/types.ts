@@ -209,6 +209,35 @@ export interface CliView {
 
 export type BoxStatus = 'connecting' | 'online' | 'offline';
 
+/** Resizing is a manager decision, never inferred from a hostname or virtualisation. */
+export type MachineCapacity = 'unknown' | 'fixed' | 'resizable';
+
+export interface MachineSample {
+  at: number;
+  cpus: number;
+  cpuPercent: number | null;
+  /** macOS runnable threads, excluding the sampling process; unavailable on older workers. */
+  runnableThreads?: number | null;
+  load1: number | null;
+  memoryTotal: number;
+  memoryAvailable: number | null;
+  memoryPressure: 'normal' | 'warning' | 'critical' | null;
+  /** Linux PSI: percentage of the last minute with tasks stalled on this resource. */
+  cpuStall: number | null;
+  memoryStall: number | null;
+  ioStall: number | null;
+}
+
+export interface MachineTelemetry {
+  sample: MachineSample;
+  observedSeconds: number;
+  cpuAveragePercent: number | null;
+  status: 'observing' | 'healthy' | 'busy' | 'constrained' | 'unknown';
+  constraints: ('cpu' | 'memory' | 'io')[];
+  summary: string;
+  evidence: string;
+}
+
 /** Whether the worker's operating system reports a pending restart, when supported. */
 export interface RebootStatus {
   required: boolean | null;
@@ -232,6 +261,8 @@ export interface BoxView {
   sync: { text: string; failed: boolean } | null; // moving to the office's version (#94), or why it couldn't
   restartRequired: boolean;
   reboot: RebootStatus | null;
+  capacity?: MachineCapacity;
+  telemetry?: MachineTelemetry | null;
 }
 
 /** Messages on an agent's terminal socket (/ws/term?agent=<id>), server to browser. */
@@ -464,6 +495,8 @@ export interface WorldSnapshot {
   usage: UsageView;
   clis: CliView[];
   boxes: BoxView[];
+  officeTelemetry?: MachineTelemetry | null;
+  officeCapacity?: MachineCapacity;
 }
 
 export type ServerEvent =
@@ -489,6 +522,7 @@ export type ServerEvent =
   | { type: 'clis'; clis: CliView[] }
   | { type: 'box'; box: BoxView }
   | { type: 'boxRemoved'; boxId: string }
+  | { type: 'officeTelemetry'; telemetry: MachineTelemetry | null; capacity: MachineCapacity }
   | { type: 'toast'; level: 'info' | 'success' | 'error'; text: string };
 
 export interface GhRepoSummary {

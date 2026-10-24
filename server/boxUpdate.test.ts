@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { checkoutCommit, releaseCommit, updateBox, updateRefusal } from './boxUpdate.ts';
 import { createBoxOps } from './boxOps.ts';
 
+// Checkout identity is independent of this test machine's OS update service.
+vi.mock('./rebootStatus.ts', () => ({ rebootStatus: async () => ({ required: null, reason: null }) }));
+
 // A box's info asks gh too: not in tests.
 vi.mock('./exec.ts', async (actual) => {
   const exec = await actual<typeof import('./exec.ts')>();
