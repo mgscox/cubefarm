@@ -38,6 +38,12 @@ On Windows, keep it inside your user profile, which other accounts can't read by
 
 The file only holds the settings listed here. `SWARM_HOME`, `SWARM_PORT`, `SWARM_HOST` and the other `SWARM_*` variables are read from the environment only.
 
+Startup watchdogs also read the environment: `SWARM_DESK_START_TIMEOUT_MS` defaults to 900000 (15 minutes), and
+`SWARM_CLI_START_TIMEOUT_MS` to 600000 (10 minutes). Each measures silence before a session reports its id; new log or
+terminal output resets the quiet period. Set a positive number of milliseconds and restart the office to override.
+Timed-out desk operations are cancelled, QA/fix work retains its preparation strikes, and explicit issue starts remain
+requested. Remote desk RPCs additionally have their own deadlines (the desk timeout for preparation, 2 minutes for release).
+
 ## How it's read
 
 - **At startup only.** After editing the file, restart the office.

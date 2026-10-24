@@ -36,6 +36,8 @@ export class AgentTerminal {
   rows = TERM_ROWS;
   /** Output arrived since the last save. */
   dirty = false;
+  /** Includes CLI output that has not produced a structured agent log or session id yet. */
+  lastOutputAt = 0;
   /** Closes a CLI left waiting at its prompt after its task (set by the runtime that left it there). */
   releaseIdle: (() => void) | null = null;
   /** Something the manager typed at that waiting prompt: the office takes it on as a follow-up (true) or refuses. */
@@ -64,6 +66,7 @@ export class AgentTerminal {
   /** Output from the CLI (or a note from the office): into the mirror and out to everyone watching. */
   write(data: string) {
     if (!data) return;
+    this.lastOutputAt = Date.now();
     this.term.write(data);
     this.dirty = true;
     this.send({ t: 'data', data });

@@ -11,6 +11,8 @@ import type { BoxConnection, BoxOptions, CliHost, CliPlan, Machine, PreparedCli 
 import type { SessionHandle } from './agentRunner.ts';
 import type { AgentCli, BoxStatus, CliView, MachineSample, MachineTelemetry } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
+import { operationSignal } from './operation.ts';
+import { startTimeouts } from './sessionStart.ts';
 
 // The office's side of a box: `ssh <destination> cubefarm box --stdio` (boxStdio.ts) runs desk and session-file
 // methods there (boxOps.ts) and bridges to the box's host, a terminal keeper on that machine. The ssh link can drop
@@ -22,7 +24,7 @@ const READY_MS = 180_000;
 /** A method on the box: most are quick, cloning and preparing a desk aren't. */
 const CALL_MS = 120_000;
 const SLOW_CALL_MS = 15 * 60_000;
-const SLOW = new Set(['prepareDesk', 'detectClis', 'info']);
+const SLOW = new Set(['detectClis', 'info']);
 /** Updating a box's cubefarm: a fetch, maybe an npm install, and a build. */
 const UPDATE_MS = 20 * 60_000;
 /** A relink waits this long at most for the box's methods to answer and prepared CLIs to start (a new link loses them). */
@@ -318,12 +320,23 @@ class BoxLink implements CliHost {
   call<T>(method: string, ...args: unknown[]): Promise<T> {
     if (this.status !== 'online') return Promise.reject(new Error(`${this.name} is ${this.status}${this.error ? ` (${this.error})` : ''}.`));
     return new Promise<T>((resolve, reject) => {
+      const signal = operationSignal();
+      signal?.throwIfAborted();
       const rid = this.nextRid++;
-      const timer = setTimeout(() => {
+      const abort = () => {
         this.calls.delete(rid);
-        reject(new Error(`${this.name} didn't answer ${method} in time.`));
-      }, method === 'resources' ? 10_000 : SLOW.has(method) ? SLOW_CALL_MS : CALL_MS);
-      this.calls.set(rid, { resolve: resolve as (v: unknown) => void, reject, timer });
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        this.send({ op: 'cancelRpc', rid });
+        reject(new Error(`${this.name} didn't answer ${method} in time; operation aborted.`));
+      };
+      const timer = setTimeout(abort, method === 'prepareDesk' ? startTimeouts().preparing : method === 'resources' ? 10_000 : SLOW.has(method) ? SLOW_CALL_MS : CALL_MS);
+      const finish = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+      this.calls.set(rid, {
+        resolve: (v) => { finish(); resolve(v as T); },
+        reject: (e) => { finish(); reject(e); }, timer,
+      });
+      signal?.addEventListener('abort', abort, { once: true });
       this.send({ op: 'rpc', rid, method, args });
     });
   }

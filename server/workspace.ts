@@ -3,6 +3,7 @@ import path from 'node:path';
 import { WORKSPACE_ROOT } from './config.ts';
 import { gh, git, run } from './exec.ts';
 import { projectEnv } from './projectEnv.ts';
+import { operationSignal } from './operation.ts';
 
 // Layout on disk:
 //   <your projects folder>/<repo>                    the floor's main checkout: your own folder, only fetched and fast-forwarded (syncMain)
@@ -16,7 +17,10 @@ const localRoots = new Map<string, string>(); // lowercased owner/name -> the us
 /** Serialise git operations per repo so concurrent worktree adds don't fight over index locks. */
 function withRepoLock<T>(fullName: string, fn: () => Promise<T>): Promise<T> {
   const prev = locks.get(fullName) ?? Promise.resolve();
-  const next = prev.catch(() => undefined).then(fn);
+  const next = prev.catch(() => undefined).then(() => {
+    operationSignal()?.throwIfAborted();
+    return fn();
+  });
   locks.set(fullName, next);
   return next;
 }
@@ -256,6 +260,7 @@ export interface DeskBase {
 
 /** Remove a directory, retrying while Windows still has handles open in it. */
 async function removeDir(dir: string) {
+  operationSignal()?.throwIfAborted();
   await fs.rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
 }
 
@@ -300,6 +305,7 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
         await git(['clean', '-fd'], { cwd: wt }).catch(() => undefined);
         return wt;
       } catch {
+        operationSignal()?.throwIfAborted();
         // fall through and rebuild the worktree from scratch
       }
     }

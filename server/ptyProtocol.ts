@@ -32,6 +32,7 @@ export type ToHost =
   | { op: 'shutdown' } // stop every terminal and exit (a keeper on another version)
   // to a box (answered by its bridge, boxStdio.ts, not its keeper):
   | { op: 'rpc'; rid: number; method: string; args: unknown[] } // a desk or session-file method, run on the box
+  | { op: 'cancelRpc'; rid: number } // abort the commands of a timed-out desk operation
   | { op: 'launch'; id: string; token: string; cols: number; rows: number; meta: unknown }; // start the CLI a 'prepare' rpc wrote
 
 export type FromHost =
