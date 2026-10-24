@@ -1,7 +1,7 @@
 // Fleet advice follows measured pressure and declared resize capability, independent of hostnames and providers.
-import type { MachineCapacity, MachineTelemetry } from '../../shared/types';
+import { RESOURCE_STALE_MS, type MachineCapacity, type MachineTelemetry } from '../../shared/types';
 
-export const telemetryFresh = (value: MachineTelemetry | null | undefined, now: number): value is MachineTelemetry => !!value && now - value.sample.at >= -5000 && now - value.sample.at <= 20_000;
+export const telemetryFresh = (value: MachineTelemetry | null | undefined, now: number): value is MachineTelemetry => !!value && now - value.sample.at >= -5000 && now - value.sample.at <= RESOURCE_STALE_MS;
 
 export interface FleetTarget {
   id: string;
@@ -30,14 +30,16 @@ export function machineAdvice(id: string, telemetry: MachineTelemetry, capacity:
     ? 'Check CPU limits or processor affinity before adding workers or resizing this machine.'
     : 'Avoid adding workers for now; high utilisation alone does not justify a hardware upgrade.';
   const actions: string[] = [];
+  const target = constraints.some((c) => c !== 'io') ? spareMachine(id, machines, now) : undefined;
+  if (target) actions.push(`${target.name} has measured spare capacity. Move some work there for its next tasks, then recheck both machines.`);
   if (capacity === 'resizable') {
-    if (constraints.includes('cpu')) actions.push('Increase the allocated CPUs, then recheck under the same workload.');
-    if (constraints.includes('memory')) actions.push('Increase the allocated RAM, then recheck under the same workload.');
+    const prefix = target ? 'If work must stay here, increase' : 'Increase';
+    if (constraints.includes('cpu')) actions.push(`${prefix} the allocated CPUs, then recheck under the same workload.`);
+    if (constraints.includes('memory')) actions.push(`${prefix} the allocated RAM, then recheck under the same workload.`);
   }
   if (constraints.includes('io')) actions.push('Reduce parallel builds and check storage latency; extra CPUs alone will not resolve the I/O stalls.');
-  if (capacity !== 'resizable' && constraints.some((c) => c !== 'io')) {
-    const target = spareMachine(id, machines, now);
-    actions.push(target ? `${target.name} has measured spare capacity. Move some work there for its next tasks, then recheck both machines.` : 'Reduce concurrent agents here. No other online machine currently has confirmed spare capacity.');
+  if (!target && capacity !== 'resizable' && constraints.some((c) => c !== 'io')) {
+    actions.push('Reduce concurrent agents here. No other online machine currently has confirmed spare capacity.');
   }
   return actions.join(' ');
 }

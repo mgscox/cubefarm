@@ -212,6 +212,8 @@ export type BoxStatus = 'connecting' | 'online' | 'offline';
 /** Resizing is a manager decision, never inferred from a hostname or virtualisation. */
 export type MachineCapacity = 'unknown' | 'fixed' | 'resizable';
 
+export const RESOURCE_STALE_MS = 20_000;
+
 export interface MachineSample {
   at: number;
   cpus: number;

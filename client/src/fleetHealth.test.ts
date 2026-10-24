@@ -19,6 +19,11 @@ describe('dynamic fleet advice', () => {
     expect(advice).not.toContain('Increase');
     expect(machineAdvice('any', health({ memoryStall: 20 }), 'unknown', [], now)).toContain('Reduce concurrent agents');
   });
+  it('considers spare fleet capacity before resizing an overloaded machine', () => {
+    const advice = machineAdvice('resizable-host', health({ cpuPercent: 97, cpuStall: 30 }), 'resizable', [spare], now);
+    expect(advice).toContain('New VPS has measured spare capacity');
+    expect(advice.indexOf('New VPS')).toBeLessThan(advice.search(/increase/i));
+  });
   it('rejects offline, stale, warming-up, self and low-headroom destinations', () => {
     expect(spareMachine('new-vps', [spare], now)).toBeUndefined();
     expect(spareMachine('any', [{ ...spare, online: false }], now)).toBeUndefined();

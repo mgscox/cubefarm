@@ -1,3 +1,4 @@
+// Show a machine diagnosis, supporting evidence and its manager-declared resize capability.
 import { useEffect, useState } from 'react';
 import type { MachineCapacity, MachineTelemetry } from '../../../shared/types';
 import { api } from '../api';

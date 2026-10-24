@@ -203,6 +203,7 @@ test('Fleet machine summaries show restart warnings and workers by floor and rep
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.routeWebSocket('**/ws', (ws) => {
     const server = ws.connectToServer();
+    let fixture: ServerEvent & { type: 'box' } | undefined;
     server.onMessage((message) => {
       const event = JSON.parse(message.toString()) as ServerEvent;
       if (event.type === 'snapshot') {
@@ -215,6 +216,7 @@ test('Fleet machine summaries show restart warnings and workers by floor and rep
           capacity: 'resizable',
           telemetry: machineHealth([{ at: Date.now(), cpus: 4, cpuPercent: 97, load1: 8, memoryTotal: 16 * 1024 ** 3, memoryAvailable: 10 * 1024 ** 3, memoryPressure: null, cpuStall: 40, memoryStall: 0, ioStall: 0 }]),
         }];
+        fixture = { type: 'box', box: event.data.boxes[0] };
         const template = event.data.agents.find((a) => a.role === 'dev')!;
         event.data.agents = event.data.repos.flatMap((repo) => {
           repo.box = 'fleet-test';
@@ -223,6 +225,10 @@ test('Fleet machine summaries show restart warnings and workers by floor and rep
             { ...template, id: `${repo.id}-moving`, repoId: repo.id, name: 'Ken', desk: 1, box: '', deskBox: 'fleet-test', status: 'working' as const },
           ];
         });
+      }
+      if (event.type === 'officeTelemetry' && fixture?.box.telemetry) {
+        fixture.box.telemetry.sample.at = Date.now();
+        ws.send(JSON.stringify(fixture));
       }
       // Keep the display fixture stable while the demo's unrelated background tasks run.
       if (event.type === 'agent' || event.type === 'repo') return;
@@ -248,7 +254,7 @@ test('Fleet machine summaries show restart warnings and workers by floor and rep
   }
   await expect(box.getByText('Finishing here before they move:')).toBeVisible();
   await expect(box.getByText('CPU constrained', { exact: true })).toBeVisible();
-  await expect(box.getByText('Increase the allocated CPUs, then recheck under the same workload.', { exact: true })).toBeVisible();
+  await expect(box.getByText(/increase the allocated CPUs/i)).toBeVisible();
   await expect(page.getByText('CubeFarm worker restart required. It will restart automatically after active agents finish.')).toBeVisible();
   await expect(page.getByText('The operating system has requested a reboot.')).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('fleet-floor-worker-lists.png') });
@@ -280,10 +286,10 @@ test('Fleet diagnoses a newly added box and changes its advice when hardware is 
     }).toPass();
     const card = page.locator(`[data-box="${box.id}"]`);
     await expect(card.getByText('CPU constrained', { exact: true })).toBeVisible();
-    await expect(card.getByText(/Increase the allocated CPUs/)).toBeVisible();
+    await expect(card.getByText(/increase the allocated CPUs/i)).toBeVisible();
     await card.getByRole('combobox', { name: 'Capacity for New VPS' }).selectOption('fixed');
     await expect(card.getByText(/Reduce concurrent agents here|has measured spare capacity/)).toBeVisible();
-    await expect(card.getByText(/Increase the allocated CPUs/)).toHaveCount(0);
+    await expect(card.getByText(/increase the allocated CPUs/i)).toHaveCount(0);
     await card.getByText('Why this advice?').click();
     await expect(card.getByText('4 logical CPUs · 16.0 GiB RAM')).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath('fleet-pressure-advice.png') });

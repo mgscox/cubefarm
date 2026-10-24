@@ -34,8 +34,22 @@ describe('machine diagnosis', () => {
     expect(machineHealth(minute({ memoryAvailable: 20 })).status).toBe('busy');
     expect(machineHealth(minute({ memoryAvailable: 20 })).constraints).toEqual([]);
     expect(machineHealth([sample(0, { memoryStall: 12 })]).constraints).toEqual(['memory']);
-    expect(machineHealth([sample(0, { memoryPressure: 'critical', memoryAvailable: null })]).constraints).toEqual(['memory']);
+    expect(machineHealth([sample(0, { memoryPressure: 'critical', memoryAvailable: null })]).status).toBe('observing');
+    expect(machineHealth(minute({ memoryPressure: 'critical', memoryAvailable: null })).constraints).toEqual(['memory']);
     expect(machineHealth(minute({ memoryAvailable: null, memoryPressure: 'normal', ioStall: null })).status).toBe('healthy');
+  });
+  it('does not recommend a RAM upgrade for a brief macOS pressure spike', () => {
+    const history = minute({ memoryAvailable: null, memoryPressure: 'normal' });
+    history[12] = sample(60_000, { memoryAvailable: null, memoryPressure: 'warning' });
+    expect(machineHealth(history).constraints).toEqual([]);
+    expect(machineHealth(history).status).toBe('observing');
+  });
+  it('does not count incomplete CPU or memory readings as a healthy baseline', () => {
+    for (const patch of [{ cpuPercent: null }, { memoryAvailable: null }]) {
+      const history = minute();
+      history[6] = sample(30_000, patch);
+      expect(machineHealth(history).status).toBe('unknown');
+    }
   });
   it('reports combined bottlenecks and missing evidence honestly', () => {
     expect(machineHealth(minute({ cpuPercent: 95, cpuStall: 40, memoryStall: 10, ioStall: 20 })).constraints).toEqual(['cpu', 'memory', 'io']);
@@ -69,6 +83,21 @@ describe('resource monitor lifecycle', () => {
     resolve(sample());
     await vi.advanceTimersByTimeAsync(5000);
     expect(changed).not.toHaveBeenCalled();
+  });
+  it('starts a fresh baseline after a signal disappears and recovers', async () => {
+    vi.useFakeTimers();
+    let memoryAvailable: number | null = 500;
+    const changed = vi.fn();
+    const stop = monitorResources(async () => sample(0, { memoryAvailable }), changed);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(changed.mock.lastCall![0].status).toBe('healthy');
+    memoryAvailable = null;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(changed.mock.lastCall![0].observedSeconds).toBe(0);
+    memoryAvailable = 500;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(changed.mock.lastCall![0]).toMatchObject({ observedSeconds: 0, status: 'observing' });
+    stop();
   });
   it('clears failed readings and starts a new baseline on recovery', async () => {
     vi.useFakeTimers();

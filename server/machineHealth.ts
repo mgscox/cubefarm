@@ -1,8 +1,7 @@
 // Interpret sustained resource contention separately from utilisation. No scheduling or host changes happen here.
-import type { MachineSample, MachineTelemetry } from '../shared/types.ts';
+import { RESOURCE_STALE_MS, type MachineSample, type MachineTelemetry } from '../shared/types.ts';
 
 export const RESOURCE_INTERVAL_MS = 5000;
-export const RESOURCE_STALE_MS = 20_000;
 
 export function machineHealth(history: MachineSample[]): MachineTelemetry {
   const sample = history.at(-1)!;
@@ -22,7 +21,9 @@ export function machineHealth(history: MachineSample[]): MachineTelemetry {
     constraints.push('cpu');
     evidence.push(`CPU use averaged ${Math.round(cpuAveragePercent)}%; runnable work is waiting for CPU time.`);
   }
-  if (sample.memoryPressure === 'critical' || sample.memoryPressure === 'warning' || (sample.memoryStall ?? 0) >= 5) {
+  const memoryWarning = (s: MachineSample) => s.memoryPressure === 'critical' || s.memoryPressure === 'warning';
+  const sustainedMemoryPressure = sustained && history.every(memoryWarning);
+  if (sustainedMemoryPressure || (sample.memoryStall ?? 0) >= 5) {
     constraints.push('memory');
     evidence.push(sample.memoryPressure ? `The OS reports ${sample.memoryPressure} memory pressure.` : `Tasks spent ${sample.memoryStall!.toFixed(1)}% of the last minute stalled on memory.`);
   }
@@ -33,10 +34,11 @@ export function machineHealth(history: MachineSample[]): MachineTelemetry {
   const base = { sample, observedSeconds, cpuAveragePercent, constraints };
   if (constraints.length) return { ...base, status: 'constrained', summary: `${constraints.map((c) => ({ cpu: 'CPU', memory: 'Memory', io: 'I/O' })[c]).join(' + ')} constrained`, evidence: evidence.join(' ') };
   if (cpuWaiting) return { ...base, status: 'busy', summary: 'CPU waits detected; cause unconfirmed', evidence: 'Work is waiting for CPU time despite lower overall utilisation. CPU limits or processor affinity may be restricting usable capacity.' };
+  if (memoryWarning(sample)) return { ...base, status: 'observing', summary: 'Checking for sustained memory pressure', evidence: 'The OS currently reports memory pressure. Waiting for a full minute of pressure before recommending a RAM increase.' };
   if (!sustained) return { ...base, status: 'observing', summary: 'Checking for sustained pressure', evidence: 'Building a one-minute baseline; brief bursts do not establish overload.' };
   const lowMemory = history.every((s) => s.memoryAvailable !== null && s.memoryTotal > 0 && s.memoryAvailable / s.memoryTotal < 0.1);
   if (cpuBusy || lowMemory) return { ...base, status: 'busy', summary: lowMemory ? 'Low memory headroom' : 'Busy, without confirmed CPU contention', evidence: lowMemory ? 'Less than 10% RAM has been available throughout the observation window. This alone does not prove memory contention.' : 'CPU use is high, but there is no confirmed queue waiting for CPU time.' };
-  if (cpuAveragePercent === null || (sample.memoryAvailable === null && sample.memoryPressure === null)) return { ...base, status: 'unknown', summary: 'Insufficient resource evidence', evidence: 'CPU or memory pressure could not be measured reliably on this machine.' };
+  if (history.some((s) => s.cpuPercent === null || (s.memoryAvailable === null && s.memoryPressure === null))) return { ...base, status: 'unknown', summary: 'Insufficient resource evidence', evidence: 'CPU or memory pressure could not be measured reliably on this machine.' };
   return { ...base, status: 'healthy', summary: 'No sustained pressure detected', evidence: `No CPU or memory contention detected in the last minute.${sample.ioStall === null ? ' I/O pressure is unavailable on this OS.' : ''}` };
 }
 
@@ -53,7 +55,10 @@ export function monitorResources(read: () => Promise<MachineSample>, changed: (v
       if (stopped) return;
       // Office receipt times avoid clock skew between the office and a remote box.
       const sample = { ...value, at: Date.now() };
-      if (history.length && (sample.at - history.at(-1)!.at > RESOURCE_STALE_MS || sample.cpus !== history.at(-1)!.cpus)) history = [];
+      const previous = history.at(-1);
+      const signalsChanged = previous && (['cpuPercent', 'memoryAvailable', 'memoryPressure', 'runnableThreads', 'cpuStall', 'memoryStall', 'ioStall'] as const)
+        .some((key) => (sample[key] == null) !== (previous[key] == null));
+      if (previous && (sample.at - previous.at > RESOURCE_STALE_MS || sample.cpus !== previous.cpus || signalsChanged)) history = [];
       // Keep one sample on the far side of a minute: timer jitter must not keep the window forever below 60s.
       while (history.length > 1 && sample.at - history[1].at >= 60_000) history.shift();
       history.push(sample);

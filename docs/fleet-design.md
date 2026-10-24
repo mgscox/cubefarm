@@ -14,16 +14,18 @@ one-minute load above 1.1 times the logical CPU count is used only when I/O stal
 macOS instead samples runnable thread states (excluding the sampling process) and requires a full minute of high
 CPU use with more runnable threads than 1.1 times the logical CPU count. This avoids treating uninterruptible I/O
 sleepers in load averages as CPU demand. Without queue evidence, high CPU use remains busy rather than a confirmed bottleneck.
-Memory contention uses macOS OS pressure warnings or Linux PSI memory stalls of at least 5% over the last minute.
+Memory contention uses a full minute of macOS OS pressure warnings or Linux PSI memory stalls of at least 5% over
+the last minute.
 I/O contention uses Linux PSI I/O stalls of at least 10%. Sustained available RAM below 10% is a headroom warning,
 not proof of overload. Linux uses MemAvailable, including reclaimable caches; macOS uses OS pressure rather than
 free pages. Windows can report CPU use and available RAM, but lacks these queue and I/O pressure signals.
 
-Resizable machines get advice for the constrained resource. Fixed or unspecified machines get advice to reduce
-concurrency or move some work to another fresh, online machine with a full baseline, CPU use below 60%, at least
-25% RAM available and no measured contention. This is a candidate destination; an arbitrary floor is not guaranteed
-to fit. Missing, failed, offline or stale readings never imply spare capacity. Samples expire after 20 seconds;
-failed reads, connection loss and logical CPU count changes reset the baseline. These are diagnostic heuristics,
+All machines first consider moving some work to another fresh, online machine with a full baseline, CPU use below
+60%, at least 25% RAM available and no measured contention. This is a candidate destination; an arbitrary floor is not guaranteed
+to fit. Resizable machines also get advice for the constrained resource if work must remain there. Fixed or
+unspecified machines without a measured destination get advice to reduce concurrency. Missing, failed, offline or
+stale readings never imply spare capacity. Samples expire after 20 seconds; failed reads, changes in available
+signals, connection loss and logical CPU count changes reset the baseline. These are diagnostic heuristics,
 not throughput predictions. A VM reports only its guest allocation; hypervisor contention and provider resize
 permissions are not discovered. Unsupported OS signals remain unavailable. Demo readings are labelled as simulated.
 
