@@ -62,6 +62,8 @@ create providers. Leave the model empty to use OpenCode's own default.
 CubeFarm passes the model as `model` in `OPENCODE_CONFIG_CONTENT`, following the
 [OpenCode config schema](https://opencode.ai/config.json). The interactive CLI does not accept `--model`
 (verified with OpenCode v2.0.32); it accepts `--auto`, `--session` and `--prompt`.
+CubeFarm passes `--standalone` so each desk's private server reads its own model, instructions, plugins and permissions
+from the environment; OpenCode's shared background service keeps the config of the client that started it.
 
 ## Adding a setting (contributors)
 

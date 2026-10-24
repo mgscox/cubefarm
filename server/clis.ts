@@ -254,6 +254,7 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
       // No project argument: it starts in its terminal's folder, and a desk path in its command line would make the
       // desk clean-up take it for a leftover.
       const args = [
+        '--standalone', // the shared service only reads the first client's config, not this desk's env
         '--auto',
         ...(ctx.resumeId ? ['--session', ctx.resumeId] : []),
         '--prompt',
