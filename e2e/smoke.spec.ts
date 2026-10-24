@@ -397,6 +397,10 @@ test('floor monitors discard screenshots cleared by a session handoff', async ({
       const event = JSON.parse(message.toString()) as ServerEvent;
       if (event.type === 'snapshot') {
         event.data.settings.tutorialStep = -1;
+        for (const a of event.data.agents) {
+          a.hasScreenshot = false;
+          a.screenshotAt = null;
+        }
         const repo = event.data.repos.find((r) => r.fullName === 'demo-co/pixel-todo')!;
         const agent = event.data.agents.find((a) => a.role === 'dev' && a.repoId === repo.id)!;
         agentId = agent.id;
@@ -407,6 +411,8 @@ test('floor monitors discard screenshots cleared by a session handoff', async ({
         ws.send(JSON.stringify({ type: 'agent', agent: { ...agent, hasScreenshot: false, screenshotAt: null } }));
         return;
       }
+      // Freeze the handoff fixture: later demo tasks can publish a new image and clear it before its HTTP read.
+      if (event.type === 'agent') return;
       ws.send(JSON.stringify(event));
     });
   });
