@@ -243,6 +243,8 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
     }
     case 'opencode': {
       const config = {
+        // Bare desk model names are Ollama IDs; other providers must include their prefix.
+        ...(ctx.model ? { model: ctx.model.includes('/') ? ctx.model : `ollama/${ctx.model}` } : {}),
         plugin: [ctx.plugin],
         instructions: [ctx.files.system],
         autoupdate: false, // several agents starting at once must not each reinstall it
@@ -252,8 +254,8 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
       // No project argument: it starts in its terminal's folder, and a desk path in its command line would make the
       // desk clean-up take it for a leftover.
       const args = [
+        '--standalone', // the shared service only reads the first client's config, not this desk's env
         '--auto',
-        ...(ctx.model ? ['--model', ctx.model] : []),
         ...(ctx.resumeId ? ['--session', ctx.resumeId] : []),
         '--prompt',
         ctx.prompt,

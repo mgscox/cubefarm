@@ -270,6 +270,29 @@ describe('launchArgs', () => {
     expect(codexHookCommand('/usr/bin/node', "/home/o'neil/.cubefarm/bin/codex-hook.cjs", false)).toBe(`'/usr/bin/node' '/home/o'"'"'neil/.cubefarm/bin/codex-hook.cjs'`);
   });
 
+  it.each([
+    ['glm-5.3:cloud', 'ollama/glm-5.3:cloud'],
+    ['ollama/glm-5.3:cloud', 'ollama/glm-5.3:cloud'],
+    ['openrouter/z-ai/glm-5.3', 'openrouter/z-ai/glm-5.3'],
+  ])('sets OpenCode model %s through config, keeping provider-qualified IDs', (model, expected) => {
+    const { args, env } = launchArgs('opencode', ctx({ model }));
+    expect(args).toEqual(['--standalone', '--auto', '--prompt', '--looks like a flag']);
+    expect(JSON.parse(env.OPENCODE_CONFIG_CONTENT).model).toBe(expected);
+    expect(env.CUBEFARM_NOTIFY_URL).toBe('http://127.0.0.1:1/api/hooks/t');
+  });
+
+  it.each([undefined, 'session-1'])("starts OpenCode with its own default model (resume %s)", (resumeId) => {
+    const { args, env } = launchArgs('opencode', ctx({ resumeId }));
+    expect(args).toEqual(['--standalone', '--auto', ...(resumeId ? ['--session', resumeId] : []), '--prompt', '--looks like a flag']);
+    expect(JSON.parse(env.OPENCODE_CONFIG_CONTENT)).not.toHaveProperty('model');
+  });
+
+  it('keeps the configured OpenCode model on resume', () => {
+    const { args, env } = launchArgs('opencode', ctx({ resumeId: 'session-1', model: 'ollama/glm-5.3:cloud' }));
+    expect(args).toEqual(['--standalone', '--auto', '--session', 'session-1', '--prompt', '--looks like a flag']);
+    expect(JSON.parse(env.OPENCODE_CONFIG_CONTENT).model).toBe('ollama/glm-5.3:cloud');
+  });
+
   it("lets OpenCode run without stopping to ask, and without updating itself", () => {
     const config = (patch: Partial<LaunchContext>) => JSON.parse(launchArgs('opencode', ctx(patch)).env.OPENCODE_CONFIG_CONTENT);
     for (const role of ['dev', 'qa'] as const) expect(config({ role }).permission).toEqual({ edit: 'allow', bash: 'allow', webfetch: 'allow' });
