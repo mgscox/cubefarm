@@ -33,7 +33,7 @@ import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, paci
 import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, issueBlockers, issueParent, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
-import { effectiveModel } from '../shared/models.ts';
+import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
 import { CEO_ID, RESEARCHER_ID, type MachineCapacity, type MachineTelemetry } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
 import { isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchFiledAt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
@@ -3282,12 +3282,10 @@ export class Swarm {
   updateSettings(patch: Partial<SwarmSettings>) {
     const s = this.state.settings;
     if (patch.sessionLimit !== undefined) s.sessionLimit = Math.max(0, Math.round(Number(patch.sessionLimit)) || 0);
-    // The default model belongs to the default coding agent: a new agent starts on its own default.
-    if (isCli(patch.defaultCli) && patch.defaultCli !== s.defaultCli) {
-      s.defaultCli = patch.defaultCli;
-      if (patch.defaultModel === undefined) s.defaultModel = s.defaultCli === 'claude' ? DEFAULT_MODEL : '';
+    // The default model belongs to the default coding agent; each agent's is remembered for when it's the default again.
+    if (isCli(patch.defaultCli) || patch.defaultModel !== undefined) {
+      Object.assign(s, applyDefaultModel(s, { defaultCli: isCli(patch.defaultCli) ? patch.defaultCli : undefined, defaultModel: patch.defaultModel }, DEFAULT_MODEL));
     }
-    if (patch.defaultModel !== undefined) s.defaultModel = String(patch.defaultModel).trim() || (s.defaultCli === 'claude' ? DEFAULT_MODEL : '');
     if (patch.defaultEffort !== undefined && EFFORTS.includes(patch.defaultEffort)) s.defaultEffort = patch.defaultEffort;
     if (patch.runtime === 'terminal' || patch.runtime === 'sdk') s.runtime = patch.runtime;
     if (patch.hiring === 'approve' || patch.hiring === 'auto') s.hiring = patch.hiring;
