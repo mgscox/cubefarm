@@ -2658,6 +2658,20 @@ input.inline:focus {
   gap: 4px;
   margin-top: 4px;
 }
+.fleet-health {
+  margin: 10px 0;
+  padding: 10px;
+  border-left: 4px solid #888;
+  background: rgba(0, 0, 0, 0.035);
+}
+.fleet-health[data-health='healthy'] { border-color: #32864b; }
+.fleet-health[data-health='busy'] { border-color: #b27413; }
+.fleet-health[data-health='constrained'] { border-color: #ba3b3b; }
+.fleet-health details { margin-top: 6px; }
+.fleet-health summary { cursor: pointer; }
+.fleet-health p { margin: 6px 0; }
+.fleet-capacity { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.fleet-capacity select { width: auto; max-width: 100%; font-size: inherit; }
 .fleet-missing {
   color: #9c4f00;
 }

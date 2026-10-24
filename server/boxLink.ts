@@ -9,7 +9,8 @@ import type { RecoveredTurn } from './cliTranscript.ts';
 import { boxCommand, boxDeskDir, boxMainDir, boxUpdateCommand, parseUpdateResult, redialDelay, retryForm, updateFailure, type BoxInfo, type BoxLayout, type BoxUpdateResult } from './fleet.ts';
 import type { BoxConnection, BoxOptions, CliHost, CliPlan, Machine, PreparedCli } from './machine.ts';
 import type { SessionHandle } from './agentRunner.ts';
-import type { AgentCli, BoxStatus, CliView } from '../shared/types.ts';
+import type { AgentCli, BoxStatus, CliView, MachineSample, MachineTelemetry } from '../shared/types.ts';
+import { monitorResources } from './machineHealth.ts';
 
 // The office's side of a box: `ssh <destination> cubefarm box --stdio` (boxStdio.ts) runs desk and session-file
 // methods there (boxOps.ts) and bridges to the box's host, a terminal keeper on that machine. The ssh link can drop
@@ -34,6 +35,8 @@ class BoxLink implements CliHost {
   error: string | null = null;
   info: BoxInfo | null = null;
   clis: CliView[] = [];
+  telemetry: MachineTelemetry | null = null;
+  private stopResources?: () => void;
   readonly ptys = new Map<string, KeeperPty>();
   private child: ChildProcessWithoutNullStreams | null = null;
   private stderr = '';
@@ -76,6 +79,11 @@ class BoxLink implements CliHost {
   }
 
   private set(status: BoxStatus, error: string | null = this.error) {
+    if (status !== 'online') {
+      this.stopResources?.();
+      this.stopResources = undefined;
+      this.telemetry = null;
+    }
     this.status = status;
     this.error = error;
     this.onChange();
@@ -160,6 +168,11 @@ class BoxLink implements CliHost {
     this.attempt = 0;
     this.refused = null;
     this.set('online', null);
+    this.stopResources?.();
+    this.stopResources = monitorResources(() => this.call<MachineSample>('resources'), (value) => {
+      this.telemetry = value;
+      this.onChange();
+    });
     for (const id of this.kills.splice(0)) this.send({ op: 'kill', id });
     // Terminals followed before the link dropped carry on from what they printed meanwhile; ones the box lost, ended.
     const listed = new Set(m.ptys.map((p) => p.id));
@@ -246,6 +259,7 @@ class BoxLink implements CliHost {
    * cubefarm now on its disk, and its keeper keeps the terminals. One that's offline is dialled now.
    */
   async relink(): Promise<void> {
+    this.stopResources?.(); // background sampling must not keep this link's outstanding-RPC drain busy
     const until = Date.now() + RELINK_WAIT_MS;
     const busy = () => {
       for (const [token, at] of this.launching) if (Date.now() - at > LAUNCH_MS) this.launching.delete(token);
@@ -308,7 +322,7 @@ class BoxLink implements CliHost {
       const timer = setTimeout(() => {
         this.calls.delete(rid);
         reject(new Error(`${this.name} didn't answer ${method} in time.`));
-      }, SLOW.has(method) ? SLOW_CALL_MS : CALL_MS);
+      }, method === 'resources' ? 10_000 : SLOW.has(method) ? SLOW_CALL_MS : CALL_MS);
       this.calls.set(rid, { resolve: resolve as (v: unknown) => void, reject, timer });
       this.send({ op: 'rpc', rid, method, args });
     });
@@ -316,6 +330,7 @@ class BoxLink implements CliHost {
 
   close() {
     this.closed = true;
+    this.stopResources?.();
     clearTimeout(this.redial);
     for (const w of this.dialWaiters.splice(0)) w.reject(new Error('the box was removed'));
     const c = this.child;
@@ -438,7 +453,7 @@ export function connectBox(opts: BoxOptions): BoxConnection {
   };
   return {
     machine,
-    state: () => ({ status: link.status, error: link.error, info: link.info, clis: link.clis, running: link.ptys.size, reported: link.reported, refused: link.isRefused }),
+    state: () => ({ status: link.status, error: link.error, info: link.info, clis: link.clis, running: link.ptys.size, reported: link.reported, refused: link.isRefused, telemetry: link.telemetry }),
     reconnected: Promise.resolve().then(() => reconnectClis(opts.terminalFor, link)), // dials once the caller has the connection
     hooksReady: () => link.hooksReady(),
     check: () => link.check(),

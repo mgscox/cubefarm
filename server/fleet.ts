@@ -1,7 +1,7 @@
 // The office's boxes: other machines an agent's desk and CLI can run on, reached over SSH (see docs/fleet-design.md).
 // Pure rules here: which machine a session starts on, the ssh command line, and paths built the box's way.
 
-import type { RebootStatus } from '../shared/types.ts';
+import type { MachineCapacity, RebootStatus } from '../shared/types.ts';
 
 /** A box as the office stores it. What it last reported is kept so its paths are known while it's offline. */
 export interface PersistedBox {
@@ -11,6 +11,7 @@ export interface PersistedBox {
   destination: string;
   /** Its workspaces folder and path separator, from its last info. */
   layout?: BoxLayout | null;
+  capacity?: MachineCapacity;
 }
 
 /** Where a box keeps desks: its own folder and separator (it may run another OS than the office). */

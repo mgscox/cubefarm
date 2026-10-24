@@ -76,6 +76,7 @@ export const api = {
   addBox: (name: string, destination: string) => call<BoxView>('POST', '/api/boxes', { name, destination }),
   removeBox: (id: string) => call('DELETE', `/api/boxes/${id}`),
   checkBox: (id: string) => call<BoxView>('POST', `/api/boxes/${id}/check`),
+  machineCapacity: (id: string, capacity: import('../../shared/types').MachineCapacity) => call('PATCH', '/api/fleet/capacity', { id, capacity }),
   assign: (id: string, issueNumber: number, note?: string) => call('POST', `/api/agents/${id}/assign`, { issueNumber, note }),
   stop: (id: string) => call('POST', `/api/agents/${id}/stop`),
   reset: (id: string) => call('POST', `/api/agents/${id}/reset`),

@@ -134,6 +134,7 @@ app.post(
 app.post('/api/boxes', route((req) => swarm.addBox(req.body?.name, req.body?.destination)));
 app.delete('/api/boxes/:id', route((req) => swarm.removeBox(String(req.params.id))));
 app.post('/api/boxes/:id/check', route((req) => swarm.checkBox(String(req.params.id))));
+app.patch('/api/fleet/capacity', route((req) => swarm.setMachineCapacity(req.body?.id, req.body?.capacity)));
 app.patch('/api/agents/:id', route((req) => swarm.updateAgent(String(req.params.id), req.body ?? {})));
 app.delete('/api/agents/:id', route((req) => swarm.fireAgent(String(req.params.id))));
 app.post('/api/agents/:id/assign', route((req) => swarm.assign(String(req.params.id), num(req.body.issueNumber), str(req.body.note) || undefined)));

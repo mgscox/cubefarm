@@ -48,6 +48,8 @@ interface State {
   settings: SwarmSettings;
   clis: CliView[]; // the coding-agent CLIs installed where the office runs
   boxes: BoxView[]; // other machines agents' desks and CLIs can run on
+  officeTelemetry: WorldSnapshot['officeTelemetry'];
+  officeCapacity: WorldSnapshot['officeCapacity'];
   repos: RepoView[];
   agents: Record<string, Agent>;
   logs: Record<string, LogLine[]>;
@@ -126,6 +128,8 @@ const LOG_KEEP = 600;
 export const useStore = create<State>((set, get) => ({
   connected: false,
   loaded: false,
+  officeTelemetry: null,
+  officeCapacity: 'unknown',
   user: null,
   ghReady: true,
   demo: false,
@@ -217,6 +221,8 @@ export const useStore = create<State>((set, get) => ({
           usage: d.usage,
           clis: d.clis ?? [],
           boxes: d.boxes ?? [],
+          officeTelemetry: d.officeTelemetry ?? null,
+          officeCapacity: d.officeCapacity ?? 'unknown',
           restarting: false,
           floor: floorExists ? get().floor : 0,
         });
@@ -293,6 +299,9 @@ export const useStore = create<State>((set, get) => ({
       }
       case 'boxRemoved':
         set({ boxes: get().boxes.filter((b) => b.id !== ev.boxId) });
+        break;
+      case 'officeTelemetry':
+        set({ officeTelemetry: ev.telemetry, officeCapacity: ev.capacity });
         break;
       case 'request': {
         const prev = get().requests.find((r) => r.id === ev.request.id);

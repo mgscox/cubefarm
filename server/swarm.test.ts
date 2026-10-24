@@ -3510,6 +3510,21 @@ describe('boxes', () => {
     Object.assign(s.state.agents[0], { box: null, deskBox: '' });
   });
 
+  it('keeps per-machine resize capability and resource evidence independent of machine names', async () => {
+    const box = swarm.addBox('Unfamiliar VPS', 'cpu-busy.example');
+    swarm.setMachineCapacity(box.id, 'resizable');
+    swarm.setMachineCapacity('', 'fixed');
+    await vi.advanceTimersByTimeAsync(1600);
+    const fleet = swarm as unknown as { state: { officeCapacity: string; boxes: unknown[] }; boxView(b: unknown): unknown };
+    expect(fleet.state.officeCapacity).toBe('fixed');
+    expect(fleet.boxView(fleet.state.boxes[0])).toMatchObject({ id: box.id, capacity: 'resizable', telemetry: { status: 'constrained', constraints: ['cpu'] } });
+    expect(() => swarm.setMachineCapacity(box.id, 'maybe')).toThrow(HttpError);
+    expect(() => swarm.setMachineCapacity('missing', 'fixed')).toThrow(HttpError);
+    expect(() => swarm.setMachineCapacity(undefined, 'fixed')).toThrow(HttpError);
+    swarm.removeBox(box.id);
+    expect(fleet.state.boxes).toEqual([]);
+  });
+
   it("moves a whole floor to a box with one change, and the floor's next tasks start there", async () => {
     const box = swarm.addBox('Build box', 'ada@buildbox');
     await vi.advanceTimersByTimeAsync(1600);

@@ -8,7 +8,8 @@ import type { PreviewBackend } from './previewRunner.ts';
 import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
 import { bootNotice, CLIS } from './clis.ts';
 import { updateFailure } from './fleet.ts';
-import type { CliView, GhRepoSummary, IssueInfo, PullInfo } from '../shared/types.ts';
+import type { CliView, GhRepoSummary, IssueInfo, PullInfo, MachineSample, MachineTelemetry } from '../shared/types.ts';
+import { monitorResources } from './machineHealth.ts';
 import { dependencyUrls, READY_FOR_HUMAN, RESEARCH } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR } from './config.ts';
@@ -454,6 +455,13 @@ function fakeUsageWarning(cb: SessionCallbacks) {
 
 const fakeClis = () => CLIS.map((c) => ({ id: c.id, label: c.label, installed: true, version: 'demo', integrated: c.integrated }));
 
+const demoResources = (profile = ''): MachineSample => ({
+  at: Date.now(), cpus: 4, cpuPercent: profile.startsWith('cpu-busy') ? 97 : 25, load1: profile.startsWith('cpu-busy') ? 8 : 1,
+  memoryTotal: 16 * 1024 ** 3, memoryAvailable: (profile.startsWith('memory-busy') ? 0.5 : 10) * 1024 ** 3,
+  memoryPressure: null, cpuStall: profile.startsWith('cpu-busy') ? 40 : 0, memoryStall: profile.startsWith('memory-busy') ? 20 : 0,
+  ioStall: profile.startsWith('io-busy') ? 30 : 0,
+});
+
 /**
  * A pretend box: it "connects" after a moment (one whose destination starts with "offline" never does; "no-hooks": its
  * CLIs can't reach its hook URL), and its desks and fake sessions are the demo's own under its folder, labelled with
@@ -465,6 +473,8 @@ const fakeClis = () => CLIS.map((c) => ({ id: c.id, label: c.label, installed: t
 function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
   let status: 'connecting' | 'online' | 'offline' = 'connecting';
   let running = 0;
+  let telemetry: MachineTelemetry | null = null;
+  let stopResources: (() => void) | undefined;
   const offline = /^offline/i.test(opts.box.destination);
   const claudeOnly = /^claude-only/i.test(opts.box.destination);
   let clis: CliView[] = [];
@@ -477,6 +487,7 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
   let timer = setTimeout(async () => {
     status = offline ? 'offline' : 'online';
     if (!offline) clis = await machine.detectClis();
+    if (!offline) stopResources = monitorResources(async () => demoResources(opts.box.destination), (value) => { telemetry = value; opts.changed(); });
     opts.changed();
   }, 1500);
   const workspaces = `/boxes/${opts.box.name}/workspaces`;
@@ -519,6 +530,7 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
       running,
       reported: status === 'online',
       refused: false,
+      telemetry,
     }),
     reconnected: Promise.resolve([]), // fake sessions end with the office
     hooksReady: () => undefined,
@@ -565,7 +577,7 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
       status = 'online';
       opts.changed();
     },
-    close: () => clearTimeout(timer),
+    close: () => { clearTimeout(timer); stopResources?.(); },
   };
 }
 
@@ -619,6 +631,7 @@ export function createDemoBackend(): Backend {
   };
   return {
     demo: true,
+    resources: async () => demoResources(),
     user: async () => 'demo-manager',
     listMyRepos: async (): Promise<GhRepoSummary[]> =>
       [...repos.values()].map((r) => ({ nameWithOwner: r.fullName, description: r.description, visibility: 'PUBLIC', updatedAt: now() })),

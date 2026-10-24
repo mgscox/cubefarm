@@ -7,7 +7,7 @@ import type { RecoveredTurn } from './cliTranscript.ts';
 import type { ClaudeTurn } from './clis.ts';
 import type { BoxInfo, BoxUpdateResult, PersistedBox } from './fleet.ts';
 import type { AgentTerminal } from './terminal.ts';
-import type { AgentCli, AgentRole, BoxStatus, CliView, EffortLevel } from '../shared/types.ts';
+import type { AgentCli, AgentRole, BoxStatus, CliView, EffortLevel, MachineTelemetry } from '../shared/types.ts';
 
 // Where an agent works: its desk (a worktree), its sessions and the CLIs it runs: the office's own machine, or a box
 // (another machine, reached over ssh: see docs/fleet-design.md). Paths a machine hands out are its own: the office
@@ -132,7 +132,7 @@ export interface CliHost {
 export interface BoxConnection {
   machine: Machine;
   /** reported: info and clis are from the link that's up now. refused: it runs another protocol version. */
-  state(): { status: BoxStatus; error: string | null; info: BoxInfo | null; clis: CliView[]; running: number; reported: boolean; refused: boolean };
+  state(): { status: BoxStatus; error: string | null; info: BoxInfo | null; clis: CliView[]; running: number; reported: boolean; refused: boolean; telemetry?: MachineTelemetry | null };
   /**
    * The CLIs the box kept running while the office was away, back in their agents' terminals: resolves the first
    * time the box connects (which may be long after the office starts). Call hooksReady() once they're followed again.

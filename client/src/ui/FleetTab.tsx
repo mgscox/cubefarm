@@ -4,6 +4,8 @@ import { agentBox, boxName, boxNotes, boxWarnings, busy, floorMove, floorMoveTex
 import { agentsOnRepo, useStore, type Agent } from '../store';
 import type { BoxView, CliView, RepoView } from '../../../shared/types';
 import { confirmDialog } from './Confirm';
+import { MachineHealth } from './MachineHealth';
+import type { FleetTarget } from '../fleetHealth';
 
 // The manager console's Fleet tab: the machines agents work on (this one and the boxes reached over ssh), adding and
 // removing boxes, and putting a whole floor on one. A change applies when each agent's next task starts.
@@ -56,8 +58,10 @@ function Workers({ id, agents, repos }: { id: string; agents: Agent[]; repos: Re
   );
 }
 
-function OfficeMachine({ agents, repos }: { agents: Agent[]; repos: RepoView[] }) {
+function OfficeMachine({ agents, repos, machines }: { agents: Agent[]; repos: RepoView[]; machines: FleetTarget[] }) {
   const clis = useStore((s) => s.clis);
+  const telemetry = useStore((s) => s.officeTelemetry);
+  const capacity = useStore((s) => s.officeCapacity);
   return (
     <div className="card fleet-card">
       <div className="row">
@@ -72,12 +76,13 @@ function OfficeMachine({ agents, repos }: { agents: Agent[]; repos: RepoView[] }
         </div>
         <span className="status status-running">online</span>
       </div>
+      <MachineHealth id="" online telemetry={telemetry} capacity={capacity} machines={machines} />
       <Workers id="" agents={agents} repos={repos} />
     </div>
   );
 }
 
-function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos: RepoView[] }) {
+function BoxCard({ box, agents, repos, machines }: { box: BoxView; agents: Agent[]; repos: RepoView[]; machines: FleetTarget[] }) {
   const { info, missing, hooks } = boxNotes(box);
   const warnings = boxWarnings(box);
   const [checking, setChecking] = useState(false);
@@ -115,6 +120,7 @@ function BoxCard({ box, agents, repos }: { box: BoxView; agents: Agent[]; repos:
       {warnings.map((warning) => <div key={warning.kind} role="status" className={`small ${warning.kind === 'unknown' ? 'muted' : 'fleet-missing'}`}>{warning.kind === 'unknown' ? 'ⓘ' : '⚠'} {warning.text}</div>)}
       {missing.length > 0 && <div className="small fleet-missing">⚠ Set up on the box: {missing.join(', ')}</div>}
       {hooks && <div className="small fleet-missing">⚠ {hooks}</div>}
+      <MachineHealth id={box.id} online={box.status === 'online'} telemetry={box.telemetry} capacity={box.capacity} machines={machines} />
       <Workers id={box.id} agents={agents} repos={repos} />
       <div className="row">
         <span className="muted small grow">{box.running ? `${box.running} CLI${box.running === 1 ? '' : 's'} running there` : 'Nothing running there'}</span>
@@ -263,6 +269,8 @@ export function FleetTab() {
   const agents = useStore((s) => s.agents);
   const terminal = useStore((s) => s.settings.runtime === 'terminal');
   const list = Object.values(agents);
+  const officeTelemetry = useStore((s) => s.officeTelemetry);
+  const machines: FleetTarget[] = [{ id: '', name: 'This machine', online: true, telemetry: officeTelemetry }, ...boxes.map((b) => ({ id: b.id, name: b.name, online: b.status === 'online', telemetry: b.telemetry }))];
   return (
     <div className="tab-grid">
       <div>
@@ -272,9 +280,9 @@ export function FleetTab() {
           </div>
         )}
         <h3 className="section">🖥 Machines</h3>
-        <OfficeMachine agents={list} repos={repos} />
+        <OfficeMachine agents={list} repos={repos} machines={machines} />
         {boxes.map((b) => (
-          <BoxCard key={b.id} box={b} agents={list} repos={repos} />
+          <BoxCard key={b.id} box={b} agents={list} repos={repos} machines={machines} />
         ))}
         {repos.length > 0 && <h3 className="section">🏢 Floors</h3>}
         {[...repos].sort((a, b) => a.floor - b.floor).map((r) => (
