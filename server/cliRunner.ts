@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, codexTurnThread, hookReviewKey, idlePromptWatch, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, STUCK_MS, trustKey } from './clis.ts';
+import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, codexTurnThread, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, STUCK_MS, trustKey } from './clis.ts';
 import { terminalsAvailable, type Pty } from './ptyClient.ts';
 import { ALLOW } from './ptyProtocol.ts';
 import { localCliHost } from './localCliHost.ts';
@@ -366,12 +366,15 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let shotTimer: NodeJS.Timeout | undefined;
   let stuckTimer: NodeJS.Timeout | undefined;
   const stuck = menuWatch();
-  const idleStuck = idlePromptWatch();
+  const idleStuck = idlePromptWatch(STUCK_MS, Date.now(), cli);
+  let activity = 0;
   const stir = () => {
+    activity += 1;
     stuck.stir();
     idleStuck.stir();
   };
   const nudged = new Set<string>();
+  let checkingIdle = false;
   let trustKeys = 0; // keys pressed on a folder-trust question (a few at most)
   let trustedAt = 0;
 
@@ -562,8 +565,16 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         cb.tool(null);
         return {};
       }
-      case 'SessionStart': // Codex, once its hooks are trusted: the thread it starts on is the main thread
-        if (!sub) pinMain(b);
+      case 'SessionStart': // OpenCode reports creation; Codex reports the main thread once hooks are trusted.
+        if (!sub) {
+          pinMain(b);
+          if (cli === 'opencode' && typeof b.session_id === 'string' && live && !live.resumeId) {
+            live.resumeId = b.session_id;
+            mainThread = b.session_id;
+            cb.sessionId(b.session_id);
+            remember(live);
+          }
+        }
         return {};
       case 'UserPromptSubmit': {
         if (sub) return {};
@@ -611,7 +622,10 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         return {};
       // Codex's notify program and the OpenCode plugin
       case 'TurnComplete': {
+        const mark = typeof b.turn_id === 'string' ? b.turn_id : '';
+        if (cli === 'opencode' && ((mark && mark === turnBase?.mark) || (Number.isFinite(b.completed_at) && Number(b.completed_at) < (opts.reattachSince ?? started)))) return {};
         const thread = typeof b.session_id === 'string' ? b.session_id : '';
+        if (cli === 'opencode' && mainThread && thread !== mainThread) return {};
         if (cli === 'codex') {
           // Codex also runs side threads (a title, subagents): only the main thread's turns count.
           const main = codexTurnThread(mainThread, { thread, input: String(b.input ?? '').trim(), subagent: b.subagent === true }, launched);
@@ -628,7 +642,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         const text = String(b.last_assistant_message ?? '').trim();
         if (transcriptEnded && !working) return {};
         const reply = cli === 'codex' ? text || lastText : text;
-        saveTurn({ bytes: 0, ended: true, mark: `hook:${reply}`, text: reply }, true);
+        saveTurn({ bytes: 0, ended: true, mark: mark || `hook:${reply}`, text: reply }, true);
         transcriptEnded = true;
         turns += 1;
         if (text) {
@@ -655,8 +669,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
 
   /** The session transcript on its own machine; recovery also discovers an unreported session id. */
   const readTurn = async (): Promise<ClaudeTurn | null> => {
-    if (opts.reattach) {
-      const read = await host.recoverTurn(opts.cwd, cli, live?.resumeId ?? opts.resumeSessionId ?? null, opts.reattachSince ?? 0);
+    if (opts.reattach || cli === 'opencode') {
+      const read = await host.recoverTurn(opts.cwd, cli, live?.resumeId ?? opts.resumeSessionId ?? null, opts.reattach ? opts.reattachSince ?? 0 : started);
       const t = opts.reattachSince ? currentTaskTurn(read, opts.reattachSince) : read;
       if (t?.sessionId && live && live.resumeId !== t.sessionId) {
         live.resumeId = t.sessionId;
@@ -737,15 +751,30 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   };
 
   /**
-   * A menu nobody answers, or Codex back at its prompt without a turn-end hook (notably after a refusal), would leave
-   * its desk working forever. After STUCK_MS the session fails through the usual retry path, closing its CLI tree.
+   * A menu nobody answers or a lost turn-end signal must not strand a desk. OpenCode exports its result after
+   * STUCK_MS at a quiet idle prompt; unusable results fail through the usual retry path, closing the CLI tree.
    */
   const watchStuck = () => {
-    stuckTimer = setInterval(() => {
-      if (done || !live?.proc) return;
+    stuckTimer = setInterval(async () => {
+      if (done || !live?.proc || checkingIdle) return;
       const screen = term.screen();
       const idle = cli === 'codex' ? idleStuck.look(screen, working) : null;
       const option = working ? stuck.look(screen) : null;
+      const openIdle = cli === 'opencode' ? idleStuck.look(screen, working) : null;
+      if (openIdle && Date.now() - Math.max(started, term.lastOutputAt ?? 0) >= STUCK_MS) {
+        checkingIdle = true;
+        const before = activity;
+        const outputAt = term.lastOutputAt;
+        const t = await readTurn().catch(() => null);
+        checkingIdle = false;
+        if (done || !working || before !== activity || outputAt !== term.lastOutputAt) return;
+        if (t?.ended && t.text && t.mark && t.mark !== turnBase?.mark) { followTurn(t); return; }
+        const error = `${label} sat at an idle prompt without reporting a turn end; no usable result could be recovered`;
+        term.note(`── ${error} ──`);
+        log([{ kind: 'error', text: error }]);
+        finish({ ok: false, text: '', errors: [error] });
+        return;
+      }
       const minutes = Math.round(STUCK_MS / 60_000);
       const error = idle === 'refusal' ? `${label} refused the request (safety filter)`
         : idle === 'idle' ? `${label} sat at an idle prompt without reporting a turn end for ${minutes} minutes, so the office ended the session`
@@ -766,7 +795,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       if (done) return;
       const screen = term.screen();
       const active = /esc to (interrupt|cancel)/i.test(screen);
-      const idle = !active && /(?:^|\n)\s*[❯›]/.test(screen);
+      const idle = !active && (cli === 'opencode' ? opencodeIdlePrompt(screen) : /(?:^|\n)\s*[❯›]/.test(screen));
       const stale = t?.ended && t.mark === turnBase?.mark && !live?.transcriptPending && working;
       if (t && (!t.ended || (t.text && t.mark)) && !(idle && !t.ended) && !stale) {
         followTurn(t);

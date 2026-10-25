@@ -245,9 +245,9 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
       const config = {
         // Bare desk model names are Ollama IDs; other providers must include their prefix.
         ...(ctx.model ? { model: ctx.model.includes('/') ? ctx.model : `ollama/${ctx.model}` } : {}),
-        plugin: [ctx.plugin],
+        plugins: [ctx.plugin],
         instructions: [ctx.files.system],
-        autoupdate: false, // several agents starting at once must not each reinstall it
+        update: 'disable', // several agents starting at once must not each reinstall it
         permission: { edit: 'allow', bash: 'allow', webfetch: 'allow' }, // it can't stop to ask either
         ...(ctx.browser ? { mcp: { playwright: { type: 'local', command: [ctx.browser.command, ...ctx.browser.args], enabled: true } } } : {}),
       };
@@ -497,9 +497,16 @@ export function menuWatch(limitMs = STUCK_MS, now = Date.now()) {
   return screenWatch(menuOnScreen, limitMs, now);
 }
 
+/** OpenCode keeps the commands hint after usage replaces the agents hint; active turns also show interrupt. */
+export function opencodeIdlePrompt(screen: string): boolean {
+  return !/esc\s+(?:to\s+)?(?:interrupt|cancel)|(?:interrupt|cancel)\s+esc/i.test(screen)
+    && /ctrl\+p\s+commands\b/i.test(screen);
+}
+
 /** Codex can end at its prompt without sending a turn-end hook, particularly after a safety refusal. */
-export function idlePromptWatch(limitMs = STUCK_MS, now = Date.now()) {
+export function idlePromptWatch(limitMs = STUCK_MS, now = Date.now(), cli: AgentCli = 'codex') {
   const watch = screenWatch<'refusal' | 'idle'>((screen) => {
+    if (cli === 'opencode') return opencodeIdlePrompt(screen) ? 'idle' : null;
     if (/esc to (interrupt|cancel)/i.test(screen)) return null;
     if (/This content can['’]t be shown|We take extra care with some cybersecurity requests/i.test(screen)) return 'refusal';
     return /^[ \t]*›(?![ \t]*\d+\.)[^\n]*$/m.test(screen) ? 'idle' : null;
@@ -667,33 +674,80 @@ process.stdin.on('end', async () => {
 });
 `;
 
-/** OpenCode plugin: reports its session and when it goes idle (a turn is complete). No imports: loaded from a file. */
-export const OPENCODE_PLUGIN_SOURCE = String.raw`// cubefarm: tells the office when OpenCode's session goes idle.
-export default async function CubefarmPlugin({ client } = {}) {
-  const url = process.env.CUBEFARM_NOTIFY_URL;
-  if (!url) return {};
-  let root;
-  const post = (body) =>
-    fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(3000) }).catch(() => {});
-  const lastReply = async (id) => {
-    try {
-      const res = await client.session.messages({ path: { id } });
-      const reply = (res?.data ?? []).filter((m) => m?.info?.role === 'assistant').pop();
-      return (reply?.parts ?? []).filter((p) => p?.type === 'text').map((p) => p.text).join('\n').trim();
-    } catch {
-      return '';
-    }
-  };
-  return {
-    event: async ({ event }) => {
-      const props = event?.properties ?? {};
-      if (event?.type === 'session.created' && !props.info?.parentID && !root) root = props.info?.id;
-      const sessionID = props.sessionID ?? props.info?.id;
-      if (event?.type === 'session.idle' && (!root || sessionID === root)) {
-        post({ hook_event_name: 'TurnComplete', session_id: sessionID ?? null, last_assistant_message: sessionID ? await lastReply(sessionID) : '' });
+/** OpenCode v2 package entrypoint. No dependencies: the box writes and loads its own copy. */
+export const OPENCODE_PLUGIN_SOURCE = String.raw`// cubefarm: OpenCode v2 session notifications.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+export default {
+  id: 'cubefarm',
+  async setup(ctx) {
+    const url = process.env.CUBEFARM_NOTIFY_URL;
+    if (!url) return;
+    const stop = new AbortController();
+    const unwrap = (res) => res?.data ?? res;
+    const warn = (message) => {
+      const line = '[cubefarm] ' + message;
+      console.error(line);
+      try {
+        const dir = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'opencode', 'log');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.appendFileSync(path.join(dir, 'cubefarm.log'), new Date().toISOString() + ' ' + line + '\n');
+      } catch { /* stderr still carries the diagnostic if the log folder cannot be written. */ }
+    };
+    const bounded = (promise) => {
+      let timer;
+      return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('session read timed out')), 10000); })]).finally(() => clearTimeout(timer));
+    };
+    const post = async (body) => {
+      let error;
+      for (let attempt = 0; attempt < 4 && !stop.signal.aborted; attempt++) {
+        try {
+          const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.any([stop.signal, AbortSignal.timeout(10000)]) });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return;
+        } catch (err) { error = err; }
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
       }
-      if (event?.type === 'session.error') post({ hook_event_name: 'TurnError', session_id: sessionID ?? null, error: String(props.error?.data?.message ?? props.error?.name ?? 'error') });
-    },
-  };
-}
+      if (!stop.signal.aborted) warn(body.hook_event_name + ' POST failed: ' + String(error));
+    };
+    let root;
+    const main = async (id, info) => {
+      if (!id) return false;
+      if (root) return id === root;
+      info ??= unwrap(await bounded(ctx.session.get({ sessionID: id })));
+      if (info.parentID || info.location?.directory !== ctx.location.directory) return false;
+      root = id;
+      await post({ hook_event_name: 'SessionStart', session_id: id });
+      return true;
+    };
+    const handle = async (event) => {
+      const p = event.data ?? {};
+      const id = p.sessionID;
+      if (event.type === 'session.created') { await main(id, p); return; }
+      if (!['session.execution.started', 'session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted'].includes(event.type)) return;
+      if (!await main(id)) return;
+      if (event.type === 'session.execution.started') {
+        await post({ hook_event_name: 'UserPromptSubmit', session_id: id });
+        return;
+      }
+      if (event.type !== 'session.execution.succeeded') {
+        await post({ hook_event_name: 'TurnError', session_id: id, error: String(p.error?.message ?? p.reason ?? 'execution failed') });
+      }
+      let text = '';
+      try {
+        const messages = unwrap(await bounded(ctx.session.context({ sessionID: id })));
+        const reply = messages.filter((m) => m.type === 'assistant').pop();
+        text = (reply?.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join('\n').trim();
+      } catch (err) { warn('Could not read last reply: ' + String(err)); }
+      await post({ hook_event_name: 'TurnComplete', session_id: id, last_assistant_message: text, turn_id: event.id?.replace(/^evt_/, 'msg_'), completed_at: event.created });
+    };
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ signal: stop.signal })) {
+        try { await handle(event); } catch (err) { warn('Notification failed: ' + String(err)); }
+      }
+    })().catch((err) => { if (!stop.signal.aborted) warn('Event stream failed: ' + String(err)); });
+    return () => stop.abort();
+  },
+};
 `;

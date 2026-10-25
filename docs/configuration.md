@@ -65,6 +65,15 @@ CubeFarm passes the model as `model` in `OPENCODE_CONFIG_CONTENT`, following the
 CubeFarm passes `--standalone` so each desk's private server reads its own model, instructions, plugins and permissions
 from the environment; OpenCode's shared background service keeps the config of the client that started it.
 
+OpenCode integration targets v2 (verified against v2.0.32). CubeFarm writes a v2 notification plugin package on the
+machine that owns the desk and points it at that machine's terminal keeper. Failed notifications retry with backoff;
+exhausted retries are written to stderr and `<XDG_DATA_HOME>/opencode/log/cubefarm.log` (default
+`~/.local/share/opencode/log/cubefarm.log`).
+
+If notifications are lost, ten minutes without terminal output at an idle OpenCode prompt triggers recovery using
+`opencode session list --format json --standalone` and `opencode session export <id> --standalone` on the desk's machine.
+Only the current task's completed root session is accepted; ambiguous or unusable results follow the normal retry path.
+
 ## Adding a setting (contributors)
 
 Read it with `readConfigEnv()` from `server/config.ts` where it's needed, let the environment win (`process.env.X || readConfigEnv().X`), keep the value out of `process.env`, logs and broadcasts if it's a secret, and add a row to the table above.

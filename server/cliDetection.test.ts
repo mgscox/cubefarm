@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createBoxOps } from './boxOps.ts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { commandFor, detectClis } from './clis.ts';
 import { writeCliSession } from './cliFiles.ts';
@@ -8,7 +10,7 @@ import { run } from './exec.ts';
 import type { CliPlan } from './machine.ts';
 
 // Version probes are faked: no installed agent CLI is run by these tests.
-vi.mock('./exec.ts', () => ({ run: vi.fn(async () => 'test version') }));
+vi.mock('./exec.ts', () => ({ run: vi.fn(async () => 'test version'), git: async () => '' }));
 
 let home: string;
 const win = process.platform === 'win32';
@@ -50,6 +52,27 @@ describe('CLI installer folders outside PATH', () => {
     const launch = writeCliSession(plan, { url: plan.officeUrl, held: false });
     expect(launch.file).toBe(file);
     expect(launch.cwd).toBe(home);
+    fs.rmSync(launch.dir, { recursive: true, force: true, maxRetries: 5 });
+  });
+
+  it('prepares a box-local v2 plugin package and posts to its keeper rather than the office', async () => {
+    install(['.opencode', 'bin']);
+    const box = createBoxOps({ hookUrl: () => 'http://127.0.0.1:45678', pids: () => [], root: home });
+    const plan: CliPlan = {
+      cli: 'opencode', token: 'box-plugin', sessionId: 'test', cwd: path.join(home, 'desk with spaces'), prompt: 'QA', systemAppend: '',
+      model: '', effort: '', name: 'Nancy', role: 'qa', additionalDirectories: [], browserTesting: false, officeUrl: 'http://office.invalid', officeTools: false,
+    };
+    await box.rpc('prepare', [plan]);
+    const launch = box.take(plan.token)!;
+    const config = JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT);
+    expect(config.plugin).toBeUndefined();
+    expect(config.plugins).toHaveLength(1);
+    const folder = fileURLToPath(config.plugins[0]);
+    expect(path.dirname(folder)).toBe(path.join(path.dirname(path.dirname(launch.dir)), 'bin'));
+    expect(fs.statSync(folder).isDirectory()).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(folder, 'package.json'), 'utf8'))).toMatchObject({ main: './index.js', type: 'module' });
+    expect(fs.readFileSync(path.join(folder, 'index.js'), 'utf8')).toContain("id: 'cubefarm'");
+    expect(launch.env.CUBEFARM_NOTIFY_URL).toBe('http://127.0.0.1:45678/api/hooks/box-plugin');
     fs.rmSync(launch.dir, { recursive: true, force: true, maxRetries: 5 });
   });
 
