@@ -39,9 +39,17 @@ export function forHuman(labels: string[]) {
   return labels.some((l) => l.toLowerCase() === READY_FOR_HUMAN);
 }
 
-/** Whether the office may hand an issue to an agent at all (not swarm:skip, wontfix, question or ready-for-human). */
-export function schedulable(labels: string[]) {
-  return !forHuman(labels) && !labels.some((l) => /^(swarm:skip|wontfix|question)$/i.test(l));
+/** Preparation gates that must be cleared before automatic or explicit agent starts. */
+export function issueReadinessReason(issue: Pick<IssueInfo, 'labels' | 'title'>) {
+  if (issue.labels.some((l) => /^needs-triage$/i.test(l))) return 'needs triage';
+  if (issue.labels.some((l) => /^needs-info$/i.test(l))) return 'waiting for info';
+  if (/^(?:\[Draft\]|Draft:)/i.test(issue.title)) return 'draft';
+  return null;
+}
+
+/** Whether the office may hand an issue to an agent, without requiring ready-for-agent. */
+export function schedulable(labels: string[], title = '') {
+  return !issueReadinessReason({ labels, title }) && !forHuman(labels) && !labels.some((l) => /^(swarm:skip|wontfix|question)$/i.test(l));
 }
 
 /** Open issues this issue waits for, from "Depends on #3" / "Blocked by #4, #5" in its body. */
@@ -80,17 +88,19 @@ export function issueParent(issue: Pick<IssueInfo, 'subIssues' | 'labels' | 'tit
 /** Status shared by the manager's issue list and Kanban cards. */
 export function issueWorkNote(issue: IssueInfo): string | null {
   const parent = issueParent(issue);
-  return [parent ? `parent: ${parent}` : issue.subIssues === null ? 'sub-issues have not loaded' : '', issue.stalled].filter(Boolean).join(' · ') || null;
+  return [issueReadinessReason(issue), parent ? `parent: ${parent}` : issue.subIssues === null ? 'sub-issues have not loaded' : '', issue.stalled].filter(Boolean).join(' · ') || null;
 }
 
 /** Why an issue must stay in the backlog, including explicit parent/PRD containers. */
 export function issueWaitReason(issue: IssueInfo, open: Set<number>): string | null {
+  const readiness = issueReadinessReason(issue);
+  if (readiness) return readiness;
   if (issue.subIssues === null) return 'sub-issues have not loaded';
   if (issueParent(issue)) return 'parent or PRD';
   if (issue.stalled) return issue.stalled;
   if (issue.nativeBlockers === null) return 'native blockers have not loaded';
   if (issueBlockers(issue, open).length) return 'open blockers';
-  if (!schedulable(issue.labels)) return 'reserved or skipped work';
+  if (!schedulable(issue.labels, issue.title)) return 'reserved or skipped work';
   return null;
 }
 
