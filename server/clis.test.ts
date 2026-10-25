@@ -296,7 +296,23 @@ describe('launchArgs', () => {
   it("lets OpenCode run without stopping to ask, and without updating itself", () => {
     const config = (patch: Partial<LaunchContext>) => JSON.parse(launchArgs('opencode', ctx(patch)).env.OPENCODE_CONFIG_CONTENT);
     for (const role of ['dev', 'qa'] as const) expect(config({ role }).permission).toEqual({ edit: 'allow', bash: 'allow', webfetch: 'allow' });
-    expect(config({}).autoupdate).toBe(false);
+    expect(config({}).update).toBe('disable');
+  });
+});
+
+describe('the idle OpenCode watchdog', () => {
+  it('requires a quiet idle composer and excludes active executions', () => {
+    const idle = 'Ask anything…\nBuild GLM 5.3 Flash\ntab agents ctrl+p commands';
+    const watch = idlePromptWatch(STUCK_MS, 0, 'opencode');
+    expect(watch.look(idle, true, 0)).toBeNull();
+    expect(watch.look(idle, true, STUCK_MS)).toBe('idle');
+    watch.stir(STUCK_MS);
+    expect(watch.look(idle, true, 2 * STUCK_MS - 1)).toBeNull();
+    for (const screen of [idle + '\nesc interrupt', idle + '\nesc to cancel', 'Running tests…', 'Permission required']) {
+      const active = idlePromptWatch(STUCK_MS, 0, 'opencode');
+      active.look(screen, true, 0);
+      expect(active.look(screen, true, 2 * STUCK_MS)).toBeNull();
+    }
   });
 });
 

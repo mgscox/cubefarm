@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vite
 import { CommandError, ghJson, run } from './exec.ts';
 import { branchAhead, listIssues } from './github.ts';
 import { LOST_CONVERSATION, STUCK_MS } from './clis.ts';
-import { startCliSession } from './cliRunner.ts';
+import { opencodeTurn } from './opencodeTranscript.ts';
+import { handleHook, startCliSession } from './cliRunner.ts';
 import type { BoxConnection, CliHost } from './machine.ts';
 import { BOX_CLI_CHECK_MS } from './fleet.ts';
 import type { AgentTerminal } from './terminal.ts';
@@ -2563,6 +2564,47 @@ describe('QA rounds', () => {
     };
     s.state.qa.push(rec);
     runFix = vi.spyOn(s, 'runFix').mockResolvedValue() as Mock;
+  });
+
+  it.each([false, true])('collects an OpenCode box QA report and leaves testing (lost notification: %s)', async (lost) => {
+    const tester = addAgent('q1', 'Nancy', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: 'sha-1' });
+    const report = { verdict: 'pass', summary: 'Box QA completed', checks: [{ name: 'Regression', result: 'pass', details: 'Verified' }] };
+    const text = 'Finished QA.\n```json\n' + JSON.stringify(report) + '\n```';
+    const since = Date.now();
+    let token = '';
+    const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
+    const term = { cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), lastOutputAt: since, screen: () => 'Ask anything…\ntab agents ctrl+p commands' } as unknown as AgentTerminal;
+    const host: CliHost = {
+      prepare: async (plan) => { token = plan.token; return { dir: 'box/sessions/t', prompt: plan.prompt, start: () => pty }; },
+      recoverTurn: async () => opencodeTurn({ info: { id: 'ses_box', location: { directory: 'desk' } }, messages: [
+        { id: 'msg_reply', type: 'assistant', content: [{ type: 'text', text }] },
+        { id: 'msg_done', type: 'idle', outcome: 'succeeded', time: { created: since + 1 } },
+      ] }, 'desk', since, 'ses_box'),
+      hasFile: () => false, claudeTurn: () => null, newShots: () => [], savedShot: () => null,
+      codexThread: async () => undefined, removeDir: vi.fn(), reconnect: async () => [], adopt: () => pty,
+      discard: vi.fn(), hooksReady: vi.fn(), leave: vi.fn(), protect: () => ({ pids: [], markers: [] }),
+    };
+    const comment = vi.spyOn(s.backend, 'commentPull');
+    const finished = vi.fn((result: SessionResult) => { void s.onQaFinished(tester, repo, result); });
+    startCliSession({ cwd: 'desk', cli: 'opencode', terminal: term, role: 'qa', prompt: 'Test PR #13', systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [] }, {
+      log: vi.fn(), tool: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), finished,
+      sessionId: (id) => { tester.sessionId = id; },
+    }, host);
+    await vi.advanceTimersByTimeAsync(0);
+    if (!lost) {
+      handleHook(token, { hook_event_name: 'SessionStart', session_id: 'ses_box' });
+      expect(tester.sessionId).toBe('ses_box');
+      handleHook(token, { hook_event_name: 'TurnComplete', session_id: 'ses_box', turn_id: 'msg_done', last_assistant_message: text });
+    }
+    await vi.advanceTimersByTimeAsync(STUCK_MS + 33_000);
+    expect(finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text, turns: 1 }));
+    expect(tester).toMatchObject({ status: 'done', sessionId: 'ses_box' });
+    expect(rec).toMatchObject({ status: 'passed', summary: report.summary, checks: report.checks, sessionFailures: 0 });
+    expect(comment).toHaveBeenCalledOnce();
+    handleHook(token, { hook_event_name: 'TurnComplete', session_id: 'ses_box', last_assistant_message: text });
+    expect(comment).toHaveBeenCalledOnce();
   });
 
   it.each(['preparing', 'working'])('waits for its %s author, even when another developer is free', (status) => {

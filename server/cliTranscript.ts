@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { claudeTurn, readClaudeTurn, type ClaudeTurn } from './clis.ts';
+import { recoverOpencodeTurn } from './opencodeTranscript.ts';
 import type { AgentCli } from '../shared/types.ts';
 
 export interface RecoveredTurn extends ClaudeTurn { sessionId?: string }
@@ -49,8 +50,8 @@ export function currentTaskTurn<T extends ClaudeTurn>(turn: T | null, since: num
 }
 
 /** Ambiguous discoveries are left for the visible recovery failure, rather than collecting another session's reply. */
-export function recoverCliTurn(cwd: string, cli: AgentCli, sessionId: string | null, since: number, home = os.homedir()): RecoveredTurn | null {
-  if (cli === 'opencode') return null;
+export function recoverCliTurn(cwd: string, cli: AgentCli, sessionId: string | null, since: number, home = os.homedir()): RecoveredTurn | null | Promise<RecoveredTurn | null> {
+  if (cli === 'opencode') return recoverOpencodeTurn(cwd, sessionId, since);
   if (cli === 'claude' && sessionId) return currentTaskTurn(readClaudeTurn(cwd, sessionId, home), since);
   const root = cli === 'claude' ? path.join(home, '.claude', 'projects', path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-')) : path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'sessions');
   const candidates: { file: string; id: string }[] = [];

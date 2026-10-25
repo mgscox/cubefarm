@@ -27,7 +27,10 @@ function writeHelpers() {
   fs.writeFileSync(path.join(BIN_DIR, 'statusline.cjs'), STATUSLINE_SOURCE);
   fs.writeFileSync(path.join(BIN_DIR, 'notify.cjs'), NOTIFY_SOURCE);
   fs.writeFileSync(path.join(BIN_DIR, 'codex-hook.cjs'), CODEX_HOOK_SOURCE);
-  fs.writeFileSync(path.join(BIN_DIR, 'opencode-plugin.mjs'), OPENCODE_PLUGIN_SOURCE);
+  const pluginDir = path.join(BIN_DIR, 'opencode-plugin');
+  fs.mkdirSync(pluginDir, { recursive: true });
+  fs.writeFileSync(path.join(pluginDir, 'package.json'), JSON.stringify({ name: 'cubefarm-notify', type: 'module', main: './index.js' }));
+  fs.writeFileSync(path.join(pluginDir, 'index.js'), OPENCODE_PLUGIN_SOURCE);
   helpersWritten = true;
 }
 
@@ -101,7 +104,7 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
     files,
     notify: { script: path.join(BIN_DIR, 'notify.cjs'), url: hookUrl },
     codexHook: path.join(BIN_DIR, 'codex-hook.cjs'),
-    plugin: pathToFileURL(path.join(BIN_DIR, 'opencode-plugin.mjs')).href,
+    plugin: pathToFileURL(path.join(BIN_DIR, 'opencode-plugin')).href,
     browser,
   });
 

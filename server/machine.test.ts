@@ -104,6 +104,82 @@ describe('startCliSession on a host', () => {
     expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: ['Codex refused the request (safety filter)'] }));
   });
 
+  it.each(['recovered', 'missing', 'late-hook'])('settles a quiet OpenCode box prompt (%s)', async (mode) => {
+    const cb = claudeCallbacks();
+    const report = '{"verdict":"pass"}';
+    let token = '';
+    const term = { ...terminal(), lastOutputAt: Date.now(), screen: () => 'Ask anything…\nBuild GLM 5.3 Flash\ntab agents  ctrl+p commands' } as unknown as AgentTerminal;
+    const recoverTurn = vi.fn(async () => mode === 'missing' ? null : { ...turn({ ended: true, mark: 'msg_done', text: report }), sessionId: 'ses_box', completedAt: Date.now() });
+    const h = { ...host((plan) => { token = plan.token; return Promise.resolve({ dir: 'box/sessions/t', prompt: plan.prompt, start: () => pty }); }), recoverTurn };
+    startCliSession({ ...opts, cli: 'opencode', terminal: term }, cb, h);
+    await vi.advanceTimersByTimeAsync(STUCK_MS);
+    expect(recoverTurn).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(recoverTurn).toHaveBeenCalledWith('desk', 'opencode', null, expect.any(Number));
+    if (mode === 'late-hook') handleHook(token, { hook_event_name: 'TurnComplete', session_id: 'ses_box', turn_id: 'msg_done', last_assistant_message: report });
+    await vi.advanceTimersByTimeAsync(3000);
+    if (mode === 'missing') {
+      expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: [expect.stringContaining('no usable result')] }));
+    } else {
+      expect(cb.sessionId).toHaveBeenCalledWith('ses_box');
+      expect(cb.turn).toHaveBeenCalledExactlyOnceWith(report);
+      expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: report, turns: 1 }));
+      handleHook(token, { hook_event_name: 'TurnComplete', session_id: 'ses_box', last_assistant_message: report });
+      expect(cb.finished).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('ignores an OpenCode hook arriving while box recovery is in flight', async () => {
+    const cb = claudeCallbacks();
+    let token = '';
+    let recovered!: (turn: ClaudeTurn) => void;
+    const term = { ...terminal(), screen: () => 'Ask anything…' } as unknown as AgentTerminal;
+    const h = { ...host((plan) => { token = plan.token; return { dir: 'sessions/t', prompt: plan.prompt, start: () => pty }; }),
+      recoverTurn: () => new Promise<ClaudeTurn>((resolve) => { recovered = resolve; }),
+    };
+    startCliSession({ ...opts, cli: 'opencode', terminal: term }, cb, h);
+    await vi.advanceTimersByTimeAsync(STUCK_MS + 30_000);
+    handleHook(token, { hook_event_name: 'TurnComplete', session_id: 'ses_box', turn_id: 'msg_done', last_assistant_message: 'Done' });
+    recovered(turn({ ended: true, mark: 'msg_done', text: 'Done' }));
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(cb.turn).toHaveBeenCalledExactlyOnceWith('Done');
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'Done', turns: 1 }));
+  });
+
+  it('ignores a recovered OpenCode turn retried after a follow-up begins', async () => {
+    const cb = claudeCallbacks();
+    let token = '';
+    const term = { ...terminal(), screen: () => 'Ask anything…' } as unknown as AgentTerminal;
+    const h = { ...host((plan) => { token = plan.token; return { dir: 'sessions/t', prompt: plan.prompt, start: () => pty }; }),
+      recoverTurn: async () => turn({ ended: true, mark: 'msg_done', text: 'First' }),
+    };
+    const session = startCliSession({ ...opts, cli: 'opencode', terminal: term }, cb, h);
+    await vi.advanceTimersByTimeAsync(STUCK_MS + 30_000);
+    session.send('Another task');
+    handleHook(token, { hook_event_name: 'TurnComplete', session_id: 'ses_box', turn_id: 'msg_done', last_assistant_message: 'First' });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(cb.finished).not.toHaveBeenCalled();
+    expect(cb.turn).toHaveBeenCalledExactlyOnceWith('First');
+    handleHook(token, { hook_event_name: 'TurnComplete', session_id: 'ses_box', turn_id: 'msg_second', last_assistant_message: 'Second' });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'Second', turns: 2 }));
+  });
+
+  it('leaves OpenCode working while output is arriving, even if the prompt text is unchanged', async () => {
+    const cb = claudeCallbacks();
+    const term = { ...terminal(), lastOutputAt: Date.now(), screen: () => 'Ask anything…' } as unknown as AgentTerminal;
+    const recoverTurn = vi.fn(async () => null);
+    const h = { ...host((plan) => ({ dir: 'sessions/t', prompt: plan.prompt, start: () => pty })), recoverTurn };
+    const session = startCliSession({ ...opts, cli: 'opencode', terminal: term }, cb, h);
+    for (let i = 0; i < 15; i++) {
+      term.lastOutputAt = Date.now();
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+    expect(cb.finished).not.toHaveBeenCalled();
+    expect(recoverTurn).not.toHaveBeenCalled();
+    session.stop();
+  });
+
   it('keeps a hook-reported Codex turn successful when its idle prompt stays on screen', async () => {
     const { cb, hook } = claude(() => '› Ask Codex to do anything', () => null, { cli: 'codex', keepAlive: true });
     const kills = pty.kill.mock.calls.length;
