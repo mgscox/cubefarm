@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { blockers, forHuman, holdUps, issueBlockers, issueWaitReason, issueSpecialty, READY_FOR_HUMAN, schedulable, setDependsOn } from './issues.ts';
+import { blockers, forHuman, holdUps, issueBlockers, issueWaitReason, issueWorkNote, issueSpecialty, READY_FOR_HUMAN, schedulable, setDependsOn } from './issues.ts';
 
 const open = (...n: number[]) => new Set(n);
 
@@ -184,6 +184,30 @@ describe('ready-for-human', () => {
 
 describe('issue wait decisions', () => {
   const issue = { number: 2, title: 'Implement', body: '', labels: [], url: '', createdAt: '' };
+  it.each([
+    { labels: ['needs-triage'], title: 'Implement', reason: 'needs triage' },
+    { labels: ['NEEDS-TRIAGE'], title: 'Implement', reason: 'needs triage' },
+    { labels: ['Needs-Info'], title: 'Implement', reason: 'waiting for info' },
+    { labels: [], title: '[Draft] Foo', reason: 'draft' },
+    { labels: [], title: '[dRaFt] Foo', reason: 'draft' },
+    { labels: [], title: 'DRAFT: Foo', reason: 'draft' },
+  ])('keeps $title ($labels) off the schedule with reason $reason', ({ labels, title, reason }) => {
+    expect(schedulable(labels, title)).toBe(false);
+    expect(issueWaitReason({ ...issue, labels, title }, open())).toBe(reason);
+    expect(issueWorkNote({ ...issue, labels, title })).toBe(reason);
+    expect(issueWaitReason({ ...issue, labels, title, stalled: 'stalled' }, open())).toBe(reason);
+    expect(schedulable([], 'Foo')).toBe(true);
+  });
+
+  it('leaves ready-for-agent optional and matches whole labels and title prefixes', () => {
+    for (const labels of [[], ['ready-for-agent'], ['needs-information'], ['not-needs-triage']]) {
+      for (const title of ['Implement', 'Implement [Draft]', 'Drafting Foo', '[Drafting] Foo']) {
+        expect(schedulable(labels, title)).toBe(true);
+        expect(issueWaitReason({ ...issue, labels, title }, open())).toBeNull();
+      }
+    }
+  });
+
   it('distinguishes unread dependencies from unsupported hosts', () => {
     expect(issueWaitReason({ ...issue, nativeBlockers: null }, open())).toBe('native blockers have not loaded');
     expect(issueWaitReason(issue, open())).toBeNull();

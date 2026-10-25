@@ -1,11 +1,11 @@
 // Pure decisions for retaining explicit issue starts and selecting a desk after a restart.
 import type { IssueInfo, PullInfo, RequestedStart } from '../shared/types.ts';
-import { forHuman, RESEARCH_BRANCH } from '../shared/issues.ts';
+import { forHuman, issueReadinessReason, RESEARCH_BRANCH } from '../shared/issues.ts';
 
 export function retainRequestedStarts(requests: RequestedStart[], issues: IssueInfo[] | null, pulls: PullInfo[] | null): RequestedStart[] {
   return requests.filter((request) => {
     const issue = issues?.find((i) => i.number === request.issueNumber);
-    if (issues && (!issue || forHuman(issue.labels))) return false;
+    if (issues && (!issue || forHuman(issue.labels) || issueReadinessReason(issue))) return false;
     return !pulls?.some((p) => p.closesIssues.includes(request.issueNumber) || p.headRefName.startsWith(`swarm/issue-${request.issueNumber}-`) || p.headRefName.startsWith(`${RESEARCH_BRANCH}${request.issueNumber}-`));
   });
 }

@@ -541,11 +541,13 @@ describe('explicit issue starts across office restarts', () => {
     expect(runTask).toHaveBeenCalledExactlyOnceWith(other, repo, issue(66), undefined);
   });
 
-  it.each(['closed', 'ready-for-human', 'PR'] as const)('drops a requested start that now has status %s', async (status) => {
+  it.each(['closed', 'ready-for-human', 'needs-triage', 'Needs-Info', '[Draft]', 'Draft:', 'PR'] as const)('drops a requested start that now has status %s', async (status) => {
     await swarm.assign('a1', 66);
     restart();
     if (status === 'closed') setIssues(issue(67));
     if (status === 'ready-for-human') setIssues(issue(66, ['Ready-For-Human']), issue(67));
+    if (status === 'needs-triage' || status === 'Needs-Info') setIssues(issue(66, [status]), issue(67));
+    if (status === '[Draft]' || status === 'Draft:') setIssues({ ...issue(66), title: `${status} Foo` }, issue(67));
     if (status === 'PR') s.repoRt.get(repo.id)!.pulls = [{ headRefName: 'swarm/issue-66-ada', closesIssues: [] } as unknown as PullInfo];
     s.schedule();
     expect(runTask).not.toHaveBeenCalled();
@@ -1744,6 +1746,59 @@ describe('native issue dependencies', () => {
     const floor = JSON.parse(s.companyStatus()).floors[0];
     expect(floor.backlog[0].waitsFor).toEqual(['other/repo#2']);
     expect(floor.capacity.longestDependencyChain).toBe(1);
+  });
+});
+
+describe('issues awaiting preparation', () => {
+  const gates = [
+    { labels: ['needs-triage'], title: 'Foo', reason: 'needs triage', release: 'needs-triage label' },
+    { labels: ['Needs-Info'], title: 'Foo', reason: 'waiting for info', release: 'needs-info label' },
+    { labels: [], title: '[Draft] Foo', reason: 'draft', release: 'title prefix' },
+    { labels: [], title: 'dRaFt: Foo', reason: 'draft', release: 'title prefix' },
+  ];
+
+  it.each(gates)('never auto-assigns $title ($labels), reports $reason, then starts after a refresh clears the gate', async ({ labels, title, reason }) => {
+    Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
+    Object.assign(s.repoRt.get(repo.id)!, { lastMergedAt: null });
+    const list = vi.spyOn(s.backend, 'listIssues').mockResolvedValue([{ ...issue(1, labels), title }]);
+    vi.spyOn(s.backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    await swarm.syncRepo(repo.id);
+    expect(ready()).toEqual([]);
+    expect(s.startIssueWork(repo)).toBe(false);
+    expect(runTask).not.toHaveBeenCalled();
+    const floor = JSON.parse(s.companyStatus()).floors[0];
+    expect(floor.capacity.issuesReadyToStart).toBe(0);
+    expect(floor.backlog[0]).toMatchObject({ number: 1, waitReason: reason });
+
+    list.mockResolvedValue([issue(1)]);
+    await swarm.syncRepo(repo.id);
+    expect(ready()).toEqual([1]);
+    const refreshed = JSON.parse(s.companyStatus()).floors[0];
+    expect(refreshed.capacity.issuesReadyToStart).toBe(1);
+    expect(refreshed.backlog[0].waitReason).toBeUndefined();
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(runTask).toHaveBeenCalledOnce();
+  });
+
+  it.each(gates)('refuses manager and CEO starts of $title ($labels) with an actionable 409', async ({ labels, title, reason, release }) => {
+    setIssues({ ...issue(1, labels), title });
+    await expect(swarm.assign('a1', 1)).rejects.toMatchObject({ status: 409, message: expect.stringContaining(reason) });
+    const start = s as unknown as { startIssue(x: { floor: number; number: number }): Promise<string> };
+    await expect(start.startIssue({ floor: 1, number: 1 })).rejects.toMatchObject({ status: 409, message: expect.stringContaining(release) });
+    expect(await s.officeTools().call('start_issue', { floor: 1, number: 1 })).toContain(reason);
+    expect(runTask).not.toHaveBeenCalled();
+    expect(repo.requestedStarts).toEqual([]);
+
+    setIssues(issue(1));
+    expect(await s.officeTools().call('start_issue', { floor: 1, number: 1 })).toContain('started #1');
+    expect(runTask).toHaveBeenCalledOnce();
+  });
+
+  it.each(gates)('leaves $title ($labels) in the backlog while starting other ready work', ({ labels, title }) => {
+    setIssues({ ...issue(1, labels), title }, issue(2, ['ready-for-agent']));
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(runTask).toHaveBeenCalledOnce();
+    expect(runTask.mock.calls[0][2].number).toBe(2);
   });
 });
 

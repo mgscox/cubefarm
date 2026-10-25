@@ -34,7 +34,7 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { AGENT_COMMENT_MARKER, issueBlockers, issueParent, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
 import { CEO_ID, RESEARCHER_ID, type MachineCapacity, type MachineTelemetry } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
@@ -2316,6 +2316,11 @@ export class Swarm {
     if (a.role === 'researcher' && !isResearchIssue(issue.labels)) throw new HttpError(409, `${a.name} is a researcher: they take swarm:${RESEARCH} issues. Label #${issueNumber} swarm:${RESEARCH} or give it to a developer.`);
     if (forHuman(issue.labels)) {
       throw new HttpError(409, `#${issueNumber} is labelled ${READY_FOR_HUMAN}: an agent can't complete it. Remove the label to hand it to a developer.`);
+    }
+    const readiness = issueReadinessReason(issue);
+    if (readiness) {
+      const release = readiness === 'draft' ? 'Remove the [Draft] or Draft: title prefix' : `Remove the ${readiness === 'needs triage' ? 'needs-triage' : 'needs-info'} label once the issue is ready`;
+      throw new HttpError(409, `#${issueNumber} is not ready: ${readiness}. ${release} to hand it to an agent.`);
     }
     if (!explicit && (issueWaitReason(this.workIssue(repo, issue), new Set(this.repoRt.get(repo.id)!.issues.map((i) => i.number))) || noWorkCoolingDown(repo.noWorkEndings?.find((r) => r.issueNumber === issueNumber), this.repoRt.get(repo.id)!.issuesFetchedAt))) throw new HttpError(409, `#${issueNumber} is not ready for automatic work`);
     this.checkIssueClaim(a, issueNumber);
@@ -4760,11 +4765,13 @@ export class Swarm {
           // Only what sets an issue apart, so a long backlog stays short.
           backlog: rt.issues.map((i) => {
             const waitsFor = issueBlockers(i, open);
+            const waitReason = issueWaitReason(this.workIssue(r, i), open);
             return {
               number: i.number,
               title: i.title,
               specialty: issueSpecialty(i.labels) || null,
               ...(waitsFor.length && { waitsFor }),
+              ...(waitReason && { waitReason }),
               ...(this.issueTaken(r, i.number) && { inProgress: true }),
               ...(forHuman(i.labels) && { readyForHuman: true }),
               ...(issueParent(i) && { parent: issueParent(i) }),
