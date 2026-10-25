@@ -4,6 +4,7 @@ import { CommandError, ghJson, run } from './exec.ts';
 import { branchAhead, listIssues } from './github.ts';
 import { LOST_CONVERSATION, STUCK_MS } from './clis.ts';
 import { opencodeTurn } from './opencodeTranscript.ts';
+import { OPENCODE_IDLE_WITH_USAGE } from './fixtures/opencodeScreens.ts';
 import { handleHook, startCliSession } from './cliRunner.ts';
 import type { BoxConnection, CliHost } from './machine.ts';
 import { BOX_CLI_CHECK_MS } from './fleet.ts';
@@ -2575,7 +2576,7 @@ describe('QA rounds', () => {
     const since = Date.now();
     let token = '';
     const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
-    const term = { cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), lastOutputAt: since, screen: () => 'Ask anything…\ntab agents ctrl+p commands' } as unknown as AgentTerminal;
+    const term = { cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), lastOutputAt: since, screen: () => OPENCODE_IDLE_WITH_USAGE } as unknown as AgentTerminal;
     const host: CliHost = {
       prepare: async (plan) => { token = plan.token; return { dir: 'box/sessions/t', prompt: plan.prompt, start: () => pty }; },
       recoverTurn: async () => opencodeTurn({ info: { id: 'ses_box', location: { directory: 'desk' } }, messages: [

@@ -5,8 +5,9 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
+import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
 
@@ -301,18 +302,20 @@ describe('launchArgs', () => {
 });
 
 describe('the idle OpenCode watchdog', () => {
-  it('requires a quiet idle composer and excludes active executions', () => {
-    const idle = 'Ask anything…\nBuild GLM 5.3 Flash\ntab agents ctrl+p commands';
+  it.each([OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE])('recognizes the captured idle footer: %s', (idle) => {
+    expect(opencodeIdlePrompt(idle)).toBe(true);
     const watch = idlePromptWatch(STUCK_MS, 0, 'opencode');
     expect(watch.look(idle, true, 0)).toBeNull();
     expect(watch.look(idle, true, STUCK_MS)).toBe('idle');
     watch.stir(STUCK_MS);
     expect(watch.look(idle, true, 2 * STUCK_MS - 1)).toBeNull();
-    for (const screen of [idle + '\nesc interrupt', idle + '\nesc to cancel', 'Running tests…', 'Permission required']) {
-      const active = idlePromptWatch(STUCK_MS, 0, 'opencode');
-      active.look(screen, true, 0);
-      expect(active.look(screen, true, 2 * STUCK_MS)).toBeNull();
-    }
+  });
+
+  it.each([OPENCODE_WORKING, OPENCODE_WORKING.replace('esc interrupt', 'esc to cancel'), 'Running tests…', 'Permission required'])('excludes an active or unrecognized screen: %s', (screen) => {
+    expect(opencodeIdlePrompt(screen)).toBe(false);
+    const active = idlePromptWatch(STUCK_MS, 0, 'opencode');
+    active.look(screen, true, 0);
+    expect(active.look(screen, true, 2 * STUCK_MS)).toBeNull();
   });
 });
 

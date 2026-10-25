@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { planCli, type CliHost } from './machine.ts';
 import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
 import { STUCK_MS, type ClaudeTurn } from './clis.ts';
+import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
 import type { SessionCallbacks, SessionOptions } from './agentRunner.ts';
 import type { AgentTerminal } from './terminal.ts';
 
@@ -108,7 +109,7 @@ describe('startCliSession on a host', () => {
     const cb = claudeCallbacks();
     const report = '{"verdict":"pass"}';
     let token = '';
-    const term = { ...terminal(), lastOutputAt: Date.now(), screen: () => 'Ask anything…\nBuild GLM 5.3 Flash\ntab agents  ctrl+p commands' } as unknown as AgentTerminal;
+    const term = { ...terminal(), lastOutputAt: Date.now(), screen: () => OPENCODE_IDLE_WITH_USAGE } as unknown as AgentTerminal;
     const recoverTurn = vi.fn(async () => mode === 'missing' ? null : { ...turn({ ended: true, mark: 'msg_done', text: report }), sessionId: 'ses_box', completedAt: Date.now() });
     const h = { ...host((plan) => { token = plan.token; return Promise.resolve({ dir: 'box/sessions/t', prompt: plan.prompt, start: () => pty }); }), recoverTurn };
     startCliSession({ ...opts, cli: 'opencode', terminal: term }, cb, h);
@@ -133,7 +134,7 @@ describe('startCliSession on a host', () => {
     const cb = claudeCallbacks();
     let token = '';
     let recovered!: (turn: ClaudeTurn) => void;
-    const term = { ...terminal(), screen: () => 'Ask anything…' } as unknown as AgentTerminal;
+    const term = { ...terminal(), screen: () => OPENCODE_IDLE_WITH_USAGE } as unknown as AgentTerminal;
     const h = { ...host((plan) => { token = plan.token; return { dir: 'sessions/t', prompt: plan.prompt, start: () => pty }; }),
       recoverTurn: () => new Promise<ClaudeTurn>((resolve) => { recovered = resolve; }),
     };
@@ -149,7 +150,7 @@ describe('startCliSession on a host', () => {
   it('ignores a recovered OpenCode turn retried after a follow-up begins', async () => {
     const cb = claudeCallbacks();
     let token = '';
-    const term = { ...terminal(), screen: () => 'Ask anything…' } as unknown as AgentTerminal;
+    const term = { ...terminal(), screen: () => OPENCODE_IDLE_WITH_USAGE } as unknown as AgentTerminal;
     const h = { ...host((plan) => { token = plan.token; return { dir: 'sessions/t', prompt: plan.prompt, start: () => pty }; }),
       recoverTurn: async () => turn({ ended: true, mark: 'msg_done', text: 'First' }),
     };
@@ -165,14 +166,14 @@ describe('startCliSession on a host', () => {
     expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'Second', turns: 2 }));
   });
 
-  it('leaves OpenCode working while output is arriving, even if the prompt text is unchanged', async () => {
+  it.each(['output', 'interrupt hint'])('leaves OpenCode working with %s, even if the screen is unchanged', async (activity) => {
     const cb = claudeCallbacks();
-    const term = { ...terminal(), lastOutputAt: Date.now(), screen: () => 'Ask anything…' } as unknown as AgentTerminal;
+    const term = { ...terminal(), lastOutputAt: Date.now(), screen: () => activity === 'output' ? OPENCODE_IDLE_WITH_USAGE : OPENCODE_WORKING } as unknown as AgentTerminal;
     const recoverTurn = vi.fn(async () => null);
     const h = { ...host((plan) => ({ dir: 'sessions/t', prompt: plan.prompt, start: () => pty })), recoverTurn };
     const session = startCliSession({ ...opts, cli: 'opencode', terminal: term }, cb, h);
     for (let i = 0; i < 15; i++) {
-      term.lastOutputAt = Date.now();
+      if (activity === 'output') term.lastOutputAt = Date.now();
       await vi.advanceTimersByTimeAsync(60_000);
     }
     expect(cb.finished).not.toHaveBeenCalled();

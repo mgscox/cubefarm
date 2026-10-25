@@ -497,10 +497,10 @@ export function menuWatch(limitMs = STUCK_MS, now = Date.now()) {
   return screenWatch(menuOnScreen, limitMs, now);
 }
 
-/** OpenCode leaves its empty composer and keyboard hints visible after execution settles. */
+/** OpenCode keeps the commands hint after usage replaces the agents hint; active turns also show interrupt. */
 export function opencodeIdlePrompt(screen: string): boolean {
   return !/esc\s+(?:to\s+)?(?:interrupt|cancel)|(?:interrupt|cancel)\s+esc/i.test(screen)
-    && /Ask anything[.…]|(?:^|\n)[ \t┃│]*>[ \t]|tab\s+agents?\b/i.test(screen);
+    && /ctrl\+p\s+commands\b/i.test(screen);
 }
 
 /** Codex can end at its prompt without sending a turn-end hook, particularly after a safety refusal. */
