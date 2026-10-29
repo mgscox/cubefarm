@@ -674,7 +674,9 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     if (cli === 'claude' && !begun && conversation.lost(term.screen())) return finish({ ok: false, text: '', errors: [LOST_CONVERSATION] });
     const ranMs = Date.now() - launchedAt;
     const { ok, error } = cliExit(cli, { code, signal, working, lastText, ranMs, turns, output: live?.outputTail });
-    const startupFailed = !adopt && !opts.reattach && cliStartupFailed({ code, signal, ranMs, turns, sessionId: reportedSessionId });
+    // Codex's early hooks pin its real thread before notify reports it; Claude's launch UUID isn't evidence.
+    const knownSessionId = reportedSessionId ?? (cli === 'codex' ? mainThread : null);
+    const startupFailed = !adopt && !opts.reattach && cliStartupFailed({ code, signal, ranMs, turns, sessionId: knownSessionId });
     finish({ ok, text: lastText, errors: error ? [error] : [], startupFailed });
   };
 

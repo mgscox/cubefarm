@@ -2625,7 +2625,7 @@ describe('QA rounds', () => {
     runFix = vi.spyOn(s, 'runFix').mockResolvedValue() as Mock;
   });
 
-  const crashCli = async (agent: Record<string, unknown>, ranMs = 2_000, turn = false, session = false, prepareMs = 0) => {
+  const crashCli = async (agent: Record<string, unknown>, ranMs = 2_000, turn = false, session = false, prepareMs = 0, options: Partial<Pick<SessionOptions, 'cli' | 'resumeSessionId'>> & { hooks?: Record<string, unknown>[] } = {}) => {
     let token = '';
     const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
     const term = { cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), write: vi.fn(), screen: () => '' } as unknown as AgentTerminal;
@@ -2642,11 +2642,13 @@ describe('QA rounds', () => {
     };
     const finished = vi.fn();
     vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
-    startCliSession({ cwd: 'desk', cli: 'opencode', terminal: term, role: agent.role as 'qa' | 'dev', prompt: 'Work', systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [] }, {
+    const { hooks = [], ...sessionOptions } = options;
+    startCliSession({ cwd: 'desk', cli: 'opencode', ...sessionOptions, terminal: term, role: agent.role as 'qa' | 'dev', prompt: 'Work', systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [] }, {
       log: vi.fn(), tool: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), finished,
       sessionId: (id) => { agent.sessionId = id; },
     }, host);
     await vi.advanceTimersByTimeAsync(prepareMs + ranMs);
+    for (const hook of hooks) handleHook(token, hook);
     if (session) handleHook(token, { hook_event_name: 'SessionStart', session_id: 'ses_test' });
     if (turn) handleHook(token, { hook_event_name: 'TurnComplete', session_id: 'ses_test', last_assistant_message: 'Working on it' });
     pty.onData.mock.calls[0][0]('\x1b[31mError: X\x1b[0m\r\n');
@@ -2709,6 +2711,47 @@ describe('QA rounds', () => {
     expect(result.startupFailed).toBe(false);
     expect(tester.status).toBe('error');
     expect(rec).toMatchObject({ status: 'queued', sessionFailures: 1 });
+  });
+
+  it.each(['SessionStart', 'UserPromptSubmit'])('charges a Codex session reported by %s before its first turn', async (event) => {
+    const tester = addAgent('q1', 'Poirot', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13, sessionId: null });
+    rec.status = 'testing';
+    const result = await crashCli(tester, 2_000, false, false, 0, {
+      cli: 'codex', hooks: [{ hook_event_name: event, session_id: 'existing-session' }],
+    });
+    expect(result).toMatchObject({ startupFailed: false, turns: 0, ok: false });
+    expect(rec).toMatchObject({ status: 'queued', sessionFailures: 1 });
+    expect(tester.status).toBe('error');
+    expect(tester.startupFailed).not.toBe(true);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    const runQa = vi.spyOn(s, 'runQa').mockResolvedValue();
+    expect(s.startPipelineWork(repo)).toBe(true);
+    expect(runQa).toHaveBeenCalledWith(tester, repo, rec);
+  });
+
+  it.each([
+    { cli: 'codex' as const },
+    { cli: 'codex' as const, hooks: [{ hook_event_name: 'SessionStart', session_id: 'sub-session', agent_id: 'subagent' }] },
+    { cli: 'claude' as const },
+  ])('holds a $cli startup failure without a reported main session ($hooks)', async (options) => {
+    const tester = addAgent('q1', 'Poirot', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13, sessionId: null });
+    rec.status = 'testing';
+    const result = await crashCli(tester, 2_000, false, false, 0, options);
+    expect(result).toMatchObject({ startupFailed: true, turns: 0 });
+    expect(rec).toMatchObject({ status: 'queued', sessionFailures: 0 });
+    expect(tester).toMatchObject({ status: 'error', startupFailed: true });
+  });
+
+  it.each(['codex', 'claude', 'opencode'] as const)('charges a resumed %s session even without hooks or turns', async (cli) => {
+    const tester = addAgent('q1', 'Poirot', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13, sessionId: 'existing-session' });
+    rec.status = 'testing';
+    const result = await crashCli(tester, 2_000, false, false, 0, { cli, resumeSessionId: 'existing-session' });
+    expect(result).toMatchObject({ startupFailed: false, turns: 0 });
+    expect(rec).toMatchObject({ status: 'queued', sessionFailures: 1 });
+    expect(tester.startupFailed).not.toBe(true);
   });
 
   it('returns a developer startup crash to the issue queue without failure or no-work charges', async () => {
