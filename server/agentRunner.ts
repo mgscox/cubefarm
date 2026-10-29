@@ -59,6 +59,8 @@ export interface SessionResult {
   structured?: unknown;
   /** The manager interrupted the turn in the agent's terminal (Esc). */
   interrupted?: boolean;
+  /** The CLI crashed before a turn or conversation, within 15 seconds of launch. */
+  startupFailed?: boolean;
 }
 
 export interface SessionCallbacks {

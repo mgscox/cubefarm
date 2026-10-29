@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
+import { stripVTControlCharacters } from 'node:util';
 import { run } from './exec.ts';
 import type { AgentBoot, AgentCli, AgentRole, CliView, EffortLevel } from '../shared/types.ts';
 
@@ -318,13 +319,23 @@ const signalName = (n: number) => Object.entries(os.constants.signals).find(([, 
  * cut off: node-pty reports a signalled exit as code 0, and Codex's launcher re-raises the SIGTERM it gets, so code 0
  * alone doesn't mean it finished.
  */
-export function cliExit(cli: AgentCli, x: { code: number; signal?: number; working: boolean; lastText: string; ranMs: number }): { ok: boolean; error: string | null } {
+export function cliExit(cli: AgentCli, x: { code: number; signal?: number; working: boolean; lastText: string; ranMs: number; turns?: number; output?: string }): { ok: boolean; error: string | null } {
   const label = cliLabel(cli);
   if (x.signal) return { ok: false, error: `${label} was stopped (${signalName(x.signal)}) before finishing.` };
-  if (x.code !== 0) return { ok: false, error: `${label} exited with code ${x.code} before finishing.` };
+  if (x.code !== 0) {
+    const tail = x.turns === 0 || x.ranMs < 15_000
+      ? stripVTControlCharacters(x.output ?? '').split(/\r\n|[\r\n]/).map((s) => s.trim()).filter(Boolean).slice(-20).join('\n').slice(-4000)
+      : '';
+    return { ok: false, error: `${label} exited with code ${x.code} before finishing.${tail ? `\n${tail}` : ''}` };
+  }
   if (x.working) return { ok: false, error: `${label} exited in the middle of its task.` };
   if (x.lastText !== '' || (cli !== 'claude' && x.ranMs > 20_000)) return { ok: true, error: null };
   return { ok: false, error: `${label} exited before finishing.` };
+}
+
+/** A failed launch belongs to the desk, before a conversation or completed turn can belong to the task. */
+export function cliStartupFailed(x: { code: number; signal?: number; turns: number; sessionId: string | null; ranMs: number }): boolean {
+  return (x.code !== 0 || !!x.signal) && x.turns === 0 && !x.sessionId && x.ranMs < 15_000;
 }
 
 // ---------- Claude Code's conversation ----------

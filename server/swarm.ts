@@ -134,6 +134,7 @@ interface PersistedAgent {
   heldRetry?: HeldRetry | null;
   issueStartHead?: string | null;
   lastError: string | null;
+  startupFailed?: boolean;
   box: string | null; // their own box, overriding the floor's (null = the floor's)
   deskBox: string; // where the current task's desk and CLI conversation are ('' = the office's machine)
   logTail: LogLine[];
@@ -852,6 +853,7 @@ export class Swarm {
       hasScreenshot: !!rt.screenshot,
       screenshotAt: rt.screenshot?.at ?? null,
       lastError: a.lastError,
+      startupFailed: a.startupFailed ?? false,
       box: a.box,
       deskBox: a.deskBox,
       boot: rt.boot ?? null,
@@ -1074,7 +1076,7 @@ export class Swarm {
   private refreshWaitingBoxClis() {
     const now = Date.now();
     for (const a of this.state.agents) {
-      if (a.heldRetry || !(FREE.includes(a.status) || (a.status === 'error' && now - (a.endedAt ?? 0) >= ERROR_COOLDOWN_MS))) continue;
+      if (a.startupFailed || a.heldRetry || !(FREE.includes(a.status) || (a.status === 'error' && now - (a.endedAt ?? 0) >= ERROR_COOLDOWN_MS))) continue;
       const where = this.place(a, 'new');
       if (!('wait' in where) || !where.lacks || !this.boxConns.get(where.wait)?.state().reported || this.boxChecks.has(where.wait) || !boxCliCheckDue(this.boxCliCheckedAt.get(where.wait), now)) continue;
       void this.checkBox(where.wait).catch((err) => console.warn('could not check box coding agents', err));
@@ -1450,7 +1452,8 @@ export class Swarm {
 
   private clearTask(a: PersistedAgent) {
     this.nextGeneration(a);
-    Object.assign(a, { status: 'idle', task: null, issueNumber: null, issueTitle: null, branch: null, prNumber: null, prUrl: null, lastError: null, heldRetry: null });
+    // Finishing or closing the task cannot repair a broken CLI; only Clear desk releases that hold.
+    Object.assign(a, { status: a.startupFailed ? 'error' : 'idle', task: null, issueNumber: null, issueTitle: null, branch: null, prNumber: null, prUrl: null, lastError: a.startupFailed ? a.lastError : null, heldRetry: null });
     this.reconcileOrphanedQa();
     this.emitAgent(a);
   }
@@ -2246,6 +2249,7 @@ export class Swarm {
       if (q.devAgentId === id && q.status === 'fixing') this.setQa(q, { status: 'failed' });
     }
     this.agentRt.get(id)?.terminal?.releaseIdle?.();
+    a.startupFailed = false;
     this.clearTask(a);
     this.appendLog(a, [{ kind: 'system', text: '↺ Cleared desk. Ready for new work.' }]);
     this.save();
@@ -2297,6 +2301,10 @@ export class Swarm {
     }
   }
 
+  private checkDesk(a: PersistedAgent) {
+    if (a.startupFailed) throw new HttpError(409, `Clear ${a.name}'s desk before starting more work; their CLI crashed at startup.`);
+  }
+
   async assign(agentId: string, issueNumber: number, note?: string) {
     return this.assignIssue(agentId, issueNumber, note, true);
   }
@@ -2304,6 +2312,7 @@ export class Swarm {
   private async assignIssue(agentId: string, issueNumber: number, note: string | undefined, explicit: boolean) {
     this.ensureOfficeOpen();
     const a = this.agent(agentId);
+    this.checkDesk(a);
     if (a.role === 'ceo') throw new HttpError(400, `${a.name} runs the company; give issues to the developers.`);
     if (a.id === RESEARCHER_ID) throw new HttpError(400, `${a.name} researches for the whole company: send them a brief instead of an issue.`);
     const repo = this.repo(a.repoId);
@@ -2465,6 +2474,7 @@ export class Swarm {
   }
 
   private beginTask(a: PersistedAgent, patch: Partial<PersistedAgent>, banner: string, preparing: string) {
+    this.checkDesk(a);
     if (patch.task === 'issue' || patch.task === 'fix') this.claimIssue(a, patch.issueNumber ?? null, 'preparing');
     const rt = this.agentRt.get(a.id)!;
     this.nextGeneration(a);
@@ -2711,6 +2721,14 @@ export class Swarm {
       a.status = 'stopped'; // The outcome is unknown: don't automatically rerun the task after the error cooldown.
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
       if (rec) this.setQa(rec, { status: 'needs-human', qaAgentId: null, summary: a.lastError });
+    } else if (result.startupFailed && !result.ok && a.status !== 'stopped') {
+      a.startupFailed = true;
+      a.heldRetry = null;
+      this.cancelRequestedStart(a);
+      this.fail(a, result, 'CLI startup; clear the desk before retrying');
+      const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
+      if (a.task === 'qa' && rec?.qaAgentId === a.id) this.setQa(rec, { status: 'queued', qaAgentId: null, summary: a.lastError });
+      else if (a.task === 'fix' && rec?.devAgentId === a.id) this.setQa(rec, { status: 'failed' });
     } else if (a.task === 'qa') await this.onQaFinished(a, repo, result, released);
     else if (a.task === 'fix') await this.onFixFinished(a, repo, result);
     else await this.onIssueFinished(a, repo, result, released, generation);
@@ -3006,6 +3024,7 @@ export class Swarm {
   }
 
   private async prepareQa(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord) {
+    this.checkDesk(a);
     const branch = `qa/pr-${rec.prNumber}-${slugify(a.name)}`;
     const lastTester = rec.qaAgentId;
     this.setQa(rec, { status: 'testing', qaAgentId: a.id });
@@ -3429,12 +3448,12 @@ export class Swarm {
 
   /**
    * Agents on a floor who can take work now. One whose last session failed sits out a short cooldown, then gets work
-   * like everyone else instead of waiting for the manager to reset them.
+   * like everyone else. A startup crash waits for Clear desk instead.
    */
   private available(repo: PersistedRepo, role: AgentRole) {
     const now = Date.now();
     return this.state.agents
-      .filter((a) => a.repoId === repo.id && a.role === role && !a.heldRetry && (FREE.includes(a.status) || (a.status === 'error' && now - (a.endedAt ?? 0) >= ERROR_COOLDOWN_MS)))
+      .filter((a) => a.repoId === repo.id && a.role === role && !a.startupFailed && !a.heldRetry && (FREE.includes(a.status) || (a.status === 'error' && now - (a.endedAt ?? 0) >= ERROR_COOLDOWN_MS)))
       .filter((a) => !('wait' in this.place(a, 'new'))) // their box is offline, or hasn't got their coding agent: they wait
       .sort((x, y) => x.desk - y.desk);
   }
@@ -3503,7 +3522,7 @@ export class Swarm {
       const want = issue ? issueSpecialty(issue.labels) : null;
       // A fix that crashed waits for a developer who hasn't crashed on it, if the floor has one.
       const fresh = (a: PersistedAgent) => !rec.fixCrashes.includes(a.id);
-      const freshOnFloor = this.state.agents.some((a) => a.repoId === repo.id && a.role === 'dev' && fresh(a));
+      const freshOnFloor = this.state.agents.some((a) => a.repoId === repo.id && a.role === 'dev' && !a.startupFailed && fresh(a));
       const pool = freshOnFloor ? devs.filter(fresh) : devs;
       const author = this.state.agents.find((a) => a.id === rec.devAgentId && a.repoId === repo.id && a.role === 'dev') ?? null;
       const headRef = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headRefName ?? null;

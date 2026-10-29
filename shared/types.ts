@@ -312,6 +312,8 @@ export interface AgentView {
   hasScreenshot: boolean;
   screenshotAt: number | null;
   lastError: string | null;
+  /** A launch crash keeps this desk out of scheduling until Clear desk. */
+  startupFailed?: boolean;
   box: string | null; // their own box, overriding the floor's (null = the floor's)
   deskBox: string; // where their current task's desk and CLI are ('' = the office's machine)
   boot: AgentBoot | null; // a new CLI the office hasn't heard from yet (null: it has, or none is starting)

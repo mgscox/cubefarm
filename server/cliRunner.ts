@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, codexTurnThread, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, STUCK_MS, trustKey } from './clis.ts';
+import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cliStartupFailed, codexTurnThread, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, STUCK_MS, trustKey } from './clis.ts';
 import { terminalsAvailable, type Pty } from './ptyClient.ts';
 import { ALLOW } from './ptyProtocol.ts';
 import { localCliHost } from './localCliHost.ts';
@@ -147,6 +147,7 @@ interface LiveCli {
   dir: string;
   resumeId: string | null; // the session a follow-up resumes
   statusLine: string;
+  outputTail?: string;
   /** Browser screenshots already passed on (Codex and OpenCode: collected from the browser's output folder). */
   shots: Set<string>;
   /** The office session driving it; null while it waits at its prompt. */
@@ -231,7 +232,10 @@ function wire(l: LiveCli, office?: OfficeTools) {
   routes.set(l.token, { hook, office });
   l.term.bind({ write: (d) => quietly(() => p.write(d)), resize: (c, r) => quietly(() => p.resize(c, r)) });
   p.onData((data) => {
-    if (lives.get(l.term) === l) l.term.write(data);
+    if (lives.get(l.term) === l) {
+      l.outputTail = ((l.outputTail ?? '') + data).slice(-64_000);
+      l.term.write(data);
+    }
   });
   p.onExit((code, signal) => {
     l.proc = null;
@@ -340,6 +344,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const token = crypto.randomUUID();
   const sessionId = opts.resumeSessionId ?? crypto.randomUUID();
   const started = Date.now();
+  let launchedAt = started;
   const statusLine = `🏢 cubefarm${opts.label ? ` · ${opts.label}` : ''}`;
   const toolNames = new Map<string, string>();
   const officePrompts: string[] = []; // prompts the office typed, so the ones the manager typed are told apart
@@ -378,7 +383,11 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let trustKeys = 0; // keys pressed on a folder-trust question (a few at most)
   let trustedAt = 0;
 
-  const cb: SessionCallbacks = { ...callbacks };
+  let reportedSessionId = opts.resumeSessionId ?? null;
+  const cb: SessionCallbacks = { ...callbacks, sessionId: (id) => {
+    reportedSessionId = id;
+    callbacks.sessionId(id);
+  } };
   const conversation = claudeConversation(opts.resumeSessionId ?? null, (id) => cb.sessionId(id));
   const log = (entries: LogEntry[]) => entries.length && cb.log(entries);
   const setBoot = (state: AgentBoot | null) => {
@@ -663,8 +672,12 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   /** The CLI quit on its own: /exit typed in the terminal, a crash, a signal, or it couldn't start (not signed in, bad flag…). */
   const exited = (code: number, signal?: number) => {
     if (cli === 'claude' && !begun && conversation.lost(term.screen())) return finish({ ok: false, text: '', errors: [LOST_CONVERSATION] });
-    const { ok, error } = cliExit(cli, { code, signal, working, lastText, ranMs: Date.now() - started });
-    finish({ ok, text: lastText, errors: error ? [error] : [] });
+    const ranMs = Date.now() - launchedAt;
+    const { ok, error } = cliExit(cli, { code, signal, working, lastText, ranMs, turns, output: live?.outputTail });
+    // Codex's early hooks pin its real thread before notify reports it; Claude's launch UUID isn't evidence.
+    const knownSessionId = reportedSessionId ?? (cli === 'codex' ? mainThread : null);
+    const startupFailed = !adopt && !opts.reattach && cliStartupFailed({ code, signal, ranMs, turns, sessionId: knownSessionId });
+    finish({ ok, text: lastText, errors: error ? [error] : [], startupFailed });
   };
 
   /** The session transcript on its own machine; recovery also discovers an unreported session id. */
@@ -842,7 +855,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     term.releaseIdle = null;
     live.recoveringBusy = false;
     live.session = { hook, exited };
-    Object.assign(live, { statusLine });
+    Object.assign(live, { statusLine, outputTail: '' });
     remember(live);
     if (live.resumeId && cli !== 'claude') cb.sessionId(live.resumeId); // Claude's hooks say when its conversation is on disk
     if (opts.reattach) begun = true; // preserve a pending transcript finish from before the restart
@@ -893,6 +906,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       if (done) return; // stopped while its thread was being unarchived
       let p: Pty;
       try {
+        launchedAt = Date.now();
         p = prepared.start({ cols: term.cols, rows: term.rows }, metaOf(l));
       } catch (err) {
         setTimeout(() => finish({ ok: false, text: '', errors: [(err as Error).message] }), 0);
