@@ -3017,6 +3017,20 @@ describe('QA rounds', () => {
   });
 
   describe('a crashed fix', () => {
+    it('retries an available fixer when the only fresh developer is held after a startup crash', async () => {
+      const barbara = addAgent('a2', 'Barbara', 'dev', 1);
+      fixCrashes(barbara);
+      Object.assign(barbara, { status: 'error', endedAt: Date.now() });
+      Object.assign(ada, { status: 'working', task: 'fix', prNumber: 13, sessionId: null });
+      Object.assign(rec, { status: 'fixing', devAgentId: 'a1' });
+      await crashCli(ada);
+      expect(ada.startupFailed).toBe(true);
+      expect(rec).toMatchObject({ status: 'failed', fixCrashes: ['a2'] });
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(s.startPipelineWork(repo)).toBe(true);
+      expect(runFix).toHaveBeenCalledExactlyOnceWith(barbara, repo, rec);
+    });
+
     it('goes to another developer next, and to a human once they crash too', () => {
       const barbara = addAgent('a2', 'Barbara', 'dev', 1);
       fixCrashes(ada);

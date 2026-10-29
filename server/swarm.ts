@@ -3522,7 +3522,7 @@ export class Swarm {
       const want = issue ? issueSpecialty(issue.labels) : null;
       // A fix that crashed waits for a developer who hasn't crashed on it, if the floor has one.
       const fresh = (a: PersistedAgent) => !rec.fixCrashes.includes(a.id);
-      const freshOnFloor = this.state.agents.some((a) => a.repoId === repo.id && a.role === 'dev' && fresh(a));
+      const freshOnFloor = this.state.agents.some((a) => a.repoId === repo.id && a.role === 'dev' && !a.startupFailed && fresh(a));
       const pool = freshOnFloor ? devs.filter(fresh) : devs;
       const author = this.state.agents.find((a) => a.id === rec.devAgentId && a.repoId === repo.id && a.role === 'dev') ?? null;
       const headRef = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headRefName ?? null;
