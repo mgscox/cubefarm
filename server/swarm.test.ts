@@ -32,6 +32,7 @@ interface Internals {
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[] };
   repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string; issuesFetchedAt?: number }>;
   agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null; shots?: unknown[]; qaResume?: unknown }>;
+  issueFailures: Map<string, number>;
   pausedUntil: number;
   readyIssues(repo: Repo): { issue: IssueInfo }[];
   startIssueWork(repo: Repo): boolean;
@@ -41,6 +42,7 @@ interface Internals {
   advanceMerge(repo: Repo, rec: QaRec, pull: PullInfo): Promise<boolean>;
   runQa(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   runFix(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
+  recordFinished(agent: unknown, repo: Repo, result: SessionResult, generation: undefined, session: undefined): Promise<void>;
   onQaFinished(agent: unknown, repo: Repo, result: SessionResult, released?: Promise<void>): Promise<void>;
   onIssueFinished(agent: unknown, repo: Repo, result: SessionResult, released: Promise<void>, generation: number | undefined): Promise<void>;
   onFixFinished(agent: unknown, repo: Repo, result: SessionResult): Promise<void>;
@@ -48,6 +50,7 @@ interface Internals {
   broadcast(event: ServerEvent): void;
   save(): void;
   schedule(): void;
+  reconcilePulls(repo: Repo, pulls: PullInfo[]): void;
   recover(agents: Record<string, unknown>[], preparing?: Set<unknown>): void;
   maybeHeartbeat(): void;
   startCeoWork(): void;
@@ -2620,6 +2623,115 @@ describe('QA rounds', () => {
     };
     s.state.qa.push(rec);
     runFix = vi.spyOn(s, 'runFix').mockResolvedValue() as Mock;
+  });
+
+  const crashCli = async (agent: Record<string, unknown>, ranMs = 2_000, turn = false, session = false, prepareMs = 0) => {
+    let token = '';
+    const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
+    const term = { cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), write: vi.fn(), screen: () => '' } as unknown as AgentTerminal;
+    const host: CliHost = {
+      prepare: (plan) => {
+        token = plan.token;
+        const prepared = { dir: 'box/sessions/t', prompt: plan.prompt, start: () => pty };
+        return prepareMs ? new Promise((resolve) => setTimeout(() => resolve(prepared), prepareMs)) : prepared;
+      },
+      recoverTurn: async () => null,
+      hasFile: () => false, claudeTurn: () => null, newShots: () => [], savedShot: () => null,
+      codexThread: async () => undefined, removeDir: vi.fn(), reconnect: async () => [], adopt: () => pty,
+      discard: vi.fn(), hooksReady: vi.fn(), leave: vi.fn(), protect: () => ({ pids: [], markers: [] }),
+    };
+    const finished = vi.fn();
+    vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+    startCliSession({ cwd: 'desk', cli: 'opencode', terminal: term, role: agent.role as 'qa' | 'dev', prompt: 'Work', systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [] }, {
+      log: vi.fn(), tool: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), finished,
+      sessionId: (id) => { agent.sessionId = id; },
+    }, host);
+    await vi.advanceTimersByTimeAsync(prepareMs + ranMs);
+    if (session) handleHook(token, { hook_event_name: 'SessionStart', session_id: 'ses_test' });
+    if (turn) handleHook(token, { hook_event_name: 'TurnComplete', session_id: 'ses_test', last_assistant_message: 'Working on it' });
+    pty.onData.mock.calls[0][0]('\x1b[31mError: X\x1b[0m\r\n');
+    pty.onExit.mock.calls[0][0](1);
+    expect(finished).toHaveBeenCalledOnce();
+    const result = finished.mock.calls[0][0] as SessionResult;
+    await s.recordFinished(agent, repo, result, undefined, undefined);
+    return result;
+  };
+
+  it.each(['tester', 'developer'] as const)('requeues a startup crash and uses the next free %s without charging the PR', async (replacement) => {
+    const tester = addAgent('q1', 'Poirot', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13, sessionId: null });
+    Object.assign(rec, { status: 'testing', round: 1 });
+    const events = vi.spyOn(s, 'broadcast');
+    const result = await crashCli(tester);
+    expect(result).toMatchObject({ startupFailed: true, turns: 0 });
+    expect(tester).toMatchObject({ status: 'error', startupFailed: true, lastError: expect.stringContaining('Error: X') });
+    expect(s.agentRt.get('q1')!.log).toContainEqual(expect.objectContaining({ kind: 'error', text: expect.stringContaining('Error: X') }));
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'agent', agent: expect.objectContaining({ startupFailed: true }) }));
+    expect(rec).toMatchObject({ status: 'queued', sessionFailures: 0, qaAgentId: null, round: 1, summary: expect.stringContaining('Error: X') });
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    const runQa = vi.spyOn(s, 'runQa').mockResolvedValue();
+    expect(s.startPipelineWork(repo)).toBe(false);
+    const next = addAgent('next', 'Nancy', replacement === 'tester' ? 'qa' : 'dev', 1);
+    expect(s.startPipelineWork(repo)).toBe(true);
+    expect(runQa).toHaveBeenCalledWith(next, repo, rec);
+    expect(() => s.beginTask(tester, {}, '', '')).toThrow(/Clear Poirot/);
+    swarm.resetAgent(String(tester.id));
+    expect(tester.startupFailed).toBe(false);
+    runQa.mockClear();
+    expect(s.startPipelineWork(repo)).toBe(true);
+    expect(runQa).toHaveBeenCalledWith(tester, repo, rec);
+  });
+
+  it('keeps a broken developer QA desk blocked when its PR closes', async () => {
+    const tester = addAgent('q1', 'Poirot', 'dev', 1);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13, sessionId: null });
+    rec.status = 'testing';
+    await crashCli(tester);
+    s.reconcilePulls(repo, [{ ...pull, state: 'MERGED' }]);
+    expect(tester).toMatchObject({ status: 'error', startupFailed: true, task: null, lastError: expect.stringContaining('Error: X') });
+    expect(() => s.beginTask(tester, {}, '', '')).toThrow(/Clear Poirot/);
+  });
+
+  it('measures startup from the process launch, after slow box preparation', async () => {
+    const tester = addAgent('q1', 'Poirot', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13, sessionId: null });
+    Object.assign(rec, { status: 'testing', sessionFailures: 1 });
+    const result = await crashCli(tester, 2_000, false, false, 20_000);
+    expect(result.startupFailed).toBe(true);
+    expect(rec).toMatchObject({ status: 'queued', sessionFailures: 1 });
+  });
+
+  it.each([[2_000, true, false], [16_000, false, false], [2_000, false, true]])('still charges a real session failure (%i ms, turn %s, session %s)', async (ms, turn, session) => {
+    const tester = addAgent('q1', 'Poirot', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13, sessionId: null });
+    rec.status = 'testing';
+    const result = await crashCli(tester, ms, turn, session);
+    expect(result.startupFailed).toBe(false);
+    expect(tester.status).toBe('error');
+    expect(rec).toMatchObject({ status: 'queued', sessionFailures: 1 });
+  });
+
+  it('returns a developer startup crash to the issue queue without failure or no-work charges', async () => {
+    setIssues(issue(66));
+    Object.assign(ada, { status: 'working', task: 'issue', issueNumber: 66, prNumber: null, sessionId: null });
+    await crashCli(ada);
+    expect(ada).toMatchObject({ status: 'error', startupFailed: true });
+    expect(s.issueFailures.get(`${repo.id}#66`) ?? 0).toBe(0);
+    expect(repo.noWorkEndings ?? []).toEqual([]);
+    expect(ready()).toEqual([66]);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(s.startIssueWork(repo)).toBe(false);
+    const next = addAgent('a2', 'Barbara', 'dev', 1);
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(runTask).toHaveBeenCalledWith(next, repo, expect.objectContaining({ number: 66 }), undefined);
+  });
+
+  it('returns a fix startup crash without charging the PR fix budget', async () => {
+    Object.assign(ada, { status: 'working', task: 'fix', prNumber: 13, sessionId: null });
+    Object.assign(rec, { status: 'fixing', fixCrashes: [] });
+    await crashCli(ada);
+    expect(rec).toMatchObject({ status: 'failed', fixCrashes: [], sessionFailures: 0, summary: 'Broken' });
+    expect(ada).toMatchObject({ status: 'error', startupFailed: true });
   });
 
   it.each([false, true])('collects an OpenCode box QA report and leaves testing (lost notification: %s)', async (lost) => {

@@ -5,7 +5,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, cliStartupFailed, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
 
@@ -384,6 +384,30 @@ describe('cliExit', () => {
     expect(cliExit('codex', { code: 0, working: false, lastText: '', ranMs: 5_000 })).toEqual({ ok: false, error: 'Codex exited before finishing.' });
     expect(cliExit('opencode', { code: 1, working: true, lastText: '', ranMs: 2_000 }).error).toBe('OpenCode exited with code 1 before finishing.');
   });
+
+  it('includes the last 20 nonblank terminal lines, without ANSI and with a length cap', () => {
+    const x = { code: 1, working: true, lastText: '', ranMs: 2_000, turns: 0 };
+    const output = ['old', ...Array.from({ length: 19 }, (_, i) => `line ${i}`), '', '\x1b[31mError: X\x1b[0m', ''].join('\r\n');
+    const error = cliExit('opencode', { ...x, output }).error!;
+    expect(error).toContain('Error: X');
+    expect(error).not.toContain('old');
+    expect(error).not.toContain('\x1b');
+    expect(error.split('\n')).toHaveLength(21);
+    expect(cliExit('opencode', { ...x, output: 'x'.repeat(10_000) }).error!.length).toBeLessThan(4100);
+    expect(cliExit('opencode', { ...x, ranMs: 60_000, output }).error).toContain('Error: X');
+    expect(cliExit('opencode', { ...x, turns: 1, output }).error).toContain('Error: X');
+    expect(cliExit('opencode', { ...x, turns: 1, ranMs: 60_000, output }).error).not.toContain('Error: X');
+  });
+
+  it('only treats an early failure without a turn or conversation as a broken desk', () => {
+    const x = { code: 1, turns: 0, sessionId: null, ranMs: 2_000 };
+    expect(cliStartupFailed(x)).toBe(true);
+    expect(cliStartupFailed({ ...x, turns: 1 })).toBe(false);
+    expect(cliStartupFailed({ ...x, sessionId: 'session' })).toBe(false);
+    expect(cliStartupFailed({ ...x, ranMs: 15_000 })).toBe(false);
+    expect(cliStartupFailed({ ...x, code: 0 })).toBe(false);
+  });
+
 });
 
 describe("Claude Code's conversation", () => {
