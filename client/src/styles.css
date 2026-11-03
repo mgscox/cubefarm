@@ -1159,6 +1159,13 @@ input.inline:focus {
   height: 100%;
   padding: 8px 4px 4px 10px;
 }
+.live-term-screen.live-term-archive {
+  overflow: auto;
+}
+.live-term-screen.live-term-archive .xterm {
+  width: max-content;
+  height: max-content;
+}
 .live-term-foot {
   display: flex;
   align-items: center;
