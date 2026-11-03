@@ -35,9 +35,11 @@ try {
   }
   console.log(`repo skills verified: ${packed.skills.length}`);
 
-  const specialism = path.join('docs', 'specialisms', 'developer.md');
-  if (!fs.readFileSync(path.join(installed, specialism)).equals(fs.readFileSync(path.join(root, specialism)))) {
-    throw new Error('npm package developer specialism differs from the checkout');
+  for (const name of ['developer.md', 'qa.md']) {
+    const specialism = path.join('docs', 'specialisms', name);
+    if (!fs.readFileSync(path.join(installed, specialism)).equals(fs.readFileSync(path.join(root, specialism)))) {
+      throw new Error(`npm package specialism differs from the checkout: ${name}`);
+    }
   }
 
   const bin = path.join(installed, 'bin', 'cubefarm.js');

@@ -1,0 +1,59 @@
+[
+  {
+    "id": "S-001",
+    "name": "Payment timeout leaves order in inconsistent state",
+    "source": "analysis.R1",
+    "impact": 16,
+    "likelihood": 3,
+    "coverage_priority": 3,
+    "routing_hint": "automated"
+  },
+  {
+    "id": "S-002",
+    "name": "Client price differs from server-computed total",
+    "source": "analysis.R4",
+    "impact": 16,
+    "likelihood": 2,
+    "coverage_priority": 3
+  },
+  {
+    "id": "S-003",
+    "name": "Address validation bypassed via paste",
+    "source": "analysis.R2",
+    "impact": 8,
+    "likelihood": 3,
+    "coverage_priority": 3
+  },
+  {
+    "id": "S-004",
+    "name": "Saved-card selector shows expired cards",
+    "source": "AC-11",
+    "impact": 8,
+    "likelihood": 3,
+    "coverage_priority": 3
+  },
+  {
+    "id": "S-005",
+    "name": "Order summary renders wrong tax for tax-exempt",
+    "source": "AC-5",
+    "impact": 4,
+    "likelihood": 4,
+    "coverage_priority": 3
+  },
+  {
+    "id": "S-006",
+    "name": "Network drop mid-submit retries safely",
+    "source": "AC-13",
+    "impact": 2,
+    "likelihood": 3,
+    "coverage_priority": 3
+  },
+  {
+    "id": "S-007",
+    "name": "XSS in address autocomplete",
+    "source": "hazard",
+    "impact": 8,
+    "likelihood": 2,
+    "coverage_priority": 1
+  }
+]

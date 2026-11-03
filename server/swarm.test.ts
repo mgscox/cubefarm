@@ -3333,8 +3333,6 @@ describe('developer specialism', () => {
 
     const issuePrompt = p.buildSystemAppend(a, repo, '/desk', 'swarm/issue-1-ada');
     const fixPrompt = p.buildSystemAppend(a, repo, '/desk', 'swarm/13', { pr: 13, headRef: 'swarm/13' });
-    const qaPrompt = p.buildQaSystemAppend(a, repo, '/desk', 'qa/pr-13-ada', { number: 13, title: 'Chaser', headRefName: 'swarm/13', url: '' });
-
     const playbook = new URL('../docs/specialisms/developer.md', import.meta.url);
     expect(read).toHaveBeenCalledTimes(2);
     expect(read).toHaveBeenCalledWith(playbook, 'utf8');
@@ -3342,7 +3340,28 @@ describe('developer specialism', () => {
     expect(issuePrompt).toContain('Project-specific ownership');
     expect(fixPrompt).toContain('Edited playbook');
     expect(fixPrompt).not.toContain('First playbook');
-    expect(qaPrompt).not.toContain('playbook');
+  });
+});
+
+describe('QA specialism', () => {
+  it('rereads the QA playbook for both the tester and a developer covering QA', () => {
+    const read = vi.spyOn(syncFs, 'readFileSync').mockReturnValueOnce('QA playbook').mockReturnValueOnce('Edited QA playbook');
+    Object.assign(repo, { links: [], defaultBranch: 'main' });
+    const developer = s.state.agents[0];
+    const tester = { ...developer, role: 'qa', brief: 'Project-specific QA brief' };
+    const pr = { number: 13, title: 'Chaser', headRefName: 'swarm/13', url: '' };
+    const p = s as unknown as Record<string, (...args: unknown[]) => string>;
+
+    const testerPrompt = p.buildQaSystemAppend(tester, repo, '/desk', 'qa/pr-13-tester', pr);
+    const coverPrompt = p.buildQaSystemAppend(developer, repo, '/desk', 'qa/pr-13-ada', pr);
+
+    const playbook = new URL('../docs/specialisms/qa.md', import.meta.url);
+    expect(read.mock.calls).toEqual([[playbook, 'utf8'], [playbook, 'utf8']]);
+    expect(testerPrompt).toContain('QA playbook');
+    expect(testerPrompt).toContain('Project-specific QA brief');
+    expect(coverPrompt).toContain('Edited QA playbook');
+    expect(coverPrompt).toContain('covering for the QA lab');
+    expect(coverPrompt).toContain('Finish with the structured QA report');
   });
 });
 

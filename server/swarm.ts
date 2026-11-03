@@ -313,7 +313,14 @@ const MAX_DESKS: Record<AgentRole, number> = { dev: 12, qa: 3, ceo: 1, researche
 // A floor's researchers sit at developer desks: the two share the floor's desk slots.
 const deskPool = (role: AgentRole) => (role === 'researcher' ? 'dev' : role);
 const ROLE_TITLE: Record<AgentRole, string> = { dev: 'Developer', qa: 'QA tester', ceo: 'CEO', researcher: 'Researcher' };
-const DEVELOPER_SPECIALISM = new URL('../docs/specialisms/developer.md', import.meta.url);
+function readSpecialism(name: 'developer' | 'qa') {
+  try {
+    return syncFs.readFileSync(new URL(`../docs/specialisms/${name}.md`, import.meta.url), 'utf8').trim();
+  } catch (err) {
+    console.warn(`could not read the ${name} specialism`, err);
+    return '';
+  }
+}
 const MAX_QA_ROUNDS = 3;
 // Every agent runs Claude Opus 5.5 at medium effort unless the manager overrides it.
 const DEFAULT_MODEL = 'claude-opus-5-5';
@@ -2848,14 +2855,7 @@ export class Swarm {
 
   private buildSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, fixing?: { pr: number; headRef: string }) {
     if (a.role === 'researcher' && !fixing) return this.researcherSystemAppend(a, { kind: 'floor', repo: repo.fullName, defaultBranch: repo.defaultBranch, summary: repo.summary, mission: repo.mission, cwd, branch, autoMerge: repo.autoMerge });
-    let specialism = '';
-    if (a.role === 'dev') {
-      try {
-        specialism = syncFs.readFileSync(DEVELOPER_SPECIALISM, 'utf8').trim();
-      } catch (err) {
-        console.warn('could not read the developer specialism', err);
-      }
-    }
+    const specialism = a.role === 'dev' ? readSpecialism('developer') : '';
     const linked = this.linkedRepos(repo).map((r) => `- ${r.fullName}: read-only reference clone at ${this.machineFor(a).mainDir(r.fullName)}`);
     const push = fixing ? `git push origin HEAD:${fixing.headRef}` : `git push -u origin ${branch}`;
     return [
@@ -3414,6 +3414,7 @@ export class Swarm {
   }
 
   private buildQaSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, pr: PrDetails) {
+    const specialism = readSpecialism('qa');
     return [
       `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a QA engineer'} on an autonomous agent team ("cubefarm"). Developers open pull requests; you review and independently verify each one before it is merged. Your sign-off is the review: ${repo.autoMerge ? "on this floor a PR you pass merges by itself as soon as GitHub's checks are green, so nobody else reads the code after you. " : ''}Be thorough and skeptical, but fair: fail a PR only for real problems (broken behaviour, failing tests or build, the issue's requirements not met, obvious regressions), not for style preferences.`,
       ...(a.brief ? ['', `Your job description:\n${a.brief}`] : []),
@@ -3436,6 +3437,7 @@ export class Swarm {
       '5. You may write throwaway scripts to probe behaviour, but do not commit them.',
       '',
       'Rules: do not modify the code under test, do not commit, push, comment on, review or merge anything on GitHub. The office posts your report on the pull request. Finish with the structured QA report: verdict, summary, the checks you performed, the commands you ran and one caption per screenshot.',
+      ...(specialism ? ['', specialism] : []),
       ONE_TURN,
     ].join('\n');
   }
