@@ -97,4 +97,6 @@ export const api = {
     call('POST', '/api/telegram', { action, ...extra }),
   approveRequest: (id: string, overrides: { name?: string; model?: string; effort?: string } = {}) => call('POST', `/api/requests/${id}/approve`, overrides),
   rejectRequest: (id: string, note?: string) => call('POST', `/api/requests/${id}/reject`, { note }),
+  retryPublication: (proposalId: string) => call('POST', `/api/publications/${encodeURIComponent(proposalId)}/retry`),
+  demoPublication: (fault: '' | 'lost-create' | 'refused') => call('POST', '/api/publications/demo', { fault }),
 };

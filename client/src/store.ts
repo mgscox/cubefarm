@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CEO_ID, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type PublicationView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { appendPhoneMessage } from '../../shared/phone';
 import { issueBlockers, issueWorkNote } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
@@ -61,6 +61,7 @@ interface State {
   messages: PhoneMessage[];
   phoneReadAt: number;
   telegram?: TelegramView;
+  publications: PublicationView[]; // approved proposals' publications, oldest first
   officeCommit?: string | null; // undefined: the server can't update itself
   officeLifecycle: OfficeLifecycleView;
   officeUpdate?: OfficeUpdateView;
@@ -130,6 +131,7 @@ export const useStore = create<State>((set, get) => ({
   loaded: false,
   officeTelemetry: null,
   officeCapacity: 'unknown',
+  publications: [],
   user: null,
   ghReady: true,
   demo: false,
@@ -215,6 +217,7 @@ export const useStore = create<State>((set, get) => ({
           messages: d.messages,
           phoneReadAt: d.phoneReadAt,
           telegram: d.telegram,
+          publications: d.publications ?? [],
           officeCommit: d.officeCommit,
           officeLifecycle: d.officeLifecycle,
           officeUpdate: d.officeUpdate,
@@ -337,6 +340,12 @@ export const useStore = create<State>((set, get) => ({
       case 'telegram':
         set({ telegram: ev.telegram });
         break;
+      case 'publication': {
+        const publications = get().publications;
+        const known = publications.some((p) => p.proposalId === ev.publication.proposalId);
+        set({ publications: known ? publications.map((p) => (p.proposalId === ev.publication.proposalId ? ev.publication : p)) : [...publications, ev.publication] });
+        break;
+      }
       case 'toast':
         get().pushToast(ev.level, ev.text);
         break;
