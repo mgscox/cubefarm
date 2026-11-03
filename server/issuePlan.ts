@@ -40,7 +40,8 @@ export function normalized(s: string) {
     .toLowerCase()
     .replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')
     .replace(/^\[[ x]\]\s+/, '')
-    .replace(/[`*_]/g, '')
+    .replace(/`/g, '')
+    .replace(/(?<!\w)[*_]+|[*_]+(?!\w)/g, '') // emphasis markers only: user_id keeps its underscore
     .replace(/\s+/g, ' ')
     .replace(/[\s.!?;:,]+$/, '')
     .trim();

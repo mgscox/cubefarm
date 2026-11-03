@@ -114,6 +114,20 @@ describe('Issue Plan drafting', () => {
     ]);
   });
 
+  it('keeps identifiers distinct when matching titles and coverage, while ignoring formatting', () => {
+    const repo = 'a/ids';
+    const ids = [issue(repo, 1, 'Return the user_id field', 'The JSON response includes user_id.')];
+    const idCtx: PlanContext = { ...ctx, floors: [repo], openIssues: () => ids };
+    const entry = { key: 'k', repo, requirement: 'R1', title: 'Return the userid field', brief: 'Add userid.', acceptance: ['The JSON response includes userid'] };
+    expect(draftIssuePlan({ entries: [entry] }, idCtx)).toMatchObject({ ok: true, entries: [{ kind: 'new', brief: 'Add userid.', acceptance: ['The JSON response includes userid'] }] });
+    const overlap = draftIssuePlan({ entries: [{ ...entry, title: 'Expose the id', overlaps: 1 }] }, idCtx);
+    expect(overlap).toMatchObject({ ok: true, entries: [{ kind: 'new', brief: 'Add userid.', acceptance: ['The JSON response includes userid'], covered: [] }] });
+    expect(draftIssuePlan({ entries: [{ ...entry, title: '**Return the `user_id` field**' }] }, idCtx)).toMatchObject({ ok: true, entries: [{ kind: 'existing', issue: { number: 1 } }] });
+    const formatted = draftIssuePlan({ entries: [{ ...entry, title: 'Expose the id', overlaps: 1, acceptance: ['- [ ] The JSON response includes `user_id`', '_Also_ the email'] }] }, idCtx);
+    expect(formatted).toMatchObject({ ok: true, entries: [{ kind: 'new', acceptance: ['_Also_ the email'], covered: ['- [ ] The JSON response includes `user_id`'] }] });
+    expect(normalized('__init__ and snake_case_name')).toBe('init and snake_case_name');
+  });
+
   it('finds cycles and normalizes comparable text', () => {
     expect(dependencyCycle([{ issue: 'a', blockedBy: 'b' }, { issue: 'b', blockedBy: 'c' }])).toBeNull();
     expect(dependencyCycle([{ issue: 'x', blockedBy: 'a' }, { issue: 'a', blockedBy: 'a' }])).toEqual(['a', 'a']);
