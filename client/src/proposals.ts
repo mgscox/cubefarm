@@ -1,15 +1,16 @@
 // What the approval card says about an Idea's Proposals: its stage, the review outcome and unresolved findings.
-import type { IdeaView, ProposalView } from '../../shared/types';
+import type { IdeaReviewCycleView, IdeaView, ProposalView } from '../../shared/types';
+import { ideaStatusLabel } from './ideas';
 
 /** An Idea's Proposals, oldest first; the last one is what the card shows. */
 export function ideaProposals(all: ProposalView[], ideaId: string): ProposalView[] {
   return all.filter((p) => p.ideaId === ideaId).sort((a, b) => a.createdAt - b.createdAt);
 }
 
-export function ideaStage(idea: IdeaView, proposals: ProposalView[]): string {
+export function ideaStage(idea: IdeaView, proposals: ProposalView[], cycle?: IdeaReviewCycleView): string {
   if (idea.status === 'archived') return 'Archived';
   const latest = proposals[proposals.length - 1];
-  if (!latest) return 'Queued';
+  if (!latest) return ideaStatusLabel(idea, cycle);
   const d = latest.decision;
   if (!d) return 'Awaiting decision';
   if (d.action === 'approve') return d.publication?.status === 'accepted' ? 'Approved · handed to publication' : 'Approved · queued for publication';

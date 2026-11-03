@@ -48,6 +48,16 @@ describe('Idea state', () => {
     expect(useStore.getState().ideaRecords).toHaveLength(3);
     expect(useStore.getState().ideaRecords[0].body).toBe('More sources');
   });
+
+  it('keeps one review cycle per Idea', () => {
+    useStore.setState({ ideaReviews: [] });
+    const apply = useStore.getState().apply;
+    const review = { ideaId: 'i1', author: 'lead', reviewers: { evidence: 'a', feasibility: 'b' }, rounds: [{ round: 1, prdRevision: 1, planRevision: 1, reviews: [] }], handoff: null };
+    apply({ type: 'ideaReview', review });
+    apply({ type: 'ideaReview', review: { ...review, rounds: [...review.rounds, { round: 2, prdRevision: 2, planRevision: 2, reviews: [] }] } });
+    apply({ type: 'ideaReview', review: { ...review, ideaId: 'i2' } });
+    expect(useStore.getState().ideaReviews.map((r) => [r.ideaId, r.rounds.length])).toEqual([['i1', 2], ['i2', 1]]);
+  });
 });
 
 describe('Proposal state', () => {

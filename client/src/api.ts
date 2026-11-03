@@ -1,5 +1,5 @@
 import { useStore } from './store';
-import type { IdeaInput, IdeaView, ProposalDecisionInput, ProposalView, AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
+import type { IdeaInput, IdeaView, IdeaReviewCycleView, ProposalDecisionInput, ProposalView, AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
 
 async function call<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -28,6 +28,7 @@ export const api = {
   submitIdea: (input: IdeaInput) => call<IdeaView>('POST', '/api/ideas', input),
   decideProposal: (id: string, decision: ProposalDecisionInput) => call<ProposalView>('POST', `/api/proposals/${encodeURIComponent(id)}/decision`, decision),
   seedDemoProposal: (ideaId: string) => call<ProposalView>('POST', `/api/ideas/${encodeURIComponent(ideaId)}/proposals/demo`),
+  demoIdeaReview: (ideaId: string, fixture: 'agree' | 'disagree') => call<IdeaReviewCycleView>('POST', `/api/ideas/${encodeURIComponent(ideaId)}/demo-review`, { fixture }),
   githubRepos: (owner?: string) => call<GhRepoSummary[]>('GET', `/api/github/repos${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`),
   connectRepo: (fullName: string, floor: FloorOptions = {}) => call<RepoView>('POST', '/api/repos', { fullName, ...floor }),
   createRepo: (body: FloorOptions & { name: string; description: string; visibility: 'private' | 'public'; owner?: string }) =>

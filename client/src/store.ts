@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CEO_ID, type IdeaView, type IdeaRecordView, type ProposalView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type IdeaView, type IdeaReviewCycleView, type IdeaRecordView, type ProposalView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { appendPhoneMessage } from '../../shared/phone';
 import { issueBlockers, issueWorkNote } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
@@ -61,6 +61,7 @@ interface State {
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
   proposals: ProposalView[];
+  ideaReviews: IdeaReviewCycleView[];
   messages: PhoneMessage[];
   phoneReadAt: number;
   telegram?: TelegramView;
@@ -168,6 +169,7 @@ export const useStore = create<State>((set, get) => ({
   ideas: [],
   ideaRecords: [],
   proposals: [],
+  ideaReviews: [],
   messages: [],
   phoneReadAt: 0,
   usage: { state: 'normal', until: null },
@@ -221,6 +223,7 @@ export const useStore = create<State>((set, get) => ({
           ideas: d.ideas ?? [],
           ideaRecords: d.ideaRecords ?? [],
           proposals: d.proposals ?? [],
+          ideaReviews: d.ideaReviews ?? [],
           messages: d.messages,
           phoneReadAt: d.phoneReadAt,
           telegram: d.telegram,
@@ -331,6 +334,9 @@ export const useStore = create<State>((set, get) => ({
         break;
       case 'proposal':
         set({ proposals: [...get().proposals.filter((p) => p.id !== ev.proposal.id), ev.proposal] });
+        break;
+      case 'ideaReview':
+        set({ ideaReviews: [...get().ideaReviews.filter((r) => r.ideaId !== ev.review.ideaId), ev.review] });
         break;
       case 'research':
         set({ research: ev.research });

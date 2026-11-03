@@ -493,7 +493,7 @@ export interface IdeaView {
   links: string[];
   constraints: string;
   floorHints: string[];
-  status: 'queued' | 'archived'; // archived: rejected, kept read-only with its history
+  status: 'queued' | 'reviewing' | 'proposed' | 'archived'; // archived: rejected, kept read-only with its history
   createdAt: number;
   archivedAt?: number;
   linkedFrom?: string;
@@ -565,6 +565,41 @@ export interface ProposalView {
   createdAt: number;
 }
 
+/** Evidence and requirements, or feasibility across floors and dependencies. */
+export type IdeaReviewFocus = 'evidence' | 'feasibility';
+
+export interface IdeaReviewView {
+  focus: IdeaReviewFocus;
+  reviewer: string; // agent id, never the PRD's author
+  prdRevision: number; // the revision this verdict is about
+  verdict: 'endorse' | 'findings';
+  findings: string[];
+  at: number;
+}
+
+export interface IdeaReviewRoundView {
+  round: number; // 1-based, at most MAX_REVIEW_ROUNDS
+  prdRevision: number;
+  planRevision: number; // the Issue Plan paired with that PRD revision
+  reviews: IdeaReviewView[];
+}
+
+export interface IdeaFindingView {
+  focus: IdeaReviewFocus;
+  reviewer: string;
+  text: string;
+}
+
+/** The independent review of an Idea's PRD and Issue Plan, and its handoff to the manager. */
+export interface IdeaReviewCycleView {
+  ideaId: string;
+  author: string; // the lead who writes and revises the PRD
+  reviewers: Record<IdeaReviewFocus, string>;
+  rounds: IdeaReviewRoundView[];
+  handoff: { prdRevision: number; planRevision: number; round: number; endorsed: boolean; unresolved: IdeaFindingView[]; at: number } | null;
+  fixture?: 'agree' | 'disagree'; // demo reviewers' script; absent for production reviews
+}
+
 export interface WorldSnapshot {
   user: string | null; // gh login
   ghReady: boolean;
@@ -581,6 +616,7 @@ export interface WorldSnapshot {
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
   proposals: ProposalView[];
+  ideaReviews: IdeaReviewCycleView[];
   messages: PhoneMessage[];
   phoneReadAt: number; // CEO messages newer than this are unread
   telegram?: TelegramView;
@@ -611,6 +647,7 @@ export type ServerEvent =
   | { type: 'idea'; idea: IdeaView }
   | { type: 'ideaRecord'; record: IdeaRecordView }
   | { type: 'proposal'; proposal: ProposalView }
+  | { type: 'ideaReview'; review: IdeaReviewCycleView }
   | { type: 'message'; message: PhoneMessage }
   | { type: 'phoneRead'; at: number }
   | { type: 'telegram'; telegram: TelegramView }
