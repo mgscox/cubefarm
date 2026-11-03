@@ -186,7 +186,7 @@ export function Overlays() {
     case 'elevator':
       return <ElevatorPanel />;
     case 'manager':
-      return <ManagerConsole initialTab={overlay.tab} initialRepo={overlay.repoId} />;
+      return <ManagerConsole initialTab={overlay.tab} initialRepo={overlay.repoId} initialIdea={overlay.ideaId} />;
     case 'help':
       return <Help />;
   }

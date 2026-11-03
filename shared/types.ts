@@ -478,6 +478,34 @@ export interface ResearchDoc {
   at: number;
 }
 
+/** Manager intake, independent of any selected floor or downstream workflow. */
+export interface IdeaInput {
+  description: string;
+  links?: string[];
+  constraints?: string;
+  floorHints?: string[]; // configured repo ids, advisory only
+}
+
+export interface IdeaView {
+  id: string;
+  description: string;
+  links: string[];
+  constraints: string;
+  floorHints: string[];
+  status: 'queued';
+  createdAt: number;
+}
+
+/** Read-only presentation of records produced by the owning research, review and proposal slices. */
+export interface IdeaRecordView {
+  id: string;
+  ideaId: string;
+  kind: 'research' | 'review' | 'proposal';
+  title: string;
+  body: string;
+  createdAt: number;
+}
+
 export interface WorldSnapshot {
   user: string | null; // gh login
   ghReady: boolean;
@@ -491,6 +519,8 @@ export interface WorldSnapshot {
   requests: HireRequestView[];
   ceo: CeoInfo;
   research: ResearchInfo;
+  ideas: IdeaView[];
+  ideaRecords: IdeaRecordView[];
   messages: PhoneMessage[];
   phoneReadAt: number; // CEO messages newer than this are unread
   telegram?: TelegramView;
@@ -518,6 +548,8 @@ export type ServerEvent =
   | { type: 'request'; request: HireRequestView }
   | { type: 'ceo'; ceo: CeoInfo }
   | { type: 'research'; research: ResearchInfo }
+  | { type: 'idea'; idea: IdeaView }
+  | { type: 'ideaRecord'; record: IdeaRecordView }
   | { type: 'message'; message: PhoneMessage }
   | { type: 'phoneRead'; at: number }
   | { type: 'telegram'; telegram: TelegramView }

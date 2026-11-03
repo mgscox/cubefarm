@@ -23,6 +23,7 @@ import { planDevFix, type FixReason } from './fixPlan.ts';
 import { fixNeedsHuman, fixOutcome } from './fixOutcome.ts';
 import { fixGoesTo, prepFailure, prepHeld, PREP_HOLD_MS } from './handOut.ts';
 import { HttpError } from './httpError.ts';
+import { queuedIdea } from './ideas.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
@@ -52,6 +53,8 @@ import type {
   CliView,
   EffortLevel,
   HireRequestView,
+  IdeaView,
+  IdeaRecordView,
   IssueInfo,
   NoWorkEnding,
   LogLine,
@@ -196,6 +199,8 @@ interface Persisted {
   requests: HireRequestView[];
   ceo: CeoState;
   research: ResearchState;
+  ideas: IdeaView[];
+  ideaRecords: IdeaRecordView[];
   messages: PhoneMessage[];
   phoneReadAt: number;
   telegram: TelegramState;
@@ -458,6 +463,8 @@ export class Swarm {
     requests: [],
     ceo: { queue: [], job: null, lastReviewAt: null, lastFingerprint: null },
     research: { queue: [], job: null, done: [] },
+    ideas: [],
+    ideaRecords: [],
     messages: [],
     phoneReadAt: 0,
     telegram: emptyTelegram(),
@@ -604,6 +611,8 @@ export class Swarm {
         requests: loaded.requests ?? [],
         ceo: { ...this.state.ceo, ...loaded.ceo },
         research: { ...this.state.research, ...loaded.research },
+        ideas: loaded.ideas ?? [],
+        ideaRecords: loaded.ideaRecords ?? [],
         messages: loaded.messages ?? [],
         phoneReadAt: loaded.phoneReadAt ?? 0,
         telegram: loaded.telegram ?? emptyTelegram(),
@@ -893,6 +902,8 @@ export class Swarm {
       requests: this.state.requests,
       ceo: this.ceoInfo(),
       research: this.researchInfo(),
+      ideas: this.state.ideas,
+      ideaRecords: this.state.ideaRecords,
       messages: this.state.messages.slice(-100),
       phoneReadAt: this.state.phoneReadAt,
       telegram: this.telegram.view(),
@@ -996,6 +1007,28 @@ export class Swarm {
     const tmp = `${STATE_FILE}.tmp`;
     await fs.writeFile(tmp, JSON.stringify(this.state, null, 2));
     await fs.rename(tmp, STATE_FILE);
+  }
+
+  // ---------- ideas ----------
+
+  private ideaSubmissions: Promise<unknown> = Promise.resolve();
+
+  submitIdea(input: unknown): Promise<IdeaView> {
+    // Serialize intake so a failed save cannot be acknowledged by a concurrent submission.
+    const submit = this.ideaSubmissions.then(async () => {
+      const idea = queuedIdea(input, this.state.repos.map((r) => r.id), crypto.randomUUID(), Date.now());
+      this.state.ideas.push(idea);
+      try {
+        await this.writeState();
+      } catch (err) {
+        this.state.ideas = this.state.ideas.filter((i) => i.id !== idea.id);
+        throw err;
+      }
+      this.broadcast({ type: 'idea', idea });
+      return idea;
+    });
+    this.ideaSubmissions = submit.catch(() => undefined);
+    return submit;
   }
 
   // ---------- lookups ----------
@@ -1820,6 +1853,7 @@ export class Swarm {
     if (this.handoffRetry) clearTimeout(this.handoffRetry);
     this.handoffRetry = null;
     await this.managerCommands;
+    await this.ideaSubmissions;
     await this.writeState().catch((err) => console.warn('could not save the state', err));
     await this.backend.releaseClis(restart); // before the terminals are saved: whatever they print next waits in the keeper
     for (const c of this.boxConns.values()) c.close();

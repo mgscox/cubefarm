@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CEO_ID, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type IdeaView, type IdeaRecordView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { appendPhoneMessage } from '../../shared/phone';
 import { issueBlockers, issueWorkNote } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
@@ -13,11 +13,11 @@ export type Overlay =
   | { kind: 'kanban'; repoId: string }
   | { kind: 'app'; repoId: string }
   | { kind: 'elevator' }
-  | { kind: 'manager'; tab?: ManagerTab; repoId?: string }
+  | { kind: 'manager'; tab?: ManagerTab; repoId?: string; ideaId?: string }
   | { kind: 'phone'; tab?: PhoneTab; requestId?: string }
   | { kind: 'help' };
 
-export type ManagerTab = 'floors' | 'ceo' | 'team' | 'fleet' | 'issues' | 'settings';
+export type ManagerTab = 'floors' | 'ceo' | 'team' | 'fleet' | 'issues' | 'ideas' | 'settings';
 
 export interface Focus {
   id: string;
@@ -58,6 +58,8 @@ interface State {
   requests: HireRequestView[];
   ceo: CeoInfo;
   research: ResearchInfo;
+  ideas: IdeaView[];
+  ideaRecords: IdeaRecordView[];
   messages: PhoneMessage[];
   phoneReadAt: number;
   telegram?: TelegramView;
@@ -162,6 +164,8 @@ export const useStore = create<State>((set, get) => ({
   requests: [],
   ceo: { queue: [], job: null, lastReviewAt: null, nextReviewAt: null },
   research: { queue: [], job: null, done: [] },
+  ideas: [],
+  ideaRecords: [],
   messages: [],
   phoneReadAt: 0,
   usage: { state: 'normal', until: null },
@@ -212,6 +216,8 @@ export const useStore = create<State>((set, get) => ({
           requests: d.requests,
           ceo: d.ceo,
           research: d.research ?? { queue: [], job: null, done: [] },
+          ideas: d.ideas ?? [],
+          ideaRecords: d.ideaRecords ?? [],
           messages: d.messages,
           phoneReadAt: d.phoneReadAt,
           telegram: d.telegram,
@@ -313,6 +319,12 @@ export const useStore = create<State>((set, get) => ({
       }
       case 'ceo':
         set({ ceo: ev.ceo });
+        break;
+      case 'idea':
+        set({ ideas: [...get().ideas.filter((i) => i.id !== ev.idea.id), ev.idea] });
+        break;
+      case 'ideaRecord':
+        set({ ideaRecords: [...get().ideaRecords.filter((r) => r.ideaId !== ev.record.ideaId || r.kind !== ev.record.kind || r.id !== ev.record.id), ev.record] });
         break;
       case 'research':
         set({ research: ev.research });
