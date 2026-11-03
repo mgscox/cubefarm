@@ -58,18 +58,24 @@ export function LiveTerminal({ agentId, className, idleHint = 'Not running · a 
     let ws: WebSocket | null = null;
     let closed = false;
     let ready = false; // the snapshot is on screen: sizes we send now describe what the viewer sees
+    let running = false;
     let retry: number | undefined;
     let frame = 0;
     const send = (m: TermClientMessage) => {
       if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m));
     };
     const fitAndTell = () => {
+      if (closed || !ready) return;
+      // A stopped full-screen CLI cannot redraw its layout. Keep the saved cells and let a small tile scroll.
+      const archived = !running && term.buffer.active.type === 'alternate';
+      el.classList.toggle('live-term-archive', archived);
+      if (archived) return;
       try {
         fit.fit();
       } catch {
         return; // not laid out yet
       }
-      if (ready) send({ t: 'resize', cols: term.cols, rows: term.rows });
+      if (running) send({ t: 'resize', cols: term.cols, rows: term.rows });
     };
     const connect = () => {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -81,6 +87,7 @@ export function LiveTerminal({ agentId, className, idleHint = 'Not running · a 
         if (m.t === 'snapshot') {
           // Replayed at the size it was drawn at, then fitted to this viewer (the CLI redraws for the new size).
           ready = false;
+          running = m.live;
           term.reset();
           term.resize(m.cols, m.rows);
           term.write(m.data, () => {
@@ -91,7 +98,11 @@ export function LiveTerminal({ agentId, className, idleHint = 'Not running · a 
           setLive(m.live);
         } else if (m.t === 'data') term.write(m.data);
         else if (m.t === 'size' && (m.cols !== term.cols || m.rows !== term.rows)) term.resize(m.cols, m.rows);
-        else if (m.t === 'live') setLive(m.live);
+        else if (m.t === 'live') {
+          running = m.live;
+          setLive(m.live);
+          term.write('', fitAndTell);
+        }
       };
       socket.onclose = (e) => {
         if (ws === socket) ws = null;

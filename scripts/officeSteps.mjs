@@ -49,11 +49,14 @@ const DEPENDENCY_FILES = ['package.json', 'package-lock.json'];
 
 /**
  * What the pulled files need: `npm install` when the root package.json or lockfile changed, and in start mode (the
- * built office) `npm run build` whenever anything changed.
+ * built office) `npm run build` whenever anything changed. Skill changes also need validation in dev mode.
  */
 export function stepsFor(changedFiles, { startMode }) {
   const files = changedFiles.map((f) => f.trim().replace(/\\/g, '/')).filter(Boolean);
-  return { install: files.some((f) => DEPENDENCY_FILES.includes(f)), build: startMode && files.length > 0 };
+  return {
+    install: files.some((f) => DEPENDENCY_FILES.includes(f)),
+    build: (startMode && files.length > 0) || files.some((f) => f.startsWith('skills/')),
+  };
 }
 
 /**

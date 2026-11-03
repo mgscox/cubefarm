@@ -1,10 +1,14 @@
 import { create } from 'zustand';
-import { CEO_ID, type IdeaView, type IssuePlanView, type IdeaRecordView, type IdeaReviewCycleView, type ProposalView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type IdeaView, type IssuePlanView, type IdeaReviewCycleView, type IdeaRecordView, type ProposalView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type PublicationView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { appendPhoneMessage } from '../../shared/phone';
 import { hasLabel, issueBlockers, issueReadinessReason, issueWorkNote, NEEDS_HUMAN, NEEDS_REVIEW } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
 export type Agent = Omit<AgentView, 'log'>;
+
+/** A publication the Issues tab can draw: the server only sends these, but one bad event shouldn't crash the console. */
+export const isPublication = (p: PublicationView | null | undefined): p is PublicationView =>
+  !!p && typeof p.proposalId === 'string' && Array.isArray(p.issues) && Array.isArray(p.snapshot?.issues);
 
 export type PhoneTab = 'chat' | 'hires' | 'company' | 'games';
 
@@ -66,6 +70,7 @@ interface State {
   messages: PhoneMessage[];
   phoneReadAt: number;
   telegram?: TelegramView;
+  publications: PublicationView[]; // approved proposals' publications, oldest first
   officeCommit?: string | null; // undefined: the server can't update itself
   officeLifecycle: OfficeLifecycleView;
   officeUpdate?: OfficeUpdateView;
@@ -135,6 +140,7 @@ export const useStore = create<State>((set, get) => ({
   loaded: false,
   officeTelemetry: null,
   officeCapacity: 'unknown',
+  publications: [],
   user: null,
   ghReady: true,
   demo: false,
@@ -230,6 +236,7 @@ export const useStore = create<State>((set, get) => ({
           messages: d.messages,
           phoneReadAt: d.phoneReadAt,
           telegram: d.telegram,
+          publications: (d.publications ?? []).filter(isPublication),
           officeCommit: d.officeCommit,
           officeLifecycle: d.officeLifecycle,
           officeUpdate: d.officeUpdate,
@@ -367,6 +374,13 @@ export const useStore = create<State>((set, get) => ({
       case 'telegram':
         set({ telegram: ev.telegram });
         break;
+      case 'publication': {
+        if (!isPublication(ev.publication)) break; // a malformed record must never blank the manager's console
+        const publications = get().publications;
+        const known = publications.some((p) => p.proposalId === ev.publication.proposalId);
+        set({ publications: known ? publications.map((p) => (p.proposalId === ev.publication.proposalId ? ev.publication : p)) : [...publications, ev.publication] });
+        break;
+      }
       case 'toast':
         get().pushToast(ev.level, ev.text);
         break;

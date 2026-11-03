@@ -70,6 +70,19 @@ describe('Idea state', () => {
   });
 });
 
+describe('publication state', () => {
+  it('ignores a malformed publication instead of storing it', () => {
+    useStore.setState({ publications: [] });
+    const apply = useStore.getState().apply;
+    apply({ type: 'publication', publication: { proposalId: '__proto__' } as never });
+    apply({ type: 'publication', publication: null as never });
+    expect(useStore.getState().publications).toEqual([]);
+    const good = { proposalId: 'p1', issues: [], snapshot: { issues: [] } } as never;
+    apply({ type: 'publication', publication: good });
+    expect(useStore.getState().publications).toEqual([good]);
+  });
+});
+
 describe('Proposal state', () => {
   it('replaces a Proposal by id when its decision or publication changes', () => {
     useStore.setState({ proposals: [] });

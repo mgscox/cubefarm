@@ -1,8 +1,11 @@
+import syncFs from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { emptyTelegram, TelegramMirror, telegramToken, telegramTransport, type TelegramState, type TelegramTransport } from './telegram.ts';
-import { createDemoTelegram } from './demo.ts';
+import { createDemoTelegram, demoApprovedProposal, demoTracker } from './demo.ts';
+import { loadPublications, Publisher } from './publication.ts';
+import { approvedHold, blockerKey, readBlocker, type BlockerReading } from './approvedBlockers.ts';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
 import type { BoxConnection, Machine } from './machine.ts';
@@ -43,7 +46,7 @@ import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
-import { CEO_ID, RESEARCHER_ID, type MachineCapacity, type MachineTelemetry } from '../shared/types.ts';
+import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
 import { isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchFiledAt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
 import type {
@@ -222,6 +225,8 @@ interface Persisted {
   officeId: string;
   boxes: PersistedBox[];
   officeCapacity?: MachineCapacity;
+  /** Approved Proposals' publications by proposal id: their snapshot, issue identities and progress. */
+  publications: Record<string, PublicationView>;
 }
 
 interface Shot {
@@ -307,6 +312,7 @@ const MAX_DESKS: Record<AgentRole, number> = { dev: 12, qa: 3, ceo: 1, researche
 // A floor's researchers sit at developer desks: the two share the floor's desk slots.
 const deskPool = (role: AgentRole) => (role === 'researcher' ? 'dev' : role);
 const ROLE_TITLE: Record<AgentRole, string> = { dev: 'Developer', qa: 'QA tester', ceo: 'CEO', researcher: 'Researcher' };
+const DEVELOPER_SPECIALISM = new URL('../docs/specialisms/developer.md', import.meta.url);
 const MAX_QA_ROUNDS = 3;
 // Every agent runs Claude Opus 5.5 at medium effort unless the manager overrides it.
 const DEFAULT_MODEL = 'claude-opus-5-5';
@@ -490,6 +496,7 @@ export class Swarm {
     managerInputs: [],
     officeId: '',
     boxes: [],
+    publications: {},
   };
   /** Links to the boxes: removed ones stay until the CLIs still running there have ended. */
   private boxConns = new Map<string, BoxConnection>();
@@ -544,6 +551,8 @@ export class Swarm {
   private clis: CliView[] = []; // coding-agent CLIs found on this machine (detected at startup)
 
   readonly telegram: TelegramMirror;
+  /** Publishes approved Proposals' Issue Plans; later slices read issue identities and progress from it. */
+  readonly publisher: Publisher;
   private demoTelegram: ReturnType<typeof createDemoTelegram> | null = null;
   private proposalWorker: ProposalWorker | null;
   private managerCommands: Promise<void> = Promise.resolve();
@@ -570,6 +579,19 @@ export class Swarm {
       decide: (id, approve) => approve ? this.approveRequest(id) : this.rejectRequest(id),
       request: (id) => this.state.requests.find((r) => r.id === id),
       ceoName: () => this.ceo()?.name ?? 'Joi',
+    });
+    this.publisher = new Publisher({
+      tracker: backend,
+      floors: () => this.state.repos.map((r) => r.fullName),
+      fixtures: backend.demo,
+      records: () => this.state.publications,
+      commit: () => this.writeState(),
+      emit: (publication) => this.broadcast({ type: 'publication', publication }),
+      released: (repo) => {
+        const r = this.state.repos.find((x) => x.fullName.toLowerCase() === repo.toLowerCase());
+        if (r) void this.syncRepo(r.id).then(() => this.schedule());
+      },
+      notify: (level, text) => this.toast(level, text),
     });
     this.previews = new Previews(backend, {
       emit: (id) => {
@@ -649,6 +671,7 @@ export class Swarm {
         officeId: typeof loaded.officeId === 'string' ? loaded.officeId : '',
         boxes: (loaded.boxes ?? []).filter((b) => b && typeof b.id === 'string' && typeof b.destination === 'string'),
         officeCapacity: loaded.officeCapacity ?? 'unknown',
+        publications: loadPublications(loaded.publications),
       };
       for (const m of this.state.messages) this.messageSeq = Math.max(this.messageSeq, m.id + 1);
       if (!EFFORTS.includes(this.state.settings.defaultEffort)) this.state.settings.defaultEffort = 'medium';
@@ -776,6 +799,7 @@ export class Swarm {
     for (const r of this.state.ideaReviews) this.scheduleIdeaReview(r.ideaId);
     this.save();
     await this.refreshOfficeLifecycle().catch((err) => console.warn('could not save closing office state', err));
+    this.publisher.resumeAll();
     setTimeout(() => this.schedule(), 1000);
   }
 
@@ -949,6 +973,7 @@ export class Swarm {
       officeCommit: this.officeHead?.slice(0, 7) ?? null,
       officeLifecycle: this.officeLifecycleView(),
       officeUpdate: this.officeHead ? this.officeUpdateView() : undefined,
+      publications: this.publisher.list(),
     };
   }
 
@@ -2082,6 +2107,7 @@ export class Swarm {
    */
   async shutdown(restart = false): Promise<void> {
     this.stopResources?.();
+    this.publisher.stop();
     await this.telegram.stop();
     if (this.handoffRetry) clearTimeout(this.handoffRetry);
     this.handoffRetry = null;
@@ -2134,7 +2160,21 @@ export class Swarm {
 
   private workIssue(repo: PersistedRepo, issue: IssueInfo): IssueInfo {
     const record = retainNoWork(repo.noWorkEndings ?? [], [issue])[0];
-    return { ...issue, stalled: record && record.count >= 2 ? STALLED : undefined };
+    const held = approvedHold(this.publisher.issueOrigin(repo.fullName, issue.number), this.blockerReadings) ?? undefined;
+    return { ...issue, stalled: record && record.count >= 2 ? STALLED : undefined, held };
+  }
+
+  /** Re-read the approved prerequisites of this floor's Idea issues from the tracker, wherever they live. */
+  private async readApprovedBlockers(repo: PersistedRepo, issues: IssueInfo[]) {
+    const wanted = new Map<string, { repo: string; number: number }>();
+    for (const i of issues) {
+      for (const b of this.publisher.issueOrigin(repo.fullName, i.number)?.blockers ?? []) {
+        if (b.repo !== null && b.number !== null) wanted.set(blockerKey(b.repo, b.number), { repo: b.repo, number: b.number });
+      }
+    }
+    await Promise.all([...wanted].map(async ([key, b]) => {
+      this.blockerReadings.set(key, await readBlocker(() => this.backend.readIssue(b.repo, b.number)));
+    }));
   }
 
   private setNoWorkEndings(repo: PersistedRepo, records: NoWorkEnding[]) {
@@ -2153,6 +2193,7 @@ export class Swarm {
       if (issues.status === 'fulfilled') {
         rt.issuesFetchedAt = started;
         this.setNoWorkEndings(repo, retainNoWork(repo.noWorkEndings ?? [], issues.value));
+        await this.readApprovedBlockers(repo, issues.value);
       }
       const requests = retainRequestedStarts(repo.requestedStarts, issues.status === 'fulfilled' ? issues.value : null, pullResult.status === 'fulfilled' ? pullResult.value.pulls : null);
       if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests);
@@ -2245,6 +2286,39 @@ export class Swarm {
     if (assignTo) await this.assign(assignTo, number);
     else setTimeout(() => this.schedule(), 200);
     return number;
+  }
+
+  // ---------- Ideas: publication ----------
+
+  /**
+   * Publish an approved Proposal: the seam the manager's decision hands its recorded approval to. A repeat of the same
+   * approval returns the recorded publication; nothing outside the demo and tests accepts a fixture approval.
+   */
+  publishApproved(snapshot: ApprovedSnapshot): Promise<PublicationView> {
+    return this.publisher.publish(snapshot);
+  }
+
+  retryPublication(proposalId: string): PublicationView {
+    return this.publisher.retry(proposalId);
+  }
+
+  /**
+   * The demo's seeded approved Proposal on floor 1, optionally with a fault at the fake tracker: a create whose
+   * response is lost, or the repo refusing writes for a while.
+   */
+  async publishDemoProposal(fault: string): Promise<PublicationView> {
+    if (!this.backend.demo) throw new HttpError(404, 'Seeded proposals exist only in the demo office.');
+    const repo = this.state.repos.find((r) => r.floor === 1) ?? this.state.repos[0];
+    if (!repo) throw new HttpError(400, 'Connect a floor first.');
+    if (fault === 'lost-create') demoTracker.lostCreates++;
+    else if (fault === 'refused') demoTracker.refused.set(repo.fullName, Date.now() + 20_000);
+    else if (fault && fault !== 'blocked') throw new HttpError(400, 'fault must be lost-create, refused or blocked.');
+    if (fault !== 'blocked') return this.publishApproved(demoApprovedProposal(repo.fullName));
+    // An approved prerequisite on another floor, so the guard holds the published issue until that one is merged.
+    const floors = [...this.state.repos.filter((r) => r !== repo), repo];
+    const prerequisite = floors.map((r) => ({ repo: r.fullName, issue: this.repoRt.get(r.id)?.issues[0] })).find((x) => x.issue);
+    if (!prerequisite) throw new HttpError(400, 'No open issue to wait for.');
+    return this.publishApproved(demoApprovedProposal(repo.fullName, Date.now(), { repo: prerequisite.repo, number: prerequisite.issue!.number }));
   }
 
   async mergePull(repoId: string, number: number, method: 'squash' | 'merge' | 'rebase' = 'squash', approval?: { reason: string }) {
@@ -2598,6 +2672,9 @@ export class Swarm {
     if (forHuman(issue.labels)) {
       throw new HttpError(409, `#${issueNumber} is labelled ${READY_FOR_HUMAN}: an agent can't complete it. Remove the label to hand it to a developer.`);
     }
+    // Approved prerequisites hold an Idea issue on both start paths: the manager can't override its approved plan.
+    const held = this.workIssue(repo, issue).held;
+    if (held) throw new HttpError(409, `#${issueNumber} is held by its approved plan: ${held}.`);
     const readiness = issueReadinessReason(issue);
     if (readiness) {
       const label = readiness === 'needs triage' ? 'needs-triage' : readiness === 'waiting for info' ? 'needs-info' : NEEDS_HUMAN;
@@ -2710,12 +2787,21 @@ export class Swarm {
 
   private buildSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, fixing?: { pr: number; headRef: string }) {
     if (a.role === 'researcher' && !fixing) return this.researcherSystemAppend(a, { kind: 'floor', repo: repo.fullName, defaultBranch: repo.defaultBranch, summary: repo.summary, mission: repo.mission, cwd, branch, autoMerge: repo.autoMerge });
+    let specialism = '';
+    if (a.role === 'dev') {
+      try {
+        specialism = syncFs.readFileSync(DEVELOPER_SPECIALISM, 'utf8').trim();
+      } catch (err) {
+        console.warn('could not read the developer specialism', err);
+      }
+    }
     const linked = this.linkedRepos(repo).map((r) => `- ${r.fullName}: read-only reference clone at ${this.machineFor(a).mainDir(r.fullName)}`);
     const push = fixing ? `git push origin HEAD:${fixing.headRef}` : `git push -u origin ${branch}`;
     return [
       `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a software engineer'} on an autonomous agent team ("cubefarm"). Several teammates work in parallel on other issues of the same repository, each in their own git worktree. Nobody is watching live to answer questions, so make sensible decisions yourself and record assumptions in the PR description. The manager may occasionally send you messages; follow their instructions.`,
       `Every pull request is reviewed and tested by a QA teammate. ${repo.autoMerge ? "Once they sign off and GitHub's checks pass, the office merges it by itself" : 'Once they sign off, the manager merges it'}. If they find problems, or checks fail, or it conflicts with the default branch, you will get the details; fix them on the same branch.`,
       a.brief ? `\nYour job description:\n${a.brief}` : '',
+      specialism ? `\n${specialism}` : '',
       '',
       `Repository: ${repo.fullName} (default branch: ${repo.defaultBranch})`,
       repo.summary ? `Project: ${repo.summary}` : '',
@@ -3738,6 +3824,7 @@ export class Swarm {
 
   private scheduleOffset = 0;
   private issueFailures = new Map<string, number>(); // `${repoId}#${issue}` → failed sessions on it
+  private blockerReadings = new Map<string, BlockerReading>(); // blockerKey → latest read of an approved prerequisite
   private nudged = new Set<string>(); // `${repoId}#${issue}`: its developer was asked once to finish the missing PR
   private pausedUntil = 0; // Claude's usage limit was hit: nothing new starts before this
   private pacingUntil = 0; // Claude warned about usage: new issues are paced until this

@@ -28,7 +28,9 @@
   "files": [
     "bin",
     "dist",
-    "dist-server"
+    "dist-server",
+    "docs/specialisms/developer.md",
+    "skills"
   ],
   "engines": {
     "node": ">=22"
@@ -52,6 +54,7 @@
     "@xterm/headless": "^6.0.0",
     "express": "^5.2.1",
     "ws": "^8.22.0",
+    "yaml": "^2.9.1",
     "zod": "^4.0.0"
   },
   "devDependencies": {
