@@ -17,6 +17,7 @@ import { Resume } from './Phone';
 import { ProjectPicker } from './ProjectPicker';
 import { StatusPill } from './TerminalView';
 import { RepoRefreshStatus } from './RepoRefreshStatus';
+import { ManagerMcpSettings } from './ManagerMcpSettings';
 
 const MODELS = ['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5'];
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -840,6 +841,7 @@ export function SettingsTab() {
         <h3>🖱️ Mouse</h3>
         <MouseSettings />
         <p className="muted small">Saved in this browser. Turning speed already allows for big, high-resolution screens; use the slider to fine-tune it.</p>
+        <ManagerMcpSettings />
         <h3>ℹ️ Environment</h3>
         <div className="small">
           GitHub: <b>{user ?? 'not signed in'}</b>

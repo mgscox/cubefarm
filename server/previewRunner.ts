@@ -64,6 +64,7 @@ export function previewEnv(extra: Record<string, string>, port: number, tmp: str
   }
   env.BROWSER = 'none'; // dev servers that open a browser tab on start shouldn't
   for (const [k, v] of Object.entries(extra)) env[k] = fillPlaceholders(v, port, tmp);
+  env.SWARM_SUB_OFFICE = '1';
   env.PORT = String(port);
   return env;
 }

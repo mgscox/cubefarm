@@ -4303,31 +4303,47 @@ export class Swarm {
   }
 
   /** The manager's phone → the CEO. Injected into a running session, otherwise the CEO picks it up next. */
-  messageCeo(text: string, source?: NonNullable<PhoneMessage['telegram']>, accepted?: () => void): Promise<void> {
+  async messageCeo(text: string, source?: NonNullable<PhoneMessage['telegram']>, accepted?: () => void): Promise<void> {
+    await this.submitManagerMessage(text, { telegram: source, accepted });
+  }
+
+  async messageCeoFromMcp(text: string, requestId: string) {
+    const message = await this.submitManagerMessage(text, { mcpRequestId: requestId });
+    return { messageId: message!.id, accepted: true };
+  }
+
+  private submitManagerMessage(text: string, { telegram, accepted, mcpRequestId }: Pick<PhoneMessage, 'telegram' | 'mcpRequestId'> & { accepted?: () => void }) {
     const run = this.managerCommands.then(async () => {
-      if (source && source.updateId < this.state.telegram.offset) {
+      if (telegram && telegram.updateId < this.state.telegram.offset) {
         await this.writeState();
         await this.dispatchManagerInputs();
         return;
       }
       const t = text.trim();
       if (!t || t.length > 4000) throw new HttpError(400, 'Send between 1 and 4000 characters. Nothing was submitted.');
+      const previous = mcpRequestId && this.state.messages.find((m) => m.mcpRequestId === mcpRequestId);
+      if (previous) {
+        if (previous.text !== t) throw new HttpError(409, 'This request ID belongs to a different message. Use a new ID for new work.');
+        await this.writeState();
+        return previous;
+      }
       const a = this.ceo();
       if (!this.agentRt.get(a.id)?.session) this.ensureOfficeOpen();
       if (this.state.managerInputs.length >= 1000) throw new HttpError(409, 'Manager input queue is full. Try again after Joi catches up.');
       this.acceptingManager++;
       try {
         accepted?.();
-        const m = this.postMessage('manager', t, undefined, source, false);
+        const m = this.postMessage('manager', t, undefined, { telegram, mcpRequestId }, false);
         this.state.managerInputs.push({ id: m.id, text: t, status: 'pending' });
-        // Message, source deduplication offset, pending CEO input and outbound mirror share one atomic file rename.
+        // The message, replay metadata, pending CEO input and Telegram mirror share one atomic file rename.
         await this.writeState();
         this.broadcast({ type: 'message', message: m });
         await this.dispatchManagerInputs();
+        setTimeout(() => this.schedule(), 150);
+        return m;
       } finally { this.acceptingManager--; }
-      setTimeout(() => this.schedule(), 150);
     });
-    this.managerCommands = run.catch(() => this.retryManagerInputs());
+    this.managerCommands = run.then(() => undefined, () => this.retryManagerInputs());
     return run;
   }
 
@@ -4721,8 +4737,13 @@ export class Swarm {
 
   // ---------- the phone ----------
 
-  private postMessage(from: PhoneMessage['from'], text: string, requestId?: string, source?: PhoneMessage['telegram'], publish = true) {
-    const m: PhoneMessage = { id: this.messageSeq++, from, text: text.trim(), at: Date.now(), ...(from === 'manager' ? { origin: source ? 'telegram' as const : 'web' as const, ...(source ? { telegram: source } : {}) } : {}), ...(requestId ? { requestId } : {}) };
+  private postMessage(from: PhoneMessage['from'], text: string, requestId?: string, { telegram, mcpRequestId }: Pick<PhoneMessage, 'telegram' | 'mcpRequestId'> = {}, publish = true) {
+    const m: PhoneMessage = { id: this.messageSeq++, from, text: text.trim(), at: Date.now(), ...(requestId ? { requestId } : {}) };
+    if (from === 'manager') {
+      m.origin = telegram ? 'telegram' : mcpRequestId ? 'mcp' : 'web';
+      if (telegram) m.telegram = telegram;
+      if (mcpRequestId) m.mcpRequestId = mcpRequestId;
+    }
     this.state.messages.push(m);
     if (this.state.messages.length > KEEP_MESSAGES) this.state.messages.splice(0, this.state.messages.length - KEEP_MESSAGES);
     this.telegram.message(m);
@@ -4740,6 +4761,13 @@ export class Swarm {
   }
 
   // ---------- hire and let-go proposals ----------
+
+  async decideProposalFromMcp(proposalId: string, decision: 'approve' | 'reject') {
+    if (decision === 'approve') this.approveRequest(proposalId);
+    else this.rejectRequest(proposalId);
+    await this.writeState();
+    return { proposalId, status: decision === 'approve' ? 'approved' : 'rejected' };
+  }
 
   private addRequest(req: HireRequestView) {
     this.state.requests.push(req);
