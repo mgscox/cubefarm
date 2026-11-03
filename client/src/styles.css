@@ -692,7 +692,7 @@ input.inline:focus {
   color: var(--ink);
 }
 @media (max-width: 700px) {
-  .workers {
+  .hud .workers {
     display: none;
   }
 }

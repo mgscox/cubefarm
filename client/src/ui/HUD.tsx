@@ -2,22 +2,9 @@ import { useMemo } from 'react';
 import { repoOnFloor, usePhoneBadge, useStore } from '../store';
 import { CEO_ID } from '../../../shared/types';
 import { HeldHint } from './HeldHint';
+import { OfficeNotices } from './OfficeNotices';
 import { WorkersPanel } from './WorkersPanel';
-import { officeUpdateChip } from '../officeUpdate';
 import { qaCounts } from '../qaCounts';
-
-/** While the office is on its way to updating itself (or restarting to do it); opens the console's Office row. */
-function OfficeUpdateChip() {
-  const text = useStore((s) => (s.restarting ? '⟳ Office restarting…' : officeUpdateChip(s.officeUpdate)));
-  const overlay = useStore((s) => s.overlay);
-  const openOverlay = useStore((s) => s.openOverlay);
-  if (!text || overlay?.kind === 'manager') return null;
-  return (
-    <button className="office-chip" onClick={() => openOverlay({ kind: 'manager', tab: 'floors' })} title="The office is updating itself. Open the manager's console">
-      {text}
-    </button>
-  );
-}
 
 /** The phone in your pocket: always one key (or click) away, with a badge when the CEO is waiting on you. */
 function PhoneButton() {
@@ -62,8 +49,6 @@ export function HUD({ onDashboard }: { onDashboard: () => void }) {
   const restarting = useStore((s) => s.restarting);
   const demo = useStore((s) => s.demo);
   const user = useStore((s) => s.user);
-  const ghReady = useStore((s) => s.ghReady);
-  const ghError = useStore((s) => s.ghError);
   const focus = useStore((s) => s.focus);
   const held = useStore((s) => s.held);
   const overlay = useStore((s) => s.overlay);
@@ -102,9 +87,7 @@ export function HUD({ onDashboard }: { onDashboard: () => void }) {
       </div>
 
       <WorkersPanel />
-      <OfficeUpdateChip />
-
-      {!ghReady && ghError && <div className="hud-banner">⚠️ {ghError}</div>}
+      <OfficeNotices />
 
       {started && !overlay && !travel && <div className={`crosshair ${focus ? 'crosshair-hot' : ''}`} />}
       {started && !overlay && focus && (
