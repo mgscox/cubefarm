@@ -2,7 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { emptyTelegram, TelegramMirror, telegramToken, telegramTransport, type TelegramState, type TelegramTransport } from './telegram.ts';
-import { createDemoTelegram } from './demo.ts';
+import { createDemoTelegram, demoApprovedProposal, demoTracker } from './demo.ts';
+import { loadPublications, Publisher } from './publication.ts';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
 import type { BoxConnection, Machine } from './machine.ts';
@@ -42,7 +43,7 @@ import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
-import { CEO_ID, RESEARCHER_ID, type MachineCapacity, type MachineTelemetry } from '../shared/types.ts';
+import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
 import { isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchFiledAt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
 import type {
@@ -218,6 +219,8 @@ interface Persisted {
   officeId: string;
   boxes: PersistedBox[];
   officeCapacity?: MachineCapacity;
+  /** Approved Proposals' publications by proposal id: their snapshot, issue identities and progress. */
+  publications: Record<string, PublicationView>;
 }
 
 interface Shot {
@@ -485,6 +488,7 @@ export class Swarm {
     managerInputs: [],
     officeId: '',
     boxes: [],
+    publications: {},
   };
   /** Links to the boxes: removed ones stay until the CLIs still running there have ended. */
   private boxConns = new Map<string, BoxConnection>();
@@ -539,6 +543,8 @@ export class Swarm {
   private clis: CliView[] = []; // coding-agent CLIs found on this machine (detected at startup)
 
   readonly telegram: TelegramMirror;
+  /** Publishes approved Proposals' Issue Plans; later slices read issue identities and progress from it. */
+  readonly publisher: Publisher;
   private demoTelegram: ReturnType<typeof createDemoTelegram> | null = null;
   private proposalWorker: ProposalWorker | null;
   private managerCommands: Promise<void> = Promise.resolve();
@@ -565,6 +571,19 @@ export class Swarm {
       decide: (id, approve) => approve ? this.approveRequest(id) : this.rejectRequest(id),
       request: (id) => this.state.requests.find((r) => r.id === id),
       ceoName: () => this.ceo()?.name ?? 'Joi',
+    });
+    this.publisher = new Publisher({
+      tracker: backend,
+      floors: () => this.state.repos.map((r) => r.fullName),
+      fixtures: backend.demo,
+      records: () => this.state.publications,
+      commit: () => this.writeState(),
+      emit: (publication) => this.broadcast({ type: 'publication', publication }),
+      released: (repo) => {
+        const r = this.state.repos.find((x) => x.fullName.toLowerCase() === repo.toLowerCase());
+        if (r) void this.syncRepo(r.id).then(() => this.schedule());
+      },
+      notify: (level, text) => this.toast(level, text),
     });
     this.previews = new Previews(backend, {
       emit: (id) => {
@@ -643,6 +662,7 @@ export class Swarm {
         officeId: typeof loaded.officeId === 'string' ? loaded.officeId : '',
         boxes: (loaded.boxes ?? []).filter((b) => b && typeof b.id === 'string' && typeof b.destination === 'string'),
         officeCapacity: loaded.officeCapacity ?? 'unknown',
+        publications: loadPublications(loaded.publications),
       };
       for (const m of this.state.messages) this.messageSeq = Math.max(this.messageSeq, m.id + 1);
       if (!EFFORTS.includes(this.state.settings.defaultEffort)) this.state.settings.defaultEffort = 'medium';
@@ -770,6 +790,7 @@ export class Swarm {
     for (const r of this.state.ideaReviews) this.scheduleIdeaReview(r.ideaId);
     this.save();
     await this.refreshOfficeLifecycle().catch((err) => console.warn('could not save closing office state', err));
+    this.publisher.resumeAll();
     setTimeout(() => this.schedule(), 1000);
   }
 
@@ -942,6 +963,7 @@ export class Swarm {
       officeCommit: this.officeHead?.slice(0, 7) ?? null,
       officeLifecycle: this.officeLifecycleView(),
       officeUpdate: this.officeHead ? this.officeUpdateView() : undefined,
+      publications: this.publisher.list(),
     };
   }
 
@@ -2099,6 +2121,7 @@ export class Swarm {
    */
   async shutdown(restart = false): Promise<void> {
     this.stopResources?.();
+    this.publisher.stop();
     await this.telegram.stop();
     if (this.handoffRetry) clearTimeout(this.handoffRetry);
     this.handoffRetry = null;
@@ -2262,6 +2285,34 @@ export class Swarm {
     if (assignTo) await this.assign(assignTo, number);
     else setTimeout(() => this.schedule(), 200);
     return number;
+  }
+
+  // ---------- Ideas: publication ----------
+
+  /**
+   * Publish an approved Proposal: the seam the manager's decision hands its recorded approval to. A repeat of the same
+   * approval returns the recorded publication; nothing outside the demo and tests accepts a fixture approval.
+   */
+  publishApproved(snapshot: ApprovedSnapshot): Promise<PublicationView> {
+    return this.publisher.publish(snapshot);
+  }
+
+  retryPublication(proposalId: string): PublicationView {
+    return this.publisher.retry(proposalId);
+  }
+
+  /**
+   * The demo's seeded approved Proposal on floor 1, optionally with a fault at the fake tracker: a create whose
+   * response is lost, or the repo refusing writes for a while.
+   */
+  async publishDemoProposal(fault: string): Promise<PublicationView> {
+    if (!this.backend.demo) throw new HttpError(404, 'Seeded proposals exist only in the demo office.');
+    const repo = this.state.repos.find((r) => r.floor === 1) ?? this.state.repos[0];
+    if (!repo) throw new HttpError(400, 'Connect a floor first.');
+    if (fault === 'lost-create') demoTracker.lostCreates++;
+    else if (fault === 'refused') demoTracker.refused.set(repo.fullName, Date.now() + 20_000);
+    else if (fault) throw new HttpError(400, 'fault must be lost-create or refused.');
+    return this.publishApproved(demoApprovedProposal(repo.fullName));
   }
 
   async mergePull(repoId: string, number: number, method: 'squash' | 'merge' | 'rebase' = 'squash', approval?: { reason: string }) {

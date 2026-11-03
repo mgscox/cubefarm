@@ -15,6 +15,7 @@ import { LiveTerminal } from './LiveTerminal';
 import { MouseSettings, Panel } from './Overlays';
 import { Resume } from './Phone';
 import { ProjectPicker } from './ProjectPicker';
+import { PublicationsCard } from './Publications';
 import { StatusPill } from './TerminalView';
 import { RepoRefreshStatus } from './RepoRefreshStatus';
 import { ManagerMcpSettings } from './ManagerMcpSettings';
@@ -686,6 +687,7 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
           })}
         </div>
       </div>
+      <PublicationsCard />
     </div>
   );
 }

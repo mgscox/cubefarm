@@ -664,6 +664,8 @@ export interface WorldSnapshot {
   boxes: BoxView[];
   officeTelemetry?: MachineTelemetry | null;
   officeCapacity?: MachineCapacity;
+  /** Approved Proposals' publications, newest last. */
+  publications?: PublicationView[];
 }
 
 export type ServerEvent =
@@ -694,6 +696,7 @@ export type ServerEvent =
   | { type: 'box'; box: BoxView }
   | { type: 'boxRemoved'; boxId: string }
   | { type: 'officeTelemetry'; telemetry: MachineTelemetry | null; capacity: MachineCapacity }
+  | { type: 'publication'; publication: PublicationView }
   | { type: 'toast'; level: 'info' | 'success' | 'error'; text: string };
 
 export interface GhRepoSummary {
@@ -701,4 +704,66 @@ export interface GhRepoSummary {
   description: string;
   visibility: string;
   updatedAt: string;
+}
+
+// ---------- Ideas: publication ----------
+
+/** A manager's recorded approval of one Proposal: an exact pair of PRD and Issue Plan revisions. */
+export interface ProposalApproval {
+  decisionId: string;
+  proposalId: string;
+  ideaId: string;
+  prdRevision: number;
+  planRevision: number;
+  decidedAt: number;
+  /** 'fixture': seeded by the demo or tests. Publication refuses fixtures anywhere else. */
+  source: 'manager' | 'fixture';
+}
+
+/** One new issue in an approved Issue Plan. */
+export interface PlanIssue {
+  /** Stable within the plan; with the proposal it makes the marker the issue carries in its body. */
+  entryId: string;
+  /** A configured floor's owner/name. */
+  repo: string;
+  title: string;
+  body: string;
+  /** Routing hint: becomes a swarm:<specialty> label. */
+  specialty?: string;
+}
+
+/** What publication receives: the approval and the exact Issue Plan revision it covers. */
+export interface ApprovedSnapshot {
+  approval: ProposalApproval;
+  issues: PlanIssue[];
+}
+
+/** A plan issue's progress: created held, read back (verified), then released into ordinary dispatch. */
+export type PublishedStep = 'pending' | 'creating' | 'created' | 'verified' | 'released';
+
+export interface PublishedIssue {
+  entryId: string;
+  repo: string;
+  /** The stable plan-entry marker in the issue's body, used to find the issue again after a lost response. */
+  marker: string;
+  step: PublishedStep;
+  number: number | null;
+  url: string | null;
+}
+
+export interface PublicationView {
+  proposalId: string;
+  snapshot: ApprovedSnapshot;
+  /** publishing: on its way (or retrying a temporary failure); blocked: held until the cause clears; complete: released. */
+  status: 'publishing' | 'blocked' | 'complete';
+  /** Why it is retrying or blocked. */
+  note: string | null;
+  /** The cause needs the manager (access, a conflicting issue) rather than another automatic attempt. */
+  needsManager: boolean;
+  /** When the next automatic attempt runs (null: none planned). */
+  retryAt: number | null;
+  issues: PublishedIssue[];
+  attempts: number;
+  createdAt: number;
+  updatedAt: number;
 }

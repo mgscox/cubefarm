@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
-import { branchAhead, isCheckAccessError, listPulls, readTwice } from './github.ts';
+import { branchAhead, findIssuesByMarker, isCheckAccessError, listPulls, readIssue, readTwice } from './github.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { mergeStep } from './mergeGate.ts';
 
@@ -277,5 +277,29 @@ describe('optional PR checks', () => {
   it('recognizes repeated gh GraphQL diagnostics, not an arbitrary error mentioning checks', () => {
     expect(isCheckAccessError(error(`GraphQL: ${denial()}\n${denial(2)}`))).toBe(true);
     expect(isCheckAccessError(new Error(`GraphQL: ${denial()}`))).toBe(false);
+  });
+});
+
+describe('publication reads', () => {
+  const rest = (number: number, body: string | null, extra = {}) => ({
+    number, title: `Issue ${number}`, body, html_url: `https://github.com/Demo/Repo/issues/${number}`, state: 'open', labels: [{ name: 'held-for-publication' }], ...extra,
+  });
+
+  it('finds issues by marker in a REST listing since a time, skipping pull requests', async () => {
+    const marker = '<!-- cubefarm:plan-entry p1/e1 -->';
+    const command = vi.fn(async (_args: string[]) => [rest(1, `Brief\n\n${marker}`), rest(2, null), rest(3, 'other'), rest(4, marker, { state: 'closed' })].map((i) => JSON.stringify(i)).join('\n') + '\n');
+    const found = await findIssuesByMarker('demo/repo', marker, '2026-11-03T10:00:00.000Z', command);
+    expect(found.map((i) => [i.number, i.state])).toEqual([[1, 'OPEN'], [4, 'CLOSED']]);
+    expect(found[0]).toMatchObject({ repo: 'Demo/Repo', labels: ['held-for-publication'], url: 'https://github.com/Demo/Repo/issues/1' });
+    const args = command.mock.calls[0][0];
+    expect(args).toContain('--paginate');
+    expect(args.find((a) => a.startsWith('repos/'))).toBe('repos/demo/repo/issues?state=all&per_page=100&since=2026-11-03T10%3A00%3A00.000Z');
+  });
+
+  it('reads an issue back, with null only for a missing one', async () => {
+    expect(await readIssue('demo/repo', 1, async () => rest(1, 'x'))).toMatchObject({ number: 1, repo: 'Demo/Repo', state: 'OPEN' });
+    expect(await readIssue('demo/repo', 1, async () => rest(1, 'x', { pull_request: {} }))).toBeNull();
+    expect(await readIssue('demo/repo', 9, async () => { throw error('HTTP 404: Not Found'); })).toBeNull();
+    await expect(readIssue('demo/repo', 9, async () => { throw error('HTTP 502: Bad Gateway'); })).rejects.toThrow();
   });
 });

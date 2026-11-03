@@ -85,6 +85,9 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
 - `research.ts`: researchers' prompts, branches and briefs. The lobby researcher (always present) takes briefs into
   the company research folder (`<SWARM_HOME>/research`, local git) or a floor's `docs/research/`; floor researchers take
   `swarm:research` issues. Research PRs skip QA.
+- `publication.ts`: publishing an approved Proposal's Issue Plan (Ideas): the recorded approval and progress persisted
+  before GitHub writes, issues created held (`[Draft] ` title + `held-for-publication`) with a plan-entry marker, read
+  back, then released; retries and restarts find a lost create by its marker. The demo's fixture approval is refused elsewhere.
 - `backend.ts`: the `Backend` interface (everything touching GitHub, git, disk and sessions) and `realBackend`.
 - `demo.ts`: `createDemoBackend()`: fake GitHub, fake sessions (drawn into the agent's terminal in the terminal runtime), fake previews for `--demo`.
 - `github.ts`: all GitHub access through the `gh` CLI.
