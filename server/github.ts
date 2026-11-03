@@ -432,9 +432,10 @@ export async function issueState(fullName: string, number: number): Promise<'OPE
   }
 }
 
-/** Replace an issue's body and/or add and remove labels. */
-export async function editIssue(fullName: string, number: number, edit: { body?: string; addLabels?: string[]; removeLabels?: string[] }): Promise<void> {
+/** Replace an issue's title and/or body, and add and remove labels. */
+export async function editIssue(fullName: string, number: number, edit: { title?: string; body?: string; addLabels?: string[]; removeLabels?: string[] }): Promise<void> {
   const args = ['issue', 'edit', String(number), '-R', fullName];
+  if (edit.title !== undefined) args.push('--title', edit.title);
   if (edit.body !== undefined) args.push('--body-file', '-');
   for (const l of edit.addLabels ?? []) {
     await ensureLabel(fullName, l);
@@ -443,6 +444,69 @@ export async function editIssue(fullName: string, number: number, edit: { body?:
   for (const l of edit.removeLabels ?? []) args.push('--remove-label', l);
   if (args.length === 5) return;
   await gh(args, edit.body !== undefined ? { input: edit.body || ' ' } : undefined);
+}
+
+// ---------- publication support ----------
+
+/** An issue as GitHub reads it back. */
+export interface TrackedIssue {
+  repo: string; // owner/name from its URL
+  number: number;
+  url: string;
+  title: string;
+  body: string;
+  labels: string[];
+  state: 'OPEN' | 'CLOSED';
+}
+
+interface RestIssue {
+  number: number; title: string; body: string | null; html_url: string; state: string; labels: ({ name: string } | string)[]; pull_request?: unknown;
+}
+
+const trackedIssue = (raw: RestIssue): TrackedIssue => ({
+  repo: raw.html_url.match(/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/\d+/i)?.[1] ?? '',
+  number: raw.number,
+  url: raw.html_url,
+  title: raw.title,
+  body: raw.body ?? '',
+  labels: raw.labels.map((l) => (typeof l === 'string' ? l : l.name)),
+  state: raw.state.toUpperCase() === 'OPEN' ? 'OPEN' : 'CLOSED',
+});
+
+export interface IssueAccess {
+  repo: string; // the canonical owner/name GitHub answers with (differs after a rename or transfer)
+  issues: boolean;
+  permission: string; // ADMIN, MAINTAIN, WRITE, TRIAGE, READ or ''
+}
+
+export async function issueAccess(fullName: string): Promise<IssueAccess> {
+  const raw = await ghJson<{ nameWithOwner: string; hasIssuesEnabled: boolean; viewerPermission: string | null }>([
+    'repo', 'view', fullName, '--json', 'nameWithOwner,hasIssuesEnabled,viewerPermission',
+  ]);
+  return { repo: raw.nameWithOwner, issues: raw.hasIssuesEnabled, permission: raw.viewerPermission ?? '' };
+}
+
+/** One issue read back over REST; null only when GitHub says there is no such issue. */
+export async function readIssue(fullName: string, number: number, api: RestQuery = ghJson): Promise<TrackedIssue | null> {
+  try {
+    const raw = await api(['api', `repos/${fullName}/issues/${number}`]) as RestIssue;
+    return raw.pull_request ? null : trackedIssue(raw);
+  } catch (error) {
+    if (error instanceof CommandError && /\bHTTP (?:404|410)\b/.test(error.stderr)) return null;
+    throw error;
+  }
+}
+
+/**
+ * Issues updated since `since` whose body carries `marker`. A REST listing, not search: a just-created issue is in it
+ * at once, so a miss after a lost create response means the issue really isn't there.
+ */
+export async function findIssuesByMarker(fullName: string, marker: string, since: string, command: typeof gh = gh): Promise<TrackedIssue[]> {
+  const out = await command(
+    ['api', '--paginate', `repos/${fullName}/issues?state=all&per_page=100&since=${encodeURIComponent(since)}`, '--jq', '.[] | select(.pull_request == null)'],
+    SYNC_READ,
+  );
+  return out.split('\n').filter((line) => line.trim()).map((line) => trackedIssue(JSON.parse(line) as RestIssue)).filter((i) => i.body.includes(marker));
 }
 
 /** Merge a PR. With headSha, GitHub refuses if anything was pushed after that commit (e.g. after QA signed it off). */

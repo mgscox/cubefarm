@@ -180,6 +180,10 @@ app.post(
 );
 app.post('/api/requests/:id/reject', route((req) => swarm.rejectRequest(String(req.params.id), str(req.body?.note))));
 
+// Ideas: publication of approved proposals. No route accepts an approval: only the manager's decision records one.
+app.post('/api/publications/demo', route((req) => swarm.publishDemoProposal(str(req.body?.fault))));
+app.post('/api/publications/:id/retry', route((req) => swarm.retryPublication(String(req.params.id))));
+
 // Serve the built client: the published package, or `npm start` after `npm run build`.
 const dist = path.resolve(import.meta.dirname, '../dist');
 if (fs.existsSync(dist)) {
