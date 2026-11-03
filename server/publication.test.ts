@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
 import type { TrackedIssue } from './github.ts';
 import {
-  failure, heldTitle, loadPublications, planMarker, PublicationBlock, Publisher, snapshotProblem, verifyProblem,
+  failure, heldTitle, loadPublications, planMarker, PublicationBlock, publishedBody, Publisher, snapshotProblem, verifyProblem,
   type PublicationHost, type PublicationTracker,
 } from './publication.ts';
 import { createDemoBackend, demoApprovedProposal } from './demo.ts';
@@ -342,6 +342,36 @@ describe('recovery', () => {
     expect(view.note).toMatch(/#1 and #2/);
     expect(tracker.log).not.toContain('create');
     expect(tracker.log).not.toContain('edit');
+  });
+
+  it('adopts the one open duplicate once the extras are closed', async () => {
+    const plan = approved().issues[0];
+    const marker = planMarker('p1', 'e1');
+    for (const n of [1, 2]) tracker.issues.push({ repo: REPO, number: n, url: `https://github.com/${REPO}/issues/${n}`, title: heldTitle(plan.title), body: publishedBody(plan, marker), labels: [PUBLICATION_HOLD], state: 'OPEN' });
+    const view = await publisher.publish(approved());
+    await settle();
+    expect(view.status).toBe('blocked');
+
+    tracker.issues[0].state = 'CLOSED';
+    publisher.retry('p1');
+    await settle();
+    expect(view).toMatchObject({ status: 'complete', needsManager: false });
+    expect(view.issues[0]).toMatchObject({ number: 2, step: 'released' });
+    expect(tracker.issues).toHaveLength(2);
+    expect(tracker.log).not.toContain('create');
+    expect(tracker.issues[1]).toMatchObject({ title: plan.title, labels: [] });
+    expect(tracker.issues[0].labels).toContain(PUBLICATION_HOLD);
+    expect(host.released).toHaveBeenCalledWith(REPO, 2);
+  });
+
+  it('does not create a replacement when every marker match is closed', async () => {
+    const marker = planMarker('p1', 'e1');
+    tracker.issues.push({ repo: REPO, number: 1, url: '', title: heldTitle('Add a weekly summary'), body: marker, labels: [PUBLICATION_HOLD], state: 'CLOSED' });
+    const view = await publisher.publish(approved());
+    await settle();
+    expect(view).toMatchObject({ status: 'blocked', needsManager: true, retryAt: null });
+    expect(view.note).toMatch(/#1 .*is closed\. Reopen one/);
+    expect(tracker.log).not.toContain('create');
   });
 
   it('keeps the issue held when the read-back does not match', async () => {

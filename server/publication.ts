@@ -306,13 +306,18 @@ export class Publisher {
     if (entry.step !== 'pending' && entry.step !== 'creating') return;
     const since = new Date(rec.createdAt - LOOKUP_SKEW_MS).toISOString();
     const found = (await this.host.tracker.findIssuesByMarker(entry.repo, entry.marker, since)).filter((i) => sameRepo(i.repo, entry.repo));
-    if (found.length > 1) {
-      throw new PublicationBlock(`${found.map((i) => `#${i.number}`).join(' and ')} on ${entry.repo} all carry plan entry ${entry.entryId}. Close the extras, then retry.`, 'conflict');
+    // Closed matches are extras the manager closed, or an issue someone closed: never adopted, never recreated over.
+    const open = found.filter((i) => i.state === 'OPEN');
+    if (open.length > 1) {
+      throw new PublicationBlock(`${open.map((i) => `#${i.number}`).join(' and ')} on ${entry.repo} all carry plan entry ${entry.entryId}. Close the extras, then retry.`, 'conflict');
     }
-    if (found.length === 1) {
-      Object.assign(entry, { number: found[0].number, url: found[0].url, step: 'created' });
+    if (open.length === 1) {
+      Object.assign(entry, { number: open[0].number, url: open[0].url, step: 'created' });
       await this.save(rec);
       return;
+    }
+    if (found.length) {
+      throw new PublicationBlock(`${found.map((i) => `#${i.number}`).join(' and ')} on ${entry.repo} carrying plan entry ${entry.entryId} ${found.length > 1 ? 'are' : 'is'} closed. Reopen one, then retry.`, 'conflict');
     }
     const plan = this.plan(rec, entry);
     entry.step = 'creating';
