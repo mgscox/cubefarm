@@ -834,6 +834,13 @@ input.inline:focus {
   display: grid;
   gap: 8px;
 }
+.start-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+}
 .start-meta {
   margin-top: 16px;
   display: flex;
@@ -2689,4 +2696,50 @@ input.inline:focus {
 }
 .fleet-help p {
   margin: 8px 0 0;
+}
+
+/* ---------- ideas ---------- */
+.ideas-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.7fr) minmax(0, 1.8fr);
+  gap: 16px;
+  align-items: start;
+}
+.ideas h2 { margin: 0 0 6px; }
+.idea-detail h4 { margin: 12px 0 4px; }
+.idea-detail p, .idea-detail ul { margin: 6px 0; }
+.idea-entry { color: var(--ink); text-decoration: none; margin-bottom: 0; }
+.idea-entry:hover b { text-decoration: underline; }
+.idea-list, .idea-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.idea-entry, .idea-detail, .idea-identity {
+  overflow-wrap: anywhere;
+}
+.idea-entry b {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.idea-selected { background: #fff1ce; }
+.idea-status { padding: 4px 10px; border-radius: 20px; background: #eee8dc; font-weight: 600; }
+.idea-prose { white-space: pre-wrap; }
+.idea-hints { margin: 12px 0; border: 1px solid var(--ink); border-radius: 8px; }
+.idea-hints .toggle { display: flex; margin: 8px 0; }
+.idea-handoff { margin: 8px 0; padding: 8px 12px; border-left: 6px solid var(--good); border-radius: 8px; background: #eaf8ee; }
+.idea-handoff.idea-open { border-left-color: var(--warn); background: #fff4d6; }
+.idea-demo { margin: 12px 0; padding: 8px 12px; border: 2px dashed var(--muted); border-radius: 8px; }
+.idea-demo .btn { margin: 0; }
+.idea-rounds { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.idea-rounds > li { padding: 8px 12px; border: 1px solid #ddd6c6; border-radius: 8px; }
+.idea-verdict { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; margin-top: 4px; }
+.idea-verdict ul { flex-basis: 100%; }
+.idea-verdict .good { color: #1a7f37; font-weight: 600; }
+.idea-verdict .warn { color: #9a5b00; font-weight: 600; }
+@media (max-width: 650px) {
+  .ideas-grid { grid-template-columns: minmax(0, 1fr); }
+  .idea-list { order: 1; }
 }

@@ -1,10 +1,14 @@
 import { create } from 'zustand';
-import { CEO_ID, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type PublicationView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type IdeaView, type IdeaRecordView, type IdeaReviewCycleView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type PublicationView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { appendPhoneMessage } from '../../shared/phone';
 import { issueBlockers, issueWorkNote } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
 export type Agent = Omit<AgentView, 'log'>;
+
+/** A publication the Issues tab can draw: the server only sends these, but one bad event shouldn't crash the console. */
+export const isPublication = (p: PublicationView | null | undefined): p is PublicationView =>
+  !!p && typeof p.proposalId === 'string' && Array.isArray(p.issues) && Array.isArray(p.snapshot?.issues);
 
 export type PhoneTab = 'chat' | 'hires' | 'company' | 'games';
 
@@ -13,11 +17,11 @@ export type Overlay =
   | { kind: 'kanban'; repoId: string }
   | { kind: 'app'; repoId: string }
   | { kind: 'elevator' }
-  | { kind: 'manager'; tab?: ManagerTab; repoId?: string }
+  | { kind: 'manager'; tab?: ManagerTab; repoId?: string; ideaId?: string }
   | { kind: 'phone'; tab?: PhoneTab; requestId?: string }
   | { kind: 'help' };
 
-export type ManagerTab = 'floors' | 'ceo' | 'team' | 'fleet' | 'issues' | 'settings';
+export type ManagerTab = 'floors' | 'ceo' | 'team' | 'fleet' | 'issues' | 'ideas' | 'settings';
 
 export interface Focus {
   id: string;
@@ -58,6 +62,9 @@ interface State {
   requests: HireRequestView[];
   ceo: CeoInfo;
   research: ResearchInfo;
+  ideas: IdeaView[];
+  ideaRecords: IdeaRecordView[];
+  ideaReviews: IdeaReviewCycleView[];
   messages: PhoneMessage[];
   phoneReadAt: number;
   telegram?: TelegramView;
@@ -164,6 +171,9 @@ export const useStore = create<State>((set, get) => ({
   requests: [],
   ceo: { queue: [], job: null, lastReviewAt: null, nextReviewAt: null },
   research: { queue: [], job: null, done: [] },
+  ideas: [],
+  ideaRecords: [],
+  ideaReviews: [],
   messages: [],
   phoneReadAt: 0,
   usage: { state: 'normal', until: null },
@@ -214,10 +224,13 @@ export const useStore = create<State>((set, get) => ({
           requests: d.requests,
           ceo: d.ceo,
           research: d.research ?? { queue: [], job: null, done: [] },
+          ideas: d.ideas ?? [],
+          ideaRecords: d.ideaRecords ?? [],
+          ideaReviews: d.ideaReviews ?? [],
           messages: d.messages,
           phoneReadAt: d.phoneReadAt,
           telegram: d.telegram,
-          publications: d.publications ?? [],
+          publications: (d.publications ?? []).filter(isPublication),
           officeCommit: d.officeCommit,
           officeLifecycle: d.officeLifecycle,
           officeUpdate: d.officeUpdate,
@@ -317,6 +330,15 @@ export const useStore = create<State>((set, get) => ({
       case 'ceo':
         set({ ceo: ev.ceo });
         break;
+      case 'idea':
+        set({ ideas: [...get().ideas.filter((i) => i.id !== ev.idea.id), ev.idea] });
+        break;
+      case 'ideaRecord':
+        set({ ideaRecords: [...get().ideaRecords.filter((r) => r.ideaId !== ev.record.ideaId || r.kind !== ev.record.kind || r.id !== ev.record.id), ev.record] });
+        break;
+      case 'ideaReview':
+        set({ ideaReviews: [...get().ideaReviews.filter((r) => r.ideaId !== ev.review.ideaId), ev.review] });
+        break;
       case 'research':
         set({ research: ev.research });
         break;
@@ -341,6 +363,7 @@ export const useStore = create<State>((set, get) => ({
         set({ telegram: ev.telegram });
         break;
       case 'publication': {
+        if (!isPublication(ev.publication)) break; // a malformed record must never blank the manager's console
         const publications = get().publications;
         const known = publications.some((p) => p.proposalId === ev.publication.proposalId);
         set({ publications: known ? publications.map((p) => (p.proposalId === ev.publication.proposalId ? ev.publication : p)) : [...publications, ev.publication] });
