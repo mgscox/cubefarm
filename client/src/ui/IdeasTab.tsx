@@ -7,6 +7,7 @@ import { FOCUS_LABEL, REVIEW_FOCUSES } from '../../../shared/ideaReview';
 import { reviewProgress, verdictText } from '../ideas';
 import { useStore } from '../store';
 import { Markdown } from './Markdown';
+import { PublicationsCard } from './Publications';
 import { PrdView, ProposalCard } from './ProposalCard';
 
 const ideaLink = (id: string) => `#idea/${id}`;
@@ -97,6 +98,7 @@ export function IdeaDetail({ idea, records, proposals = [], prd, onLinkedIdea }:
           void api.seedDemoProposal(idea.id).catch(() => undefined).finally(() => setSeeding(false));
         }}>Seed demo review handoff</button>
       )}
+      <PublicationsCard ideaId={idea.id} />
       <h4>Floor hints</h4>
       <p>{idea.floorHints.length ? idea.floorHints.join(', ') : 'No floor hints — affected repositories are open.'}</p>
       {idea.constraints && <><h4>Constraints</h4><p className="idea-prose">{idea.constraints}</p></>}

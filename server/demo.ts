@@ -42,6 +42,8 @@ const repos = new Map<string, FakeRepo>();
 const bareRepos = new Set<string>();
 const mergedSinceSync = new Map<string, number>(); // merges the fake project folder hasn't pulled yet
 const closedIssues = new Set<string>(); // `${fullName}#${n}`: issues closed by a merge
+// GitHub still serves closed issues: references and marker recovery must survive demo agents merging their work.
+const closedIssueRecords = new Map<string, TrackedIssue>();
 
 const fakeSha = () => crypto.randomBytes(20).toString('hex');
 
@@ -53,6 +55,8 @@ export const demoTracker = {
   lostCreates: 0,
   /** Repos refusing writes (READ permission) until this time. */
   refused: new Map<string, number>(),
+  /** Fail creates after preflight succeeds, to exercise partially staged cross-floor plans. */
+  refusedCreates: new Map<string, number>(),
 };
 
 const refusing = (fullName: string) => (demoTracker.refused.get(fullName) ?? 0) > Date.now();
@@ -84,6 +88,20 @@ export function demoApprovedProposal(repo: string, at = Date.now()): ApprovedSna
       ].join('\n'),
     }],
   };
+}
+
+/** An approved cross-floor fixture with a tracking Parent, independent leaves and a read-only reference. */
+export function demoCrossFloorProposal(a: string, b: string): ApprovedSnapshot {
+  const snapshot = demoApprovedProposal(a);
+  const leaf = snapshot.issues[0];
+  snapshot.issues = [
+    { entryId: 'parent', repo: a, title: 'Weekly plan', body: 'Track delivery across the two floors.', trackingParent: true },
+    { ...leaf, parent: 'parent' },
+    { entryId: 'endpoint', repo: b, title: 'Serve the weekly summary', body: 'Add a read-only weekly summary endpoint.', parent: 'parent' },
+    { entryId: 'existing', repo: b, title: 'Existing API work', body: '', existing: { number: 1, url: `https://github.com/${b}/issues/1` } },
+    { entryId: 'panel', repo: a, title: 'Connect the weekly panel', body: 'Read the endpoint and show its summary.', parent: 'parent', blockedBy: ['endpoint', 'existing'] },
+  ];
+  return snapshot;
 }
 
 /** Fake CI: checks run for a while after every push, and now and then one fails so the fix loop shows. */
@@ -707,7 +725,7 @@ export function createDemoBackend(): Backend {
     createIssue: async (fullName, title, body, labels = []) => {
       const r = repos.get(fullName);
       if (!r) throw new Error('Unknown repo');
-      if (refusing(fullName)) throw new CommandError('gh issue create failed: HTTP 403', 'HTTP 403: Resource not accessible by integration', 1, '');
+      if (refusing(fullName) || (demoTracker.refusedCreates.get(fullName) ?? 0) > Date.now()) throw new CommandError('gh issue create failed: HTTP 403', 'HTTP 403: Resource not accessible by integration', 1, '');
       const n = r.nextNumber++;
       r.issues.push(issue(n, title, body, fullName, labels));
       if (demoTracker.lostCreates > 0) {
@@ -722,9 +740,13 @@ export function createDemoBackend(): Backend {
     },
     readIssue: async (fullName, number) => {
       const i = repos.get(fullName)?.issues.find((x) => x.number === number);
-      return i ? tracked(fullName, i) : null;
+      const closed = closedIssueRecords.get(`${fullName}#${number}`);
+      return i ? tracked(fullName, i) : closed ? { ...closed, labels: [...closed.labels] } : null;
     },
-    findIssuesByMarker: async (fullName, marker) => (repos.get(fullName)?.issues ?? []).filter((i) => i.body.includes(marker)).map((i) => tracked(fullName, i)),
+    findIssuesByMarker: async (fullName, marker) => [
+      ...(repos.get(fullName)?.issues ?? []).map((i) => tracked(fullName, i)),
+      ...[...closedIssueRecords.values()].filter((i) => i.repo === fullName).map((i) => ({ ...i, labels: [...i.labels] })),
+    ].filter((i) => i.body.includes(marker)),
     issueState: async (fullName, number) => {
       const r = repos.get(fullName);
       return r?.issues.some((i) => i.number === number) ? 'OPEN' : closedIssues.has(`${fullName}#${number}`) ? 'CLOSED' : null;
@@ -745,7 +767,11 @@ export function createDemoBackend(): Backend {
       mergedSinceSync.set(fullName, (mergedSinceSync.get(fullName) ?? 0) + 1);
       pr.state = 'MERGED';
       pr.mergedAt = now();
-      for (const n of pr.closesIssues) closedIssues.add(`${fullName}#${n}`);
+      for (const n of pr.closesIssues) {
+        closedIssues.add(`${fullName}#${n}`);
+        const i = r.issues.find((i) => i.number === n);
+        if (i) closedIssueRecords.set(`${fullName}#${n}`, { ...tracked(fullName, i), state: 'CLOSED' });
+      }
       r.issues = r.issues.filter((i) => !pr.closesIssues.includes(i.number));
     },
     updateBranch: async (fullName, number) => {

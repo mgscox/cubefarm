@@ -5,7 +5,7 @@ import {
   failure, heldTitle, loadPublications, planMarker, PublicationBlock, publishedBody, Publisher, snapshotProblem, verifyProblem,
   type PublicationHost, type PublicationTracker,
 } from './publication.ts';
-import { createDemoBackend, demoApprovedProposal } from './demo.ts';
+import { createDemoBackend, demoApprovedProposal, demoCrossFloorProposal } from './demo.ts';
 import { Swarm } from './swarm.ts';
 import { issueWaitReason, PUBLICATION_HOLD, schedulable } from '../shared/issues.ts';
 import type { ApprovedSnapshot, PublicationView } from '../shared/types.ts';
@@ -53,10 +53,14 @@ class FakeTracker implements PublicationTracker {
     }
     return this.issues.filter((i) => i.repo === repo && i.body.includes(marker)).map((i) => ({ ...i, labels: [...i.labels] }));
   }
-  async editIssue(repo: string, number: number, edit: { title?: string; removeLabels?: string[] }) {
+  async listIssues(repo: string) {
+    return this.issues.filter((i) => i.repo === repo && i.state === 'OPEN').map((i) => ({ ...i, createdAt: '' }));
+  }
+  async editIssue(repo: string, number: number, edit: { title?: string; body?: string; removeLabels?: string[] }) {
     this.log.push('edit');
     const i = this.issues.find((x) => x.repo === repo && x.number === number)!;
     if (edit.title !== undefined) i.title = edit.title;
+    if (edit.body !== undefined) i.body = edit.body;
     i.labels = i.labels.filter((l) => !edit.removeLabels?.includes(l));
   }
 }
@@ -111,12 +115,12 @@ describe('approved snapshots', () => {
     expect(snapshotProblem(approved({ source: 'manager' }), false)).toBeNull();
   });
 
-  it('needs the exact revisions and a single plan entry', () => {
+  it('needs exact revisions and well-formed plan entries', () => {
     expect(snapshotProblem(approved({ planRevision: 0 }), true)).toMatch(/exact PRD and Issue Plan revisions/);
     expect(snapshotProblem({ ...approved(), approval: undefined }, true)).toMatch(/recorded approval/);
     const two = approved();
     two.issues.push({ ...two.issues[0], entryId: 'e2' });
-    expect(snapshotProblem(two, true)).toMatch(/single-issue plans/);
+    expect(snapshotProblem(two, true)).toBeNull();
     expect(snapshotProblem({ ...approved(), issues: [{ ...approved().issues[0], repo: 'nope' }] }, true)).toMatch(/owner\/name/);
     expect(snapshotProblem(approved({ proposalId: 'p1 -->' }), true)).toMatch(/ids/);
   });
@@ -347,7 +351,7 @@ describe('recovery', () => {
   it('adopts the one open duplicate once the extras are closed', async () => {
     const plan = approved().issues[0];
     const marker = planMarker('p1', 'e1');
-    for (const n of [1, 2]) tracker.issues.push({ repo: REPO, number: n, url: `https://github.com/${REPO}/issues/${n}`, title: heldTitle(plan.title), body: publishedBody(plan, marker), labels: [PUBLICATION_HOLD], state: 'OPEN' });
+    for (const n of [1, 2]) tracker.issues.push({ repo: REPO, number: n, url: `https://github.com/${REPO}/issues/${n}`, title: heldTitle(plan.title), body: publishedBody(plan, marker), labels: [PUBLICATION_HOLD, 'swarm:frontend'], state: 'OPEN' });
     const view = await publisher.publish(approved());
     await settle();
     expect(view.status).toBe('blocked');
@@ -359,7 +363,7 @@ describe('recovery', () => {
     expect(view.issues[0]).toMatchObject({ number: 2, step: 'released' });
     expect(tracker.issues).toHaveLength(2);
     expect(tracker.log).not.toContain('create');
-    expect(tracker.issues[1]).toMatchObject({ title: plan.title, labels: [] });
+    expect(tracker.issues[1]).toMatchObject({ title: plan.title, labels: ['swarm:frontend'] });
     expect(tracker.issues[0].labels).toContain(PUBLICATION_HOLD);
     expect(host.released).toHaveBeenCalledWith(REPO, 2);
   });
@@ -401,6 +405,229 @@ describe('recovery', () => {
   });
 });
 
+describe('cross-floor plans', () => {
+  const OTHER = 'demo-co/api';
+  const plan = () => {
+    const snapshot = demoCrossFloorProposal(REPO, OTHER);
+    snapshot.approval = approved().approval;
+    return snapshot;
+  };
+  beforeEach(() => {
+    host.floors = () => [REPO, OTHER];
+    tracker.issues.push({ repo: OTHER, number: 1, url: `https://github.com/${OTHER}/issues/1`, title: 'Existing work', body: 'Keep this exact brief.', labels: ['needs-human'], state: 'OPEN' });
+  });
+
+  it('stages and wires the whole plan before releasing independent leaves, leaving references untouched', async () => {
+    const existing = structuredClone(tracker.issues[0]);
+    const edit = tracker.editIssue.bind(tracker);
+    vi.spyOn(tracker, 'editIssue').mockImplementation(async (repo, number, change) => {
+      if (change.removeLabels) {
+        expect(records.p1.issues.every((i) => ['verified', 'held', 'released', 'releasing', 'referenced'].includes(i.step))).toBe(true);
+        expect(tracker.issues.filter((i) => i.body.includes('cubefarm:plan-entry'))).toHaveLength(4);
+        for (const entry of records.p1.issues.filter((i) => i.step === 'held')) {
+          expect(tracker.issues.find((i) => i.repo === entry.repo && i.number === entry.number)?.labels).toContain(PUBLICATION_HOLD);
+        }
+      }
+      await edit(repo, number, change);
+    });
+    const view = await publisher.publish(plan());
+    await settle();
+    expect(view.status).toBe('complete');
+    expect(view.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'held']);
+    expect(tracker.issues[0]).toEqual(existing);
+    expect(publisher.issueOrigin(OTHER, 1)).toBeNull();
+    expect(host.released).toHaveBeenCalledTimes(2);
+    const parent = tracker.issues.find((i) => i.number === view.issues[0].number && i.repo === REPO)!;
+    const panel = tracker.issues.find((i) => i.number === view.issues[4].number && i.repo === REPO)!;
+    expect(parent.body).toContain(view.issues[2].url);
+    expect(panel.body).toContain(`Parent: ${view.issues[0].url}`);
+    expect(panel.body).toContain(`Depends on ${view.issues[2].url}`);
+    expect(panel.body).toContain(`Depends on ${existing.url}`);
+    expect(view.issues[4].holdReason).toMatch(/dispatch integration/);
+  });
+
+  it('keeps recorded links stable when read-back URL casing differs from the approved target', async () => {
+    const read = tracker.readIssue.bind(tracker);
+    vi.spyOn(tracker, 'readIssue').mockImplementation(async (repo, number) => {
+      const got = await read(repo, number);
+      return got && !(repo === OTHER && number === 1) ? { ...got, url: got.url.replace('demo-co', 'Demo-Co') } : got;
+    });
+    const view = await publisher.publish(plan());
+    await settle();
+    expect(view.status).toBe('complete');
+    expect(view.issues[0].url).toContain('demo-co');
+  });
+
+  it('accepts an existing blocker that closes during access recovery without changing it', async () => {
+    const create = tracker.createIssue.bind(tracker);
+    let refuse = true;
+    vi.spyOn(tracker, 'createIssue').mockImplementation(async (repo, ...args) => {
+      if (repo === OTHER && refuse) throw new CommandError('refused', 'HTTP 403: Forbidden', 1);
+      return create(repo, ...args);
+    });
+    const view = await publisher.publish(plan());
+    await settle();
+    tracker.issues[0].state = 'CLOSED';
+    const closed = structuredClone(tracker.issues[0]);
+    refuse = false;
+    await settle(15_000);
+    expect(view.status).toBe('complete');
+    expect(tracker.issues[0]).toEqual(closed);
+    expect(view.issues[4].step).toBe('held');
+  });
+
+  it('keeps A held when B refuses writes after preflight, then reuses the staged identities automatically', async () => {
+    const create = tracker.createIssue.bind(tracker);
+    let refuse = true;
+    vi.spyOn(tracker, 'createIssue').mockImplementation(async (repo, ...args) => {
+      if (repo === OTHER && refuse) throw new CommandError('refused', 'HTTP 403: Forbidden', 1);
+      return create(repo, ...args);
+    });
+    const snapshot = plan();
+    const view = await publisher.publish(snapshot);
+    await settle();
+    const staged = view.issues.slice(0, 2).map((i) => i.number);
+    expect(view).toMatchObject({ status: 'blocked', needsManager: true });
+    expect(staged.every((n) => n !== null)).toBe(true);
+    expect(host.released).not.toHaveBeenCalled();
+    expect(tracker.issues.slice(1).every((i) => i.title.startsWith('[Draft] ') && i.labels.includes(PUBLICATION_HOLD))).toBe(true);
+    refuse = false;
+    await settle(15_000);
+    expect(view.status).toBe('complete');
+    expect(view.issues.slice(0, 2).map((i) => i.number)).toEqual(staged);
+    expect(tracker.issues).toHaveLength(5);
+    expect(await publisher.publish(snapshot)).toBe(view);
+  });
+
+  it('preflights recorded holds before writing to another floor on retry', async () => {
+    const create = tracker.createIssue.bind(tracker);
+    let refuse = true;
+    vi.spyOn(tracker, 'createIssue').mockImplementation(async (repo, ...args) => {
+      if (repo === OTHER && refuse) throw new CommandError('refused', 'HTTP 403: Forbidden', 1);
+      return create(repo, ...args);
+    });
+    const view = await publisher.publish(plan());
+    await settle();
+    tracker.issues[1].labels = [];
+    refuse = false;
+    await settle(15_000);
+    expect(view.status).toBe('blocked');
+    expect(view.note).toMatch(/hold/);
+    expect(tracker.issues).toHaveLength(3); // only A's two staged issues and the existing reference
+    expect(host.released).not.toHaveBeenCalled();
+  });
+
+  it('resumes a restart in per-issue release without duplicating a create or a completed release', async () => {
+    const edit = tracker.editIssue.bind(tracker);
+    let releases = 0;
+    vi.spyOn(tracker, 'editIssue').mockImplementation(async (repo, number, change) => {
+      await edit(repo, number, change);
+      if (change.removeLabels && ++releases === 2) throw new Error('lost release response');
+    });
+    await publisher.publish(plan());
+    await settle();
+    expect(records.p1.issues.map((i) => i.step)).toEqual(['held', 'released', 'releasing', 'referenced', 'held']);
+    publisher.stop();
+    records = JSON.parse(disk.at(-1)!);
+    publisher = new Publisher(host);
+    publisher.resumeAll();
+    await settle();
+    expect(records.p1.status).toBe('complete');
+    expect(records.p1.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'held']);
+    expect(tracker.issues).toHaveLength(5);
+    expect(releases).toBe(2);
+  });
+
+  it('replays wiring after a lost write response and never edits an existing reference', async () => {
+    const edit = tracker.editIssue.bind(tracker);
+    let lose = true;
+    vi.spyOn(tracker, 'editIssue').mockImplementation(async (repo, number, change) => {
+      expect(`${repo}#${number}`).not.toBe(`${OTHER}#1`);
+      await edit(repo, number, change);
+      if (change.body && lose) { lose = false; throw new Error('lost wiring response'); }
+    });
+    const view = await publisher.publish(plan());
+    await settle();
+    expect(host.released).not.toHaveBeenCalled();
+    await settle(15_000);
+    expect(view.status).toBe('complete');
+    expect(tracker.issues).toHaveLength(5);
+  });
+
+  it('waits for dispatch visibility before any release and retries temporary failures', async () => {
+    const list = tracker.listIssues.bind(tracker);
+    let stale = true;
+    vi.spyOn(tracker, 'listIssues').mockImplementation(async (repo) => stale ? [] : list(repo));
+    const view = await publisher.publish(plan());
+    await settle();
+    expect(view).toMatchObject({ status: 'publishing', needsManager: false });
+    expect(host.released).not.toHaveBeenCalled();
+    stale = false;
+    await settle(15_000);
+    expect(view.status).toBe('complete');
+  });
+
+  it('automatically retries dispatch metadata that has not loaded', async () => {
+    const list = tracker.listIssues.bind(tracker);
+    let loading = true;
+    vi.spyOn(tracker, 'listIssues').mockImplementation(async (repo) => (await list(repo)).map((i) => ({ ...i, nativeBlockers: loading ? null : [] })));
+    const view = await publisher.publish(plan());
+    await settle();
+    expect(view).toMatchObject({ status: 'publishing', needsManager: false });
+    expect(host.released).not.toHaveBeenCalled();
+    loading = false;
+    await settle(15_000);
+    expect(view.status).toBe('complete');
+  });
+
+  it('rechecks prior verified issues and blocks scope changes before releasing a sibling', async () => {
+    const list = vi.spyOn(tracker, 'listIssues').mockRejectedValue(new Error('timeout'));
+    const view = await publisher.publish(plan());
+    await settle();
+    records.p1.issues[1].step = 'verified';
+    tracker.issues.find((i) => i.repo === REPO && i.number === view.issues[1].number)!.body += '\nUnapproved scope';
+    list.mockRestore();
+    await settle(15_000);
+    expect(view.status).toBe('blocked');
+    expect(host.released).not.toHaveBeenCalled();
+  });
+
+  it('refuses missing holds and changed approval targets or dependencies', async () => {
+    const create = tracker.createIssue.bind(tracker);
+    vi.spyOn(tracker, 'createIssue').mockImplementation(async (...args) => {
+      const n = await create(...args);
+      tracker.issues.at(-1)!.labels = [];
+      return n;
+    });
+    const snapshot = plan();
+    const view = await publisher.publish(snapshot);
+    await settle();
+    expect(view.status).toBe('blocked');
+    expect(view.note).toMatch(/hold/);
+    expect(host.released).not.toHaveBeenCalled();
+    for (const change of ['target', 'scope', 'dependency']) {
+      const changed = structuredClone(snapshot);
+      if (change === 'target') changed.issues[1].repo = OTHER;
+      if (change === 'scope') changed.issues[1].body += ' More work.';
+      if (change === 'dependency') changed.issues[4].blockedBy = ['existing'];
+      await expect(publisher.publish(changed)).rejects.toMatchObject({ status: 409 });
+    }
+  });
+
+  it('preflights every reference and dependency before creating anything', async () => {
+    tracker.issues = [];
+    const view = await publisher.publish(plan());
+    await settle();
+    expect(view.status).toBe('blocked');
+    expect(tracker.log).not.toContain('create');
+    const unknown = plan(); unknown.issues[4].blockedBy = ['absent'];
+    const self = plan(); self.issues[1].blockedBy = [self.issues[1].entryId];
+    const cycle = plan(); cycle.issues[2].blockedBy = ['panel'];
+    const hierarchy = plan(); hierarchy.issues[0].parent = 'parent';
+    for (const snapshot of [unknown, self, cycle, hierarchy]) expect(snapshotProblem(snapshot, true)).not.toBeNull();
+  });
+});
+
 describe('pure decisions', () => {
   const plan = approved().issues[0];
   const entry = { entryId: 'e1', repo: REPO, marker: planMarker('p1', 'e1'), step: 'created' as const, number: 3, url: null };
@@ -419,6 +646,7 @@ describe('pure decisions', () => {
   it('tells temporary failures from blocks', () => {
     expect(failure(new Error('timeout'), 1)).toMatchObject({ status: 'publishing', needsManager: false, retryIn: 15_000 });
     expect(failure(new Error('timeout'), 10).retryIn).toBe(600_000);
+    expect(failure(new CommandError('x', 'HTTP 403: API rate limit exceeded', 1), 1)).toMatchObject({ status: 'publishing', needsManager: false, retryIn: 15_000 });
     expect(failure(new CommandError('x', 'HTTP 403: Forbidden', 1), 1)).toMatchObject({ status: 'blocked', needsManager: true, retryIn: 15_000 });
     expect(failure(new PublicationBlock('dupes', 'conflict'), 1)).toMatchObject({ status: 'blocked', retryIn: null });
   });
@@ -433,7 +661,7 @@ describe('the demo office', () => {
     vi.spyOn(s, 'syncRepo').mockResolvedValue();
     vi.spyOn(s, 'schedule').mockImplementation(() => {});
     s.state.repos.push({ id: 'r1', fullName: 'demo-co/pixel-todo', floor: 1 });
-    return { swarm, backend };
+    return { swarm, backend, s };
   };
 
   it('publishes the seeded approved proposal through the fake tracker, recovering a lost create', async () => {
@@ -450,6 +678,29 @@ describe('the demo office', () => {
     expect(published).toHaveLength(1);
     expect(issueWaitReason(published[0], new Set())).toBeNull(); // ordinary dispatch can take it
     expect(swarm.publisher.list()).toContainEqual(expect.objectContaining({ proposalId: view.proposalId, status: 'complete' }));
+    swarm.publisher.stop();
+  });
+
+  it('exercises cross-floor staging, held dependencies and automatic recovery through the demo tracker', async () => {
+    const { swarm, backend, s } = office();
+    s.state.repos.push({ id: 'r2', fullName: 'demo-co/weather-api', floor: 2 });
+    const before = await backend.readIssue('demo-co/weather-api', 1);
+    const view = await swarm.publishDemoProposal('cross-floor-refused');
+    await swarm.publisher.settled(view.proposalId);
+    expect(view.status).toBe('blocked');
+    const staged = view.issues.slice(0, 2).map((i) => i.number);
+    expect(view.issues[2].number).toBeNull();
+    expect(staged.every((i) => i !== null)).toBe(true);
+    await vi.advanceTimersByTimeAsync(45_000);
+    await swarm.publisher.settled(view.proposalId);
+    expect(view.status).toBe('complete');
+    expect(view.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'held']);
+    expect(view.issues.slice(0, 2).map((i) => i.number)).toEqual(staged);
+    expect(await backend.readIssue('demo-co/weather-api', 1)).toEqual(before);
+    for (const entry of view.issues.filter((i) => i.step !== 'referenced')) {
+      const visible = (await backend.listIssues(entry.repo)).find((i) => i.number === entry.number)!;
+      expect(issueWaitReason(visible, new Set())).toBe(entry.step === 'held' ? 'held for publication' : null);
+    }
     swarm.publisher.stop();
   });
 

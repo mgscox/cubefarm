@@ -708,6 +708,12 @@ export interface PlanIssue {
   body: string;
   /** Routing hint: becomes a swarm:<specialty> label. */
   specialty?: string;
+  /** Existing issues are read-only references; they are never held, edited or released. */
+  existing?: { number: number; url: string };
+  trackingParent?: boolean;
+  /** Entry ids within this exact approved plan. Hierarchy is rendered as reciprocal body links. */
+  parent?: string;
+  blockedBy?: string[];
 }
 
 /** What publication receives: the approval and the exact Issue Plan revision it covers. */
@@ -717,7 +723,7 @@ export interface ApprovedSnapshot {
 }
 
 /** A plan issue's progress: created held, read back (verified), then released into ordinary dispatch. */
-export type PublishedStep = 'pending' | 'creating' | 'created' | 'verified' | 'released';
+export type PublishedStep = 'pending' | 'creating' | 'created' | 'verified' | 'releasing' | 'released' | 'held' | 'referenced';
 
 export interface PublishedIssue {
   entryId: string;
@@ -725,6 +731,7 @@ export interface PublishedIssue {
   /** The stable plan-entry marker in the issue's body, used to find the issue again after a lost response. */
   marker: string;
   step: PublishedStep;
+  holdReason?: string;
   number: number | null;
   url: string | null;
 }
@@ -732,7 +739,7 @@ export interface PublishedIssue {
 export interface PublicationView {
   proposalId: string;
   snapshot: ApprovedSnapshot;
-  /** publishing: on its way (or retrying a temporary failure); blocked: held until the cause clears; complete: released. */
+  /** publishing: on its way (or retrying a temporary failure); blocked: held until the cause clears; complete: verified, with independent leaves released. */
   status: 'publishing' | 'blocked' | 'complete';
   /** Why it is retrying or blocked. */
   note: string | null;

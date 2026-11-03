@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { emptyTelegram, TelegramMirror, telegramToken, telegramTransport, type TelegramState, type TelegramTransport } from './telegram.ts';
-import { createDemoTelegram, demoApprovedProposal, demoTracker } from './demo.ts';
+import { createDemoTelegram, demoApprovedProposal, demoCrossFloorProposal, demoTracker } from './demo.ts';
 import { loadPublications, Publisher } from './publication.ts';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
@@ -2251,10 +2251,24 @@ export class Swarm {
     if (!this.backend.demo) throw new HttpError(404, 'Seeded proposals exist only in the demo office.');
     const repo = this.state.repos.find((r) => r.floor === 1) ?? this.state.repos[0];
     if (!repo) throw new HttpError(400, 'Connect a floor first.');
-    if (fault === 'lost-create') demoTracker.lostCreates++;
-    else if (fault === 'refused') demoTracker.refused.set(repo.fullName, Date.now() + 20_000);
-    else if (fault) throw new HttpError(400, 'fault must be lost-create or refused.');
-    return this.publishApproved(demoApprovedProposal(repo.fullName));
+    let snapshot: ApprovedSnapshot;
+    if (fault === 'cross-floor' || fault === 'cross-floor-refused') {
+      const other = this.state.repos.find((r) => r.fullName !== repo.fullName);
+      if (!other) throw new HttpError(400, 'Connect two floors for a cross-floor plan.');
+      if (fault === 'cross-floor-refused') demoTracker.refusedCreates.set(other.fullName, Date.now() + 20_000);
+      snapshot = demoCrossFloorProposal(repo.fullName, other.fullName);
+    } else {
+      if (fault === 'lost-create') demoTracker.lostCreates++;
+      else if (fault === 'refused') demoTracker.refused.set(repo.fullName, Date.now() + 20_000);
+      else if (fault) throw new HttpError(400, 'Unknown publication fixture.');
+      snapshot = demoApprovedProposal(repo.fullName);
+    }
+    await this.commitIdeas(() => {
+      const idea: IdeaView = { id: snapshot.approval.ideaId, description: 'Demo: publish the approved weekly plan', links: [], constraints: '', floorHints: [], status: 'proposed', createdAt: Date.now() };
+      this.state.ideas.push(idea);
+      return { result: idea, rollback: () => { this.state.ideas = this.state.ideas.filter((i) => i !== idea); }, events: [{ type: 'idea', idea }] };
+    });
+    return this.publishApproved(snapshot);
   }
 
   async mergePull(repoId: string, number: number, method: 'squash' | 'merge' | 'rebase' = 'squash', approval?: { reason: string }) {
