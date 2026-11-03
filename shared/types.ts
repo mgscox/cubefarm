@@ -36,6 +36,7 @@ export interface IssueInfo {
   bodyBlockers?: IssueDependency[]; // resolved dependency URLs; unread URLs are held open
   stalled?: string;
   nativeBlockers?: IssueDependency[] | null; // null: unread, undefined: unsupported; otherwise last successful sync
+  held?: string; // published from an Idea: why its approved plan holds it (a prerequisite not delivered, a Tracking Parent)
 }
 
 export interface PullInfo {
@@ -708,7 +709,14 @@ export interface PlanIssue {
   body: string;
   /** Routing hint: becomes a swarm:<specialty> label. */
   specialty?: string;
+  /** Approved prerequisites: no agent starts this issue until each is closed as completed. */
+  blockedBy?: ApprovedBlocker[];
+  /** A Tracking Parent: groups the plan's work and is never dispatched. */
+  tracking?: boolean;
 }
+
+/** A prerequisite the approval names: another entry of the same plan, or an issue already on a tracker. */
+export type ApprovedBlocker = { entryId: string } | { repo: string; number: number };
 
 /** What publication receives: the approval and the exact Issue Plan revision it covers. */
 export interface ApprovedSnapshot {

@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { emptyTelegram, TelegramMirror, telegramToken, telegramTransport, type TelegramState, type TelegramTransport } from './telegram.ts';
 import { createDemoTelegram, demoApprovedProposal, demoTracker } from './demo.ts';
 import { loadPublications, Publisher } from './publication.ts';
+import { approvedHold, blockerKey, readBlocker, type BlockerReading } from './approvedBlockers.ts';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
 import type { BoxConnection, Machine } from './machine.ts';
@@ -2118,7 +2119,21 @@ export class Swarm {
 
   private workIssue(repo: PersistedRepo, issue: IssueInfo): IssueInfo {
     const record = retainNoWork(repo.noWorkEndings ?? [], [issue])[0];
-    return { ...issue, stalled: record && record.count >= 2 ? STALLED : undefined };
+    const held = approvedHold(this.publisher.issueOrigin(repo.fullName, issue.number), this.blockerReadings) ?? undefined;
+    return { ...issue, stalled: record && record.count >= 2 ? STALLED : undefined, held };
+  }
+
+  /** Re-read the approved prerequisites of this floor's Idea issues from the tracker, wherever they live. */
+  private async readApprovedBlockers(repo: PersistedRepo, issues: IssueInfo[]) {
+    const wanted = new Map<string, { repo: string; number: number }>();
+    for (const i of issues) {
+      for (const b of this.publisher.issueOrigin(repo.fullName, i.number)?.blockers ?? []) {
+        if (b.repo !== null && b.number !== null) wanted.set(blockerKey(b.repo, b.number), { repo: b.repo, number: b.number });
+      }
+    }
+    await Promise.all([...wanted].map(async ([key, b]) => {
+      this.blockerReadings.set(key, await readBlocker(() => this.backend.readIssue(b.repo, b.number)));
+    }));
   }
 
   private setNoWorkEndings(repo: PersistedRepo, records: NoWorkEnding[]) {
@@ -2137,6 +2152,7 @@ export class Swarm {
       if (issues.status === 'fulfilled') {
         rt.issuesFetchedAt = started;
         this.setNoWorkEndings(repo, retainNoWork(repo.noWorkEndings ?? [], issues.value));
+        await this.readApprovedBlockers(repo, issues.value);
       }
       const requests = retainRequestedStarts(repo.requestedStarts, issues.status === 'fulfilled' ? issues.value : null, pullResult.status === 'fulfilled' ? pullResult.value.pulls : null);
       if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests);
@@ -2255,8 +2271,13 @@ export class Swarm {
     if (!repo) throw new HttpError(400, 'Connect a floor first.');
     if (fault === 'lost-create') demoTracker.lostCreates++;
     else if (fault === 'refused') demoTracker.refused.set(repo.fullName, Date.now() + 20_000);
-    else if (fault) throw new HttpError(400, 'fault must be lost-create or refused.');
-    return this.publishApproved(demoApprovedProposal(repo.fullName));
+    else if (fault && fault !== 'blocked') throw new HttpError(400, 'fault must be lost-create, refused or blocked.');
+    if (fault !== 'blocked') return this.publishApproved(demoApprovedProposal(repo.fullName));
+    // An approved prerequisite on another floor, so the guard holds the published issue until that one is merged.
+    const floors = [...this.state.repos.filter((r) => r !== repo), repo];
+    const prerequisite = floors.map((r) => ({ repo: r.fullName, issue: this.repoRt.get(r.id)?.issues[0] })).find((x) => x.issue);
+    if (!prerequisite) throw new HttpError(400, 'No open issue to wait for.');
+    return this.publishApproved(demoApprovedProposal(repo.fullName, Date.now(), { repo: prerequisite.repo, number: prerequisite.issue!.number }));
   }
 
   async mergePull(repoId: string, number: number, method: 'squash' | 'merge' | 'rebase' = 'squash', approval?: { reason: string }) {
@@ -2610,6 +2631,9 @@ export class Swarm {
     if (forHuman(issue.labels)) {
       throw new HttpError(409, `#${issueNumber} is labelled ${READY_FOR_HUMAN}: an agent can't complete it. Remove the label to hand it to a developer.`);
     }
+    // Approved prerequisites hold an Idea issue on both start paths: the manager can't override its approved plan.
+    const held = this.workIssue(repo, issue).held;
+    if (held) throw new HttpError(409, `#${issueNumber} is held by its approved plan: ${held}.`);
     const readiness = issueReadinessReason(issue);
     if (readiness) {
       const label = readiness === 'needs triage' ? 'needs-triage' : readiness === 'waiting for info' ? 'needs-info' : NEEDS_HUMAN;
@@ -3759,6 +3783,7 @@ export class Swarm {
 
   private scheduleOffset = 0;
   private issueFailures = new Map<string, number>(); // `${repoId}#${issue}` → failed sessions on it
+  private blockerReadings = new Map<string, BlockerReading>(); // blockerKey → latest read of an approved prerequisite
   private nudged = new Set<string>(); // `${repoId}#${issue}`: its developer was asked once to finish the missing PR
   private pausedUntil = 0; // Claude's usage limit was hit: nothing new starts before this
   private pacingUntil = 0; // Claude warned about usage: new issues are paced until this
