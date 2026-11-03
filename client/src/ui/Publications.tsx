@@ -16,6 +16,15 @@ const STEP: Record<PublishedStep, string> = {
   held: 'verified, kept held',
   referenced: 'existing reference, unchanged',
 };
+/** The approved prerequisites of a plan entry, as issue links where publication recorded them. */
+function blockers(p: PublicationView, entryId: string) {
+  const plan = p.snapshot.issues.find((i) => i.entryId === entryId);
+  return (plan?.blockedBy ?? []).map((b) => {
+    if ('repo' in b) return `${b.repo}#${b.number}`;
+    const dep = p.issues.find((i) => i.entryId === b.entryId);
+    return dep?.number != null ? `${dep.repo}#${dep.number}` : b.entryId;
+  }).join(', ');
+}
 const time = (t: number) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 export function PublicationsCard({ ideaId }: { ideaId?: string }) {
@@ -24,7 +33,7 @@ export function PublicationsCard({ ideaId }: { ideaId?: string }) {
   const demo = useStore((s) => s.demo);
   const [busy, setBusy] = useState(false);
   if ((!demo || ideaId) && publications.length === 0) return null;
-  const seed = (fault: '' | 'lost-create' | 'refused' | 'cross-floor' | 'cross-floor-refused') => {
+  const seed = (fault: '' | 'lost-create' | 'refused' | 'cross-floor' | 'cross-floor-refused' | 'blocked') => {
     setBusy(true);
     void api.demoPublication(fault).catch(() => undefined).finally(() => setBusy(false));
   };
@@ -38,6 +47,7 @@ export function PublicationsCard({ ideaId }: { ideaId?: string }) {
             <button className="btn btn-small" disabled={busy} onClick={() => seed('')}>Publish sample</button>
             <button className="btn btn-small" disabled={busy} onClick={() => seed('lost-create')}>…lose the create response</button>
             <button className="btn btn-small" disabled={busy} onClick={() => seed('refused')}>…refuse writes for 20 s</button>
+            <button className="btn btn-small" disabled={busy} onClick={() => seed('blocked')}>…waiting on another floor's issue</button>
             <button className="btn btn-small" disabled={busy} onClick={() => seed('cross-floor')}>Publish cross-floor plan</button>
             <button className="btn btn-small" disabled={busy} onClick={() => seed('cross-floor-refused')}>…second floor refuses writes</button>
           </div>
@@ -63,6 +73,7 @@ export function PublicationsCard({ ideaId }: { ideaId?: string }) {
                     i.repo
                   )}{' '}
                   · {STEP[i.step]}{i.holdReason ? `: ${i.holdReason}` : ''}
+                  {blockers(p, i.entryId) && <span className="muted"> · waits for {blockers(p, i.entryId)}</span>}
                 </div>
               ))}
               {p.note && <div className="muted small">{p.needsManager ? '⚠ ' : ''}{p.note}</div>}

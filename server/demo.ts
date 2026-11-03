@@ -35,15 +35,13 @@ function issue(n: number, title: string, body: string, fullName: string, labels:
   return { number: n, title, body, url: `https://github.com/${fullName}/issues/${n}`, labels, createdAt: now() };
 }
 
-const tracked = (fullName: string, i: IssueInfo): TrackedIssue => ({ repo: fullName, number: i.number, url: i.url, title: i.title, body: i.body, labels: [...i.labels], state: 'OPEN' });
+const tracked = (fullName: string, i: IssueInfo): TrackedIssue => ({ repo: fullName, number: i.number, url: i.url, title: i.title, body: i.body, labels: [...i.labels], state: 'OPEN', stateReason: null });
 
 const repos = new Map<string, FakeRepo>();
 /** Repos made in the demo (new projects, published folders): empty, so no package.json for the preview to fall back on. */
 const bareRepos = new Set<string>();
 const mergedSinceSync = new Map<string, number>(); // merges the fake project folder hasn't pulled yet
-const closedIssues = new Set<string>(); // `${fullName}#${n}`: issues closed by a merge
-// GitHub still serves closed issues: references and marker recovery must survive demo agents merging their work.
-const closedIssueRecords = new Map<string, TrackedIssue>();
+const closedIssues = new Map<string, TrackedIssue>(); // `${fullName}#${n}` → an issue closed (as completed) by a merge
 
 const fakeSha = () => crypto.randomBytes(20).toString('hex');
 
@@ -64,9 +62,9 @@ const refusing = (fullName: string) => (demoTracker.refused.get(fullName) ?? 0) 
 let fixtureSeq = 0;
 /**
  * A seeded, already-approved single-issue Proposal. Its approval is a fixture: only the demo office and tests accept
- * it, never the real one.
+ * it, never the real one. With a prerequisite, the approved plan says the issue waits for that one.
  */
-export function demoApprovedProposal(repo: string, at = Date.now()): ApprovedSnapshot {
+export function demoApprovedProposal(repo: string, at = Date.now(), prerequisite?: { repo: string; number: number }): ApprovedSnapshot {
   const n = `${at.toString(36)}-${++fixtureSeq}`;
   return {
     approval: { decisionId: `demo-decision-${n}`, proposalId: `demo-proposal-${n}`, ideaId: `demo-idea-${n}`, prdRevision: 2, planRevision: 4, decidedAt: at, source: 'fixture' },
@@ -86,6 +84,7 @@ export function demoApprovedProposal(repo: string, at = Date.now()): ApprovedSna
         '',
         'PRD requirement: R2 (weekly recap).',
       ].join('\n'),
+      ...(prerequisite && { blockedBy: [prerequisite] }),
     }],
   };
 }
@@ -95,11 +94,11 @@ export function demoCrossFloorProposal(a: string, b: string): ApprovedSnapshot {
   const snapshot = demoApprovedProposal(a);
   const leaf = snapshot.issues[0];
   snapshot.issues = [
-    { entryId: 'parent', repo: a, title: 'Weekly plan', body: 'Track delivery across the two floors.', trackingParent: true },
+    { entryId: 'parent', repo: a, title: 'Weekly plan', body: 'Track delivery across the two floors.', tracking: true },
     { ...leaf, parent: 'parent' },
     { entryId: 'endpoint', repo: b, title: 'Serve the weekly summary', body: 'Add a read-only weekly summary endpoint.', parent: 'parent' },
     { entryId: 'existing', repo: b, title: 'Existing API work', body: '', existing: { number: 1, url: `https://github.com/${b}/issues/1` } },
-    { entryId: 'panel', repo: a, title: 'Connect the weekly panel', body: 'Read the endpoint and show its summary.', parent: 'parent', blockedBy: ['endpoint', 'existing'] },
+    { entryId: 'panel', repo: a, title: 'Connect the weekly panel', body: 'Read the endpoint and show its summary.', parent: 'parent', blockedBy: [{ entryId: 'endpoint' }, { entryId: 'existing' }] },
   ];
   return snapshot;
 }
@@ -740,12 +739,12 @@ export function createDemoBackend(): Backend {
     },
     readIssue: async (fullName, number) => {
       const i = repos.get(fullName)?.issues.find((x) => x.number === number);
-      const closed = closedIssueRecords.get(`${fullName}#${number}`);
+      const closed = closedIssues.get(`${fullName}#${number}`);
       return i ? tracked(fullName, i) : closed ? { ...closed, labels: [...closed.labels] } : null;
     },
     findIssuesByMarker: async (fullName, marker) => [
       ...(repos.get(fullName)?.issues ?? []).map((i) => tracked(fullName, i)),
-      ...[...closedIssueRecords.values()].filter((i) => i.repo === fullName).map((i) => ({ ...i, labels: [...i.labels] })),
+      ...[...closedIssues.values()].filter((i) => i.repo === fullName).map((i) => ({ ...i, labels: [...i.labels] })),
     ].filter((i) => i.body.includes(marker)),
     issueState: async (fullName, number) => {
       const r = repos.get(fullName);
@@ -767,10 +766,8 @@ export function createDemoBackend(): Backend {
       mergedSinceSync.set(fullName, (mergedSinceSync.get(fullName) ?? 0) + 1);
       pr.state = 'MERGED';
       pr.mergedAt = now();
-      for (const n of pr.closesIssues) {
-        closedIssues.add(`${fullName}#${n}`);
-        const i = r.issues.find((i) => i.number === n);
-        if (i) closedIssueRecords.set(`${fullName}#${n}`, { ...tracked(fullName, i), state: 'CLOSED' });
+      for (const i of r.issues.filter((x) => pr.closesIssues.includes(x.number))) {
+        closedIssues.set(`${fullName}#${i.number}`, { ...tracked(fullName, i), state: 'CLOSED', stateReason: 'completed' });
       }
       r.issues = r.issues.filter((i) => !pr.closesIssues.includes(i.number));
     },

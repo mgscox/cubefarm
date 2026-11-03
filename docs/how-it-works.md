@@ -6,6 +6,7 @@ The details behind the office: how an issue becomes a merged pull request, who d
 
 1. **Backlog and To do.** Issues labeled `needs-triage` wait in **Backlog**. Remove the label when the issue is ready. You can assign issues from **To do**, the terminal panel or the manager's console, or let the floor's **auto-assign** pick eligible work.
    - An issue that says `Depends on #N` waits until #N is closed. Of the rest, the ones that hold up the longest chain of other issues go first, then the oldest.
+   - An issue published from an approved Idea also waits for the prerequisites its approved plan names, on any floor, and neither auto-assign nor a manual start can override that. Each sync reads them back from GitHub; one counts only once it is closed as completed. An unreadable, missing or not-planned prerequisite keeps the issue waiting, and its note says which one. A Tracking Parent never starts.
    - A `swarm:<specialty>` label is a preference, not a lock. A free specialist gets first pick, and otherwise the issue goes to whichever free developer is least needed for their own specialty.
    - If a session fails, its issue goes back on the board for someone else, and the agent gets new work after a two-minute cooldown. An issue that fails twice waits for you to assign it by hand.
    - If Claude turns a session away because your usage limit is reached, the office starts no new work until the limit resets.

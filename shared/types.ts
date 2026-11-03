@@ -36,6 +36,7 @@ export interface IssueInfo {
   bodyBlockers?: IssueDependency[]; // resolved dependency URLs; unread URLs are held open
   stalled?: string;
   nativeBlockers?: IssueDependency[] | null; // null: unread, undefined: unsupported; otherwise last successful sync
+  held?: string; // published from an Idea: why its approved plan holds it (a prerequisite not delivered, a Tracking Parent)
 }
 
 export interface PullInfo {
@@ -698,7 +699,7 @@ export interface ProposalApproval {
   source: 'manager' | 'fixture';
 }
 
-/** One new issue in an approved Issue Plan. */
+/** One issue or existing reference in an approved Issue Plan. */
 export interface PlanIssue {
   /** Stable within the plan; with the proposal it makes the marker the issue carries in its body. */
   entryId: string;
@@ -710,11 +711,16 @@ export interface PlanIssue {
   specialty?: string;
   /** Existing issues are read-only references; they are never held, edited or released. */
   existing?: { number: number; url: string };
-  trackingParent?: boolean;
-  /** Entry ids within this exact approved plan. Hierarchy is rendered as reciprocal body links. */
+  /** A Tracking Parent: groups the plan's work and is never dispatched. */
+  tracking?: boolean;
+  /** Tracking Parent entry id within this plan; hierarchy is rendered as reciprocal body links. */
   parent?: string;
-  blockedBy?: string[];
+  /** Approved prerequisites: no agent starts this issue until each is closed as completed. */
+  blockedBy?: ApprovedBlocker[];
 }
+
+/** A prerequisite the approval names: another entry of the same plan, or an issue already on a tracker. */
+export type ApprovedBlocker = { entryId: string } | { repo: string; number: number };
 
 /** What publication receives: the approval and the exact Issue Plan revision it covers. */
 export interface ApprovedSnapshot {
@@ -739,7 +745,7 @@ export interface PublishedIssue {
 export interface PublicationView {
   proposalId: string;
   snapshot: ApprovedSnapshot;
-  /** publishing: on its way (or retrying a temporary failure); blocked: held until the cause clears; complete: verified, with independent leaves released. */
+  /** publishing: on its way (or retrying a temporary failure); blocked: held until the cause clears; complete: verified and leaves released, with tracking Parents held. */
   status: 'publishing' | 'blocked' | 'complete';
   /** Why it is retrying or blocked. */
   note: string | null;

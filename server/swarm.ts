@@ -1,9 +1,11 @@
+import syncFs from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { emptyTelegram, TelegramMirror, telegramToken, telegramTransport, type TelegramState, type TelegramTransport } from './telegram.ts';
 import { createDemoTelegram, demoApprovedProposal, demoCrossFloorProposal, demoTracker } from './demo.ts';
 import { loadPublications, Publisher } from './publication.ts';
+import { approvedHold, blockerKey, readBlocker, type BlockerReading } from './approvedBlockers.ts';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
 import type { BoxConnection, Machine } from './machine.ts';
@@ -305,6 +307,7 @@ const MAX_DESKS: Record<AgentRole, number> = { dev: 12, qa: 3, ceo: 1, researche
 // A floor's researchers sit at developer desks: the two share the floor's desk slots.
 const deskPool = (role: AgentRole) => (role === 'researcher' ? 'dev' : role);
 const ROLE_TITLE: Record<AgentRole, string> = { dev: 'Developer', qa: 'QA tester', ceo: 'CEO', researcher: 'Researcher' };
+const DEVELOPER_SPECIALISM = new URL('../docs/specialisms/developer.md', import.meta.url);
 const MAX_QA_ROUNDS = 3;
 // Every agent runs Claude Opus 5.5 at medium effort unless the manager overrides it.
 const DEFAULT_MODEL = 'claude-opus-5-5';
@@ -2116,7 +2119,21 @@ export class Swarm {
 
   private workIssue(repo: PersistedRepo, issue: IssueInfo): IssueInfo {
     const record = retainNoWork(repo.noWorkEndings ?? [], [issue])[0];
-    return { ...issue, stalled: record && record.count >= 2 ? STALLED : undefined };
+    const held = approvedHold(this.publisher.issueOrigin(repo.fullName, issue.number), this.blockerReadings) ?? undefined;
+    return { ...issue, stalled: record && record.count >= 2 ? STALLED : undefined, held };
+  }
+
+  /** Re-read the approved prerequisites of this floor's Idea issues from the tracker, wherever they live. */
+  private async readApprovedBlockers(repo: PersistedRepo, issues: IssueInfo[]) {
+    const wanted = new Map<string, { repo: string; number: number }>();
+    for (const i of issues) {
+      for (const b of this.publisher.issueOrigin(repo.fullName, i.number)?.blockers ?? []) {
+        if (b.repo !== null && b.number !== null) wanted.set(blockerKey(b.repo, b.number), { repo: b.repo, number: b.number });
+      }
+    }
+    await Promise.all([...wanted].map(async ([key, b]) => {
+      this.blockerReadings.set(key, await readBlocker(() => this.backend.readIssue(b.repo, b.number)));
+    }));
   }
 
   private setNoWorkEndings(repo: PersistedRepo, records: NoWorkEnding[]) {
@@ -2135,6 +2152,7 @@ export class Swarm {
       if (issues.status === 'fulfilled') {
         rt.issuesFetchedAt = started;
         this.setNoWorkEndings(repo, retainNoWork(repo.noWorkEndings ?? [], issues.value));
+        await this.readApprovedBlockers(repo, issues.value);
       }
       const requests = retainRequestedStarts(repo.requestedStarts, issues.status === 'fulfilled' ? issues.value : null, pullResult.status === 'fulfilled' ? pullResult.value.pulls : null);
       if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests);
@@ -2257,6 +2275,11 @@ export class Swarm {
       if (!other) throw new HttpError(400, 'Connect two floors for a cross-floor plan.');
       if (fault === 'cross-floor-refused') demoTracker.refusedCreates.set(other.fullName, Date.now() + 20_000);
       snapshot = demoCrossFloorProposal(repo.fullName, other.fullName);
+    } else if (fault === 'blocked') {
+      const floors = [...this.state.repos.filter((r) => r !== repo), repo];
+      const prerequisite = floors.map((r) => ({ repo: r.fullName, issue: this.repoRt.get(r.id)?.issues[0] })).find((x) => x.issue);
+      if (!prerequisite) throw new HttpError(400, 'No open issue to wait for.');
+      snapshot = demoApprovedProposal(repo.fullName, Date.now(), { repo: prerequisite.repo, number: prerequisite.issue!.number });
     } else {
       if (fault === 'lost-create') demoTracker.lostCreates++;
       else if (fault === 'refused') demoTracker.refused.set(repo.fullName, Date.now() + 20_000);
@@ -2622,6 +2645,9 @@ export class Swarm {
     if (forHuman(issue.labels)) {
       throw new HttpError(409, `#${issueNumber} is labelled ${READY_FOR_HUMAN}: an agent can't complete it. Remove the label to hand it to a developer.`);
     }
+    // Approved prerequisites hold an Idea issue on both start paths: the manager can't override its approved plan.
+    const held = this.workIssue(repo, issue).held;
+    if (held) throw new HttpError(409, `#${issueNumber} is held by its approved plan: ${held}.`);
     const readiness = issueReadinessReason(issue);
     if (readiness) {
       const label = readiness === 'needs triage' ? 'needs-triage' : readiness === 'waiting for info' ? 'needs-info' : NEEDS_HUMAN;
@@ -2734,12 +2760,21 @@ export class Swarm {
 
   private buildSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, fixing?: { pr: number; headRef: string }) {
     if (a.role === 'researcher' && !fixing) return this.researcherSystemAppend(a, { kind: 'floor', repo: repo.fullName, defaultBranch: repo.defaultBranch, summary: repo.summary, mission: repo.mission, cwd, branch, autoMerge: repo.autoMerge });
+    let specialism = '';
+    if (a.role === 'dev') {
+      try {
+        specialism = syncFs.readFileSync(DEVELOPER_SPECIALISM, 'utf8').trim();
+      } catch (err) {
+        console.warn('could not read the developer specialism', err);
+      }
+    }
     const linked = this.linkedRepos(repo).map((r) => `- ${r.fullName}: read-only reference clone at ${this.machineFor(a).mainDir(r.fullName)}`);
     const push = fixing ? `git push origin HEAD:${fixing.headRef}` : `git push -u origin ${branch}`;
     return [
       `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a software engineer'} on an autonomous agent team ("cubefarm"). Several teammates work in parallel on other issues of the same repository, each in their own git worktree. Nobody is watching live to answer questions, so make sensible decisions yourself and record assumptions in the PR description. The manager may occasionally send you messages; follow their instructions.`,
       `Every pull request is reviewed and tested by a QA teammate. ${repo.autoMerge ? "Once they sign off and GitHub's checks pass, the office merges it by itself" : 'Once they sign off, the manager merges it'}. If they find problems, or checks fail, or it conflicts with the default branch, you will get the details; fix them on the same branch.`,
       a.brief ? `\nYour job description:\n${a.brief}` : '',
+      specialism ? `\n${specialism}` : '',
       '',
       `Repository: ${repo.fullName} (default branch: ${repo.defaultBranch})`,
       repo.summary ? `Project: ${repo.summary}` : '',
@@ -3762,6 +3797,7 @@ export class Swarm {
 
   private scheduleOffset = 0;
   private issueFailures = new Map<string, number>(); // `${repoId}#${issue}` → failed sessions on it
+  private blockerReadings = new Map<string, BlockerReading>(); // blockerKey → latest read of an approved prerequisite
   private nudged = new Set<string>(); // `${repoId}#${issue}`: its developer was asked once to finish the missing PR
   private pausedUntil = 0; // Claude's usage limit was hit: nothing new starts before this
   private pacingUntil = 0; // Claude warned about usage: new issues are paced until this

@@ -51,17 +51,17 @@ test('cross-floor publication stays held on refusal and updates its Idea through
     await expect(detail).toContainText('GitHub refused');
     await expect(detail.getByRole('link', { name: `${blocked.issues[0].repo}#${blocked.issues[0].number}`, exact: true })).toBeVisible();
     await page.setViewportSize({ width: 1100, height: 850 });
-    await page.screenshot({ path: testInfo.outputPath('cross-floor-held.png') });
+    await page.screenshot({ path: testInfo.outputPath('cross-floor-held.png'), style: '.toasts { visibility: hidden !important; }' });
     await expect.poll(async () => (await current()).status, { timeout: 60_000 }).toBe('complete');
     const done = await current();
     expect(done.issues.slice(0, 2).map((i) => i.number)).toEqual(blocked.issues.slice(0, 2).map((i) => i.number));
-    expect(done.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'held']);
-    await expect(detail).toContainText('Plan verified; 2 entries stay held');
-    await expect(detail).toContainText('Waiting for approved-blocker dispatch integration');
-    await page.screenshot({ path: testInfo.outputPath('cross-floor-recovered.png') });
+    expect(done.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'released']);
+    await expect(detail).toContainText('Plan verified; 1 entry stays held');
+    await expect(detail).toContainText('waits for');
+    await page.screenshot({ path: testInfo.outputPath('cross-floor-recovered.png'), style: '.toasts { visibility: hidden !important; }' });
     await page.reload();
     await page.getByRole('button', { name: 'Enter the office' }).click();
-    await expect(detail).toContainText('Plan verified; 2 entries stay held');
+    await expect(detail).toContainText('Plan verified; 1 entry stays held');
     expect(problems).toEqual([]);
   } finally {
     await request.patch('/api/settings', { data: { tutorialStep: initial.settings.tutorialStep } });

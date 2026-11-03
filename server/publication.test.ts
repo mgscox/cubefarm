@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
 import type { TrackedIssue } from './github.ts';
 import {
-  failure, heldTitle, loadPublications, planMarker, PublicationBlock, publishedBody, Publisher, snapshotProblem, verifyProblem,
+  failure, heldTitle, loadPublications, newPublication, planMarker, PublicationBlock, publishedBody, Publisher, sameApproval, snapshotProblem, verifyProblem,
   type PublicationHost, type PublicationTracker,
 } from './publication.ts';
 import { createDemoBackend, demoApprovedProposal, demoCrossFloorProposal } from './demo.ts';
+import { approvedHold, blockerKey } from './approvedBlockers.ts';
 import { Swarm } from './swarm.ts';
 import { issueWaitReason, PUBLICATION_HOLD, schedulable } from '../shared/issues.ts';
 import type { ApprovedSnapshot, PublicationView } from '../shared/types.ts';
@@ -125,6 +126,15 @@ describe('approved snapshots', () => {
     expect(snapshotProblem(approved({ proposalId: 'p1 -->' }), true)).toMatch(/ids/);
   });
 
+  it('accepts approved blockers that name another plan entry or an owner/name#number issue', () => {
+    const blocked = (blockedBy: unknown) => ({ ...approved(), issues: [{ ...approved().issues[0], blockedBy }] }) as ApprovedSnapshot;
+    expect(snapshotProblem(blocked([{ repo: 'demo-co/api', number: 7 }]), true)).toBeNull();
+    for (const bad of [[{ entryId: 'e1' }], [{ entryId: 'nope' }], [{ entryId: 'e1', repo: 'demo-co/api', number: 7 }], [{ repo: 'nope', number: 7 }], [{ repo: 'demo-co/api', number: 0 }], 'demo-co/api#7']) {
+      expect(snapshotProblem(blocked(bad), true)).toMatch(/blocker/);
+    }
+    expect(sameApproval(blocked([{ repo: 'demo-co/api', number: 7 }]), approved())).toBe(false);
+  });
+
   it('refuses a fixture in an office without fixtures before anything is written', async () => {
     publisher = new Publisher({ ...host, fixtures: false });
     await expect(publisher.publish(approved())).rejects.toMatchObject({ status: 400 });
@@ -154,7 +164,7 @@ describe('publishing one approved issue', () => {
     expect(view).toMatchObject({ status: 'complete', note: null, attempts: 1 });
     expect(view.issues[0]).toMatchObject({ step: 'released', number: 1, url: `https://github.com/${REPO}/issues/1` });
     expect(host.released).toHaveBeenCalledWith(REPO, 1);
-    expect(publisher.issueOrigin('DEMO-CO/app', 1)).toEqual({ proposalId: 'p1', entryId: 'e1', step: 'released' });
+    expect(publisher.issueOrigin('DEMO-CO/app', 1)).toEqual({ proposalId: 'p1', entryId: 'e1', step: 'released', tracking: false, blockers: [] });
     expect(schedulable(created.labels, created.title)).toBe(true);
   });
 
@@ -417,7 +427,7 @@ describe('cross-floor plans', () => {
     tracker.issues.push({ repo: OTHER, number: 1, url: `https://github.com/${OTHER}/issues/1`, title: 'Existing work', body: 'Keep this exact brief.', labels: ['needs-human'], state: 'OPEN' });
   });
 
-  it('stages and wires the whole plan before releasing independent leaves, leaving references untouched', async () => {
+  it('stages and wires the whole plan before releasing leaves behind the approved dispatch guard, leaving references untouched', async () => {
     const existing = structuredClone(tracker.issues[0]);
     const edit = tracker.editIssue.bind(tracker);
     vi.spyOn(tracker, 'editIssue').mockImplementation(async (repo, number, change) => {
@@ -433,17 +443,59 @@ describe('cross-floor plans', () => {
     const view = await publisher.publish(plan());
     await settle();
     expect(view.status).toBe('complete');
-    expect(view.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'held']);
+    expect(view.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'released']);
     expect(tracker.issues[0]).toEqual(existing);
     expect(publisher.issueOrigin(OTHER, 1)).toBeNull();
-    expect(host.released).toHaveBeenCalledTimes(2);
+    expect(host.released).toHaveBeenCalledTimes(3);
     const parent = tracker.issues.find((i) => i.number === view.issues[0].number && i.repo === REPO)!;
     const panel = tracker.issues.find((i) => i.number === view.issues[4].number && i.repo === REPO)!;
     expect(parent.body).toContain(view.issues[2].url);
     expect(panel.body).toContain(`Parent: ${view.issues[0].url}`);
     expect(panel.body).toContain(`Depends on ${view.issues[2].url}`);
     expect(panel.body).toContain(`Depends on ${existing.url}`);
-    expect(view.issues[4].holdReason).toMatch(/dispatch integration/);
+    expect(view.issues[4].holdReason).toBeUndefined();
+    const origin = publisher.issueOrigin(panel.repo, panel.number)!;
+    expect(origin.blockers).toEqual([
+      { ref: `${view.issues[2].repo}#${view.issues[2].number}`, repo: view.issues[2].repo, number: view.issues[2].number },
+      { ref: `${existing.repo}#${existing.number}`, repo: existing.repo, number: existing.number },
+    ]);
+    expect(approvedHold(origin, new Map())).toMatch(/approved prerequisite/);
+    const delivered = new Map(origin.blockers.map((b) => [blockerKey(b.repo!, b.number!), { state: 'CLOSED' as const, stateReason: 'completed' }]));
+    expect(approvedHold(origin, delivered)).toBeNull();
+  });
+
+  it.each([false, true])("resumes main's verified single-issue record across the wiring upgrade (already delivered: %s)", async (delivered) => {
+    const snapshot = approved();
+    snapshot.issues[0].blockedBy = [{ repo: OTHER, number: 1 }];
+    const rec = newPublication(snapshot, Date.now());
+    Object.assign(rec.issues[0], { step: 'verified', number: 2, url: `https://github.com/${REPO}/issues/2` });
+    records.p1 = rec;
+    const issue = snapshot.issues[0];
+    tracker.issues.push({ repo: REPO, number: 2, url: rec.issues[0].url!, title: delivered ? issue.title : heldTitle(issue.title),
+      body: publishedBody(issue, rec.issues[0].marker), labels: delivered ? ['swarm:frontend'] : [PUBLICATION_HOLD, 'swarm:frontend'],
+      state: delivered ? 'CLOSED' : 'OPEN', stateReason: delivered ? 'completed' : null });
+    publisher.resumeAll();
+    await settle();
+    expect(rec.status).toBe('complete');
+    expect(rec.issues[0].step).toBe('released');
+    expect(tracker.log).not.toContain('create');
+    expect(host.released).toHaveBeenCalledWith(REPO, 2);
+    if (!delivered) expect(tracker.issues[1].body).toContain(`Depends on ${tracker.issues[0].url}`);
+  });
+
+  it('preserves read-only approved prerequisites outside the configured publication floors', async () => {
+    host.floors = () => [REPO];
+    const snapshot = approved();
+    snapshot.issues[0].blockedBy = [{ repo: OTHER, number: 1 }];
+    const existing = structuredClone(tracker.issues[0]);
+    const view = await publisher.publish(snapshot);
+    await settle();
+    expect(view.status).toBe('complete');
+    expect(view.issues[0].step).toBe('released');
+    expect(tracker.issues[0]).toEqual(existing);
+    const origin = publisher.issueOrigin(REPO, view.issues[0].number!)!;
+    expect(origin.blockers).toEqual([{ ref: `${OTHER}#1`, repo: OTHER, number: 1 }]);
+    expect(approvedHold(origin, new Map())).toContain(`${OTHER}#1`);
   });
 
   it('keeps recorded links stable when read-back URL casing differs from the approved target', async () => {
@@ -473,7 +525,7 @@ describe('cross-floor plans', () => {
     await settle(15_000);
     expect(view.status).toBe('complete');
     expect(tracker.issues[0]).toEqual(closed);
-    expect(view.issues[4].step).toBe('held');
+    expect(view.issues[4].step).toBe('released');
   });
 
   it('keeps A held when B refuses writes after preflight, then reuses the staged identities automatically', async () => {
@@ -526,16 +578,16 @@ describe('cross-floor plans', () => {
     });
     await publisher.publish(plan());
     await settle();
-    expect(records.p1.issues.map((i) => i.step)).toEqual(['held', 'released', 'releasing', 'referenced', 'held']);
+    expect(records.p1.issues.map((i) => i.step)).toEqual(['held', 'released', 'releasing', 'referenced', 'verified']);
     publisher.stop();
     records = JSON.parse(disk.at(-1)!);
     publisher = new Publisher(host);
     publisher.resumeAll();
     await settle();
     expect(records.p1.status).toBe('complete');
-    expect(records.p1.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'held']);
+    expect(records.p1.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'released']);
     expect(tracker.issues).toHaveLength(5);
-    expect(releases).toBe(2);
+    expect(releases).toBe(3);
   });
 
   it('reconciles a lost release response after the issue closes, then resumes sibling releases on restart', async () => {
@@ -555,8 +607,8 @@ describe('cross-floor plans', () => {
     publisher.resumeAll();
     await settle();
     expect(records.p1.status).toBe('complete');
-    expect(records.p1.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'held']);
-    expect(releases).toBe(2);
+    expect(records.p1.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'released']);
+    expect(releases).toBe(3);
     expect(tracker.issues).toHaveLength(5);
   });
 
@@ -631,7 +683,7 @@ describe('cross-floor plans', () => {
       const changed = structuredClone(snapshot);
       if (change === 'target') changed.issues[1].repo = OTHER;
       if (change === 'scope') changed.issues[1].body += ' More work.';
-      if (change === 'dependency') changed.issues[4].blockedBy = ['existing'];
+      if (change === 'dependency') changed.issues[4].blockedBy = [{ entryId: 'existing' }];
       await expect(publisher.publish(changed)).rejects.toMatchObject({ status: 409 });
     }
   });
@@ -642,9 +694,9 @@ describe('cross-floor plans', () => {
     await settle();
     expect(view.status).toBe('blocked');
     expect(tracker.log).not.toContain('create');
-    const unknown = plan(); unknown.issues[4].blockedBy = ['absent'];
-    const self = plan(); self.issues[1].blockedBy = [self.issues[1].entryId];
-    const cycle = plan(); cycle.issues[2].blockedBy = ['panel'];
+    const unknown = plan(); unknown.issues[4].blockedBy = [{ entryId: 'absent' }];
+    const self = plan(); self.issues[1].blockedBy = [{ entryId: self.issues[1].entryId }];
+    const cycle = plan(); cycle.issues[2].blockedBy = [{ entryId: 'panel' }];
     const hierarchy = plan(); hierarchy.issues[0].parent = 'parent';
     for (const snapshot of [unknown, self, cycle, hierarchy]) expect(snapshotProblem(snapshot, true)).not.toBeNull();
   });
@@ -703,7 +755,7 @@ describe('the demo office', () => {
     swarm.publisher.stop();
   });
 
-  it('exercises cross-floor staging, held dependencies and automatic recovery through the demo tracker', async () => {
+  it('exercises cross-floor staging, guarded dependencies and automatic recovery through the demo tracker', async () => {
     const { swarm, backend, s } = office();
     s.state.repos.push({ id: 'r2', fullName: 'demo-co/weather-api', floor: 2 });
     const before = await backend.readIssue('demo-co/weather-api', 1);
@@ -716,12 +768,12 @@ describe('the demo office', () => {
     await vi.advanceTimersByTimeAsync(45_000);
     await swarm.publisher.settled(view.proposalId);
     expect(view.status).toBe('complete');
-    expect(view.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'held']);
+    expect(view.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'released']);
     expect(view.issues.slice(0, 2).map((i) => i.number)).toEqual(staged);
     expect(await backend.readIssue('demo-co/weather-api', 1)).toEqual(before);
     for (const entry of view.issues.filter((i) => i.step !== 'referenced')) {
       const visible = (await backend.listIssues(entry.repo)).find((i) => i.number === entry.number)!;
-      expect(issueWaitReason(visible, new Set())).toBe(entry.step === 'held' ? 'held for publication' : null);
+      expect(issueWaitReason(visible, new Set())).toBe(entry.step === 'held' ? 'held for publication' : entry.entryId === 'panel' ? 'open blockers' : null);
     }
     swarm.publisher.stop();
   });
@@ -738,6 +790,19 @@ describe('the demo office', () => {
     expect(Object.prototype.hasOwnProperty.call(Object.prototype, 'snapshot')).toBe(false);
     expect(swarm.publisher.list().map((p) => p.proposalId)).toEqual([view.proposalId]);
     expect(swarm.publisher.list().every((p) => Array.isArray(p.issues))).toBe(true);
+    swarm.publisher.stop();
+  });
+
+  it('seeds a proposal whose approved prerequisite is an issue on another floor', async () => {
+    const { swarm } = office();
+    const s = swarm as unknown as { state: { repos: { id: string; fullName: string; floor: number }[] }; repoRt: Map<string, { issues: { number: number }[] }> };
+    s.state.repos.push({ id: 'r2', fullName: 'demo-co/weather-api', floor: 2 });
+    s.repoRt.set('r1', { issues: [] });
+    s.repoRt.set('r2', { issues: [{ number: 3 }] });
+    const view = await swarm.publishDemoProposal('blocked');
+    await swarm.publisher.settled(view.proposalId);
+    expect(view.snapshot.issues[0].blockedBy).toEqual([{ repo: 'demo-co/weather-api', number: 3 }]);
+    expect(swarm.publisher.issueOrigin('demo-co/pixel-todo', view.issues[0].number!)?.blockers).toEqual([{ ref: 'demo-co/weather-api#3', repo: 'demo-co/weather-api', number: 3 }]);
     swarm.publisher.stop();
   });
 
