@@ -128,6 +128,20 @@ describe('Issue Plan drafting', () => {
     expect(normalized('__init__ and snake_case_name')).toBe('init and snake_case_name');
   });
 
+  it('keeps underscores at the edges of inline code, so `_user` and `__init__` stay new work', () => {
+    const repo = 'a/ids';
+    for (const [code, plain] of [['_user', 'user'], ['user_', 'user'], ['__init__', 'init']]) {
+      const ids = [issue(repo, 1, `Return the \`${code}\` field`, `The JSON response includes \`${code}\`.`)];
+      const idCtx: PlanContext = { ...ctx, floors: [repo], openIssues: () => ids };
+      const entry = { key: 'k', repo, requirement: 'R1', title: `Return the \`${plain}\` field`, brief: `Add ${plain}.`, acceptance: [`The JSON response includes \`${plain}\``] };
+      const fresh = { kind: 'new', brief: `Add ${plain}.`, acceptance: [`The JSON response includes \`${plain}\``] };
+      expect(draftIssuePlan({ entries: [entry] }, idCtx)).toMatchObject({ ok: true, entries: [fresh] });
+      expect(draftIssuePlan({ entries: [{ ...entry, title: 'Expose the field', overlaps: 1 }] }, idCtx)).toMatchObject({ ok: true, entries: [{ ...fresh, covered: [] }] });
+      expect(draftIssuePlan({ entries: [{ ...entry, title: `**Return the \`${code}\` field**` }] }, idCtx)).toMatchObject({ ok: true, entries: [{ kind: 'existing', issue: { number: 1 } }] });
+    }
+    expect(normalized('**Call `__init__`** and `` a`b ``')).toBe('call __init__ and a`b');
+  });
+
   it('finds cycles and normalizes comparable text', () => {
     expect(dependencyCycle([{ issue: 'a', blockedBy: 'b' }, { issue: 'b', blockedBy: 'c' }])).toBeNull();
     expect(dependencyCycle([{ issue: 'x', blockedBy: 'a' }, { issue: 'a', blockedBy: 'a' }])).toEqual(['a', 'a']);

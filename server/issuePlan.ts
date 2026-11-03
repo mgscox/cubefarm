@@ -34,14 +34,25 @@ const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const obj = (v: unknown) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {}) as Record<string, unknown>;
 const ref = (i: IssueInfo) => ({ number: i.number, url: i.url, title: i.title });
 
-/** Comparable form of a title or criterion: case, bullets, checkboxes, spacing and closing punctuation don't count. */
+// Emphasis markers only: user_id keeps its underscore.
+const unemphasized = (s: string) => s.replace(/`/g, '').replace(/(?<!\w)[*_]+|[*_]+(?!\w)/g, '');
+
+/**
+ * Comparable form of a title or criterion: case, bullets, checkboxes, emphasis, spacing and closing punctuation don't
+ * count. Inline code is literal, so `_user` and `__init__` stay distinct from user and init.
+ */
 export function normalized(s: string) {
-  return s
+  const text = s
     .toLowerCase()
     .replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')
-    .replace(/^\[[ x]\]\s+/, '')
-    .replace(/`/g, '')
-    .replace(/(?<!\w)[*_]+|[*_]+(?!\w)/g, '') // emphasis markers only: user_id keeps its underscore
+    .replace(/^\[[ x]\]\s+/, '');
+  let out = '';
+  let at = 0;
+  for (const m of text.matchAll(/(`+)(.+?)\1(?!`)/g)) {
+    out += unemphasized(text.slice(at, m.index)) + m[2];
+    at = m.index + m[0].length;
+  }
+  return (out + unemphasized(text.slice(at)))
     .replace(/\s+/g, ' ')
     .replace(/[\s.!?;:,]+$/, '')
     .trim();
