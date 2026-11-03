@@ -30,10 +30,10 @@ export function IdeaDetail({ idea, records, proposals = [], prd, onLinkedIdea }:
       {idea.linkedFrom && <p className="small">Continues <a href={ideaLink(idea.linkedFrom)}>an earlier Idea</a>; its history is context for this one.</p>}
       {prd && !shownPrd && <p role="status">That PRD revision isn't on this Idea.</p>}
       {shownPrd ? <PrdView proposal={shownPrd} /> : latest && (
-        <ProposalCard idea={idea} proposal={latest} earlier={proposals.slice(0, -1)} onLinkedIdea={() => onLinkedIdea?.()} />
+        <ProposalCard key={latest.id} idea={idea} proposal={latest} earlier={proposals.slice(0, -1)} onLinkedIdea={() => onLinkedIdea?.()} />
       )}
       {demo && idea.status !== 'archived' && (!latest || latest.decision?.action === 'approve') && (
-        <button className="btn btn-small" disabled={seeding} onClick={() => {
+        <button className="btn btn-small idea-seed" disabled={seeding} onClick={() => {
           setSeeding(true);
           void api.seedDemoProposal(idea.id).catch(() => undefined).finally(() => setSeeding(false));
         }}>Seed demo review handoff</button>

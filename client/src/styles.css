@@ -2731,6 +2731,9 @@ input.inline:focus {
 .proposal-history summary { cursor: pointer; font-weight: 600; font-size: 0.9rem; }
 .proposal-newer { margin: 0; padding: 6px 10px; border-radius: 10px; background: #fff3bf; }
 .proposal-decision { margin: 4px 0 0; font-weight: 600; }
+.proposal-decision p { margin: 0 0 6px; }
+.proposal-quote { display: block; font-weight: 400; font-style: italic; }
+.idea-seed { align-self: flex-start; }
 .proposal-actions .btn-good { font-size: 1.05rem; }
 @media (max-width: 650px) {
   .ideas-grid { grid-template-columns: minmax(0, 1fr); }

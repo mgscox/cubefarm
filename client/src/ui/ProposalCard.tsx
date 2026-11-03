@@ -89,13 +89,15 @@ function Decision({ proposal, onLinkedIdea }: { proposal: ProposalView; onLinked
   if (d.action === 'refine') {
     return (
       <p role="status" className="proposal-decision">
-        Sent back {when(d.at)}: “{d.feedback}”. {d.wordingOnly ? 'Wording changes return straight to you.' : 'The revision goes through a fresh review cycle first.'}
+        Sent back {when(d.at)}. {d.wordingOnly ? 'Wording changes return straight to you.' : 'The revision goes through a fresh review cycle first.'}
+        <span className="proposal-quote">“{d.feedback}”</span>
       </p>
     );
   }
   return (
     <div role="status" className="proposal-decision">
-      <p>Rejected {when(d.at)}{d.feedback ? `: “${d.feedback}”` : ''}. The Idea is archived with its history; no issues were created.</p>
+      <p>Rejected {when(d.at)}. The Idea is archived with its history; no issues were created.
+        {d.feedback && <span className="proposal-quote">“{d.feedback}”</span>}</p>
       <button className="btn btn-small" onClick={onLinkedIdea}>Start a linked Idea</button>
     </div>
   );
