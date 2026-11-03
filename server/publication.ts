@@ -6,11 +6,11 @@ import type { Backend } from './backend.ts';
 import type { TrackedIssue } from './github.ts';
 import { CommandError } from './exec.ts';
 import { HttpError } from './httpError.ts';
-import { PUBLICATION_HOLD } from '../shared/issues.ts';
+import { issueWaitReason, PUBLICATION_HOLD } from '../shared/issues.ts';
 import type { ApprovedSnapshot, PlanIssue, PublicationView, PublishedIssue } from '../shared/types.ts';
 import type { IdeaIssueOrigin } from './approvedBlockers.ts';
 
-export type PublicationTracker = Pick<Backend, 'issueAccess' | 'createIssue' | 'readIssue' | 'findIssuesByMarker' | 'editIssue'>;
+export type PublicationTracker = Pick<Backend, 'issueAccess' | 'createIssue' | 'readIssue' | 'findIssuesByMarker' | 'editIssue' | 'listIssues'>;
 
 export interface PublicationHost {
   tracker: PublicationTracker;
@@ -28,8 +28,8 @@ export interface PublicationHost {
   notify(level: 'success' | 'error', text: string): void;
 }
 
-/** This release publishes single-issue plans; cross-floor plans come with hierarchy and dependency wiring. */
-export const MAX_PLAN_ISSUES = 1;
+/** Bound the work accepted in one durable publication. */
+export const MAX_PLAN_ISSUES = 100;
 export const DRAFT_PREFIX = '[Draft] ';
 /** GitHub's clock and ours can disagree: marker lookups reach this far before the approval was recorded. */
 const LOOKUP_SKEW_MS = 10 * 60_000;
@@ -45,6 +45,11 @@ export const heldTitle = (title: string) => `${DRAFT_PREFIX}${title}`;
 export const publishedBody = (issue: PlanIssue, marker: string) => `${issue.body.trim()}\n\n${marker}`;
 export const issueLabels = (issue: PlanIssue) => [PUBLICATION_HOLD, ...(issue.specialty ? [`swarm:${issue.specialty}`] : [])];
 const sameRepo = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+/** Whether a GitHub issue URL names this repo and issue. GitHub owner/name are case-insensitive. */
+const isIssueUrl = (url: unknown, repo: string, number: number) => {
+  const m = typeof url === 'string' ? /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/([1-9]\d*)$/.exec(url) : null;
+  return !!m && sameRepo(m[1], repo) && Number(m[2]) === number;
+};
 const normalized = (text: string) => text.replace(/\r\n/g, '\n').trim();
 
 /** Why an approved snapshot can't be published (null: it can). */
@@ -61,7 +66,7 @@ export function snapshotProblem(input: unknown, fixtures: boolean): string | nul
   if (a.source === 'fixture' && !fixtures) return 'Fixture approvals are only accepted by the demo office and tests.';
   const issues = s?.issues;
   if (!Array.isArray(issues) || issues.length === 0) return 'The approved Issue Plan has no issues.';
-  if (issues.length > MAX_PLAN_ISSUES) return `This release publishes single-issue plans; this one has ${issues.length} issues.`;
+  if (issues.length > MAX_PLAN_ISSUES) return `An Issue Plan can contain at most ${MAX_PLAN_ISSUES} entries.`;
   const entries = new Set<string>();
   for (const i of issues) {
     if (typeof i?.entryId !== 'string' || !ID.test(i.entryId) || entries.has(i.entryId)) return 'Each planned issue needs its own entry id.';
@@ -77,18 +82,44 @@ export function snapshotProblem(input: unknown, fixtures: boolean): string | nul
     if (!Array.isArray(i.blockedBy)) return `Plan entry ${i.entryId} needs a list of blockers.`;
     for (const b of i.blockedBy as unknown[]) {
       const ref = b as { entryId?: unknown; repo?: unknown; number?: unknown } | null;
-      const entry = typeof ref?.entryId === 'string' && entries.has(ref.entryId) && ref.entryId !== i.entryId;
-      const tracked = typeof ref?.repo === 'string' && REPO.test(ref.repo) && Number.isInteger(ref.number) && (ref.number as number) > 0;
+      const entry = typeof ref?.entryId === 'string' && entries.has(ref.entryId) && ref.entryId !== i.entryId && ref.repo === undefined && ref.number === undefined;
+      const tracked = typeof ref?.repo === 'string' && REPO.test(ref.repo) && Number.isInteger(ref.number) && (ref.number as number) > 0 && ref.entryId === undefined;
       if (!entry && !tracked) return `Plan entry ${i.entryId} has a blocker that is neither another plan entry nor an owner/name#number issue.`;
     }
   }
+  const byId = new Map(issues.map((i) => [i.entryId, i]));
+  const refs = new Set<string>();
+  for (const i of issues) {
+    if (i.blockedBy && new Set(i.blockedBy.map((b) => JSON.stringify(b))).size !== i.blockedBy.length) return `Invalid duplicate dependencies on ${i.entryId}.`;
+    if (i.parent !== undefined && (typeof i.parent !== 'string' || !byId.get(i.parent)?.tracking || byId.get(i.parent)?.existing)) return `Invalid tracking Parent for ${i.entryId}.`;
+    if (i.existing !== undefined && (!i.existing || typeof i.existing !== 'object' || Array.isArray(i.existing))) return `Invalid existing reference on ${i.entryId}.`;
+    if (i.existing) {
+      const ref = `${i.repo.toLowerCase()}#${i.existing.number}`;
+      if (!Number.isInteger(i.existing.number) || i.existing.number < 1 || !isIssueUrl(i.existing.url, i.repo, i.existing.number) || refs.has(ref)) return `Invalid or duplicate existing reference on ${i.entryId}.`;
+      if (i.parent || i.tracking || i.blockedBy?.length) return `Existing reference ${i.entryId} must remain untouched.`;
+      refs.add(ref);
+    }
+  }
+  const cyclic = (edges: (i: PlanIssue) => string[]) => {
+    const visiting = new Set<string>(), done = new Set<string>();
+    const visit = (id: string): boolean => {
+      if (visiting.has(id)) return true;
+      if (done.has(id)) return false;
+      visiting.add(id);
+      if (edges(byId.get(id)!).some(visit)) return true;
+      visiting.delete(id); done.add(id);
+      return false;
+    };
+    return issues.some((i) => visit(i.entryId));
+  };
+  if (cyclic((i) => (i.blockedBy ?? []).flatMap((b) => 'entryId' in b ? [b.entryId] : [])) || cyclic((i) => i.parent ? [i.parent] : [])) return 'The approved plan contains a dependency or hierarchy cycle.';
   return null;
 }
 
 /** The parts of a snapshot an approval authorizes: a repeat must match them exactly. */
 const approved = (s: ApprovedSnapshot) =>
-  JSON.stringify([s.approval.decisionId, s.approval.proposalId, s.approval.prdRevision, s.approval.planRevision,
-    s.issues.map((i) => [i.entryId, i.repo, i.title, i.body, i.specialty ?? '', i.blockedBy ?? [], !!i.tracking])]);
+  JSON.stringify([s.approval.decisionId, s.approval.proposalId, s.approval.prdRevision, s.approval.planRevision, s.approval.ideaId, s.approval.source, s.approval.decidedAt,
+    s.issues.map((i) => [i.entryId, i.repo, i.title, i.body, i.specialty ?? '', i.existing ? [i.existing.number, i.existing.url] : null, i.tracking ?? false, i.parent ?? null, i.blockedBy ?? []])]);
 export const sameApproval = (a: ApprovedSnapshot, b: ApprovedSnapshot) => approved(a) === approved(b);
 
 /** Publications from the state file: own, well-formed records keyed by their proposal id, whatever the key. */
@@ -112,11 +143,24 @@ export function newPublication(snapshot: ApprovedSnapshot, now: number): Publica
     note: null,
     needsManager: false,
     retryAt: null,
-    issues: snapshot.issues.map((i) => ({ entryId: i.entryId, repo: i.repo, marker: planMarker(proposalId, i.entryId), step: 'pending', number: null, url: null })),
+    issues: snapshot.issues.map((i) => ({ entryId: i.entryId, repo: i.repo, marker: planMarker(proposalId, i.entryId), step: i.existing ? 'referenced' : 'pending', number: i.existing?.number ?? null, url: i.existing?.url ?? null })),
     attempts: 0,
     createdAt: now,
     updatedAt: now,
   };
+}
+
+/** Leaves use the approved-blocker guard on both start paths; tracking Parents remain held. */
+export const holdReason = (plan: PlanIssue): string | null => plan.tracking ? 'Tracking Parent' : null;
+
+/** Deterministic, replayable body wiring using full URLs across floors. */
+export function wiredBody(rec: PublicationView, plan: PlanIssue): string {
+  const url = (id: string) => rec.issues.find((i) => i.entryId === id)!.url!;
+  const links: string[] = [];
+  if (plan.parent) links.push(`Parent: ${url(plan.parent)}`);
+  for (const b of plan.blockedBy ?? []) links.push(`Depends on ${'entryId' in b ? url(b.entryId) : `https://github.com/${b.repo}/issues/${b.number}`}`);
+  for (const child of rec.snapshot.issues.filter((i) => i.parent === plan.entryId)) links.push(`- [ ] ${url(child.entryId)}`);
+  return [publishedBody(plan, planMarker(rec.proposalId, plan.entryId)), ...links].join('\n\n');
 }
 
 /** Why a read-back doesn't match the issue publication created (null: it does). Released titles count too. */
@@ -125,7 +169,7 @@ export function verifyProblem(plan: PlanIssue, entry: PublishedIssue, got: Track
   if (!got) return `${ref} isn't on GitHub any more.`;
   if (!sameRepo(got.repo, entry.repo) || got.number !== entry.number) return `${ref} answered as ${got.repo}#${got.number}.`;
   if (!got.body.includes(entry.marker)) return `${ref} no longer carries its plan-entry marker.`;
-  if (got.state !== 'OPEN') return `${ref} was closed before its release.`;
+  if (got.state !== 'OPEN' && !(['verified', 'releasing'].includes(entry.step) && isReleased(plan, got))) return `${ref} was closed before its release.`;
   if (got.title !== heldTitle(plan.title) && got.title !== plan.title) return `${ref} has a different title: "${got.title}".`;
   if (!normalized(got.body).includes(normalized(plan.body))) return `${ref} no longer matches the approved brief.`;
   return null;
@@ -150,7 +194,7 @@ export function failure(err: unknown, attempts: number): Pick<PublicationView, '
       ? { status: 'blocked', note: message, needsManager: true, retryIn: null }
       : { status: 'blocked', note: message, needsManager: true, retryIn: backoff };
   }
-  if (err instanceof CommandError && ACCESS.test(err.stderr)) {
+  if (err instanceof CommandError && ACCESS.test(err.stderr) && !/rate limit|abuse detection/i.test(err.stderr)) {
     return { status: 'blocked', note: `GitHub refused: ${err.stderr.trim().split('\n')[0]}. Publication resumes once access is restored.`, needsManager: true, retryIn: backoff };
   }
   return { status: 'publishing', note: `Retrying: ${message}`, needsManager: false, retryIn: backoff };
@@ -180,7 +224,7 @@ export class Publisher {
    */
   issueOrigin(repo: string, number: number): IdeaIssueOrigin | null {
     for (const p of this.list()) {
-      const i = p.issues.find((x) => x.number === number && sameRepo(x.repo, repo));
+      const i = p.issues.find((x) => x.step !== 'referenced' && x.number === number && sameRepo(x.repo, repo));
       if (!i) continue;
       const plan = this.plan(p, i);
       const blockers = (plan.blockedBy ?? []).map((b) => {
@@ -276,7 +320,8 @@ export class Publisher {
     rec.retryAt = null;
     try {
       await this.advance(rec);
-      Object.assign(rec, { status: 'complete', note: null, needsManager: false });
+      const held = rec.issues.filter((i) => i.step === 'held').length;
+      Object.assign(rec, { status: 'complete', note: held ? `Plan verified; ${held} ${held === 1 ? 'entry stays' : 'entries stay'} held (tracking Parents).` : null, needsManager: false });
       await this.save(rec);
       const links = rec.issues.map((i) => `${i.repo}#${i.number}`).join(', ');
       this.host.notify('success', `Published ${links} from an approved proposal.`);
@@ -296,30 +341,100 @@ export class Publisher {
 
   /** Preflight, create or find each issue held, verify the whole plan, then release it issue by issue. */
   private async advance(rec: PublicationView) {
-    if (rec.issues.some((i) => i.step !== 'released')) await this.preflight(rec);
-    for (const entry of rec.issues) await this.place(rec, entry);
-    for (const entry of rec.issues) {
-      if (entry.step !== 'created') continue;
-      const got = await this.host.tracker.readIssue(entry.repo, entry.number!);
-      const problem = verifyProblem(this.plan(rec, entry), entry, got);
-      if (problem) throw new PublicationBlock(`${problem} The plan stays held; fix or close that issue, then retry.`, 'conflict');
-      entry.url = got!.url;
-      entry.step = 'verified';
-      await this.save(rec);
+    // Older releases recorded 'verified' before their write. Reconcile delivered work before the open backlog.
+    for (const entry of rec.issues.filter((i) => i.step === 'verified' || i.step === 'releasing')) {
+      const got = await this.checked(rec, entry, entry.step === 'verified');
+      if (isReleased(this.plan(rec, entry), got)) {
+        entry.step = 'released';
+        await this.save(rec);
+        this.host.released(entry.repo, entry.number!);
+      }
     }
-    for (const entry of rec.issues) if (entry.step === 'verified') await this.release(rec, entry);
+    await this.preflight(rec);
+    for (const entry of rec.issues) await this.place(rec, entry);
+    // Wire only new issues; reference entries are never mutated, including their reciprocal links.
+    for (const entry of rec.issues) {
+      if (['released', 'referenced', 'releasing'].includes(entry.step)) continue;
+      const got = await this.checked(rec, entry, true);
+      const body = wiredBody(rec, this.plan(rec, entry));
+      if (normalized(got.body) !== normalized(body)) {
+        await this.save(rec);
+        await this.host.tracker.editIssue(entry.repo, entry.number!, { body });
+      }
+    }
+    // Read every remaining entry again on every attempt, even ones verified before an interruption.
+    for (const entry of rec.issues) {
+      if (['released', 'referenced'].includes(entry.step)) continue;
+      const got = await this.checked(rec, entry);
+      if (normalized(got.body) !== normalized(wiredBody(rec, this.plan(rec, entry)))) throw new Error(`Links for ${entry.entryId} are not visible yet.`);
+    }
+    await this.verifyDispatch(rec);
+    for (const entry of rec.issues) {
+      if (['released', 'referenced'].includes(entry.step)) continue;
+      const reason = holdReason(this.plan(rec, entry));
+      entry.holdReason = reason ?? undefined;
+      if (reason) entry.step = 'held';
+      else if (entry.step !== 'releasing') entry.step = 'verified';
+    }
+    await this.save(rec); // the whole-plan gate precedes every release
+    for (const entry of rec.issues) if (entry.step === 'verified' || entry.step === 'releasing') await this.release(rec, entry);
+  }
+
+  private async checked(rec: PublicationView, entry: PublishedIssue, allowUnwired = false): Promise<TrackedIssue> {
+    const got = await this.host.tracker.readIssue(entry.repo, entry.number!);
+    const problem = verifyProblem(this.plan(rec, entry), entry, got);
+    if (problem) throw new PublicationBlock(`${problem} The plan stays held; fix the issue, then retry.`, 'conflict');
+    const plan = this.plan(rec, entry);
+    const allowed = [wiredBody(rec, plan), ...(entry.step === 'created' || allowUnwired ? [publishedBody(plan, entry.marker)] : [])].map(normalized);
+    if (!allowed.includes(normalized(got!.body))) throw new PublicationBlock(`${entry.entryId} no longer matches the approved scope or links. A changed plan needs a revised proposal.`, 'conflict');
+    if (entry.step !== 'releasing' && entry.step !== 'verified' &&
+        (got!.title !== heldTitle(plan.title) || !got!.labels.some((l) => l.toLowerCase() === PUBLICATION_HOLD))) {
+      throw new PublicationBlock(`${entry.entryId} lost its publication hold before whole-plan verification. Restore it, then retry.`, 'conflict');
+    }
+    if (holdReason(plan) && (got!.title !== heldTitle(plan.title) || !got!.labels.includes(PUBLICATION_HOLD))) throw new PublicationBlock(`${entry.entryId} must stay held. Restore its publication hold.`, 'conflict');
+    if (plan.specialty && !got!.labels.includes(`swarm:${plan.specialty}`)) throw new PublicationBlock(`${entry.entryId} lost its approved routing label. Restore it, then retry.`, 'conflict');
+    return got!;
+  }
+
+  private async verifyDispatch(rec: PublicationView) {
+    for (const repo of new Set(rec.issues.filter((i) => !['released', 'referenced'].includes(i.step)).map((i) => i.repo))) {
+      const visible = await this.host.tracker.listIssues(repo);
+      for (const entry of rec.issues.filter((i) => sameRepo(i.repo, repo) && !['released', 'referenced'].includes(i.step))) {
+        const plan = this.plan(rec, entry);
+        const got = visible.find((i) => i.number === entry.number);
+        if (!got || normalized(got.body) !== normalized(wiredBody(rec, plan))) throw new Error(`${entry.entryId} is not visible to dispatch with its approved links yet.`);
+        if (plan.specialty && !got.labels.includes(`swarm:${plan.specialty}`)) throw new Error(`${entry.entryId}'s routing is not visible to dispatch yet.`);
+        if (!holdReason(plan)) {
+          if (got.subIssues === null || got.nativeBlockers === null) throw new Error(`${entry.entryId}: dispatch metadata has not loaded yet.`);
+          const reason = issueWaitReason({ ...got, title: plan.title, labels: got.labels.filter((l) => l.toLowerCase() !== PUBLICATION_HOLD) }, new Set(visible.map((i) => i.number)));
+          if (reason && !(reason === 'open blockers' && plan.blockedBy?.length)) throw new PublicationBlock(`${entry.entryId} cannot enter ordinary dispatch: ${reason}. Resolve it or approve a revised proposal.`, 'conflict');
+        } else if (got.title !== heldTitle(plan.title) || !got.labels.includes(PUBLICATION_HOLD)) throw new Error(`${entry.entryId}'s hold is not visible to dispatch yet.`);
+      }
+    }
   }
 
   private async preflight(rec: PublicationView) {
     const floors = this.host.floors();
-    for (const repo of new Set(rec.issues.filter((i) => i.step !== 'released').map((i) => i.repo))) {
+    for (const repo of new Set(rec.issues.map((i) => i.repo))) {
       if (!floors.some((f) => sameRepo(f, repo))) throw new PublicationBlock(`${repo} isn't a configured floor. Connect it, or approve a revised proposal.`, 'conflict');
       const access = await this.host.tracker.issueAccess(repo);
       if (!sameRepo(access.repo, repo)) throw new PublicationBlock(`${repo} now answers as ${access.repo}. A changed target needs a revised proposal.`, 'conflict');
       if (!access.issues) throw new PublicationBlock(`Issues are turned off on ${repo}. Turn them on; publication resumes by itself.`, 'access');
-      if (!WRITERS.includes(access.permission.toUpperCase())) {
+      if (rec.snapshot.issues.some((i) => sameRepo(i.repo, repo) && !i.existing) && !WRITERS.includes(access.permission.toUpperCase())) {
         throw new PublicationBlock(`The office can't write issues on ${repo} (permission: ${access.permission || 'none'}). Grant triage or write access; publication resumes by itself.`, 'access');
       }
+    }
+    for (const plan of rec.snapshot.issues.filter((i) => i.existing)) {
+      const got = await this.host.tracker.readIssue(plan.repo, plan.existing!.number);
+      if (!got || !sameRepo(got.repo, plan.repo) || got.number !== plan.existing!.number || !isIssueUrl(got.url, plan.repo, plan.existing!.number)) throw new PublicationBlock(`Existing reference ${plan.entryId} is unavailable or changed target. Restore access or approve a revised proposal.`, 'access');
+    }
+    for (const b of rec.snapshot.issues.flatMap((i) => i.blockedBy ?? [])) {
+      if (!('repo' in b)) continue;
+      const got = await this.host.tracker.readIssue(b.repo, b.number);
+      if (!got || !sameRepo(got.repo, b.repo) || got.number !== b.number) throw new PublicationBlock(`Approved prerequisite ${b.repo}#${b.number} is unavailable. Restore access or approve a revised proposal.`, 'access');
+    }
+    for (const entry of rec.issues) {
+      if (!['pending', 'creating', 'released', 'referenced'].includes(entry.step)) await this.checked(rec, entry, true);
     }
   }
 
@@ -358,14 +473,14 @@ export class Publisher {
   /** Lift the draft title and the hold, then read the release back. Safe to repeat after an interruption. */
   private async release(rec: PublicationView, entry: PublishedIssue) {
     const plan = this.plan(rec, entry);
-    const before = await this.host.tracker.readIssue(entry.repo, entry.number!);
-    const problem = verifyProblem(plan, entry, before);
-    if (problem) throw new PublicationBlock(`${problem} The plan stays held; fix or close that issue, then retry.`, 'conflict');
+    const before = await this.checked(rec, entry);
     if (!isReleased(plan, before!)) {
+      entry.step = 'releasing';
+      await this.save(rec);
       const held = before!.labels.filter((l) => l.toLowerCase() === PUBLICATION_HOLD);
       await this.host.tracker.editIssue(entry.repo, entry.number!, { title: plan.title, ...(held.length ? { removeLabels: held } : {}) });
       const after = await this.host.tracker.readIssue(entry.repo, entry.number!);
-      if (!after || !isReleased(plan, after)) throw new Error(`the release of #${entry.number} on ${entry.repo} doesn't show on GitHub yet.`);
+      if (!after || verifyProblem(plan, entry, after) || normalized(after.body) !== normalized(wiredBody(rec, plan)) || !isReleased(plan, after)) throw new Error(`the release of #${entry.number} on ${entry.repo} doesn't show on GitHub yet.`);
     }
     entry.step = 'released';
     await this.save(rec);

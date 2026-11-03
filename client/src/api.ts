@@ -109,5 +109,5 @@ export const api = {
   approveRequest: (id: string, overrides: { name?: string; model?: string; effort?: string } = {}) => call('POST', `/api/requests/${id}/approve`, overrides),
   rejectRequest: (id: string, note?: string) => call('POST', `/api/requests/${id}/reject`, { note }),
   retryPublication: (proposalId: string) => call('POST', `/api/publications/${encodeURIComponent(proposalId)}/retry`),
-  demoPublication: (fault: '' | 'lost-create' | 'refused' | 'blocked') => call('POST', '/api/publications/demo', { fault }),
+  demoPublication: (fault: '' | 'lost-create' | 'refused' | 'cross-floor' | 'cross-floor-refused' | 'blocked') => call('POST', '/api/publications/demo', { fault }),
 };

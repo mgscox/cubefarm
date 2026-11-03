@@ -780,7 +780,7 @@ export interface ProposalApproval {
   source: 'manager' | 'fixture';
 }
 
-/** One new issue in an approved Issue Plan. */
+/** One issue or existing reference in an approved Issue Plan. */
 export interface PlanIssue {
   /** Stable within the plan; with the proposal it makes the marker the issue carries in its body. */
   entryId: string;
@@ -790,10 +790,14 @@ export interface PlanIssue {
   body: string;
   /** Routing hint: becomes a swarm:<specialty> label. */
   specialty?: string;
-  /** Approved prerequisites: no agent starts this issue until each is closed as completed. */
-  blockedBy?: ApprovedBlocker[];
+  /** Existing issues are read-only references; they are never held, edited or released. */
+  existing?: { number: number; url: string };
   /** A Tracking Parent: groups the plan's work and is never dispatched. */
   tracking?: boolean;
+  /** Tracking Parent entry id within this plan; hierarchy is rendered as reciprocal body links. */
+  parent?: string;
+  /** Approved prerequisites: no agent starts this issue until each is closed as completed. */
+  blockedBy?: ApprovedBlocker[];
 }
 
 /** A prerequisite the approval names: another entry of the same plan, or an issue already on a tracker. */
@@ -806,7 +810,7 @@ export interface ApprovedSnapshot {
 }
 
 /** A plan issue's progress: created held, read back (verified), then released into ordinary dispatch. */
-export type PublishedStep = 'pending' | 'creating' | 'created' | 'verified' | 'released';
+export type PublishedStep = 'pending' | 'creating' | 'created' | 'verified' | 'releasing' | 'released' | 'held' | 'referenced';
 
 export interface PublishedIssue {
   entryId: string;
@@ -814,6 +818,7 @@ export interface PublishedIssue {
   /** The stable plan-entry marker in the issue's body, used to find the issue again after a lost response. */
   marker: string;
   step: PublishedStep;
+  holdReason?: string;
   number: number | null;
   url: string | null;
 }
@@ -821,7 +826,7 @@ export interface PublishedIssue {
 export interface PublicationView {
   proposalId: string;
   snapshot: ApprovedSnapshot;
-  /** publishing: on its way (or retrying a temporary failure); blocked: held until the cause clears; complete: released. */
+  /** publishing: on its way (or retrying a temporary failure); blocked: held until the cause clears; complete: verified and leaves released, with tracking Parents held. */
   status: 'publishing' | 'blocked' | 'complete';
   /** Why it is retrying or blocked. */
   note: string | null;
