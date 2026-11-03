@@ -8,6 +8,7 @@ import { effectiveModel } from '../../../shared/models';
 import { canPostpone, canUpdateNow, drainDeadline, officeUpdateText } from '../officeUpdate';
 import { confirmDialog } from './Confirm';
 import { FleetTab } from './FleetTab';
+import { IdeasTab } from './IdeasTab';
 import { boxName, busy, missingClis, movable } from '../fleet';
 import { IssueForm } from './KanbanView';
 import { LiveTerminal } from './LiveTerminal';
@@ -852,14 +853,16 @@ function SettingsTab() {
   );
 }
 
-export function ManagerConsole({ initialTab, initialRepo }: { initialTab?: ManagerTab; initialRepo?: string }) {
+export function ManagerConsole({ initialTab, initialRepo, initialIdea }: { initialTab?: ManagerTab; initialRepo?: string; initialIdea?: string }) {
   const [tab, setTab] = useState<ManagerTab>(initialTab ?? 'floors');
+  useEffect(() => { if (initialIdea) setTab('ideas'); }, [initialIdea]);
   const pending = useStore((s) => pendingRequests(s.requests).length);
   const tabs: [ManagerTab, string][] = [
     ['floors', '🏢 Floors & repos'],
     ['ceo', `🧠 CEO & hiring${pending ? ` (${pending})` : ''}`],
     ['team', '👩‍💻 Team'],
     ['fleet', '🖥 Fleet'],
+    ['ideas', '💡 Ideas'],
     ['issues', '📝 Issues'],
     ['settings', '⚙️ Settings'],
   ];
@@ -877,6 +880,7 @@ export function ManagerConsole({ initialTab, initialRepo }: { initialTab?: Manag
         {tab === 'ceo' && <CeoTab />}
         {tab === 'team' && <TeamTab />}
         {tab === 'fleet' && <FleetTab />}
+        {tab === 'ideas' && <IdeasTab initialIdea={initialIdea} />}
         {tab === 'issues' && <IssuesTab initialRepo={initialRepo} />}
         {tab === 'settings' && <SettingsTab />}
       </div>

@@ -31,3 +31,21 @@ describe('agent screenshot availability', () => {
     expect(useStore.getState().screens[agent.id]).toBeUndefined();
   });
 });
+
+describe('Idea state', () => {
+  it('upserts intake and independent records by their stable identities', () => {
+    useStore.setState({ ideas: [], ideaRecords: [] });
+    const apply = useStore.getState().apply;
+    const idea = { id: 'i1', description: 'An Idea', links: [], constraints: '', floorHints: [], status: 'queued' as const, createdAt: 1 };
+    apply({ type: 'idea', idea });
+    apply({ type: 'idea', idea: { ...idea, description: 'Updated context' } });
+    expect(useStore.getState().ideas).toEqual([{ ...idea, description: 'Updated context' }]);
+    const record = { id: 'r1', ideaId: idea.id, kind: 'research' as const, title: 'Evidence', body: 'Sources', createdAt: 2 };
+    apply({ type: 'ideaRecord', record });
+    apply({ type: 'ideaRecord', record: { ...record, body: 'More sources' } });
+    apply({ type: 'ideaRecord', record: { ...record, kind: 'review' } });
+    apply({ type: 'ideaRecord', record: { ...record, ideaId: 'i2' } });
+    expect(useStore.getState().ideaRecords).toHaveLength(3);
+    expect(useStore.getState().ideaRecords[0].body).toBe('More sources');
+  });
+});
