@@ -7,7 +7,7 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 export function ideaStatusLabel(idea: IdeaView, cycle?: IdeaReviewCycleView): string {
   if (idea.status === 'proposed' && cycle?.handoff) return cycle.handoff.endorsed ? 'Proposed · endorsed' : `Proposed · ${plural(cycle.handoff.unresolved.length, 'open finding')}`;
   if (idea.status === 'reviewing' && cycle) return `In review · round ${currentRound(cycle).round} of ${MAX_REVIEW_ROUNDS}`;
-  return { queued: 'Queued', reviewing: 'In review', proposed: 'Proposed' }[idea.status];
+  return { queued: 'Queued', reviewing: 'In review', proposed: 'Proposed', archived: 'Archived' }[idea.status];
 }
 
 /** What the review is waiting on, or how it ended. */

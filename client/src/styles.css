@@ -2745,6 +2745,19 @@ input.inline:focus {
 .plan-parent { border-left: 3px solid #d7c9a8; padding-left: 10px; margin: 10px 0; }
 .plan-parent-tag { background: #efe2fb; }
 .issue-plan select { width: auto; }
+.proposal-card { border-left: 12px solid var(--warn); }
+.proposal-card h3, .proposal-prd h3 { margin: 0; }
+.proposal-issues { list-style: none; padding: 0; margin: 4px 0; display: flex; flex-direction: column; gap: 6px; }
+.proposal-issues summary { cursor: pointer; }
+.proposal-brief { margin: 6px 0 0 18px; }
+.proposal-findings, .proposal-history ul { margin: 4px 0; padding-left: 20px; }
+.proposal-history summary { cursor: pointer; font-weight: 600; font-size: 0.9rem; }
+.proposal-newer { margin: 0; padding: 6px 10px; border-radius: 10px; background: #fff3bf; }
+.proposal-decision { margin: 4px 0 0; font-weight: 600; }
+.proposal-decision p { margin: 0 0 6px; }
+.proposal-quote { display: block; font-weight: 400; font-style: italic; }
+.idea-seed { align-self: flex-start; }
+.proposal-actions .btn-good { font-size: 1.05rem; }
 .idea-handoff { margin: 8px 0; padding: 8px 12px; border-left: 6px solid var(--good); border-radius: 8px; background: #eaf8ee; }
 .idea-handoff.idea-open { border-left-color: var(--warn); background: #fff4d6; }
 .idea-demo { margin: 12px 0; padding: 8px 12px; border: 2px dashed var(--muted); border-radius: 8px; }
