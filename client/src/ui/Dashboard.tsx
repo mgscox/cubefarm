@@ -5,7 +5,6 @@ import { agentsOnRepo, isBusy, pendingRequests, repoOnFloor, unreadMessages, use
 import { isConfirmOpen } from './Confirm';
 import { KanbanView } from './KanbanView';
 import { LiveTerminal } from './LiveTerminal';
-import { SettingsTab } from './ManagerConsole';
 import { Overlays } from './Overlays';
 import { StatusPill } from './TerminalView';
 import './dashboard.css';
@@ -120,13 +119,14 @@ function FloorButton({ floor, name, color, active, selected, onSelect }: {
 
 export function Dashboard({ onOffice }: { onOffice: () => void }) {
   const [floor, setFloor] = useState(0);
-  const [view, setView] = useState<'agents' | 'kanban' | 'settings'>('agents');
+  const [view, setView] = useState<'agents' | 'kanban'>('agents');
   const [expanded, setExpanded] = useState<string | null>(null);
   const repos = useStore((s) => s.repos);
   const agents = useStore((s) => s.agents);
   const company = useStore((s) => s.settings.companyName);
   const connected = useStore((s) => s.connected);
   const demo = useStore((s) => s.demo);
+  const openOverlay = useStore((s) => s.openOverlay);
   const repo = repoOnFloor(repos, floor);
   const lobby = [agents[CEO_ID], agents[RESEARCHER_ID]].filter((agent): agent is Agent => !!agent);
   const activeByRepo = new Map<string, number>();
@@ -140,13 +140,13 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
   const selectFloor = (next: number) => {
     setFloor(next);
     setExpanded(null);
-    if (view === 'settings' || next === 0) setView('agents');
+    if (next === 0) setView('agents');
   };
 
   const visitFloor = (next: number) => {
     selectFloor(next);
     setView('agents');
-    useStore.getState().openOverlay(null);
+    openOverlay(null);
   };
 
   return (
@@ -172,21 +172,19 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
       <main className="dashboard-main">
         <header className="dashboard-toolbar">
           <div className="dashboard-heading">
-            <p className="dashboard-label">{pane === 'settings' ? 'Dashboard' : `Floor ${repo?.floor ?? 0}`}</p>
-            <h1>{pane === 'settings' ? 'Settings' : (repo?.fullName ?? 'Lobby')}</h1>
+            <p className="dashboard-label">Floor {repo?.floor ?? 0}</p>
+            <h1>{repo?.fullName ?? 'Lobby'}</h1>
           </div>
           <nav className="dashboard-nav" aria-label="Dashboard views">
             <button className="dashboard-action" aria-pressed={pane === 'agents'} onClick={() => setView('agents')}>Agents</button>
             {repo && <button className="dashboard-action" aria-pressed={pane === 'kanban'} onClick={() => setView('kanban')}>Kanban</button>}
-            <button className="dashboard-action" aria-pressed={pane === 'settings'} onClick={() => setView('settings')}>Settings</button>
+            <button className="dashboard-action" onClick={() => openOverlay({ kind: 'manager' })}>Manager console</button>
             <DashboardPhoneButton />
             <button className="dashboard-action dashboard-office" onClick={onOffice}>3D Office</button>
           </nav>
         </header>
 
-        {pane === 'settings' ? (
-          <div className="dashboard-settings"><SettingsTab /></div>
-        ) : pane === 'kanban' && repo ? (
+        {pane === 'kanban' && repo ? (
           <KanbanView key={repo.id} repoId={repo.id} inline />
         ) : team.length ? (
           <div className={`dashboard-terminals${focused ? ' dashboard-expanded' : ''}`}>

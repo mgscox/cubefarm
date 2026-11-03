@@ -279,14 +279,10 @@
   border-radius: 0;
 }
 
-.dashboard-settings,
 .dashboard-panel {
   flex: 1;
   min-height: 0;
   overflow: auto;
-}
-
-.dashboard-panel {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--dashboard-line);
