@@ -218,11 +218,14 @@ function drawBrowser(ctx: CanvasRenderingContext2D, x: number, y: number, w: num
 // ---------- kanban whiteboard ----------
 
 const COLS: { key: keyof KanbanColumns; title: string; chip: string; note: string }[] = [
-  { key: 'backlog', title: '📋 Backlog', chip: '#ffd166', note: '#fff3b0' },
+  { key: 'backlog', title: '📋 Backlog', chip: '#dce0e8', note: '#edf0f6' },
+  { key: 'todo', title: '📝 To do', chip: '#ffd166', note: '#fff3b0' },
   { key: 'progress', title: '🔨 In progress', chip: '#4cc9f0', note: '#cfeefd' },
   { key: 'qa', title: '🔍 In QA', chip: '#ff9f68', note: '#ffe3cf' },
+  { key: 'review', title: '👀 Review', chip: '#b8adff', note: '#ebe6ff' },
   { key: 'ready', title: '✅ Ready to merge', chip: '#80ed99', note: '#d8f9df' },
   { key: 'merged', title: '🎉 Merged', chip: '#c77dff', note: '#eadcff' },
+  { key: 'blocked', title: '🚧 Blocked', chip: '#ff9eac', note: '#ffc9c9' },
 ];
 
 const TONE = { warn: '#ffd8a8', bad: '#ffc9c9', good: '#d8f9df' };
@@ -255,7 +258,7 @@ export function drawKanban(ctx: CanvasRenderingContext2D, w: number, h: number, 
     ctx.fill();
     ctx.fillStyle = '#1f2233';
     ctx.font = `600 30px ${SANS}`;
-    ctx.fillText(`${c.title}  ${cards.length}`, x0 + 30, top + 27);
+    ctx.fillText(`${c.title}  ${cards.length}`, x0 + 24, top + 27, colW - 48);
     if (ci > 0) {
       ctx.strokeStyle = '#d9dbe3';
       ctx.lineWidth = 3;
@@ -265,27 +268,23 @@ export function drawKanban(ctx: CanvasRenderingContext2D, w: number, h: number, 
       ctx.stroke();
     }
 
-    const noteW = (colW - 48) / 2;
+    const noteW = colW - 32;
     const noteH = 104;
-    const perCol = 2;
-    const rowsFit = Math.floor((h - top - 70) / (noteH + 12));
-    const capacity = rowsFit * perCol;
+    const capacity = Math.floor((h - top - 70) / (noteH + 12));
     const shown = cards.length > capacity ? cards.slice(0, capacity - 1) : cards;
     shown.forEach((card, i) => {
-      const nx = x0 + 16 + (i % perCol) * (noteW + 16);
-      const ny = top + 68 + Math.floor(i / perCol) * (noteH + 12);
-      drawNote(ctx, nx, ny, noteW, noteH, card, card.tone ? TONE[card.tone] : c.note);
+      const ny = top + 68 + i * (noteH + 12);
+      drawNote(ctx, x0 + 16, ny, noteW, noteH, card, card.tone ? TONE[card.tone] : c.note);
     });
     if (cards.length > shown.length) {
       ctx.fillStyle = '#6c7086';
       ctx.font = `600 26px ${SANS}`;
-      const i = shown.length;
-      ctx.fillText(`+${cards.length - shown.length} more`, x0 + 30 + (i % perCol) * (noteW + 16), top + 68 + Math.floor(i / perCol) * (noteH + 12) + noteH / 2);
+      ctx.fillText(`+${cards.length - shown.length} more`, x0 + 30, top + 68 + shown.length * (noteH + 12) + noteH / 2);
     }
     if (cards.length === 0) {
       ctx.fillStyle = '#b4b7c5';
       ctx.font = `italic 500 26px ${SANS}`;
-      ctx.fillText(c.key === 'backlog' ? 'no open issues' : 'nothing here yet', x0 + 30, top + 110);
+      ctx.fillText('nothing here yet', x0 + 30, top + 110);
     }
   });
 }

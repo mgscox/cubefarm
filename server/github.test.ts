@@ -11,7 +11,7 @@ type Api = NonNullable<Parameters<typeof listPulls>[2]>;
 const raw = {
   number: 12, title: 'A useful change', url: 'https://github.com/demo/repo/pull/12', headRefName: 'swarm/12', headRefOid: 'abc',
   state: 'OPEN' as const, isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', reviewDecision: null,
-  closingIssuesReferences: [{ number: 11 }], createdAt: '2026-10-01', mergedAt: null, additions: 1, deletions: 0,
+  labels: [{ name: 'needs-review' }], closingIssuesReferences: [{ number: 11 }], createdAt: '2026-10-01', mergedAt: null, additions: 1, deletions: 0,
 };
 const deniedQuery = (pulls = [raw]) => vi.fn<Query>(async (args) => {
   if (args.at(-1)!.includes('statusCheckRollup')) throw error(`GraphQL: ${denial()}`);
@@ -126,7 +126,7 @@ describe('optional PR checks', () => {
   it.each(['success', 'skipped', 'neutral'])('reads %s Actions runs as passing and permits QA-passed merges', async (conclusion) => {
     const api = rest([run('completed', conclusion)]);
     const { pulls: [pr], checksError } = await listPulls('demo/repo', deniedQuery(), api);
-    expect(pr).toMatchObject({ checks: 'passing', failedChecks: [], pendingChecks: [] });
+    expect(pr).toMatchObject({ checks: 'passing', failedChecks: [], pendingChecks: [], labels: ['needs-review'] });
     expect(api).toHaveBeenCalledWith(['api', 'repos/demo/repo/actions/runs?head_sha=abc&per_page=100&page=1']);
     expect(api).toHaveBeenCalledWith(['api', 'repos/demo/repo/commits/abc/status?per_page=100&page=1']);
     expect(checksError?.match(/REST fallback in use/g)).toHaveLength(1);

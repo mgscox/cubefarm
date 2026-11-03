@@ -1258,7 +1258,7 @@ input.inline:focus {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  grid-template-columns: repeat(8, minmax(210px, 1fr));
   gap: 12px;
   overflow-x: auto;
 }
@@ -1277,19 +1277,25 @@ input.inline:focus {
   border-bottom: 3px solid var(--ink);
 }
 .kcol-backlog .kcol-head {
+  background: #dce0e8;
+}
+.kcol-todo .kcol-head {
   background: #ffd166;
 }
 .kcol-progress .kcol-head {
   background: #4cc9f0;
 }
 .kcol-review .kcol-head {
+  background: #b8adff;
+}
+.kcol-ready .kcol-head {
   background: #80ed99;
 }
 .kcol-qa .kcol-head {
   background: #ff9f68;
 }
-.kanban-5 {
-  grid-template-columns: repeat(5, minmax(210px, 1fr));
+.kcol-blocked .kcol-head {
+  background: #ff9eac;
 }
 .kcol-merged .kcol-head {
   background: #c77dff;
@@ -1625,9 +1631,8 @@ input.inline:focus {
   .tab-grid {
     grid-template-columns: 1fr;
   }
-  .kanban,
-  .kanban-5 {
-    grid-template-columns: repeat(5, 250px);
+  .kanban {
+    grid-template-columns: repeat(8, 250px);
   }
   .term-split-2 {
     grid-template-columns: 1fr;

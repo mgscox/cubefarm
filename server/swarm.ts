@@ -37,7 +37,7 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { AGENT_COMMENT_MARKER, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
 import { CEO_ID, RESEARCHER_ID, type MachineCapacity, type MachineTelemetry } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
@@ -1791,14 +1791,15 @@ export class Swarm {
 
   /** One step toward merging a QA-passed PR. Returns true when it merged. */
   private async advanceMerge(repo: PersistedRepo, rec: QaRecord, pr: PullInfo): Promise<boolean> {
+    if (hasLabel(pr.labels, NEEDS_HUMAN)) return false;
     let step = mergeStep(pr, rec, Date.now(), { base: repo.defaultBranch });
     if (step.do === 'details') {
       // GitHub works mergeability out lazily and lists often say UNKNOWN; asking about the PR itself gets an answer.
       const d = await this.backend.prDetails(repo.fullName, pr.number);
-      pr = { ...pr, headSha: d.headSha, mergeable: d.mergeable, mergeState: d.mergeState };
+      pr = { ...pr, labels: d.labels ?? pr.labels, headSha: d.headSha, mergeable: d.mergeable, mergeState: d.mergeState };
       step = mergeStep(pr, rec, Date.now(), { base: repo.defaultBranch, detailed: true });
     }
-    if (this.state.officeHeld) return false;
+    if (this.state.officeHeld || hasLabel(pr.labels, NEEDS_HUMAN)) return false;
     Object.assign(rec, step.set);
     if (step.do === 'requeue' && isResearchBranch(pr.headRefName)) {
       this.setQa(rec, { passedSha: pr.headSha, testedSha: pr.headSha, mergeNote: null, pendingSince: null }); // more research: still nothing to test
@@ -1810,6 +1811,7 @@ export class Swarm {
       setTimeout(() => this.schedule(), 200);
       return false;
     }
+    if (hasLabel(pr.labels, NEEDS_REVIEW) && step.do !== 'ready') return false;
     if (step.do === 'send-back') return this.sendBack(repo, rec, step.reason, step.instructions, step.needsHuman);
     if (step.do === 'wait') {
       if (step.alert) {
@@ -1831,6 +1833,8 @@ export class Swarm {
       return false;
     }
     if (step.do !== 'merge') return false;
+    const latest = await this.backend.prDetails(repo.fullName, pr.number);
+    if (this.state.officeHeld || hasLabel(latest.labels, NEEDS_HUMAN) || hasLabel(latest.labels, NEEDS_REVIEW)) return false;
     this.mergeNote(rec, 'merging…');
     let error = '';
     for (const method of ['squash', 'merge', 'rebase'] as const) {
@@ -2103,8 +2107,11 @@ export class Swarm {
     // The parking reservation also blocks scheduling, refresh and handoffs during a CEO override.
     if (approval) rt.parking = true;
     try {
+      const pr = await this.backend.prDetails(repo.fullName, number);
+      for (const label of [NEEDS_HUMAN, NEEDS_REVIEW]) {
+        if (hasLabel(pr.labels, label)) throw new HttpError(409, `Remove ${label} from PR #${number} before merging`);
+      }
       if (approval) {
-        const pr = await this.backend.prDetails(repo.fullName, number);
         preflight(pr, true);
         await this.backend.commentPull(repo.fullName, number, approval.reason);
         preflight(pr, true);
@@ -2435,7 +2442,8 @@ export class Swarm {
     }
     const readiness = issueReadinessReason(issue);
     if (readiness) {
-      const release = readiness === 'draft' ? 'Remove the [Draft] or Draft: title prefix' : `Remove the ${readiness === 'needs triage' ? 'needs-triage' : 'needs-info'} label once the issue is ready`;
+      const label = readiness === 'needs triage' ? 'needs-triage' : readiness === 'waiting for info' ? 'needs-info' : NEEDS_HUMAN;
+      const release = readiness === 'draft' ? 'Remove the [Draft] or Draft: title prefix' : `Remove the ${label} label once the issue is ready`;
       throw new HttpError(409, `#${issueNumber} is not ready: ${readiness}. ${release} to hand it to an agent.`);
     }
     if (!explicit && (issueWaitReason(this.workIssue(repo, issue), new Set(this.repoRt.get(repo.id)!.issues.map((i) => i.number))) || noWorkCoolingDown(repo.noWorkEndings?.find((r) => r.issueNumber === issueNumber), this.repoRt.get(repo.id)!.issuesFetchedAt))) throw new HttpError(409, `#${issueNumber} is not ready for automatic work`);
@@ -3084,6 +3092,7 @@ export class Swarm {
     if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
     const pr = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === prNumber && p.state === 'OPEN');
     if (!pr) throw new HttpError(404, `PR #${prNumber} is not open on ${repo.fullName}`);
+    if (hasLabel(pr.labels, NEEDS_HUMAN)) throw new HttpError(409, `Remove ${NEEDS_HUMAN} from PR #${prNumber} before sending it to QA`);
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === prNumber);
     if (rec?.status === 'testing' || rec?.status === 'fixing') throw new HttpError(409, `PR #${prNumber} is already ${rec.status}`);
     if (rec && (rec.status === 'needs-human' || rec.status === 'passed' || rec.status === 'failed')) {
@@ -3295,10 +3304,14 @@ export class Swarm {
         mergeRetryAt: null,
         alerted: false,
       });
+      const pullLabels = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.labels;
+      const nextAfterQa = hasLabel(pullLabels, NEEDS_HUMAN) ? 'needs human intervention'
+        : hasLabel(pullLabels, NEEDS_REVIEW) ? 'waiting for review'
+        : repo.autoMerge ? "it merges once GitHub's checks are green" : 'ready to merge';
       this.toast(
         pass ? 'success' : 'error',
         pass
-          ? `✅ ${a.name} passed PR #${rec.prNumber}${repo.autoMerge ? "; it merges once GitHub's checks are green" : ': ready to merge'}`
+          ? `✅ ${a.name} passed PR #${rec.prNumber}: ${nextAfterQa}`
           : nextStatus === 'needs-human'
             ? `❌ PR #${rec.prNumber} failed QA ${qaRounds} times and needs a human`
             : `❌ ${a.name} failed PR #${rec.prNumber}; sending it back to the developer`,
@@ -3610,8 +3623,12 @@ export class Swarm {
     if (this.repoRt.get(repo.id)?.parking) return false;
     const devs = this.available(repo, 'dev');
     const testers = this.available(repo, 'qa');
-    const waiting = (status: QaRecord['status'], task: PrepJob['task']) => this.state.qa.filter((q) => q.repoId === repo.id && q.status === status &&
-      !prepHeld(q.preparation?.[task], this.repoRt.get(repo.id)?.pulls.find((p) => p.number === q.prNumber)?.headSha ?? null, Date.now())).sort((x, y) => x.updatedAt - y.updatedAt);
+    const pulls = this.repoRt.get(repo.id)?.pulls ?? [];
+    const waiting = (status: QaRecord['status'], task: PrepJob['task']) => this.state.qa.filter((q) => {
+      if (q.repoId !== repo.id || q.status !== status) return false;
+      const pr = pulls.find((p) => p.number === q.prNumber);
+      return !hasLabel(pr?.labels, NEEDS_HUMAN) && !prepHeld(q.preparation?.[task], pr?.headSha ?? null, Date.now());
+    }).sort((x, y) => x.updatedAt - y.updatedAt);
     for (const rec of waiting('queued', 'qa')) {
       const tester =
         testers[0] ??
@@ -5237,6 +5254,7 @@ export class Swarm {
     const rt = this.repoRt.get(repo.id)!;
     const pull = rt.pulls.find((p) => p.number === x.number && p.state === 'OPEN');
     if (!pull) throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
+    if (hasLabel(pull.labels, NEEDS_HUMAN)) throw new HttpError(409, `Remove ${NEEDS_HUMAN} from PR #${x.number} before sending it to a developer`);
     let recovered = '';
     const getRecord = () => {
       if (rt.parking) throw new HttpError(409, 'Wait until PR parking finishes');
