@@ -4,7 +4,7 @@ Use this playbook for CubeFarm developer issue work and PR repairs. The desk's j
 
 - **Claude Code.** Invoke the `Skill` tool with the `cubefarm:` plugin namespace, for example `cubefarm:cubefarm-ponytail`.
 - **Codex.** Load the matching `SKILL.md` from `.agents/skills/cubefarm-bundle/`.
-- **OpenCode.** Call the native `skill` tool with the registered name, for example `skill({ name: "cubefarm-ponytail" })`.
+- **OpenCode.** Call the native `skill` tool with the registered skill ID using the tool's current schema. On OpenCode v2, use `skill({ id: "cubefarm-ponytail" })`.
 
 Try loading the applicable skill before using the phase's fallback, and record any fallback you use.
 
