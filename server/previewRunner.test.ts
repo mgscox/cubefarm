@@ -14,9 +14,10 @@ describe('previewEnv', () => {
     vi.stubEnv('npm_config_registry', 'https://registry.npmjs.org/');
     vi.stubEnv('SWARM_HOME', 'live-office');
     vi.stubEnv('PORT', '4317');
-    const env = previewEnv({ OUTPUT: '{tmp}', APP_URL: 'http://localhost:{port}' }, 4479, 'preview-tmp');
+    const env = previewEnv({ OUTPUT: '{tmp}', APP_URL: 'http://localhost:{port}', SWARM_SUB_OFFICE: '0' }, 4479, 'preview-tmp');
     expect(env.npm_config_registry).toBe('https://registry.npmjs.org/');
     expect(env.SWARM_HOME).toBeUndefined();
+    expect(env.SWARM_SUB_OFFICE).toBe('1');
     expect(env.PORT).toBe('4479');
     expect(env.OUTPUT).toBe('preview-tmp');
     expect(env.APP_URL).toBe('http://localhost:4479');

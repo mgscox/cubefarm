@@ -4,7 +4,7 @@ The details behind the office: how an issue becomes a merged pull request, who d
 
 ## How an issue flows through the office
 
-1. **Backlog.** An issue is assigned to a developer, either by you (Kanban, terminal panel or manager's console) or automatically when **auto-assign** is on for that floor. Auto-assign keeps every developer busy while there's work that can start:
+1. **Backlog and To do.** Issues labeled `needs-triage` wait in **Backlog**. Remove the label when the issue is ready. You can assign issues from **To do**, the terminal panel or the manager's console, or let the floor's **auto-assign** pick eligible work.
    - An issue that says `Depends on #N` waits until #N is closed. Of the rest, the ones that hold up the longest chain of other issues go first, then the oldest.
    - A `swarm:<specialty>` label is a preference, not a lock. A free specialist gets first pick, and otherwise the issue goes to whichever free developer is least needed for their own specialty.
    - If a session fails, its issue goes back on the board for someone else, and the agent gets new work after a two-minute cooldown. An issue that fails twice waits for you to assign it by hand.
@@ -19,7 +19,7 @@ The details behind the office: how an issue becomes a merged pull request, who d
    - returns a structured report: a verdict, the checks performed, the commands run, and a caption for each screenshot
 4. **Evidence on the PR.** The server uploads the screenshots to an orphan branch called `swarm-qa-evidence`, so evidence never lands in your code, and posts a comment on the PR. The comment contains the verdict, a table of checks, the commands run, and the screenshots.
 5. **Fail → fix → re-test.** If QA fails, the report goes back to the developer who wrote the PR, who resumes their own session and pushes fixes to the same branch. If they're busy on something else, any free developer takes the fix instead. The PR then goes back to QA for the next round. After 3 failed rounds it's flagged **needs you**.
-6. **Merge.** Once QA passes, the PR moves to **Ready to merge**. With **auto-merge** on for the floor (the default; switch it in the manager's console or on the Kanban board), the office takes it from there:
+6. **Review and merge.** A QA-passed PR labeled `needs-review` waits in **Review**. Remove the label on GitHub after approval. Other QA-passed PRs move directly to **Ready to merge**. With **auto-merge** on for the floor (the default), the office takes it from there.
    - It waits for GitHub's checks (Actions, Vercel and so on) and merges as soon as they're green, but only the exact commit QA signed off on. Commits pushed after the sign-off go back through QA first.
    - If checks fail, or the PR conflicts with the default branch because other work merged first, a free developer gets the failing checks or the conflict, fixes the branch, and QA re-tests it when the code changed. After 3 such fixes it's flagged **needs you**.
    - It squash-merges (falling back to a merge commit if the repo doesn't allow squash), deletes the remote branch, and updates the branch first if the repo only merges up-to-date branches.
@@ -32,6 +32,8 @@ The details behind the office: how an issue becomes a merged pull request, who d
    The office's own folder is the exception: pulling it would restart the office mid-work, so it shows `update ready` and the **Office** row at the top of the manager's console takes over. When the office was started by its launcher (`npm run dev` / `npm start`) and **Update automatically** is on, or you press **Update now**, the office drains: it starts no new issues, QA or CEO jobs, and lets the running sessions finish. Once nothing runs (or after 20 minutes, when the remaining sessions are stopped and their work goes back to the queue), it hands the update to the launcher, which pulls, installs, builds and restarts it; your phone then says which commit it moved to, or why the update was rolled back. **Later** postpones it for 2 hours, or until a newer commit lands. Started any other way, the office only reports the update.
 
 PRs opened by people, not agents, show up under **In QA** as "not tested yet", with a **Send to QA** button.
+
+**Blocked** shows issues and PRs labeled `needs-human`, as well as PRs the QA pipeline has escalated. After intervening, remove the label on GitHub or use **Retry QA** for an escalated PR.
 
 You can message an agent at any time. While they're working, the message is injected into their live session. After a developer finishes, the message resumes their session, e.g. "the CI failed, please fix the lint errors".
 

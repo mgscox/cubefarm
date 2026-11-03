@@ -108,3 +108,14 @@ it('refuses the fixture outside the demo and for unknown Ideas', async () => {
   (swarm as unknown as { backend: { demo: boolean } }).backend.demo = false;
   await expect(swarm.demoIdeaReview(idea.id, 'agree')).rejects.toThrow(/demo office/);
 });
+
+it('keeps archived Ideas read-only even when a demo review was running', async () => {
+  const idea = await swarm.submitIdea({ description: 'Archived during review' });
+  await swarm.demoIdeaReview(idea.id, 'disagree');
+  state().ideas[0] = { ...idea, status: 'archived', archivedAt: Date.now() };
+  const before = structuredClone(reviewOf(idea.id));
+  await runOut();
+  expect(state().ideas[0].status).toBe('archived');
+  expect(reviewOf(idea.id)).toEqual(before);
+  await expect(swarm.demoIdeaReview(idea.id, 'agree')).rejects.toThrow(/archived/);
+});

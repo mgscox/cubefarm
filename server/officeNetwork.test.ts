@@ -22,6 +22,7 @@ describe('office bind configuration', () => {
     expect(HOST).toBe(host);
     expect(vite.server?.host).toBe(host);
     expect(vite.server?.proxy).toEqual({
+      '/api/settings/mcp': { target: 'http://127.0.0.1:5324', xfwd: true },
       '/api': 'http://127.0.0.1:5324',
       '/ws': { target: 'ws://127.0.0.1:5324', ws: true },
     });

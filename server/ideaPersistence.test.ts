@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Swarm } from './swarm.ts';
 import { createDemoBackend, demoIdeaResearch } from './demo.ts';
 import { HOME_DIR, STATE_FILE } from './config.ts';
-import { RESEARCHER_ID, type IdeaView, type ServerEvent } from '../shared/types.ts';
+import { RESEARCHER_ID, type IdeaRecordView, type IdeaView, type ServerEvent } from '../shared/types.ts';
 import { nextIdeaResearch } from './ideaResearch.ts';
 import type { ResearchJob } from './research.ts';
 import type { SessionResult } from './agentRunner.ts';
@@ -228,4 +228,39 @@ it('stopping Idea preparation requires a retry and never launches a session', as
   expect(swarm.snapshot().ideas[0].research?.error).toContain('stopped');
   expect(nextIdeaResearch(swarm.snapshot().ideas, RESEARCHER_ID, 123)).toEqual([]);
   expect(h.state.research.job).toBeNull();
+});
+
+it('serializes research with Proposal decisions: a rejected Idea stays archived and its linked Idea researches with its history', async () => {
+  const backend = createDemoBackend();
+  const start = vi.spyOn(backend, 'startSession').mockReturnValue({ send: () => undefined, stop: () => undefined });
+  vi.spyOn(backend, 'prepareResearchFolder').mockResolvedValue(undefined);
+  swarm = new Swarm(backend);
+  const h = swarm as unknown as ResearchHarness & { state: { ideaRecords: IdeaRecordView[] } };
+  h.ensureResearcher([]);
+  swarm.updateSettings({ runtime: 'sdk' });
+  await swarm.connectRepo('demo-co/pixel-todo');
+  const idea = await swarm.submitIdea({ description: 'Rejected while researched' });
+  const job = nextIdeaResearch(swarm.snapshot().ideas, RESEARCHER_ID, 123)[0];
+  const agent = h.state.agents.find((a) => a.id === RESEARCHER_ID)!;
+  await h.prepareIdeaResearch(agent, job);
+  const report = demoIdeaResearch(JSON.parse(start.mock.lastCall![0].prompt));
+  const proposal = await swarm.seedDemoProposal(idea.id);
+  // The rejection is queued first; the research result waits behind it on the same path and must not revive the Idea.
+  await Promise.all([
+    swarm.decideProposal(proposal.id, { action: 'reject', prdRevision: proposal.prd.revision, planRevision: proposal.plan.revision }),
+    h.finishIdeaResearch(agent, job, { structured: report, ok: true, text: '', errors: [], turns: 1, costUsd: 0 }, h.agentRt.get(agent.id)?.generation),
+  ]);
+  expect(swarm.snapshot().ideas[0]).toMatchObject({ status: 'archived' });
+  expect(swarm.snapshot().ideaRecords.filter((r) => r.prd)).toEqual([]);
+  expect(h.state.research.job).toBeNull();
+  expect(JSON.parse(await fs.readFile(file, 'utf8')).ideas[0].status).toBe('archived');
+  await expect(swarm.retryIdeaResearch(idea.id)).rejects.toThrow(/archived/);
+  expect(nextIdeaResearch(swarm.snapshot().ideas, RESEARCHER_ID, 123)).toEqual([]);
+
+  h.state.ideaRecords.push({ id: 'earlier-evidence', ideaId: idea.id, kind: 'research', title: 'Earlier evidence', body: 'A source', createdAt: 1 });
+  const linked = await swarm.submitIdea({ description: 'Try again', linkedFrom: idea.id });
+  const next = nextIdeaResearch(swarm.snapshot().ideas, RESEARCHER_ID, 123)[0];
+  expect(next.ideaId).toBe(linked.id);
+  await h.prepareIdeaResearch(agent, next);
+  expect(JSON.parse(start.mock.lastCall![0].prompt).records.map((r: IdeaRecordView) => r.id)).toContain('earlier-evidence');
 });

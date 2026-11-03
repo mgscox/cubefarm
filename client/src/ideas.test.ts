@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { promote, recordReview, reviseRound, startReview } from '../../shared/ideaReview';
-import type { IdeaReviewView, IdeaView } from '../../shared/types';
-import { ideaStatusLabel, reviewProgress, verdictText } from './ideas';
+import type { IdeaReviewView, IdeaView, ProposalView } from '../../shared/types';
+import { ideaStatusLabel, prdLinkTarget, reviewProgress, verdictText } from './ideas';
 
 const idea: IdeaView = { id: 'i1', description: 'x', links: [], constraints: '', floorHints: [], status: 'queued', createdAt: 0 };
 const cycle = startReview('i1', 'lead', { evidence: 'ada', feasibility: 'bo' }, 1, 1);
@@ -14,6 +14,7 @@ describe('Idea review wording', () => {
     expect(ideaStatusLabel(idea)).toBe('Queued');
     expect(ideaStatusLabel({ ...idea, status: 'needs-clarification' })).toBe('Needs clarification');
     expect(ideaStatusLabel({ ...idea, status: 'researched' })).toBe('PRD ready');
+    expect(ideaStatusLabel({ ...idea, status: 'archived' })).toBe('Archived');
     expect(ideaStatusLabel({ ...idea, status: 'reviewing' }, cycle)).toBe('In review · round 1 of 3');
     const agreed = promote(recordReview(recordReview(cycle, endorse('evidence', 'ada')), endorse('feasibility', 'bo')), 1);
     expect(ideaStatusLabel({ ...idea, status: 'proposed' }, agreed)).toBe('Proposed · endorsed');
@@ -35,5 +36,19 @@ describe('Idea review wording', () => {
     expect(verdictText(undefined)).toBe('Reviewing…');
     expect(verdictText(endorse('evidence', 'ada', 2))).toBe('Endorsed r2');
     expect(verdictText(object(3, ['One']))).toBe('1 finding on r3');
+  });
+});
+
+describe('Idea PRD links', () => {
+  const revision = { id: 'i1-prd-1', ideaId: 'i1', kind: 'research' as const, title: 'PRD revision 1', body: '', createdAt: 0,
+    prd: { problem: 'p', outcome: 'o', scope: 's', evidence: [], assumptions: [], targetFloors: [], acceptanceCriteria: [] } };
+  const proposal = { id: 'p1' } as ProposalView;
+
+  it("tells a Proposal's PRD from a research revision under the same link shape", () => {
+    expect(prdLinkTarget(undefined, [proposal], [revision])).toBeNull();
+    expect(prdLinkTarget('p1', [proposal], [revision])).toBe('proposal');
+    expect(prdLinkTarget('i1-prd-1', [proposal], [revision])).toBe('revision');
+    expect(prdLinkTarget('i1-prd-1', [], [{ ...revision, prd: undefined }])).toBe('missing');
+    expect(prdLinkTarget('elsewhere', [proposal], [revision])).toBe('missing');
   });
 });

@@ -1,13 +1,20 @@
 // Wording for an Idea's state and its proposal review, kept pure for tests.
 import { MAX_REVIEW_ROUNDS, currentRound, nextStep } from '../../shared/ideaReview';
-import type { IdeaReviewCycleView, IdeaReviewView, IdeaView } from '../../shared/types';
+import type { IdeaRecordView, IdeaReviewCycleView, IdeaReviewView, IdeaView, ProposalView } from '../../shared/types';
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 export function ideaStatusLabel(idea: IdeaView, cycle?: IdeaReviewCycleView): string {
   if (idea.status === 'proposed' && cycle?.handoff) return cycle.handoff.endorsed ? 'Proposed · endorsed' : `Proposed · ${plural(cycle.handoff.unresolved.length, 'open finding')}`;
   if (idea.status === 'reviewing' && cycle) return `In review · round ${currentRound(cycle).round} of ${MAX_REVIEW_ROUNDS}`;
-  return { queued: 'Queued', researching: 'Researching', 'needs-clarification': 'Needs clarification', researched: 'PRD ready', reviewing: 'In review', proposed: 'Proposed' }[idea.status];
+  return { queued: 'Queued', researching: 'Researching', 'needs-clarification': 'Needs clarification', researched: 'PRD ready', reviewing: 'In review', proposed: 'Proposed', archived: 'Archived' }[idea.status];
+}
+
+/** What `#idea/<id>/prd/<revision>` names on this Idea: a Proposal's PRD, a research PRD revision record, or nothing yet. */
+export function prdLinkTarget(prd: string | undefined, proposals: ProposalView[], records: IdeaRecordView[]): 'proposal' | 'revision' | 'missing' | null {
+  if (!prd) return null;
+  if (proposals.some((p) => p.id === prd)) return 'proposal';
+  return records.some((r) => r.id === prd && r.prd) ? 'revision' : 'missing';
 }
 
 /** What the review is waiting on, or how it ended. */

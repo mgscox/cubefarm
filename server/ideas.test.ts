@@ -20,6 +20,12 @@ describe('Idea intake', () => {
     });
   });
 
+  it('links a new Idea to an earlier one in this office', () => {
+    expect(queuedIdea({ description: 'Try again', linkedFrom: 'idea-0' }, [], 'idea-1', 1, ['idea-0'])).toMatchObject({ linkedFrom: 'idea-0' });
+    expect(create({ description: 'Fresh' })).not.toHaveProperty('linkedFrom');
+    expect(() => queuedIdea({ description: 'Try again', linkedFrom: 'missing' }, [], 'idea-1', 1, ['idea-0'])).toThrow(/linked Idea/);
+  });
+
   it.each([undefined, null, [], {}, { description: '' }, { description: '  ' }, { description: 42 }, { description: 'x'.repeat(2001) },
     { description: 'Valid', links: 'https://example.com' }, { description: 'Valid', links: [23] },
     { description: 'Valid', links: ['javascript:alert(1)'] }, { description: 'Valid', links: ['not a URL'] },
