@@ -24,7 +24,13 @@ export interface Backend extends Machine {
   createIssue(fullName: string, title: string, body: string, labels?: string[]): Promise<number>;
   /** OPEN or CLOSED; null when there is no such issue. */
   issueState(fullName: string, number: number): Promise<'OPEN' | 'CLOSED' | null>;
-  editIssue(fullName: string, number: number, edit: { body?: string; addLabels?: string[]; removeLabels?: string[] }): Promise<void>;
+  editIssue(fullName: string, number: number, edit: { title?: string; body?: string; addLabels?: string[]; removeLabels?: string[] }): Promise<void>;
+  /** The repo GitHub answers for fullName, whether it takes issues, and the office's permission there. */
+  issueAccess(fullName: string): Promise<github.IssueAccess>;
+  /** An issue read back from GitHub; null when there is no such issue. */
+  readIssue(fullName: string, number: number): Promise<github.TrackedIssue | null>;
+  /** Issues (open or closed) updated since `since` (ISO time) whose body carries `marker`. */
+  findIssuesByMarker(fullName: string, marker: string, since: string): Promise<github.TrackedIssue[]>;
   mergePull(fullName: string, number: number, method: 'squash' | 'merge' | 'rebase', headSha?: string): Promise<void>;
   updateBranch(fullName: string, number: number): Promise<void>;
   /** Marks a draft PR ready for review. */
@@ -73,6 +79,9 @@ export const realBackend: Backend = {
   createIssue: github.createIssue,
   issueState: github.issueState,
   editIssue: github.editIssue,
+  issueAccess: github.issueAccess,
+  readIssue: (fullName, number) => github.readIssue(fullName, number),
+  findIssuesByMarker: (fullName, marker, since) => github.findIssuesByMarker(fullName, marker, since),
   mergePull: github.mergePull,
   updateBranch: github.updateBranch,
   markPullReady: github.markPullReady,

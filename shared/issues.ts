@@ -39,8 +39,12 @@ export function forHuman(labels: string[]) {
   return labels.some((l) => l.toLowerCase() === READY_FOR_HUMAN);
 }
 
+/** The hold an issue published from an Idea carries (with a draft title) until its whole plan is verified. */
+export const PUBLICATION_HOLD = 'held-for-publication';
+
 /** Preparation gates that must be cleared before automatic or explicit agent starts. */
 export function issueReadinessReason(issue: Pick<IssueInfo, 'labels' | 'title'>) {
+  if (issue.labels.some((l) => l.toLowerCase() === PUBLICATION_HOLD)) return 'held for publication';
   if (issue.labels.some((l) => /^needs-triage$/i.test(l))) return 'needs triage';
   if (issue.labels.some((l) => /^needs-info$/i.test(l))) return 'waiting for info';
   if (/^(?:\[Draft\]|Draft:)/i.test(issue.title)) return 'draft';

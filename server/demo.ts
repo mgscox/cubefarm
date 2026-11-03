@@ -8,11 +8,13 @@ import type { PreviewBackend } from './previewRunner.ts';
 import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
 import { bootNotice, CLIS } from './clis.ts';
 import { updateFailure } from './fleet.ts';
-import type { CliView, GhRepoSummary, IssueInfo, PullInfo, MachineSample, MachineTelemetry } from '../shared/types.ts';
+import type { ApprovedSnapshot, CliView, GhRepoSummary, IssueInfo, PullInfo, MachineSample, MachineTelemetry } from '../shared/types.ts';
+import type { TrackedIssue } from './github.ts';
 import { monitorResources } from './machineHealth.ts';
 import { dependencyUrls, READY_FOR_HUMAN, RESEARCH } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR } from './config.ts';
+import { CommandError } from './exec.ts';
 import { takeLastUpdate, underLauncher, type OfficeHost } from './officeUpdate.ts';
 import type { prStatusView } from './ceo.ts';
 
@@ -33,6 +35,8 @@ function issue(n: number, title: string, body: string, fullName: string, labels:
   return { number: n, title, body, url: `https://github.com/${fullName}/issues/${n}`, labels, createdAt: now() };
 }
 
+const tracked = (fullName: string, i: IssueInfo): TrackedIssue => ({ repo: fullName, number: i.number, url: i.url, title: i.title, body: i.body, labels: [...i.labels], state: 'OPEN' });
+
 const repos = new Map<string, FakeRepo>();
 /** Repos made in the demo (new projects, published folders): empty, so no package.json for the preview to fall back on. */
 const bareRepos = new Set<string>();
@@ -40,6 +44,47 @@ const mergedSinceSync = new Map<string, number>(); // merges the fake project fo
 const closedIssues = new Set<string>(); // `${fullName}#${n}`: issues closed by a merge
 
 const fakeSha = () => crypto.randomBytes(20).toString('hex');
+
+// ---------- publication fixtures ----------
+
+/** Faults the fake tracker injects at the publication boundary, so recovery can be watched in the demo and tests. */
+export const demoTracker = {
+  /** Creates that succeed on the fake GitHub but whose response is lost. */
+  lostCreates: 0,
+  /** Repos refusing writes (READ permission) until this time. */
+  refused: new Map<string, number>(),
+};
+
+const refusing = (fullName: string) => (demoTracker.refused.get(fullName) ?? 0) > Date.now();
+
+let fixtureSeq = 0;
+/**
+ * A seeded, already-approved single-issue Proposal. Its approval is a fixture: only the demo office and tests accept
+ * it, never the real one.
+ */
+export function demoApprovedProposal(repo: string, at = Date.now()): ApprovedSnapshot {
+  const n = `${at.toString(36)}-${++fixtureSeq}`;
+  return {
+    approval: { decisionId: `demo-decision-${n}`, proposalId: `demo-proposal-${n}`, ideaId: `demo-idea-${n}`, prdRevision: 2, planRevision: 4, decidedAt: at, source: 'fixture' },
+    issues: [{
+      entryId: 'weekly-summary',
+      repo,
+      title: 'Show a weekly summary of completed todos',
+      body: [
+        'From an approved Idea: a short weekly recap keeps people coming back.',
+        '',
+        '## Scope',
+        'One session: a summary card above the list with the number of todos completed in the last 7 days.',
+        '',
+        '## Acceptance criteria',
+        '- [ ] The card shows the count of todos completed in the last 7 days.',
+        '- [ ] It updates when a todo is completed or reopened.',
+        '',
+        'PRD requirement: R2 (weekly recap).',
+      ].join('\n'),
+    }],
+  };
+}
 
 /** Fake CI: checks run for a while after every push, and now and then one fails so the fix loop shows. */
 function runChecks(pr: PullInfo, fail = Math.random() < 0.2) {
@@ -662,10 +707,24 @@ export function createDemoBackend(): Backend {
     createIssue: async (fullName, title, body, labels = []) => {
       const r = repos.get(fullName);
       if (!r) throw new Error('Unknown repo');
+      if (refusing(fullName)) throw new CommandError('gh issue create failed: HTTP 403', 'HTTP 403: Resource not accessible by integration', 1, '');
       const n = r.nextNumber++;
       r.issues.push(issue(n, title, body, fullName, labels));
+      if (demoTracker.lostCreates > 0) {
+        demoTracker.lostCreates--;
+        throw new Error('connection reset before GitHub answered');
+      }
       return n;
     },
+    issueAccess: async (fullName) => {
+      if (!repos.has(fullName)) throw new CommandError(`gh repo view ${fullName} failed`, 'GraphQL: Could not resolve to a Repository', 1, '');
+      return { repo: fullName, issues: true, permission: refusing(fullName) ? 'READ' : 'ADMIN' };
+    },
+    readIssue: async (fullName, number) => {
+      const i = repos.get(fullName)?.issues.find((x) => x.number === number);
+      return i ? tracked(fullName, i) : null;
+    },
+    findIssuesByMarker: async (fullName, marker) => (repos.get(fullName)?.issues ?? []).filter((i) => i.body.includes(marker)).map((i) => tracked(fullName, i)),
     issueState: async (fullName, number) => {
       const r = repos.get(fullName);
       return r?.issues.some((i) => i.number === number) ? 'OPEN' : closedIssues.has(`${fullName}#${number}`) ? 'CLOSED' : null;
@@ -673,6 +732,8 @@ export function createDemoBackend(): Backend {
     editIssue: async (fullName, number, edit) => {
       const i = repos.get(fullName)?.issues.find((x) => x.number === number);
       if (!i) throw new Error(`Unknown issue #${number}`);
+      if (refusing(fullName)) throw new CommandError('gh issue edit failed: HTTP 403', 'HTTP 403: Resource not accessible by integration', 1, '');
+      if (edit.title !== undefined) i.title = edit.title;
       if (edit.body !== undefined) i.body = edit.body;
       i.labels = [...i.labels.filter((l) => !edit.removeLabels?.includes(l)), ...(edit.addLabels ?? []).filter((l) => !i.labels.includes(l))];
     },
