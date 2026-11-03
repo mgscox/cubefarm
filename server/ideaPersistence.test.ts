@@ -230,6 +230,34 @@ it('stopping Idea preparation requires a retry and never launches a session', as
   expect(h.state.research.job).toBeNull();
 });
 
+it('removing a focused contributor during preparation never launches a session', async () => {
+  const backend = createDemoBackend();
+  const start = vi.spyOn(backend, 'startSession').mockReturnValue({ send: () => undefined, stop: () => undefined });
+  let release!: () => void;
+  let preparing!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const entered = new Promise<void>((resolve) => { preparing = resolve; });
+  vi.spyOn(backend, 'prepareResearchFolder').mockImplementation(async () => { preparing(); await gate; });
+  swarm = new Swarm(backend);
+  const h = swarm as unknown as ResearchHarness;
+  h.ensureResearcher([]);
+  swarm.updateSettings({ runtime: 'sdk' });
+  const repo = await swarm.connectRepo('demo-co/pixel-todo');
+  const specialist = swarm.hireAgent(repo.id, { role: 'researcher' });
+  const idea = await swarm.submitIdea({ description: 'Cancel removed contributor before launch' });
+  h.state.ideas[0] = { ...idea, status: 'researching', research: { leadAgentId: RESEARCHER_ID, questions: [], requests: [{ id: 'q1', agentId: specialist.id, question: 'Check feasibility' }] } };
+  const job = nextIdeaResearch(swarm.snapshot().ideas, RESEARCHER_ID, 123)[0];
+  expect(job.agentId).toBe(specialist.id);
+  const pending = h.prepareIdeaResearch(h.state.agents.find((a) => a.id === specialist.id)!, job);
+  await entered;
+  swarm.fireAgent(specialist.id);
+  release();
+  await pending;
+  expect(swarm.snapshot().agents.some((a) => a.id === specialist.id)).toBe(false);
+  expect(h.state.research.job).toBeNull();
+  expect(start).not.toHaveBeenCalled();
+});
+
 it('serializes research with Proposal decisions: a rejected Idea stays archived and its linked Idea researches with its history', async () => {
   const backend = createDemoBackend();
   const start = vi.spyOn(backend, 'startSession').mockReturnValue({ send: () => undefined, stop: () => undefined });

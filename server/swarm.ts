@@ -4917,7 +4917,8 @@ export class Swarm {
         idea.research ??= { leadAgentId: RESEARCHER_ID, questions: [], requests: [] };
       });
       await this.backend.prepareResearchFolder(RESEARCH_DIR);
-      if (this.officeUpdate.handedOver || rt.generation !== generation) return;
+      if (this.officeUpdate.handedOver || this.agentRt.get(a.id) !== rt ||
+        rt.generation !== generation || this.state.research.job !== job) return;
       if (a.status === 'stopped') throw new Error('Research was stopped; retry when ready');
       if (this.state.officeHeld) {
         this.state.research.job = null;
