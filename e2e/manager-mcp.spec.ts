@@ -116,9 +116,13 @@ test('Settings rotates and disables the gateway immediately', async ({ page, req
   expect((await request.patch(settingsPath, { data: { token: 'too-short' } })).status()).toBe(400);
   await page.route((url) => !url.href.startsWith(baseURL!) && !url.protocol.startsWith('data'), (route) => route.fulfill({ status: 200, body: '' }));
   await page.addInitScript(() => localStorage.setItem('cubefarm:mode', 'dashboard'));
+  const openSettings = async () => {
+    await page.getByRole('button', { name: 'Manager console', exact: true }).click();
+    await page.locator('.panel').getByRole('button', { name: /Settings/ }).click();
+  };
   try {
     await page.goto('/');
-    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await openSettings();
     const card = page.getByRole('region', { name: 'Manager MCP' });
     const toggle = card.getByRole('switch');
     const input = card.getByLabel('MCP token', { exact: true });
@@ -136,7 +140,7 @@ test('Settings rotates and disables the gateway immediately', async ({ page, req
     await expect(toggle).not.toBeChecked();
     expect((await gateway(savedToken)).status()).toBe(404);
     await page.reload();
-    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await openSettings();
     await expect(toggle).not.toBeChecked();
     await expect(card.getByRole('status')).toHaveText('Using the token saved in Settings.');
     await toggle.click();

@@ -4,7 +4,7 @@ test('Dashboard opens every Manager console panel and can visit a floor', async 
   await page.route((url) => !url.href.startsWith(baseURL!) && !url.protocol.startsWith('data'), (route) => route.fulfill({ status: 200, body: '' }));
   await page.addInitScript(() => localStorage.setItem('cubefarm:mode', 'dashboard'));
   await page.goto('/');
-  await page.getByRole('button', { name: 'Manager console', exact: true }).click({ timeout: 5000 });
+  await page.getByRole('button', { name: 'Manager console', exact: true }).click();
 
   const consoleTitle = page.getByText("Manager's console");
   const panel = page.locator('.panel').filter({ has: consoleTitle });
