@@ -1093,7 +1093,9 @@ export class Swarm {
   /** The lead researcher's Issue Plan for a PRD revision: checked, reconciled with open issues, saved as the Idea's next revision. */
   draftIssuePlan(ideaId: string, prd: PrdForPlanning, draft: unknown): Promise<IssuePlanView> {
     return this.commitIdeas(() => {
-      if (!this.state.ideas.some((i) => i.id === ideaId)) throw new HttpError(404, 'No such Idea');
+      const idea = this.state.ideas.find((i) => i.id === ideaId);
+      if (!idea) throw new HttpError(404, 'No such Idea');
+      if (idea.status === 'archived') throw new HttpError(409, 'This Idea is archived; start a linked Idea instead');
       if (prd.ideaId !== ideaId) throw new HttpError(400, 'That PRD revision belongs to another Idea');
       const result = draftIssuePlan(draft, {
         prd,

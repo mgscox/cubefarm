@@ -41,14 +41,14 @@ function PlanEntry({ entry, plan }: { entry: IssuePlanEntry; plan: IssuePlanView
   );
 }
 
-export function IssuePlanSection({ ideaId }: { ideaId: string }) {
+export function IssuePlanSection({ ideaId, archived }: { ideaId: string; archived: boolean }) {
   const all = useStore((s) => s.issuePlans);
   const demo = useStore((s) => s.demo);
   const [picked, setPicked] = useState<number>();
   const [busy, setBusy] = useState(false);
   const plans = all.filter((p) => p.ideaId === ideaId).sort((a, b) => b.revision - a.revision);
   const plan = plans.find((p) => p.revision === picked) ?? plans[0];
-  const draft = demo && (
+  const draft = demo && !archived && (
     <button className="btn" disabled={busy} onClick={() => {
       setBusy(true);
       void api.draftDemoIssuePlan(ideaId).then((p) => setPicked(p.revision)).catch(() => undefined).finally(() => setBusy(false));

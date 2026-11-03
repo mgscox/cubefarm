@@ -162,10 +162,11 @@ export function draftIssuePlan(input: IssuePlanDraft, ctx: PlanContext): PlanDra
     const exact = existing === undefined ? (title ? open.find((i) => normalized(i.title) === normalized(title)) : undefined) : existing;
     const overlap = exact === undefined ? find(e.overlaps, 'overlapped') : undefined;
     if (exact === null || overlap === null) continue;
-    let acceptance = list(e.acceptance).map(str).filter(Boolean);
-    const covered = overlap ? acceptance.filter((c) => coveredItems(overlap.body).has(normalized(c))) : [];
-    acceptance = acceptance.filter((c) => !covered.includes(c));
-    const match = exact ?? (overlap && !acceptance.length ? overlap : undefined);
+    const criteria = list(e.acceptance).map(str).filter(Boolean);
+    const covered = overlap ? criteria.filter((c) => coveredItems(overlap.body).has(normalized(c))) : [];
+    const acceptance = criteria.filter((c) => !covered.includes(c));
+    // Only an overlap whose criteria are all covered becomes a reference; one without criteria is refused below.
+    const match = exact ?? (overlap && criteria.length && !acceptance.length ? overlap : undefined);
 
     if (match) {
       if (parent) problems.push(`${who} reuses ${repo}#${match.number}, which stays untouched, so it can't join a Tracking Parent.`);

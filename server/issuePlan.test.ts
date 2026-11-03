@@ -60,6 +60,12 @@ describe('Issue Plan drafting', () => {
     expect(all.ok && all.entries[0]).toMatchObject({ kind: 'existing', issue: { number: 4 }, acceptance: [] });
   });
 
+  it('refuses an overlap without criteria instead of dropping its work', () => {
+    for (const acceptance of [undefined, [], [null, ' ']]) {
+      expect(problems({ entries: [work('theme', { title: 'Customize theme colors', overlaps: 4, acceptance })] })).toEqual(['Issue theme needs measurable acceptance criteria.']);
+    }
+  });
+
   it('checks titles, briefs, criteria, floors, requirements and specialties', () => {
     expect(problems({ entries: [{ key: 'k', repo: 'a/app', requirement: 'R1', title: 'Fix', brief: '', acceptance: [] }] })).toEqual([
       'Issue k needs an actionable title of a few words, at most 100 characters.',

@@ -6,12 +6,12 @@ import { Swarm } from './swarm.ts';
 import { createDemoBackend } from './demo.ts';
 import { STATE_FILE } from './config.ts';
 import { DEMO_TODO, DEMO_WEATHER, demoPrd } from './planFixture.ts';
-import type { IssueInfo, IssuePlanView, ServerEvent } from '../shared/types.ts';
+import type { IdeaView, IssueInfo, IssuePlanView, ServerEvent } from '../shared/types.ts';
 
 type Harness = {
   broadcast(event: ServerEvent): void;
   writeState(): Promise<void>;
-  state: { repos: { id: string }[]; issuePlans: IssuePlanView[] };
+  state: { repos: { id: string }[]; ideas: IdeaView[]; issuePlans: IssuePlanView[] };
   repoRt: Map<string, { issues: IssueInfo[] }>;
 };
 let folder: string;
@@ -79,6 +79,16 @@ it('rejects a cyclic draft before it is saved or presented', async () => {
   await expect(swarm.draftIssuePlan('missing', demoPrd('missing'), { entries: [work('a')] })).rejects.toMatchObject({ status: 404 });
   expect((swarm as unknown as Harness).state.issuePlans).toEqual([]);
   expect(broadcast).not.toHaveBeenCalled();
+});
+
+it('refuses new plan revisions once the Idea is archived', async () => {
+  const h = swarm as unknown as Harness;
+  const idea = await swarm.submitIdea({ description: 'Rejected idea' });
+  const first = await swarm.draftDemoIssuePlan(idea.id);
+  h.state.ideas = h.state.ideas.map((i) => (i.id === idea.id ? { ...i, status: 'archived', archivedAt: Date.now() } : i));
+  await expect(swarm.draftDemoIssuePlan(idea.id)).rejects.toMatchObject({ status: 409, message: expect.stringContaining('archived') });
+  expect(h.state.issuePlans).toEqual([first]);
+  expect((JSON.parse(await read(file, 'utf8')) as { issuePlans: IssuePlanView[] }).issuePlans).toEqual([first]);
 });
 
 it('offers the fixture only in the demo', () => {
