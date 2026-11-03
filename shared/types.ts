@@ -524,6 +524,63 @@ export interface IdeaRecordView {
   createdAt: number;
 }
 
+// ---------- Ideas: Issue Plans ----------
+
+/** A PRD requirement, as an Issue Plan entry cites it. */
+export interface PrdRequirement {
+  id: string; // stable within its PRD revision, e.g. "R2"
+  text: string;
+}
+
+/** The PRD revision a plan is drafted from. */
+export interface PrdForPlanning {
+  ideaId: string;
+  revision: number;
+  requirements: PrdRequirement[];
+}
+
+/** One implementation issue in an Issue Plan: new work drafted here, or an open tracker issue reused untouched. */
+export interface IssuePlanEntry {
+  key: string; // unique within the plan; dependency edges and parents refer to entries by key
+  kind: 'new' | 'existing';
+  repo: string; // a configured floor's owner/name
+  title: string;
+  brief: string; // '' for an existing issue
+  acceptance: string[]; // measurable criteria; [] for an existing issue
+  requirement: PrdRequirement;
+  specialty?: string; // an existing specialty on the floor
+  parent?: string; // a Tracking Parent's key
+  /** existing: the reused issue. new: the issue it partially overlaps, so it carries only the remaining work. */
+  issue?: { number: number; url: string; title: string };
+  covered?: string[]; // criteria the overlapped issue already covers, dropped from this entry
+}
+
+/** Optional grouping of related entries; it is not work itself and can't block or be blocked. */
+export interface TrackingParent {
+  key: string;
+  repo: string;
+  title: string;
+  summary: string;
+}
+
+/** `issue` can't start until `blockedBy` is delivered (both are entry keys). */
+export interface PlanDependency {
+  issue: string;
+  blockedBy: string;
+}
+
+/** A saved, immutable Issue Plan revision, paired with the PRD revision it was drafted from. Drafting writes nothing to GitHub. */
+export interface IssuePlanView {
+  id: string;
+  ideaId: string;
+  revision: number; // 1, 2, … per Idea
+  prdRevision: number;
+  entries: IssuePlanEntry[];
+  parents: TrackingParent[];
+  dependencies: PlanDependency[];
+  createdAt: number;
+}
+
 /** One proposed implementation issue as the manager's approval card shows it. */
 export interface ProposalIssue {
   key: string; // stable plan reference, used by dependencies
@@ -630,6 +687,7 @@ export interface WorldSnapshot {
   research: ResearchInfo;
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
+  issuePlans?: IssuePlanView[];
   proposals: ProposalView[];
   ideaReviews: IdeaReviewCycleView[];
   messages: PhoneMessage[];
@@ -663,6 +721,7 @@ export type ServerEvent =
   | { type: 'research'; research: ResearchInfo }
   | { type: 'idea'; idea: IdeaView }
   | { type: 'ideaRecord'; record: IdeaRecordView }
+  | { type: 'issuePlan'; plan: IssuePlanView }
   | { type: 'proposal'; proposal: ProposalView }
   | { type: 'ideaReview'; review: IdeaReviewCycleView }
   | { type: 'message'; message: PhoneMessage }

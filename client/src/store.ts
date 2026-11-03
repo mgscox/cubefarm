@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CEO_ID, type IdeaView, type IdeaReviewCycleView, type IdeaRecordView, type ProposalView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type PublicationView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type IdeaView, type IssuePlanView, type IdeaReviewCycleView, type IdeaRecordView, type ProposalView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type PublicationView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { appendPhoneMessage } from '../../shared/phone';
 import { hasLabel, issueBlockers, issueReadinessReason, issueWorkNote, NEEDS_HUMAN, NEEDS_REVIEW } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
@@ -64,6 +64,7 @@ interface State {
   research: ResearchInfo;
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
+  issuePlans: IssuePlanView[];
   proposals: ProposalView[];
   ideaReviews: IdeaReviewCycleView[];
   messages: PhoneMessage[];
@@ -174,6 +175,7 @@ export const useStore = create<State>((set, get) => ({
   research: { queue: [], job: null, done: [] },
   ideas: [],
   ideaRecords: [],
+  issuePlans: [],
   proposals: [],
   ideaReviews: [],
   messages: [],
@@ -228,6 +230,7 @@ export const useStore = create<State>((set, get) => ({
           research: d.research ?? { queue: [], job: null, done: [] },
           ideas: d.ideas ?? [],
           ideaRecords: d.ideaRecords ?? [],
+          issuePlans: d.issuePlans ?? [],
           proposals: d.proposals ?? [],
           ideaReviews: d.ideaReviews ?? [],
           messages: d.messages,
@@ -338,6 +341,9 @@ export const useStore = create<State>((set, get) => ({
         break;
       case 'ideaRecord':
         set({ ideaRecords: [...get().ideaRecords.filter((r) => r.ideaId !== ev.record.ideaId || r.kind !== ev.record.kind || r.id !== ev.record.id), ev.record] });
+        break;
+      case 'issuePlan':
+        set({ issuePlans: [...get().issuePlans.filter((p) => p.id !== ev.plan.id), ev.plan] });
         break;
       case 'proposal':
         set({ proposals: [...get().proposals.filter((p) => p.id !== ev.proposal.id), ev.proposal] });

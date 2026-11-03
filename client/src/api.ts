@@ -1,5 +1,5 @@
 import { useStore } from './store';
-import type { IdeaInput, IdeaView, IdeaReviewCycleView, ProposalDecisionInput, ProposalView, AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
+import type { IdeaInput, IdeaReviewCycleView, IdeaView, IssuePlanView, ProposalDecisionInput, ProposalView, AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
 
 import type { ManagerMcpSettingsPatch, ManagerMcpSettingsView } from '../../shared/types';
 
@@ -28,6 +28,7 @@ export interface FloorOptions {
 
 export const api = {
   submitIdea: (input: IdeaInput) => call<IdeaView>('POST', '/api/ideas', input),
+  draftDemoIssuePlan: (ideaId: string) => call<IssuePlanView>('POST', `/api/ideas/${encodeURIComponent(ideaId)}/plans/demo`),
   decideProposal: (id: string, decision: ProposalDecisionInput) => call<ProposalView>('POST', `/api/proposals/${encodeURIComponent(id)}/decision`, decision),
   seedDemoProposal: (ideaId: string) => call<ProposalView>('POST', `/api/ideas/${encodeURIComponent(ideaId)}/proposals/demo`),
   demoIdeaReview: (ideaId: string, fixture: 'agree' | 'disagree') => call<IdeaReviewCycleView>('POST', `/api/ideas/${encodeURIComponent(ideaId)}/demo-review`, { fixture }),

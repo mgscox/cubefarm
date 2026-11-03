@@ -6,6 +6,7 @@ import { ideaProposals, ideaStage } from '../proposals';
 import { FOCUS_LABEL, REVIEW_FOCUSES } from '../../../shared/ideaReview';
 import { reviewProgress, verdictText } from '../ideas';
 import { useStore } from '../store';
+import { IssuePlanSection } from './IssuePlan';
 import { Markdown } from './Markdown';
 import { PrdView, ProposalCard } from './ProposalCard';
 
@@ -101,6 +102,7 @@ export function IdeaDetail({ idea, records, proposals = [], prd, onLinkedIdea }:
       <p>{idea.floorHints.length ? idea.floorHints.join(', ') : 'No floor hints — affected repositories are open.'}</p>
       {idea.constraints && <><h4>Constraints</h4><p className="idea-prose">{idea.constraints}</p></>}
       {idea.links.length > 0 && <><h4>Links</h4><ul>{idea.links.map((link) => <li key={link}><a href={link} target="_blank" rel="noreferrer">{link}</a></li>)}</ul></>}
+      <IssuePlanSection ideaId={idea.id} archived={idea.status === 'archived'} />
       {cycle && <IdeaReview cycle={cycle} />}
       {!cycle && !latest && demo && idea.status === 'queued' && <DemoReviewFixture ideaId={idea.id} />}
       <h4>Research, reviews & proposals</h4>

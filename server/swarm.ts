@@ -27,6 +27,8 @@ import { fixNeedsHuman, fixOutcome } from './fixOutcome.ts';
 import { fixGoesTo, prepFailure, prepHeld, PREP_HOLD_MS } from './handOut.ts';
 import { HttpError } from './httpError.ts';
 import { queuedIdea } from './ideas.ts';
+import { draftIssuePlan } from './issuePlan.ts';
+import { DEMO_TODO, DEMO_WEATHER, demoPlanDraft, demoPrd } from './planFixture.ts';
 import { decideProposal, proposalFromHandoff, withNewerDraft, type ProposalHandoff, type ProposalWorker } from './proposals.ts';
 import { createDemoProposalWorker, demoHandoff } from './proposalFixture.ts';
 import { demoProposalRecords, demoReview, isReviewFixture } from './demoIdeaReview.ts';
@@ -65,6 +67,8 @@ import type {
   ProposalView,
   IdeaReviewCycleView,
   IssueInfo,
+  IssuePlanView,
+  PrdForPlanning,
   NoWorkEnding,
   LogLine,
   OfficeUpdateView,
@@ -210,6 +214,7 @@ interface Persisted {
   research: ResearchState;
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
+  issuePlans: IssuePlanView[];
   proposals: ProposalView[];
   ideaReviews: IdeaReviewCycleView[];
   messages: PhoneMessage[];
@@ -482,6 +487,7 @@ export class Swarm {
     research: { queue: [], job: null, done: [] },
     ideas: [],
     ideaRecords: [],
+    issuePlans: [],
     proposals: [],
     ideaReviews: [],
     messages: [],
@@ -655,6 +661,7 @@ export class Swarm {
         research: { ...this.state.research, ...loaded.research },
         ideas: loaded.ideas ?? [],
         ideaRecords: loaded.ideaRecords ?? [],
+        issuePlans: loaded.issuePlans ?? [],
         proposals: loaded.proposals ?? [],
         ideaReviews: loaded.ideaReviews ?? [],
         messages: loaded.messages ?? [],
@@ -952,6 +959,7 @@ export class Swarm {
       research: this.researchInfo(),
       ideas: this.state.ideas,
       ideaRecords: this.state.ideaRecords,
+      issuePlans: this.state.issuePlans,
       proposals: this.state.proposals,
       ideaReviews: this.state.ideaReviews,
       messages: this.state.messages.slice(-100),
@@ -1080,6 +1088,41 @@ export class Swarm {
     });
     this.ideaSubmissions = submit.catch(() => undefined);
     return submit;
+  }
+
+  /** The lead researcher's Issue Plan for a PRD revision: checked, reconciled with open issues, saved as the Idea's next revision. */
+  draftIssuePlan(ideaId: string, prd: PrdForPlanning, draft: unknown): Promise<IssuePlanView> {
+    return this.commitIdeas(() => {
+      const idea = this.state.ideas.find((i) => i.id === ideaId);
+      if (!idea) throw new HttpError(404, 'No such Idea');
+      if (idea.status === 'archived') throw new HttpError(409, 'This Idea is archived; start a linked Idea instead');
+      if (prd.ideaId !== ideaId) throw new HttpError(400, 'That PRD revision belongs to another Idea');
+      const result = draftIssuePlan(draft, {
+        prd,
+        floors: this.state.repos.map((r) => r.id),
+        openIssues: (id) => this.repoRt.get(id)?.issues ?? [],
+        specialties: (id) => [
+          ...this.state.agents.filter((a) => a.repoId === id && a.specialty).map((a) => a.specialty.toLowerCase()),
+          ...this.state.requests.filter((r) => r.status === 'pending' && r.kind === 'hire' && r.repoId === id && r.specialty).map((r) => r.specialty),
+        ],
+      });
+      if (!result.ok) throw new HttpError(400, `The Issue Plan wasn't saved. ${result.problems.join(' ')}`);
+      const revision = 1 + Math.max(0, ...this.state.issuePlans.filter((p) => p.ideaId === ideaId).map((p) => p.revision));
+      const { entries, parents, dependencies } = result;
+      const plan: IssuePlanView = { id: crypto.randomUUID(), ideaId, revision, prdRevision: prd.revision, entries, parents, dependencies, createdAt: Date.now() };
+      this.state.issuePlans.push(plan);
+      const rollback = () => { this.state.issuePlans = this.state.issuePlans.filter((p) => p.id !== plan.id); };
+      return { result: plan, rollback, events: [{ type: 'issuePlan', plan }] };
+    });
+  }
+
+  /** Demo only: draft the fixture plan from the fixture PRD on an Idea. */
+  draftDemoIssuePlan(ideaId: string) {
+    if (!this.backend.demo) throw new HttpError(404, 'Demo Issue Plans are only available in the demo');
+    if (![DEMO_TODO, DEMO_WEATHER].every((id) => this.state.repos.some((r) => r.id === id))) {
+      throw new HttpError(409, `The demo Issue Plan needs the floors ${DEMO_TODO} and ${DEMO_WEATHER}`);
+    }
+    return this.draftIssuePlan(ideaId, demoPrd(ideaId), demoPlanDraft((id) => this.repoRt.get(id)?.issues ?? []));
   }
 
   /** Run an Idea change after earlier ones; `apply` mutates state and returns a rollback, run if the save fails. */
