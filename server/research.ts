@@ -9,6 +9,8 @@ import { ONE_TURN } from './clis.ts';
 
 export interface ResearchJob {
   ideaId?: string;
+  ideaPhase?: 'plan' | 'review' | 'revise' | 'promote';
+  reviewFocus?: 'evidence' | 'feasibility';
   requestId?: string;
   agentId?: string;
   topic: string;

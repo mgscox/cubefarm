@@ -62,6 +62,7 @@ export function wordingOnly(prev: Pick<ProposalView, 'prd' | 'plan'>, next: Pick
   return next.plan.issues.every((i) => {
     const b = before.get(i.key);
     return !!b && b.repo === i.repo && isDeepStrictEqual(b.existing, i.existing) && b.requirement === i.requirement
+      && b.tracking === i.tracking && b.parent === i.parent && b.specialty === i.specialty
       && wording(b.title) === wording(i.title) && wording(b.brief) === wording(i.brief)
       && isDeepStrictEqual(b.criteria.map(wording), i.criteria.map(wording))
       && isDeepStrictEqual([...b.blockedBy].sort(), [...i.blockedBy].sort());

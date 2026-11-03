@@ -33,11 +33,12 @@ function Issues({ proposal }: { proposal: ProposalView }) {
         <li key={issue.key}>
           <details>
             <summary>
-              {issue.existing ? <span className="chip chip-good">Existing #{issue.existing.number}</span> : <span className="chip">New</span>}
+              {issue.existing ? <span className="chip chip-good">Existing #{issue.existing.number}</span> : <span className="chip">{issue.tracking ? 'Tracking Parent' : 'New'}</span>}
               {' '}<b>{issue.title}</b>
               <span className="small muted"> · {issue.repo} · {issue.blockedBy.length ? `waits for ${issue.blockedBy.map(title).join(', ')}` : 'independent'}</span>
             </summary>
             <div className="proposal-brief">
+              {issue.parent && <div className="small muted">Grouped under {title(issue.parent)}</div>}
               {issue.requirement && <div className="small muted">Implements {issue.requirement}</div>}
               {issue.existing && <div><a href={issue.existing.url} target="_blank" rel="noreferrer">{issue.repo}#{issue.existing.number}</a> stays as it is.</div>}
               <Markdown text={issue.brief} />

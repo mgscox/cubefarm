@@ -605,6 +605,9 @@ export interface IssuePlanView {
 
 /** One proposed implementation issue as the manager's approval card shows it. */
 export interface ProposalIssue {
+  tracking?: boolean;
+  parent?: string;
+  specialty?: string;
   key: string; // stable plan reference, used by dependencies
   title: string;
   repo: string; // configured floor (repo id)
@@ -649,7 +652,7 @@ export interface ProposalDecisionView {
 export interface ProposalView {
   id: string;
   ideaId: string;
-  prd: { revision: number; title: string; body: string };
+  prd: { revision: number; title: string; body: string; recordId?: string };
   plan: { revision: number; issues: ProposalIssue[] };
   reviews: ProposalReview[];
   reviewSkipped?: boolean; // a wording-only revision returned directly to the manager

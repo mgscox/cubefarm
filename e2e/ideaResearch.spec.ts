@@ -24,7 +24,7 @@ test('research an unhinted Idea, answer its blocker and inspect the same saved P
     await page.screenshot({ path: testInfo.outputPath('idea-clarification.png') });
     await page.getByLabel('Reply to researcher').fill('New teammates finish onboarding in under 3 minutes');
     await page.getByRole('button', { name: 'Reply and resume research' }).click();
-    await expect(detail.getByRole('status')).toHaveText('PRD ready', { timeout: 150_000 });
+    await expect(detail.getByRole('link', { name: 'View PRD revision' })).toBeVisible({ timeout: 150_000 });
     await expect(detail).toContainText('Focused input');
     await expect(detail).toContainText('Received');
     await expect(detail).toContainText('PRD revision 1');
@@ -37,7 +37,6 @@ test('research an unhinted Idea, answer its blocker and inspect the same saved P
     await detail.getByRole('heading', { name: 'Problem', exact: true }).scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath('idea-prd.png') });
     await enter(revision!);
-    await expect(detail.getByRole('status')).toHaveText('PRD ready');
     await expect(detail.getByRole('heading', { name: 'PRD revision 1', exact: true })).toBeVisible();
     const researchHeading = detail.getByRole('heading', { name: 'Research', exact: true });
     await researchHeading.scrollIntoViewIfNeeded();

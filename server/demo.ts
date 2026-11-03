@@ -278,15 +278,43 @@ export function demoIdeaResearch(context: {
     scope: `Deliver the requested workflow on ${floor.id}.${idea.constraints ? ` Constraints: ${idea.constraints}` : ''}`,
     evidence: sources.map((source) => ({ source, finding: 'Illustrative demo evidence; no live research was performed.' })),
     assumptions: ['The target user and feasibility need independent validation; demo evidence is illustrative.'],
-    targetFloors: [{ repoId: floor.id, rationale: idea.floorHints.includes(floor.id) ? 'The hinted floor is configured and owns the demo workflow.' : 'The first configured floor owns the demo workflow; no hint was required.' }],
+    targetFloors: (idea.description.includes('[cross-floor]') ? floors.slice(0, 2) : [floor]).map((f) => ({ repoId: f.id, rationale: 'This configured floor owns part of the demo workflow.' })),
     acceptanceCriteria: ['A new teammate completes the requested workflow in under 3 minutes in 4 of 5 observed trials.', 'The workflow succeeds at desktop and 390px viewport widths with zero uncaught errors.'],
   } };
+}
+
+/** Deterministic planning and independent review at the same session boundary as production. */
+export function demoIdeaWork(context: {
+  phase: string; focus?: string; idea: IdeaView; prd: { prd: import('../shared/types.ts').IdeaPrd };
+  previous?: import('../shared/types.ts').ProposalView;
+  floors: { id: string; openIssues?: IssueInfo[] }[];
+}) {
+  if (context.phase === 'review') {
+    const disagree = context.idea.description.includes('[disagree]') && context.focus === 'feasibility';
+    return { verdict: disagree ? 'findings' : 'endorse', findings: disagree ? ['Validate the target-floor integration with observed user trials.'] : [] };
+  }
+  const prd = structuredClone(context.prd.prd);
+  const targets = prd.targetFloors.map((f) => f.repoId);
+  const cross = targets.length > 1;
+  const entries = targets.map((repo, i) => ({ key: `work${i + 1}`, repo, requirement: 'R1',
+    title: `Deliver Idea workflow ${context.idea.id.slice(0, 8)} on floor ${i + 1}`, brief: prd.scope,
+    acceptance: prd.acceptanceCriteria, ...(cross ? { parent: 'tracking' } : {}) }));
+  const parents = cross ? [{ key: 'tracking', repo: targets[0], title: 'Track the Idea workflow', summary: prd.outcome }] : [];
+  const dependencies = cross ? [{ issue: 'work2', blockedBy: 'work1' }] : [];
+  const draft = { entries, parents, dependencies };
+  if (context.phase !== 'revise') return draft;
+  if (!context.previous?.decision?.wordingOnly) {
+    prd.scope += `\nRevision: ${context.previous?.decision?.feedback ?? 'Address the review findings.'}`;
+    entries.forEach((e) => { e.brief = prd.scope; });
+  }
+  return { prd, draft };
 }
 
 function fakeIdeaSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
   cb.log([{ kind: 'text', text: '● Inspecting the Idea and linked research (deterministic demo).' }]);
   const timer = setTimeout(() => {
-    const structured = demoIdeaResearch(JSON.parse(opts.prompt));
+    const context = JSON.parse(opts.prompt);
+    const structured = context.phase ? demoIdeaWork(context) : demoIdeaResearch(context);
     cb.finished({ ok: true, text: JSON.stringify(structured), structured, costUsd: 0, turns: 1, errors: [] });
   }, 500);
   return { send: () => undefined, stop: () => {
@@ -296,6 +324,7 @@ function fakeIdeaSession(opts: SessionOptions, cb: SessionCallbacks): SessionHan
 }
 
 function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: string): SessionHandle {
+  if (opts.systemAppend.startsWith('Complete the given Idea phase')) return fakeIdeaSession(opts, cb);
   if (opts.outputSchema && 'action' in (opts.outputSchema.properties as object ?? {})) return fakeIdeaSession(opts, cb);
   const timers: NodeJS.Timeout[] = [];
   let stopped = false;

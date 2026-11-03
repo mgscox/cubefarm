@@ -7,7 +7,7 @@ import type { ResearchJob } from './research.ts';
 const text = z.string().trim().min(1).max(12000);
 const source = z.string().trim().min(1).max(2048).refine((value) => /^https?:\/\//i.test(value) || value.startsWith('#idea/') || /\.md(?:#.*)?$/.test(value), 'Use a source URL, research document path or Idea revision link');
 const list = <T extends z.ZodType>(item: T) => z.array(item).max(50);
-const prd = z.object({
+export const ideaPrdSchema = z.object({
   problem: text, outcome: text, scope: text,
   evidence: list(z.object({ source, finding: text })).min(1),
   assumptions: list(text),
@@ -20,7 +20,7 @@ const report = z.object({
   requests: list(z.object({ agentId: text, question: text })),
   answer: z.string().max(16000),
   sources: list(source),
-  prd: prd.nullable(),
+  prd: ideaPrdSchema.nullable(),
 });
 export type IdeaResearchReport = z.infer<typeof report>;
 export const IDEA_RESEARCH_SCHEMA = z.toJSONSchema(report);
