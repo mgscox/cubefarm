@@ -19,6 +19,8 @@ const SCROLLBACK = 5000;
 const STALE_BYTES = 4 * 1024 * 1024;
 /** The mouse encodings (SGR, SGR pixels) the serialize addon doesn't restore on its own. */
 const MOUSE_ENCODINGS = [1006, 1016];
+// An ANSI header older clients can ignore. Legacy recordings have no header.
+const SIZE_HEADER = /^\x1b\]777;cubefarm-size=(\d+)x(\d+)\x07/;
 
 /** Where a terminal's keystrokes and size go: the running CLI. */
 export interface TerminalSink {
@@ -99,6 +101,7 @@ export class AgentTerminal {
     if (c === this.cols && r === this.rows) return;
     this.cols = c;
     this.rows = r;
+    this.dirty = true;
     this.term.resize(c, r);
     this.sink?.resize(c, r);
   }
@@ -126,14 +129,16 @@ export class AgentTerminal {
     this.dirty = false;
     await this.flush();
     await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(`${file}.tmp`, this.snapshot());
+    await fs.writeFile(`${file}.tmp`, `\x1b]777;cubefarm-size=${this.cols}x${this.rows}\x07${this.snapshot()}`);
     await fs.rename(`${file}.tmp`, file);
   }
 
   async load(file: string) {
     const data = await fs.readFile(file, 'utf8').catch(() => '');
     if (!data) return;
-    this.term.write(data);
+    const size = SIZE_HEADER.exec(data);
+    if (size) this.resize(Number(size[1]), Number(size[2]));
+    this.term.write(size ? data.slice(size[0].length) : data);
     this.note('(the office restarted)');
     this.dirty = false;
   }
@@ -163,7 +168,7 @@ export class AgentTerminal {
         const data = msg.data.slice(0, 64 * 1024);
         this.sink?.write(data);
         this.onInput?.(data);
-      } else if (msg.t === 'resize') {
+      } else if (msg.t === 'resize' && this.live) {
         this.resize(msg.cols, msg.rows);
         for (const other of this.viewers.keys()) if (other !== ws) this.sendTo(other, { t: 'size', cols: this.cols, rows: this.rows });
       }

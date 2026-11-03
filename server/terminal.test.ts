@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import type { WebSocket } from 'ws';
 import { describe, expect, it } from 'vitest';
 import { AgentTerminal } from './terminal.ts';
@@ -29,6 +32,40 @@ describe('AgentTerminal', () => {
     expect(t.live).toBe(false);
     t.dispose();
   });
+
+  it('preserves the dimensions and right edge of an archived full-screen terminal', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cubefarm-terminal-test-'));
+    const file = path.join(directory, 'screen.ansi');
+    const original = new AgentTerminal();
+    const restored = new AgentTerminal();
+    try {
+      original.resize(160, 40);
+      original.write('\x1b[?1049h\x1b[2;145HRIGHT-EDGE');
+      await original.save(file);
+      await restored.load(file);
+      expect([restored.cols, restored.rows]).toEqual([160, 40]);
+      const viewer = Object.assign(new EventEmitter(), { readyState: 1, OPEN: 1, bufferedAmount: 0, send: () => {}, close: () => {} });
+      restored.attach(viewer as unknown as WebSocket);
+      await restored.flush();
+      viewer.emit('message', JSON.stringify({ t: 'resize', cols: 40, rows: 12 }));
+      expect([restored.cols, restored.rows]).toEqual([160, 40]);
+      expect(restored.screen()).toContain('RIGHT-EDGE');
+      await fs.writeFile(file, '\x1b[32mlegacy output\x1b[0m');
+      const legacy = new AgentTerminal();
+      try {
+        await legacy.load(file);
+        await legacy.flush();
+        expect(legacy.screen()).toContain('legacy output');
+      } finally {
+        legacy.dispose();
+      }
+    } finally {
+      original.dispose();
+      restored.dispose();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('checks admission before forwarding any keystrokes to an idle CLI', () => {
     const terminal = new AgentTerminal();
     const keys: string[] = [];

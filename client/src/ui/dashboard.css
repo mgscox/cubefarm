@@ -87,9 +87,28 @@
   font: 600 0.75rem var(--mono);
 }
 
-.dashboard-floor span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
+.dashboard-floor-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.dashboard-floor-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-floor-active {
+  flex: none;
+  min-width: 1.5em;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: #4a475d;
+  color: #fff;
+  font: 600 0.72rem var(--mono);
+  text-align: center;
 }
 
 .dashboard-connection {
@@ -313,8 +332,10 @@
     align-items: flex-start;
   }
 
-  .dashboard-floor span:last-child {
-    max-width: 100%;
+  .dashboard-floor-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .dashboard-agent-head {
