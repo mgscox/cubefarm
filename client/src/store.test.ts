@@ -49,3 +49,15 @@ describe('Idea state', () => {
     expect(useStore.getState().ideaRecords[0].body).toBe('More sources');
   });
 });
+
+describe('Proposal state', () => {
+  it('replaces a Proposal by id when its decision or publication changes', () => {
+    useStore.setState({ proposals: [] });
+    const apply = useStore.getState().apply;
+    const proposal = { id: 'p1', ideaId: 'i1', prd: { revision: 1, title: 'PRD', body: 'Body' }, plan: { revision: 1, issues: [] }, reviews: [], createdAt: 1 };
+    apply({ type: 'proposal', proposal });
+    apply({ type: 'proposal', proposal: { ...proposal, decision: { action: 'approve', at: 2, publication: { status: 'queued', at: 2 } } } });
+    apply({ type: 'proposal', proposal: { ...proposal, id: 'p2' } });
+    expect(useStore.getState().proposals.map((p) => [p.id, p.decision?.action])).toEqual([['p1', 'approve'], ['p2', undefined]]);
+  });
+});

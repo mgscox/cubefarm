@@ -24,6 +24,8 @@ import { fixNeedsHuman, fixOutcome } from './fixOutcome.ts';
 import { fixGoesTo, prepFailure, prepHeld, PREP_HOLD_MS } from './handOut.ts';
 import { HttpError } from './httpError.ts';
 import { queuedIdea } from './ideas.ts';
+import { decideProposal, proposalFromHandoff, withNewerDraft, type ProposalHandoff, type ProposalWorker } from './proposals.ts';
+import { createDemoProposalWorker, demoHandoff } from './proposalFixture.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
@@ -55,6 +57,7 @@ import type {
   HireRequestView,
   IdeaView,
   IdeaRecordView,
+  ProposalView,
   IssueInfo,
   NoWorkEnding,
   LogLine,
@@ -201,6 +204,7 @@ interface Persisted {
   research: ResearchState;
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
+  proposals: ProposalView[];
   messages: PhoneMessage[];
   phoneReadAt: number;
   telegram: TelegramState;
@@ -465,6 +469,7 @@ export class Swarm {
     research: { queue: [], job: null, done: [] },
     ideas: [],
     ideaRecords: [],
+    proposals: [],
     messages: [],
     phoneReadAt: 0,
     telegram: emptyTelegram(),
@@ -526,6 +531,7 @@ export class Swarm {
 
   readonly telegram: TelegramMirror;
   private demoTelegram: ReturnType<typeof createDemoTelegram> | null = null;
+  private proposalWorker: ProposalWorker | null;
   private managerCommands: Promise<void> = Promise.resolve();
   private acceptingManager = 0;
   private managerHandoffPending = false;
@@ -534,6 +540,12 @@ export class Swarm {
 
   constructor(private backend: Backend, transport?: TelegramTransport | null) {
     this.demoTelegram = backend.demo ? createDemoTelegram() : null;
+    // Real mode hands approvals to the publisher once it's wired in; until then they stay recorded as queued.
+    this.proposalWorker = backend.demo ? createDemoProposalWorker({
+      acceptPublication: (id, note) => this.acceptPublication(id, note),
+      submitProposal: (handoff) => this.submitProposal(handoff),
+      proposal: (id) => this.state.proposals.find((p) => p.id === id),
+    }) : null;
     const token = transport === undefined && !this.demoTelegram ? telegramToken(process.env, readConfigEnv()) : null;
     this.telegram = new TelegramMirror(transport === undefined ? this.demoTelegram ?? (token ? telegramTransport(token) : null) : transport, {
       state: () => this.state.telegram,
@@ -613,6 +625,7 @@ export class Swarm {
         research: { ...this.state.research, ...loaded.research },
         ideas: loaded.ideas ?? [],
         ideaRecords: loaded.ideaRecords ?? [],
+        proposals: loaded.proposals ?? [],
         messages: loaded.messages ?? [],
         phoneReadAt: loaded.phoneReadAt ?? 0,
         telegram: loaded.telegram ?? emptyTelegram(),
@@ -709,6 +722,7 @@ export class Swarm {
     this.state.managerInputs = this.state.managerInputs.filter((i) => i.status === 'pending');
     await this.dispatchManagerInputs();
     await this.telegram.start();
+    for (const p of this.state.proposals) this.handOffDecision(p); // decisions persisted before a restart carry on
 
     for (const r of this.state.repos) void this.cloneRepo(r.id);
     await this.backend.prepareResearchFolder(RESEARCH_DIR).catch((err) => console.warn('could not set up the research folder', err));
@@ -904,6 +918,7 @@ export class Swarm {
       research: this.researchInfo(),
       ideas: this.state.ideas,
       ideaRecords: this.state.ideaRecords,
+      proposals: this.state.proposals,
       messages: this.state.messages.slice(-100),
       phoneReadAt: this.state.phoneReadAt,
       telegram: this.telegram.view(),
@@ -1016,7 +1031,7 @@ export class Swarm {
   submitIdea(input: unknown): Promise<IdeaView> {
     // Serialize intake so a failed save cannot be acknowledged by a concurrent submission.
     const submit = this.ideaSubmissions.then(async () => {
-      const idea = queuedIdea(input, this.state.repos.map((r) => r.id), crypto.randomUUID(), Date.now());
+      const idea = queuedIdea(input, this.state.repos.map((r) => r.id), crypto.randomUUID(), Date.now(), this.state.ideas.map((i) => i.id));
       this.state.ideas.push(idea);
       try {
         await this.writeState();
@@ -1029,6 +1044,106 @@ export class Swarm {
     });
     this.ideaSubmissions = submit.catch(() => undefined);
     return submit;
+  }
+
+  /** Run an Idea change after earlier ones; `apply` mutates state and returns a rollback, run if the save fails. */
+  private commitIdeas<T>(apply: () => { result: T; rollback: () => void; events: ServerEvent[] } | { result: T; unchanged: true }): Promise<T> {
+    const run = this.ideaSubmissions.then(async () => {
+      const change = apply();
+      if ('unchanged' in change) return change.result;
+      try {
+        await this.writeState();
+      } catch (err) {
+        change.rollback();
+        throw err;
+      }
+      for (const ev of change.events) this.broadcast(ev);
+      return change.result;
+    });
+    this.ideaSubmissions = run.catch(() => undefined);
+    return run;
+  }
+
+  private putProposal(p: ProposalView): () => void {
+    const i = this.state.proposals.findIndex((x) => x.id === p.id);
+    const before = i >= 0 ? this.state.proposals[i] : undefined;
+    if (i >= 0) this.state.proposals[i] = p;
+    else this.state.proposals.push(p);
+    return () => {
+      if (before) this.state.proposals[this.state.proposals.indexOf(p)] = before;
+      else this.state.proposals = this.state.proposals.filter((x) => x !== p);
+    };
+  }
+
+  /** Review's handoff: a promoted PRD + Issue Plan pair becomes the Idea's open Proposal. */
+  submitProposal(handoff: ProposalHandoff): Promise<ProposalView> {
+    return this.commitIdeas(() => {
+      const proposal = proposalFromHandoff(handoff, {
+        idea: this.state.ideas.find((i) => i.id === handoff.ideaId), proposals: this.state.proposals, floors: this.state.repos.map((r) => r.id),
+      }, crypto.randomUUID(), Date.now());
+      return { result: proposal, rollback: this.putProposal(proposal), events: [{ type: 'proposal', proposal }] };
+    });
+  }
+
+  /** Agents saved a newer PRD or Issue Plan draft: flag it on the open card, which stays approvable as displayed. */
+  noteProposalDraft(ideaId: string, draft: { prdRevision: number; planRevision: number }): Promise<ProposalView | null> {
+    return this.commitIdeas(() => {
+      const open = this.state.proposals.find((p) => p.ideaId === ideaId && !p.decision);
+      const next = open && withNewerDraft(open, draft, Date.now());
+      if (!next) return { result: null, unchanged: true };
+      return { result: next, rollback: this.putProposal(next), events: [{ type: 'proposal', proposal: next }] };
+    });
+  }
+
+  /**
+   * The manager's decision on the pair the card displayed. Persisted before anything is handed on, and serialized with
+   * every other Idea change, so a repeated or concurrent approval never reaches the publisher twice.
+   */
+  async decideProposal(id: string, input: unknown): Promise<ProposalView> {
+    const { proposal, fresh } = await this.commitIdeas(() => {
+      const current = this.state.proposals.find((p) => p.id === id);
+      if (!current) throw new HttpError(404, 'Unknown Proposal');
+      const idea = this.state.ideas.find((i) => i.id === current.ideaId);
+      const { proposal, repeated } = decideProposal(current, idea, input, Date.now());
+      if (repeated) return { result: { proposal, fresh: false }, unchanged: true };
+      const undo = [this.putProposal(proposal)];
+      const events: ServerEvent[] = [{ type: 'proposal', proposal }];
+      if (proposal.decision!.action === 'reject' && idea) {
+        // Rejection archives the Idea with everything recorded on it; nothing is published.
+        const archived = { ...idea, status: 'archived' as const, archivedAt: proposal.decision!.at };
+        const at = this.state.ideas.indexOf(idea);
+        this.state.ideas[at] = archived;
+        undo.push(() => { this.state.ideas[this.state.ideas.indexOf(archived)] = idea; });
+        events.push({ type: 'idea', idea: archived });
+      }
+      return { result: { proposal, fresh: true }, rollback: () => undo.reverse().forEach((u) => u()), events };
+    });
+    if (fresh) this.handOffDecision(proposal);
+    return proposal;
+  }
+
+  private handOffDecision(p: ProposalView) {
+    if (p.decision?.action === 'approve' && p.decision.publication?.status === 'queued') this.proposalWorker?.publish(p);
+    if (p.decision?.action === 'refine' && !this.state.proposals.some((x) => x.revises === p.id)) this.proposalWorker?.refine(p);
+  }
+
+  /** The publisher took an approved pair. Only the first acceptance is recorded. */
+  acceptPublication(id: string, note: string): Promise<ProposalView | undefined> {
+    return this.commitIdeas(() => {
+      const p = this.state.proposals.find((x) => x.id === id);
+      const publication = p?.decision?.publication;
+      if (!p || publication?.status !== 'queued') return { result: p, unchanged: true };
+      const next: ProposalView = { ...p, decision: { ...p.decision!, publication: { status: 'accepted', at: Date.now(), note } } };
+      return { result: next, rollback: this.putProposal(next), events: [{ type: 'proposal', proposal: next }] };
+    });
+  }
+
+  /** Demo only: hand a seeded, reviewed Proposal to an Idea (PRD v3 · Issue Plan v4), then flag a newer Plan v5 draft. */
+  async seedDemoProposal(ideaId: string): Promise<ProposalView> {
+    if (!this.backend.demo) throw new HttpError(404, 'Demo fixture unavailable');
+    if (this.state.repos.length === 0) throw new HttpError(409, 'Connect a floor first');
+    const p = await this.submitProposal(demoHandoff(ideaId, this.state.repos));
+    return (await this.noteProposalDraft(ideaId, { prdRevision: p.prd.revision, planRevision: p.plan.revision + 1 })) ?? p;
   }
 
   // ---------- lookups ----------
@@ -1853,6 +1968,7 @@ export class Swarm {
     if (this.handoffRetry) clearTimeout(this.handoffRetry);
     this.handoffRetry = null;
     await this.managerCommands;
+    this.proposalWorker?.stop();
     await this.ideaSubmissions;
     await this.writeState().catch((err) => console.warn('could not save the state', err));
     await this.backend.releaseClis(restart); // before the terminals are saved: whatever they print next waits in the keeper

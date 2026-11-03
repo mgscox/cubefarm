@@ -45,6 +45,8 @@ const repoId = (req: Request) => decodeURIComponent(String(req.params.repo));
 
 app.get('/api/state', route(() => swarm.snapshot()));
 app.post('/api/ideas', route((req) => swarm.submitIdea(req.body)));
+app.post('/api/ideas/:id/proposals/demo', route((req) => swarm.seedDemoProposal(String(req.params.id))));
+app.post('/api/proposals/:id/decision', route((req) => swarm.decideProposal(String(req.params.id), req.body)));
 
 app.get('/api/github/repos', route((req) => swarm.listGithubRepos(str(req.query.owner) || undefined)));
 
