@@ -57,9 +57,11 @@ export function TerminalView({ agentId }: { agentId: string }) {
   const cols = useMemo(() => (repo ? kanbanFor(repo, agentsOnRepo(allAgents, repo.id), qaRecords) : null), [repo, allAgents, qaRecords]);
   const isQa = agent?.role === 'qa';
   const isResearcher = agent?.role === 'researcher';
-  // Devs pick issues from the backlog, researchers only its research issues; QA testers pick untested pull requests.
+  // QA testers can also retry an escalation after the manager intervenes.
   const research = (n: number) => isResearchIssue(repo?.issues.find((i) => i.number === n)?.labels ?? []);
-  const choices = !cols ? [] : isQa ? cols.qa.filter((c) => !c.qa || c.qa.status === 'needs-human' || c.qa.status === 'queued') : cols.backlog.filter((c) => !isResearcher || research(c.number));
+  const choices = !cols ? [] : isQa
+    ? [...cols.qa.filter((c) => !c.qa || c.qa.status === 'queued'), ...cols.blocked.filter((c) => c.qa?.status === 'needs-human' && !c.needsHumanLabel)]
+    : cols.todo.filter((c) => !isResearcher || research(c.number));
 
   if (!agent || !repo) {
     return (

@@ -834,6 +834,13 @@ input.inline:focus {
   display: grid;
   gap: 8px;
 }
+.start-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+}
 .start-meta {
   margin-top: 16px;
   display: flex;
@@ -1251,7 +1258,7 @@ input.inline:focus {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  grid-template-columns: repeat(8, minmax(210px, 1fr));
   gap: 12px;
   overflow-x: auto;
 }
@@ -1270,19 +1277,25 @@ input.inline:focus {
   border-bottom: 3px solid var(--ink);
 }
 .kcol-backlog .kcol-head {
+  background: #dce0e8;
+}
+.kcol-todo .kcol-head {
   background: #ffd166;
 }
 .kcol-progress .kcol-head {
   background: #4cc9f0;
 }
 .kcol-review .kcol-head {
+  background: #b8adff;
+}
+.kcol-ready .kcol-head {
   background: #80ed99;
 }
 .kcol-qa .kcol-head {
   background: #ff9f68;
 }
-.kanban-5 {
-  grid-template-columns: repeat(5, minmax(210px, 1fr));
+.kcol-blocked .kcol-head {
+  background: #ff9eac;
 }
 .kcol-merged .kcol-head {
   background: #c77dff;
@@ -1618,9 +1631,8 @@ input.inline:focus {
   .tab-grid {
     grid-template-columns: 1fr;
   }
-  .kanban,
-  .kanban-5 {
-    grid-template-columns: repeat(5, 250px);
+  .kanban {
+    grid-template-columns: repeat(8, 250px);
   }
   .term-split-2 {
     grid-template-columns: 1fr;
@@ -2733,6 +2745,16 @@ input.inline:focus {
 .plan-parent { border-left: 3px solid #d7c9a8; padding-left: 10px; margin: 10px 0; }
 .plan-parent-tag { background: #efe2fb; }
 .issue-plan select { width: auto; }
+.idea-handoff { margin: 8px 0; padding: 8px 12px; border-left: 6px solid var(--good); border-radius: 8px; background: #eaf8ee; }
+.idea-handoff.idea-open { border-left-color: var(--warn); background: #fff4d6; }
+.idea-demo { margin: 12px 0; padding: 8px 12px; border: 2px dashed var(--muted); border-radius: 8px; }
+.idea-demo .btn { margin: 0; }
+.idea-rounds { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.idea-rounds > li { padding: 8px 12px; border: 1px solid #ddd6c6; border-radius: 8px; }
+.idea-verdict { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; margin-top: 4px; }
+.idea-verdict ul { flex-basis: 100%; }
+.idea-verdict .good { color: #1a7f37; font-weight: 600; }
+.idea-verdict .warn { color: #9a5b00; font-weight: 600; }
 @media (max-width: 650px) {
   .ideas-grid { grid-template-columns: minmax(0, 1fr); }
   .idea-list { order: 1; }

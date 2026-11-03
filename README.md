@@ -38,6 +38,8 @@ Demo mode fakes GitHub and the agents, so it costs nothing and changes nothing.
 
 Optional: [connect Telegram](docs/telegram.md) to continue the same phone conversation and decide on proposals while away from the browser. Pair locally; CubeFarm must stay running.
 
+For agent clients, [enable the manager MCP gateway](docs/manager-mcp.md) to check the office, send instructions to Joi, read replies and decide on proposals.
+
 ## What's in the office
 
 - **Floors**: one per project. Ride the elevator between them.

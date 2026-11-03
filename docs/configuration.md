@@ -35,6 +35,7 @@ On Windows, keep it inside your user profile, which other accounts can't read by
 | Setting | What it does |
 | --- | --- |
 | `CUBEFARM_TELEGRAM_TOKEN` | The bot token for [Telegram](telegram.md). |
+| `CUBEFARM_MCP_TOKEN` | The fallback bearer token for the [manager MCP gateway](manager-mcp.md). A token saved in Settings takes precedence, and the Settings switch can disable access with either token source. |
 
 The file only holds the settings listed here. `SWARM_HOME`, `SWARM_PORT`, `SWARM_HOST` and the other `SWARM_*` variables are read from the environment only.
 
@@ -49,8 +50,8 @@ requested. Remote desk RPCs additionally have their own deadlines (the desk time
 - **At startup only.** After editing the file, restart the office.
 - **The environment wins.** A setting already set in the server's environment overrides the file's value.
 - **A missing or unreadable file** means no settings. CubeFarm starts as usual, and Telegram, for example, shows as unconfigured.
-- **Demo mode** (`--demo`) ignores it.
-- **It stays out of agents' environments.** The server reads the values it needs and doesn't copy the file into its own environment, which agents, previews and their tools inherit. `CUBEFARM_TELEGRAM_TOKEN` is also removed from agent and preview environments when it comes from the shell.
+- **Demo mode** (`--demo`) ignores the file. An explicitly supplied `CUBEFARM_MCP_TOKEN` environment variable can enable MCP for testing in a demo office on branch `main`.
+- **It stays out of agents' environments.** The server reads the values it needs and doesn't copy the file into its own environment, which agents, previews and their tools inherit. Gateway tokens are also removed from agent and preview environments when supplied by the shell.
 
 ## OpenCode desk models
 

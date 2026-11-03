@@ -4,11 +4,13 @@ import fs from 'node:fs';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
-import { DEMO, HOST, PORT, STATE_FILE, WORKSPACE_ROOT } from './config.ts';
+import { DEMO, HOST, PORT, STATE_FILE, WORKSPACE_ROOT, readConfigEnv } from './config.ts';
 import { bindMessage } from '../bin/officeNetwork.js';
 import { realBackend } from './backend.ts';
 import { handleHook, handleMcp, setOfficeUrl } from './cliRunner.ts';
 import { createDemoBackend } from './demo.ts';
+import { managerMcpRouter } from './managerMcp.ts';
+import { isMainMcpOffice, ManagerMcpSettings, managerMcpSettingsRouter } from './managerMcpSettings.ts';
 import { underLauncher } from './officeUpdate.ts';
 import { HttpError, Swarm } from './swarm.ts';
 
@@ -18,11 +20,17 @@ if (PORT) setOfficeUrl(`http://127.0.0.1:${PORT}`);
 await swarm.init();
 
 const app = express();
+const mcpSettings = await isMainMcpOffice(path.resolve(import.meta.dirname, '..')) ? new ManagerMcpSettings(
+  path.join(path.dirname(STATE_FILE), DEMO ? 'demo-manager-mcp.json' : 'manager-mcp.json'),
+  process.env.CUBEFARM_MCP_TOKEN ?? (DEMO ? undefined : readConfigEnv().CUBEFARM_MCP_TOKEN),
+) : null;
 // Agent CLIs calling back: hooks (a tool result can be a large screenshot, hence the limit) and the CEO's office tools.
 // The token in the path is the session's; unknown tokens get an empty answer.
 app.post('/api/hooks/:token', express.json({ limit: '64mb' }), (req, res) => void res.json(handleHook(String(req.params.token), req.body)));
 app.post('/api/mcp/:token', express.json({ limit: '4mb' }), (req, res, next) => void handleMcp(String(req.params.token), req, res).catch(next));
 app.all('/api/mcp/:token', (_req, res) => void res.status(405).set('Allow', 'POST').end());
+app.use('/mcp', mcpSettings ? managerMcpRouter(swarm, mcpSettings) : (_req, res) => { res.sendStatus(404); });
+app.use('/api/settings/mcp', managerMcpSettingsRouter(mcpSettings));
 app.use(express.json({ limit: '1mb' }));
 
 type Handler = (req: Request, res: Response) => Promise<unknown> | unknown;
@@ -46,6 +54,7 @@ const repoId = (req: Request) => decodeURIComponent(String(req.params.repo));
 app.get('/api/state', route(() => swarm.snapshot()));
 app.post('/api/ideas', route((req) => swarm.submitIdea(req.body)));
 app.post('/api/ideas/:id/plans/demo', route((req) => swarm.draftDemoIssuePlan(String(req.params.id))));
+app.post('/api/ideas/:id/demo-review', route((req) => swarm.demoIdeaReview(String(req.params.id), req.body?.fixture)));
 
 app.get('/api/github/repos', route((req) => swarm.listGithubRepos(str(req.query.owner) || undefined)));
 

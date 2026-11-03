@@ -25,6 +25,7 @@ export function Panel({
   accent,
   className,
   onClose,
+  inline,
 }: {
   title: ReactNode;
   children: ReactNode;
@@ -32,8 +33,10 @@ export function Panel({
   accent?: string;
   className?: string;
   onClose?: () => void;
+  inline?: boolean;
 }) {
   useEffect(() => {
+    if (inline) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -42,7 +45,15 @@ export function Panel({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [inline, onClose]);
+  if (inline) {
+    return (
+      <section className="dashboard-panel">
+        <div className="dashboard-panel-title">{title}</div>
+        <div className="panel-body">{children}</div>
+      </section>
+    );
+  }
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && closeOverlay()}>
       <div className={`panel ${wide ? 'panel-wide' : ''} ${className ?? ''}`} style={{ ['--accent' as string]: accent ?? '#ff8a5b' }}>
@@ -171,14 +182,14 @@ function Help() {
   );
 }
 
-export function Overlays() {
+export function Overlays({ onFloor }: { onFloor?: (floor: number) => void }) {
   const overlay = useStore((s) => s.overlay);
   if (!overlay) return null;
   switch (overlay.kind) {
     case 'terminal':
-      return overlay.agentId === CEO_ID ? <ManagerConsole initialTab="ceo" /> : overlay.agentId === RESEARCHER_ID ? <ResearchDesk /> : <TerminalView agentId={overlay.agentId} />;
+      return overlay.agentId === CEO_ID ? <ManagerConsole initialTab="ceo" onFloor={onFloor} /> : overlay.agentId === RESEARCHER_ID ? <ResearchDesk /> : <TerminalView agentId={overlay.agentId} />;
     case 'phone':
-      return <Phone tab={overlay.tab} requestId={overlay.requestId} />;
+      return <Phone tab={overlay.tab} requestId={overlay.requestId} onFloor={onFloor} />;
     case 'kanban':
       return <KanbanView repoId={overlay.repoId} />;
     case 'app':
@@ -186,7 +197,7 @@ export function Overlays() {
     case 'elevator':
       return <ElevatorPanel />;
     case 'manager':
-      return <ManagerConsole initialTab={overlay.tab} initialRepo={overlay.repoId} initialIdea={overlay.ideaId} />;
+      return <ManagerConsole initialTab={overlay.tab} initialRepo={overlay.repoId} initialIdea={overlay.ideaId} onFloor={onFloor} />;
     case 'help':
       return <Help />;
   }

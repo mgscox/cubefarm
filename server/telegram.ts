@@ -183,7 +183,8 @@ export class TelegramMirror {
   message(message: PhoneMessage) {
     if (!this.commands.state().paired || message.origin === 'telegram') return;
     const req = message.from === 'ceo' && message.requestId ? this.commands.request(message.requestId) : undefined;
-    const text = `${message.from === 'manager' ? 'Manager (WebUI)' : message.from === 'ceo' ? this.commands.ceoName() : 'Office'}: ${message.text}${req ? `\nProposal: ${req.kind} · ${req.name} · ${req.title}\n${req.status}` : ''}`;
+    const sender = message.from === 'manager' ? (message.origin === 'mcp' ? 'Manager (MCP)' : 'Manager (WebUI)') : message.from === 'ceo' ? this.commands.ceoName() : 'Office';
+    const text = `${sender}: ${message.text}${req ? `\nProposal: ${req.kind} · ${req.name} · ${req.title}\n${req.status}` : ''}`;
     const parts = telegramParts(text);
     if (this.commands.state().outbox.length + parts.length > TELEGRAM_PENDING_LIMIT) { this.commands.state().gap = true; this.emit(); return; }
     for (const [i, part] of parts.entries()) this.enqueue({ text: part, phoneId: message.id, part: i, ...(i === 0 && req ? { requestId: req.id } : {}), status: 'pending' });

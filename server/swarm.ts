@@ -26,6 +26,8 @@ import { HttpError } from './httpError.ts';
 import { queuedIdea } from './ideas.ts';
 import { draftIssuePlan } from './issuePlan.ts';
 import { DEMO_TODO, DEMO_WEATHER, demoPlanDraft, demoPrd } from './planFixture.ts';
+import { demoProposalRecords, demoReview, isReviewFixture } from './demoIdeaReview.ts';
+import { currentRound, nextStep, pickReviewers, promote, recordReview, REVIEW_FOCUSES, reviseRound, startReview } from '../shared/ideaReview.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
@@ -37,7 +39,7 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { AGENT_COMMENT_MARKER, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
 import { CEO_ID, RESEARCHER_ID, type MachineCapacity, type MachineTelemetry } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
@@ -57,6 +59,7 @@ import type {
   HireRequestView,
   IdeaView,
   IdeaRecordView,
+  IdeaReviewCycleView,
   IssueInfo,
   IssuePlanView,
   PrdForPlanning,
@@ -206,6 +209,7 @@ interface Persisted {
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
   issuePlans: IssuePlanView[];
+  ideaReviews: IdeaReviewCycleView[];
   messages: PhoneMessage[];
   phoneReadAt: number;
   telegram: TelegramState;
@@ -367,6 +371,9 @@ const TERMINALS_DIR = path.join(HOME_DIR, 'terminals');
 const terminalFile = (agentId: string) => path.join(TERMINALS_DIR, `${agentId}.ansi`);
 const TERMINAL_SAVE_MS = 20_000;
 
+// Scripted demo reviewers take a moment per verdict or revision, so the rounds can be watched.
+const IDEA_REVIEW_STEP_MS = 2500;
+
 // ---------- QA report ----------
 
 const QA_SCHEMA: Record<string, unknown> = {
@@ -471,6 +478,7 @@ export class Swarm {
     ideas: [],
     ideaRecords: [],
     issuePlans: [],
+    ideaReviews: [],
     messages: [],
     phoneReadAt: 0,
     telegram: emptyTelegram(),
@@ -620,6 +628,7 @@ export class Swarm {
         ideas: loaded.ideas ?? [],
         ideaRecords: loaded.ideaRecords ?? [],
         issuePlans: loaded.issuePlans ?? [],
+        ideaReviews: loaded.ideaReviews ?? [],
         messages: loaded.messages ?? [],
         phoneReadAt: loaded.phoneReadAt ?? 0,
         telegram: loaded.telegram ?? emptyTelegram(),
@@ -750,6 +759,7 @@ export class Swarm {
         this.broadcast({ type: 'clis', clis });
       })
       .catch((err) => console.warn('could not look for agent CLIs', err));
+    for (const r of this.state.ideaReviews) this.scheduleIdeaReview(r.ideaId);
     this.save();
     await this.refreshOfficeLifecycle().catch((err) => console.warn('could not save closing office state', err));
     setTimeout(() => this.schedule(), 1000);
@@ -912,6 +922,7 @@ export class Swarm {
       ideas: this.state.ideas,
       ideaRecords: this.state.ideaRecords,
       issuePlans: this.state.issuePlans,
+      ideaReviews: this.state.ideaReviews,
       messages: this.state.messages.slice(-100),
       phoneReadAt: this.state.phoneReadAt,
       telegram: this.telegram.view(),
@@ -1078,6 +1089,67 @@ export class Swarm {
       throw new HttpError(409, `The demo Issue Plan needs the floors ${DEMO_TODO} and ${DEMO_WEATHER}`);
     }
     return this.draftIssuePlan(ideaId, demoPrd(ideaId), demoPlanDraft((id) => this.repoRt.get(id)?.issues ?? []));
+  }
+
+  // ---------- idea reviews ----------
+
+  private ideaReviewTimers = new Map<string, NodeJS.Timeout>();
+
+  /** Demo only: puts a fixture PRD and Issue Plan on an Idea and has two scripted reviewers take it through review. */
+  async demoIdeaReview(ideaId: string, fixture: unknown): Promise<IdeaReviewCycleView> {
+    if (!this.backend.demo) throw new HttpError(404, 'Demo fixtures are only available in the demo office');
+    if (!isReviewFixture(fixture)) throw new HttpError(400, 'fixture must be "agree" or "disagree"');
+    const idea = this.state.ideas.find((i) => i.id === ideaId);
+    if (!idea) throw new HttpError(404, 'No such Idea');
+    if (this.state.ideaReviews.some((r) => r.ideaId === ideaId)) throw new HttpError(409, 'This Idea already has a proposal under review');
+    const reviewers = pickReviewers(RESEARCHER_ID, this.state.agents);
+    if (!reviewers) throw new HttpError(409, 'Reviewing a PRD takes two agents besides the lead researcher');
+    const cycle: IdeaReviewCycleView = { ...startReview(ideaId, RESEARCHER_ID, reviewers, 1, 1), fixture };
+    this.state.ideaRecords.push(...demoProposalRecords(idea, 1, Date.now()));
+    this.state.ideaReviews.push(cycle);
+    idea.status = 'reviewing';
+    await this.writeState();
+    for (const record of this.state.ideaRecords.filter((r) => r.ideaId === ideaId)) this.broadcast({ type: 'ideaRecord', record });
+    this.broadcast({ type: 'idea', idea });
+    this.broadcast({ type: 'ideaReview', review: cycle });
+    this.scheduleIdeaReview(ideaId);
+    return cycle;
+  }
+
+  private scheduleIdeaReview(ideaId: string) {
+    const cycle = this.state.ideaReviews.find((r) => r.ideaId === ideaId);
+    if (!cycle?.fixture || !this.backend.demo || nextStep(cycle) === 'done' || this.ideaReviewTimers.has(ideaId)) return;
+    this.ideaReviewTimers.set(ideaId, setTimeout(() => {
+      this.ideaReviewTimers.delete(ideaId);
+      this.stepIdeaReview(ideaId);
+    }, IDEA_REVIEW_STEP_MS));
+  }
+
+  /** One move of a scripted review: a reviewer's verdict, the lead's revision, or the handoff to the manager. */
+  private stepIdeaReview(ideaId: string) {
+    const index = this.state.ideaReviews.findIndex((r) => r.ideaId === ideaId);
+    const idea = this.state.ideas.find((i) => i.id === ideaId);
+    let cycle = this.state.ideaReviews[index];
+    if (!cycle?.fixture || !idea) return;
+    const round = currentRound(cycle);
+    const step = nextStep(cycle);
+    if (step === 'wait') {
+      const focus = REVIEW_FOCUSES.find((f) => !round.reviews.some((r) => r.focus === f))!;
+      cycle = recordReview(cycle, { focus, reviewer: cycle.reviewers[focus], prdRevision: round.prdRevision, ...demoReview(cycle.fixture, focus, round.round), at: Date.now() });
+    } else if (step === 'revise') {
+      const records = demoProposalRecords(idea, round.prdRevision + 1, Date.now());
+      this.state.ideaRecords.push(...records);
+      for (const record of records) this.broadcast({ type: 'ideaRecord', record });
+      cycle = reviseRound(cycle, round.prdRevision + 1, round.planRevision + 1);
+    } else if (step === 'promote') {
+      cycle = promote(cycle, Date.now());
+      idea.status = 'proposed';
+      this.broadcast({ type: 'idea', idea });
+    } else return;
+    this.state.ideaReviews[index] = cycle;
+    this.broadcast({ type: 'ideaReview', review: cycle });
+    this.save();
+    this.scheduleIdeaReview(ideaId);
   }
 
   // ---------- lookups ----------
@@ -1768,14 +1840,15 @@ export class Swarm {
 
   /** One step toward merging a QA-passed PR. Returns true when it merged. */
   private async advanceMerge(repo: PersistedRepo, rec: QaRecord, pr: PullInfo): Promise<boolean> {
+    if (hasLabel(pr.labels, NEEDS_HUMAN)) return false;
     let step = mergeStep(pr, rec, Date.now(), { base: repo.defaultBranch });
     if (step.do === 'details') {
       // GitHub works mergeability out lazily and lists often say UNKNOWN; asking about the PR itself gets an answer.
       const d = await this.backend.prDetails(repo.fullName, pr.number);
-      pr = { ...pr, headSha: d.headSha, mergeable: d.mergeable, mergeState: d.mergeState };
+      pr = { ...pr, labels: d.labels ?? pr.labels, headSha: d.headSha, mergeable: d.mergeable, mergeState: d.mergeState };
       step = mergeStep(pr, rec, Date.now(), { base: repo.defaultBranch, detailed: true });
     }
-    if (this.state.officeHeld) return false;
+    if (this.state.officeHeld || hasLabel(pr.labels, NEEDS_HUMAN)) return false;
     Object.assign(rec, step.set);
     if (step.do === 'requeue' && isResearchBranch(pr.headRefName)) {
       this.setQa(rec, { passedSha: pr.headSha, testedSha: pr.headSha, mergeNote: null, pendingSince: null }); // more research: still nothing to test
@@ -1787,6 +1860,7 @@ export class Swarm {
       setTimeout(() => this.schedule(), 200);
       return false;
     }
+    if (hasLabel(pr.labels, NEEDS_REVIEW) && step.do !== 'ready') return false;
     if (step.do === 'send-back') return this.sendBack(repo, rec, step.reason, step.instructions, step.needsHuman);
     if (step.do === 'wait') {
       if (step.alert) {
@@ -1808,6 +1882,8 @@ export class Swarm {
       return false;
     }
     if (step.do !== 'merge') return false;
+    const latest = await this.backend.prDetails(repo.fullName, pr.number);
+    if (this.state.officeHeld || hasLabel(latest.labels, NEEDS_HUMAN) || hasLabel(latest.labels, NEEDS_REVIEW)) return false;
     this.mergeNote(rec, 'merging…');
     let error = '';
     for (const method of ['squash', 'merge', 'rebase'] as const) {
@@ -1903,6 +1979,7 @@ export class Swarm {
     this.handoffRetry = null;
     await this.managerCommands;
     await this.ideaSubmissions;
+    for (const t of this.ideaReviewTimers.values()) clearTimeout(t);
     await this.writeState().catch((err) => console.warn('could not save the state', err));
     await this.backend.releaseClis(restart); // before the terminals are saved: whatever they print next waits in the keeper
     for (const c of this.boxConns.values()) c.close();
@@ -2079,8 +2156,11 @@ export class Swarm {
     // The parking reservation also blocks scheduling, refresh and handoffs during a CEO override.
     if (approval) rt.parking = true;
     try {
+      const pr = await this.backend.prDetails(repo.fullName, number);
+      for (const label of [NEEDS_HUMAN, NEEDS_REVIEW]) {
+        if (hasLabel(pr.labels, label)) throw new HttpError(409, `Remove ${label} from PR #${number} before merging`);
+      }
       if (approval) {
-        const pr = await this.backend.prDetails(repo.fullName, number);
         preflight(pr, true);
         await this.backend.commentPull(repo.fullName, number, approval.reason);
         preflight(pr, true);
@@ -2411,7 +2491,8 @@ export class Swarm {
     }
     const readiness = issueReadinessReason(issue);
     if (readiness) {
-      const release = readiness === 'draft' ? 'Remove the [Draft] or Draft: title prefix' : `Remove the ${readiness === 'needs triage' ? 'needs-triage' : 'needs-info'} label once the issue is ready`;
+      const label = readiness === 'needs triage' ? 'needs-triage' : readiness === 'waiting for info' ? 'needs-info' : NEEDS_HUMAN;
+      const release = readiness === 'draft' ? 'Remove the [Draft] or Draft: title prefix' : `Remove the ${label} label once the issue is ready`;
       throw new HttpError(409, `#${issueNumber} is not ready: ${readiness}. ${release} to hand it to an agent.`);
     }
     if (!explicit && (issueWaitReason(this.workIssue(repo, issue), new Set(this.repoRt.get(repo.id)!.issues.map((i) => i.number))) || noWorkCoolingDown(repo.noWorkEndings?.find((r) => r.issueNumber === issueNumber), this.repoRt.get(repo.id)!.issuesFetchedAt))) throw new HttpError(409, `#${issueNumber} is not ready for automatic work`);
@@ -3060,6 +3141,7 @@ export class Swarm {
     if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
     const pr = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === prNumber && p.state === 'OPEN');
     if (!pr) throw new HttpError(404, `PR #${prNumber} is not open on ${repo.fullName}`);
+    if (hasLabel(pr.labels, NEEDS_HUMAN)) throw new HttpError(409, `Remove ${NEEDS_HUMAN} from PR #${prNumber} before sending it to QA`);
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === prNumber);
     if (rec?.status === 'testing' || rec?.status === 'fixing') throw new HttpError(409, `PR #${prNumber} is already ${rec.status}`);
     if (rec && (rec.status === 'needs-human' || rec.status === 'passed' || rec.status === 'failed')) {
@@ -3271,10 +3353,14 @@ export class Swarm {
         mergeRetryAt: null,
         alerted: false,
       });
+      const pullLabels = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.labels;
+      const nextAfterQa = hasLabel(pullLabels, NEEDS_HUMAN) ? 'needs human intervention'
+        : hasLabel(pullLabels, NEEDS_REVIEW) ? 'waiting for review'
+        : repo.autoMerge ? "it merges once GitHub's checks are green" : 'ready to merge';
       this.toast(
         pass ? 'success' : 'error',
         pass
-          ? `✅ ${a.name} passed PR #${rec.prNumber}${repo.autoMerge ? "; it merges once GitHub's checks are green" : ': ready to merge'}`
+          ? `✅ ${a.name} passed PR #${rec.prNumber}: ${nextAfterQa}`
           : nextStatus === 'needs-human'
             ? `❌ PR #${rec.prNumber} failed QA ${qaRounds} times and needs a human`
             : `❌ ${a.name} failed PR #${rec.prNumber}; sending it back to the developer`,
@@ -3586,8 +3672,12 @@ export class Swarm {
     if (this.repoRt.get(repo.id)?.parking) return false;
     const devs = this.available(repo, 'dev');
     const testers = this.available(repo, 'qa');
-    const waiting = (status: QaRecord['status'], task: PrepJob['task']) => this.state.qa.filter((q) => q.repoId === repo.id && q.status === status &&
-      !prepHeld(q.preparation?.[task], this.repoRt.get(repo.id)?.pulls.find((p) => p.number === q.prNumber)?.headSha ?? null, Date.now())).sort((x, y) => x.updatedAt - y.updatedAt);
+    const pulls = this.repoRt.get(repo.id)?.pulls ?? [];
+    const waiting = (status: QaRecord['status'], task: PrepJob['task']) => this.state.qa.filter((q) => {
+      if (q.repoId !== repo.id || q.status !== status) return false;
+      const pr = pulls.find((p) => p.number === q.prNumber);
+      return !hasLabel(pr?.labels, NEEDS_HUMAN) && !prepHeld(q.preparation?.[task], pr?.headSha ?? null, Date.now());
+    }).sort((x, y) => x.updatedAt - y.updatedAt);
     for (const rec of waiting('queued', 'qa')) {
       const tester =
         testers[0] ??
@@ -4279,31 +4369,47 @@ export class Swarm {
   }
 
   /** The manager's phone → the CEO. Injected into a running session, otherwise the CEO picks it up next. */
-  messageCeo(text: string, source?: NonNullable<PhoneMessage['telegram']>, accepted?: () => void): Promise<void> {
+  async messageCeo(text: string, source?: NonNullable<PhoneMessage['telegram']>, accepted?: () => void): Promise<void> {
+    await this.submitManagerMessage(text, { telegram: source, accepted });
+  }
+
+  async messageCeoFromMcp(text: string, requestId: string) {
+    const message = await this.submitManagerMessage(text, { mcpRequestId: requestId });
+    return { messageId: message!.id, accepted: true };
+  }
+
+  private submitManagerMessage(text: string, { telegram, accepted, mcpRequestId }: Pick<PhoneMessage, 'telegram' | 'mcpRequestId'> & { accepted?: () => void }) {
     const run = this.managerCommands.then(async () => {
-      if (source && source.updateId < this.state.telegram.offset) {
+      if (telegram && telegram.updateId < this.state.telegram.offset) {
         await this.writeState();
         await this.dispatchManagerInputs();
         return;
       }
       const t = text.trim();
       if (!t || t.length > 4000) throw new HttpError(400, 'Send between 1 and 4000 characters. Nothing was submitted.');
+      const previous = mcpRequestId && this.state.messages.find((m) => m.mcpRequestId === mcpRequestId);
+      if (previous) {
+        if (previous.text !== t) throw new HttpError(409, 'This request ID belongs to a different message. Use a new ID for new work.');
+        await this.writeState();
+        return previous;
+      }
       const a = this.ceo();
       if (!this.agentRt.get(a.id)?.session) this.ensureOfficeOpen();
       if (this.state.managerInputs.length >= 1000) throw new HttpError(409, 'Manager input queue is full. Try again after Joi catches up.');
       this.acceptingManager++;
       try {
         accepted?.();
-        const m = this.postMessage('manager', t, undefined, source, false);
+        const m = this.postMessage('manager', t, undefined, { telegram, mcpRequestId }, false);
         this.state.managerInputs.push({ id: m.id, text: t, status: 'pending' });
-        // Message, source deduplication offset, pending CEO input and outbound mirror share one atomic file rename.
+        // The message, replay metadata, pending CEO input and Telegram mirror share one atomic file rename.
         await this.writeState();
         this.broadcast({ type: 'message', message: m });
         await this.dispatchManagerInputs();
+        setTimeout(() => this.schedule(), 150);
+        return m;
       } finally { this.acceptingManager--; }
-      setTimeout(() => this.schedule(), 150);
     });
-    this.managerCommands = run.catch(() => this.retryManagerInputs());
+    this.managerCommands = run.then(() => undefined, () => this.retryManagerInputs());
     return run;
   }
 
@@ -4697,8 +4803,13 @@ export class Swarm {
 
   // ---------- the phone ----------
 
-  private postMessage(from: PhoneMessage['from'], text: string, requestId?: string, source?: PhoneMessage['telegram'], publish = true) {
-    const m: PhoneMessage = { id: this.messageSeq++, from, text: text.trim(), at: Date.now(), ...(from === 'manager' ? { origin: source ? 'telegram' as const : 'web' as const, ...(source ? { telegram: source } : {}) } : {}), ...(requestId ? { requestId } : {}) };
+  private postMessage(from: PhoneMessage['from'], text: string, requestId?: string, { telegram, mcpRequestId }: Pick<PhoneMessage, 'telegram' | 'mcpRequestId'> = {}, publish = true) {
+    const m: PhoneMessage = { id: this.messageSeq++, from, text: text.trim(), at: Date.now(), ...(requestId ? { requestId } : {}) };
+    if (from === 'manager') {
+      m.origin = telegram ? 'telegram' : mcpRequestId ? 'mcp' : 'web';
+      if (telegram) m.telegram = telegram;
+      if (mcpRequestId) m.mcpRequestId = mcpRequestId;
+    }
     this.state.messages.push(m);
     if (this.state.messages.length > KEEP_MESSAGES) this.state.messages.splice(0, this.state.messages.length - KEEP_MESSAGES);
     this.telegram.message(m);
@@ -4716,6 +4827,13 @@ export class Swarm {
   }
 
   // ---------- hire and let-go proposals ----------
+
+  async decideProposalFromMcp(proposalId: string, decision: 'approve' | 'reject') {
+    if (decision === 'approve') this.approveRequest(proposalId);
+    else this.rejectRequest(proposalId);
+    await this.writeState();
+    return { proposalId, status: decision === 'approve' ? 'approved' : 'rejected' };
+  }
 
   private addRequest(req: HireRequestView) {
     this.state.requests.push(req);
@@ -5185,6 +5303,7 @@ export class Swarm {
     const rt = this.repoRt.get(repo.id)!;
     const pull = rt.pulls.find((p) => p.number === x.number && p.state === 'OPEN');
     if (!pull) throw new HttpError(404, `PR #${x.number} is not open on ${repo.fullName}`);
+    if (hasLabel(pull.labels, NEEDS_HUMAN)) throw new HttpError(409, `Remove ${NEEDS_HUMAN} from PR #${x.number} before sending it to a developer`);
     let recovered = '';
     const getRecord = () => {
       if (rt.parking) throw new HttpError(409, 'Wait until PR parking finishes');

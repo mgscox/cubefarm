@@ -22,6 +22,15 @@ test('draft and inspect a demo Issue Plan on an Idea', async ({ page, request, b
   await expect(plan.getByText('A date outside the next 5 days answers 400', { exact: false })).toBeVisible();
   await page.getByRole('button', { name: 'Draft demo Issue Plan' }).click();
   await expect(plan.getByLabel('Issue Plan revision')).toHaveValue('2');
+  // The independent review fixture and drafted plans coexist on the same Idea, including after a fresh snapshot.
+  await page.getByRole('button', { name: 'Reviewers agree' }).click();
+  const review = page.getByRole('region', { name: 'Proposal review' });
+  await expect(review.getByRole('note', { name: 'Handoff' })).toBeVisible();
+  await expect(plan.getByLabel('Issue Plan revision')).toHaveValue('2');
+  await page.reload();
+  await page.getByRole('button', { name: 'Enter the office' }).click();
+  await expect(review.getByRole('note', { name: 'Handoff' })).toBeVisible();
+  await expect(plan.getByLabel('Issue Plan revision')).toHaveValue('2');
   const after = await (await request.get('/api/state')).json() as WorldSnapshot;
   expect(issueIds(after).filter((id) => !before.includes(id))).toEqual([]); // demo merges may close issues; none are created
   expect(after.issuePlans?.filter((p) => p.ideaId === idea.id).map((p) => p.revision)).toEqual([1, 2]);
