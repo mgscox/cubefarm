@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
 import type { TrackedIssue } from './github.ts';
 import {
-  failure, heldTitle, planMarker, PublicationBlock, Publisher, snapshotProblem, verifyProblem,
+  failure, heldTitle, loadPublications, planMarker, PublicationBlock, Publisher, snapshotProblem, verifyProblem,
   type PublicationHost, type PublicationTracker,
 } from './publication.ts';
 import { createDemoBackend, demoApprovedProposal } from './demo.ts';
@@ -181,6 +181,84 @@ describe('publishing one approved issue', () => {
     expect(records).toEqual({});
     expect(tracker.log).toEqual([]);
   });
+
+  it('makes concurrent repeats wait for the first write, and fails them all when it fails', async () => {
+    let fail!: (err: Error) => void;
+    const commit = vi.fn(() => new Promise<void>((_, reject) => { fail = reject; }));
+    publisher = new Publisher({ ...host, commit });
+    const first = publisher.publish(approved());
+    const repeats = [publisher.publish(approved()), publisher.publish(approved())];
+    await vi.advanceTimersByTimeAsync(0);
+    expect(publisher.get('p1')).toBeNull(); // not accepted yet: no retry, list or kick reaches it
+    expect(publisher.list()).toEqual([]);
+    expect(() => publisher.retry('p1')).toThrow(/No publication/);
+    publisher.resumeAll();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(tracker.log).toEqual([]);
+
+    fail(new Error('disk full'));
+    await Promise.all([first, ...repeats].map((p) => expect(p).rejects.toThrow('disk full')));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(records).toEqual({});
+    expect(tracker.log).toEqual([]);
+    expect(host.released).not.toHaveBeenCalled();
+  });
+
+  it('lets concurrent repeats join a successful first write', async () => {
+    let done!: () => void;
+    const commit = vi.fn(() => new Promise<void>((resolve) => { done = resolve; }));
+    publisher = new Publisher({ ...host, commit });
+    const all = Promise.all([publisher.publish(approved()), publisher.publish(approved())]);
+    const refused = expect(publisher.publish(approved({ decisionId: 'd2' }))).rejects.toMatchObject({ status: 409 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tracker.log).toEqual([]);
+    done();
+    const [a, b] = await all;
+    await refused;
+    expect(a).toBe(b);
+    publisher = new Publisher({ ...host, commit: async () => undefined }); // later saves succeed at once
+    publisher.resumeAll();
+    await settle();
+    expect(records.p1.status).toBe('complete');
+    expect(tracker.log.filter((x) => x === 'create')).toHaveLength(1);
+  });
+});
+
+describe('prototype-safe records', () => {
+  const KEYS = ['__proto__', 'constructor', 'toString', 'hasOwnProperty'];
+
+  it.each(KEYS)('retrying %s is a 404 that changes nothing', (key) => {
+    const emit = vi.spyOn(host, 'emit');
+    publisher = new Publisher(host);
+    expect(() => publisher.retry(key)).toThrow(expect.objectContaining({ status: 404 }));
+    expect(publisher.get(key)).toBeNull();
+    expect(emit).not.toHaveBeenCalled();
+    expect(Object.keys(records)).toEqual([]);
+    expect(({} as Record<string, unknown>).proposalId).toBeUndefined();
+  });
+
+  it.each(KEYS)('refuses %s as a proposal id', async (key) => {
+    await expect(publisher.publish(approved({ proposalId: key }))).rejects.toMatchObject({ status: 400 });
+    expect(Object.getPrototypeOf(records)).toBe(Object.prototype);
+    expect(tracker.log).toEqual([]);
+  });
+
+  it('loads only own, well-formed records from the state file', async () => {
+    await publisher.publish(approved());
+    await settle();
+    const raw = JSON.parse(`{"__proto__": {"proposalId": "__proto__", "issues": []}, "toString": 5, "x": {"proposalId": "y", "issues": [], "snapshot": {"approval": {}}}, "p1": ${JSON.stringify(records.p1)}}`);
+    const loaded = loadPublications(raw);
+    expect(Object.keys(loaded)).toEqual(['p1']);
+    expect(Object.getPrototypeOf(loaded)).toBe(Object.prototype);
+    expect(loadPublications(null)).toEqual({});
+    expect(loadPublications([records.p1])).toEqual({});
+    records = loaded;
+    publisher = new Publisher(makeHost());
+    expect(publisher.get('p1')?.status).toBe('complete');
+    expect(publisher.get('__proto__')).toBeNull();
+    expect(() => publisher.retry('toString')).toThrow(expect.objectContaining({ status: 404 }));
+  });
 });
 
 describe('recovery', () => {
@@ -342,6 +420,21 @@ describe('the demo office', () => {
     expect(published).toHaveLength(1);
     expect(issueWaitReason(published[0], new Set())).toBeNull(); // ordinary dispatch can take it
     expect(swarm.publisher.list()).toContainEqual(expect.objectContaining({ proposalId: view.proposalId, status: 'complete' }));
+    swarm.publisher.stop();
+  });
+
+  it.each(['__proto__', 'constructor', 'toString'])('answers a retry of %s with 404 and leaves the office and its clients intact', async (key) => {
+    const { swarm } = office();
+    const broadcast = vi.spyOn(swarm as unknown as { broadcast(ev: unknown): void }, 'broadcast');
+    const view = await swarm.publishDemoProposal('');
+    await swarm.publisher.settled(view.proposalId);
+    broadcast.mockClear();
+    expect(() => swarm.retryPublication(key)).toThrow(expect.objectContaining({ status: 404 }));
+    expect(broadcast).not.toHaveBeenCalled();
+    expect(({} as Record<string, unknown>).proposalId).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(Object.prototype, 'snapshot')).toBe(false);
+    expect(swarm.publisher.list().map((p) => p.proposalId)).toEqual([view.proposalId]);
+    expect(swarm.publisher.list().every((p) => Array.isArray(p.issues))).toBe(true);
     swarm.publisher.stop();
   });
 

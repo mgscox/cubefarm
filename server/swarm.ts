@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { emptyTelegram, TelegramMirror, telegramToken, telegramTransport, type TelegramState, type TelegramTransport } from './telegram.ts';
 import { createDemoTelegram, demoApprovedProposal, demoTracker } from './demo.ts';
-import { Publisher } from './publication.ts';
+import { loadPublications, Publisher } from './publication.ts';
 import type { WebSocket } from 'ws';
 import type { Backend } from './backend.ts';
 import type { BoxConnection, Machine } from './machine.ts';
@@ -630,7 +630,7 @@ export class Swarm {
         officeId: typeof loaded.officeId === 'string' ? loaded.officeId : '',
         boxes: (loaded.boxes ?? []).filter((b) => b && typeof b.id === 'string' && typeof b.destination === 'string'),
         officeCapacity: loaded.officeCapacity ?? 'unknown',
-        publications: loaded.publications ?? {},
+        publications: loadPublications(loaded.publications),
       };
       for (const m of this.state.messages) this.messageSeq = Math.max(this.messageSeq, m.id + 1);
       if (!EFFORTS.includes(this.state.settings.defaultEffort)) this.state.settings.defaultEffort = 'medium';

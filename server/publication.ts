@@ -51,7 +51,9 @@ export function snapshotProblem(input: unknown, fixtures: boolean): string | nul
   const s = input as Partial<ApprovedSnapshot> | null;
   const a = s?.approval;
   if (!a || typeof a !== 'object') return 'A publication needs a recorded approval.';
-  if (![a.decisionId, a.proposalId, a.ideaId].every((x) => typeof x === 'string' && ID.test(x))) return 'The approval needs decision, proposal and Idea ids (letters, digits, . _ -).';
+  if (![a.decisionId, a.proposalId, a.ideaId].every((x) => typeof x === 'string' && ID.test(x) && !(x in Object.prototype))) {
+    return 'The approval needs decision, proposal and Idea ids (letters, digits, . _ -).';
+  }
   if (![a.prdRevision, a.planRevision].every((r) => Number.isInteger(r) && (r as number) > 0)) return 'The approval must name the exact PRD and Issue Plan revisions.';
   if (!Number.isFinite(a.decidedAt)) return 'The approval needs the time of the decision.';
   if (a.source !== 'manager' && a.source !== 'fixture') return 'The approval must come from the manager.';
@@ -76,6 +78,18 @@ const approved = (s: ApprovedSnapshot) =>
   JSON.stringify([s.approval.decisionId, s.approval.proposalId, s.approval.prdRevision, s.approval.planRevision,
     s.issues.map((i) => [i.entryId, i.repo, i.title, i.body, i.specialty ?? ''])]);
 export const sameApproval = (a: ApprovedSnapshot, b: ApprovedSnapshot) => approved(a) === approved(b);
+
+/** Publications from the state file: own, well-formed records keyed by their proposal id, whatever the key. */
+export function loadPublications(raw: unknown): Record<string, PublicationView> {
+  const out: Record<string, PublicationView> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [id, p] of Object.entries(raw as Record<string, unknown>)) {
+    const rec = p as PublicationView | null;
+    if (!rec || typeof rec !== 'object' || rec.proposalId !== id || !Array.isArray(rec.issues) || !rec.snapshot?.approval) continue;
+    Object.defineProperty(out, id, { value: rec, writable: true, enumerable: true, configurable: true });
+  }
+  return out;
+}
 
 export function newPublication(snapshot: ApprovedSnapshot, now: number): PublicationView {
   const { proposalId } = snapshot.approval;
@@ -133,15 +147,19 @@ export function failure(err: unknown, attempts: number): Pick<PublicationView, '
 export class Publisher {
   private running = new Map<string, Promise<void>>();
   private timers = new Map<string, NodeJS.Timeout>();
+  /** Approvals whose first write to the state file is under way: repeats wait for it, and nothing publishes yet. */
+  private accepting = new Map<string, Promise<PublicationView>>();
 
   constructor(private host: PublicationHost) {}
 
   list() {
-    return Object.values(this.host.records()).sort((a, b) => a.createdAt - b.createdAt);
+    return Object.values(this.host.records()).filter((p) => !this.accepting.has(p.proposalId)).sort((a, b) => a.createdAt - b.createdAt);
   }
 
+  /** Own records only: an id like __proto__ or toString never reaches inherited properties. */
   get(proposalId: string): PublicationView | null {
-    return this.host.records()[proposalId] ?? null;
+    const records = this.host.records();
+    return Object.hasOwn(records, proposalId) && !this.accepting.has(proposalId) ? records[proposalId] : null;
   }
 
   /** The publication an issue came from, for dispatch: null when it wasn't published from an Idea. */
@@ -162,25 +180,33 @@ export class Publisher {
     const problem = snapshotProblem(snapshot, this.host.fixtures);
     if (problem) throw new HttpError(400, problem);
     const id = snapshot.approval.proposalId;
+    const pending = this.accepting.get(id);
+    if (pending) return this.repeat(await pending, snapshot);
+    const existing = this.get(id);
+    if (existing) return this.repeat(existing, snapshot);
     const records = this.host.records();
-    const existing = records[id];
-    if (existing) {
-      if (!sameApproval(existing.snapshot, snapshot)) {
-        throw new HttpError(409, `Proposal ${id} was already approved (decision ${existing.snapshot.approval.decisionId}) and can't authorize another publication. A changed plan needs a revised proposal.`);
-      }
-      this.kick(id);
-      return existing;
-    }
     const rec = newPublication(structuredClone(snapshot), Date.now());
-    records[id] = rec;
-    try {
-      await this.host.commit();
-    } catch (err) {
-      delete records[id];
-      throw err;
-    }
+    Object.defineProperty(records, id, { value: rec, writable: true, enumerable: true, configurable: true });
+    const accept = this.host.commit().then(
+      () => rec,
+      (err: unknown) => {
+        if (Object.hasOwn(records, id) && records[id] === rec) delete records[id];
+        throw err;
+      },
+    ).finally(() => this.accepting.delete(id));
+    this.accepting.set(id, accept);
+    await accept;
     this.host.emit(rec);
     this.kick(id);
+    return rec;
+  }
+
+  /** The same approval again resumes its publication; another decision for the Proposal is refused. */
+  private repeat(rec: PublicationView, snapshot: ApprovedSnapshot) {
+    if (!sameApproval(rec.snapshot, snapshot)) {
+      throw new HttpError(409, `Proposal ${rec.proposalId} was already approved (decision ${rec.snapshot.approval.decisionId}) and can't authorize another publication. A changed plan needs a revised proposal.`);
+    }
+    this.kick(rec.proposalId);
     return rec;
   }
 
@@ -209,7 +235,7 @@ export class Publisher {
 
   /** One attempt at a time per publication: a repeat while one runs joins it. */
   private kick(id: string) {
-    const rec = this.get(id);
+    const rec = this.get(id); // null while its approval is still being recorded
     if (!rec || rec.status === 'complete' || this.running.has(id)) return;
     clearTimeout(this.timers.get(id));
     this.timers.delete(id);
