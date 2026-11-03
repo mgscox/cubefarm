@@ -4,7 +4,7 @@ import type { IdeaRecordView, IdeaReviewCycleView, IdeaView, ProposalView } from
 import { api } from '../api';
 import { ideaProposals, ideaStage } from '../proposals';
 import { FOCUS_LABEL, REVIEW_FOCUSES } from '../../../shared/ideaReview';
-import { reviewProgress, verdictText } from '../ideas';
+import { prdLinkTarget, reviewProgress, verdictText } from '../ideas';
 import { useStore } from '../store';
 import { IssuePlanSection } from './IssuePlan';
 import { Markdown } from './Markdown';
@@ -71,10 +71,19 @@ function DemoReviewFixture({ ideaId }: { ideaId: string }) {
 export function IdeaDetail({ idea, records, proposals = [], prd, onLinkedIdea }: {
   idea: IdeaView; records: IdeaRecordView[]; proposals?: ProposalView[]; prd?: string; onLinkedIdea?: () => void;
 }) {
+  const [answer, setAnswer] = useState('');
+  const [busy, setBusy] = useState(false);
+  const agents = useStore((s) => s.agents);
+  const connected = useStore((s) => s.connected);
+  const research = idea.research;
   const demo = useStore((s) => s.demo);
   const [seeding, setSeeding] = useState(false);
   const latest = proposals[proposals.length - 1];
-  const shownPrd = prd ? proposals.find((p) => p.id === prd) : undefined;
+  const target = prdLinkTarget(prd, proposals, records);
+  const shownPrd = target === 'proposal' ? proposals.find((p) => p.id === prd) : undefined;
+  useEffect(() => {
+    if (prd && target === 'revision') document.getElementById(prd)?.scrollIntoView();
+  }, [prd, target]);
   const cycle = useStore((s) => s.ideaReviews.find((r) => r.ideaId === idea.id));
   return (
     <article className="card idea-detail" aria-label="Idea detail">
@@ -88,7 +97,7 @@ export function IdeaDetail({ idea, records, proposals = [], prd, onLinkedIdea }:
       <div className="small muted idea-identity">{idea.id} · {new Date(idea.createdAt).toLocaleString()}</div>
       {idea.status === 'archived' && <p className="small muted">Archived {idea.archivedAt ? new Date(idea.archivedAt).toLocaleString() : ''}: read-only, with its PRD, Issue Plan, reviews and decisions.</p>}
       {idea.linkedFrom && <p className="small">Continues <a href={ideaLink(idea.linkedFrom)}>an earlier Idea</a>; its history is context for this one.</p>}
-      {prd && !shownPrd && <p role="status">That PRD revision isn't on this Idea.</p>}
+      {target === 'missing' && <p role="status">That PRD revision isn't on this Idea.</p>}
       {shownPrd ? <PrdView proposal={shownPrd} /> : latest && (
         <ProposalCard key={latest.id} idea={idea} proposal={latest} earlier={proposals.slice(0, -1)} onLinkedIdea={() => onLinkedIdea?.()} />
       )}
@@ -102,15 +111,43 @@ export function IdeaDetail({ idea, records, proposals = [], prd, onLinkedIdea }:
       <p>{idea.floorHints.length ? idea.floorHints.join(', ') : 'No floor hints — affected repositories are open.'}</p>
       {idea.constraints && <><h4>Constraints</h4><p className="idea-prose">{idea.constraints}</p></>}
       {idea.links.length > 0 && <><h4>Links</h4><ul>{idea.links.map((link) => <li key={link}><a href={link} target="_blank" rel="noreferrer">{link}</a></li>)}</ul></>}
+      {research && <section aria-label="Idea research">
+        <h4>Research</h4>
+        <p>Lead: {agents[research.leadAgentId]?.name ?? research.leadAgentId}</p>
+        {research.questions.map((q, i) => <div key={i}>
+          <p><b>{q.question}</b></p>
+          {q.answer !== undefined && <p className="idea-prose">Manager: {q.answer}</p>}
+        </div>)}
+        {idea.status === 'needs-clarification' && <form onSubmit={(event) => {
+          event.preventDefault();
+          if (busy) return;
+          setBusy(true);
+          void api.replyToIdea(idea.id, answer).then(() => setAnswer('')).catch(() => undefined).finally(() => setBusy(false));
+        }}>
+          <label className="field">Reply to researcher<textarea required maxLength={10000} rows={3} value={answer} onChange={(e) => setAnswer(e.target.value)} /></label>
+          <button className="btn btn-good" disabled={busy || !connected || !answer.trim()}>Reply and resume research</button>
+        </form>}
+        {research.requests.map((r) => <details key={r.id} open={r.answer === undefined}>
+          <summary>Focused input · {agents[r.agentId]?.name ?? r.agentId} · {r.answer !== undefined ? 'Received' : agents[r.agentId] ? 'Waiting' : 'Unavailable'}</summary>
+          <p className="idea-prose">{r.question}</p>
+          {r.answer !== undefined && <p className="idea-prose">{r.answer}</p>}
+          {r.sources?.map((source) => <p key={source}>{source}</p>)}
+        </details>)}
+        {research.error && <div role="alert"><p className="idea-prose">{research.error}</p>{idea.status !== 'archived' && <button className="btn" disabled={busy || !connected} onClick={() => {
+          setBusy(true);
+          void api.retryIdeaResearch(idea.id).catch(() => undefined).finally(() => setBusy(false));
+        }}>Retry research</button>}</div>}
+      </section>}
       <IssuePlanSection ideaId={idea.id} archived={idea.status === 'archived'} />
       {cycle && <IdeaReview cycle={cycle} />}
-      {!cycle && !latest && demo && idea.status === 'queued' && <DemoReviewFixture ideaId={idea.id} />}
+      {!cycle && !latest && demo && (idea.status === 'queued' || idea.status === 'researched') && <DemoReviewFixture ideaId={idea.id} />}
       <h4>Research, reviews & proposals</h4>
       {records.length === 0 && <p className="muted">No records yet.</p>}
       {[...records].sort((a, b) => a.createdAt - b.createdAt).map((record) => (
-        <section className="card" key={`${record.kind}:${record.id}`}>
+        <section className="card" id={record.id} key={`${record.kind}:${record.id}`}>
           <div className="small muted">{record.kind} · {new Date(record.createdAt).toLocaleString()}</div>
           <h4>{record.title}</h4>
+          {record.prd && <a href={`${ideaLink(idea.id)}/prd/${record.id}`}>View PRD revision</a>}
           <Markdown text={record.body} />
         </section>
       ))}
@@ -162,7 +199,7 @@ export function IdeasTab({ initialIdea, initialPrd }: { initialIdea?: string; in
           ))}
         </nav>
         {selected ? (
-          idea ? <IdeaDetail idea={idea} records={records.filter((record) => record.ideaId === idea.id)} proposals={ideaProposals(proposals, idea.id)}
+          idea ? <IdeaDetail key={idea.id} idea={idea} records={records.filter((record) => record.ideaId === idea.id)} proposals={ideaProposals(proposals, idea.id)}
             prd={initialIdea === idea.id ? initialPrd : undefined} onLinkedIdea={() => startLinked(idea)} /> : <p role="status">Idea not found in this office.</p>
         ) : (
           <form className="card" onSubmit={(event) => {

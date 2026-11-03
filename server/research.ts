@@ -8,6 +8,9 @@ import { RESEARCH_BRANCH } from '../shared/issues.ts';
 import { ONE_TURN } from './clis.ts';
 
 export interface ResearchJob {
+  ideaId?: string;
+  requestId?: string;
+  agentId?: string;
   topic: string;
   brief: string;
   repoId?: string; // file the doc on this floor by pull request; otherwise in the company research folder

@@ -1,20 +1,24 @@
 // The demo review fixture through the Swarm: rounds, handoff and restart, using only an isolated state file.
 import fs from 'node:fs/promises';
-import path from 'node:path';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Swarm } from './swarm.ts';
 import { createDemoBackend } from './demo.ts';
-import { STATE_FILE } from './config.ts';
+import { HOME_DIR, STATE_FILE } from './config.ts';
 import { RESEARCHER_ID, type IdeaRecordView, type IdeaReviewCycleView, type IdeaView } from '../shared/types.ts';
 
+// A SWARM_HOME of this file's own: the run's shared one is used by other workers' Swarms (state, terminals), and a
+// late write from a timed-out test must not land outside it once the test is torn down.
+await vi.hoisted(async () => {
+  const [{ mkdtemp }, os, path] = await Promise.all([import('node:fs/promises'), import('node:os'), import('node:path')]);
+  process.env.SWARM_HOME = await mkdtemp(path.join(os.tmpdir(), 'cubefarm-idea-review-'));
+});
+// Every round is a real disk write: on a busy CI host a handful can take seconds.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
+
 type Harness = { state: { agents: { id: string; role: string }[]; ideas: IdeaView[]; ideaReviews: IdeaReviewCycleView[]; ideaRecords: IdeaRecordView[] } };
-let folder: string;
-let file: string;
+const file = STATE_FILE;
 let swarm: Swarm;
 let createIssue: ReturnType<typeof vi.fn>;
-const read = fs.readFile.bind(fs);
-const write = fs.writeFile.bind(fs);
-const rename = fs.rename.bind(fs);
 
 const office = (agents = true) => {
   const backend = createDemoBackend();
@@ -30,14 +34,8 @@ const state = () => (swarm as unknown as Harness).state;
 const reviewOf = (ideaId: string) => state().ideaReviews.find((r) => r.ideaId === ideaId)!;
 const runOut = async () => { for (let i = 0; i < 20; i++) await vi.advanceTimersByTimeAsync(2500); };
 
-beforeEach(async () => {
+beforeEach(() => {
   vi.useFakeTimers();
-  folder = await fs.mkdtemp(path.join(process.cwd(), '.idea-review-test-'));
-  file = path.join(folder, 'demo-state.json');
-  vi.spyOn(fs, 'readFile').mockImplementation((location, ...args) => read(location === STATE_FILE ? file : location, ...args));
-  vi.spyOn(fs, 'writeFile').mockImplementation((location, ...args) => write(location === `${STATE_FILE}.tmp` ? `${file}.tmp` : location, ...args));
-  vi.spyOn(fs, 'rename').mockImplementation((from, to) => rename(from === `${STATE_FILE}.tmp` ? `${file}.tmp` : from, to === STATE_FILE ? file : to));
-  vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
   swarm = office();
 });
 
@@ -46,8 +44,10 @@ afterEach(async () => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
-  await fs.rm(folder, { recursive: true, force: true, maxRetries: 5 });
+  await fs.rm(HOME_DIR, { recursive: true, force: true, maxRetries: 5 });
 });
+
+afterAll(() => fs.rm(HOME_DIR, { recursive: true, force: true, maxRetries: 5 }));
 
 it('promotes a first-round joint endorsement without creating issues', async () => {
   const idea = await swarm.submitIdea({ description: 'Agreeable' });
@@ -61,6 +61,14 @@ it('promotes a first-round joint endorsement without creating issues', async () 
   expect(done.handoff).toMatchObject({ prdRevision: 1, planRevision: 1, endorsed: true, unresolved: [] });
   expect(state().ideas[0].status).toBe('proposed');
   expect(createIssue).not.toHaveBeenCalled();
+});
+
+it('leaves an Idea under research alone', async () => {
+  const idea = await swarm.submitIdea({ description: 'Still being researched' });
+  state().ideas[0].status = 'researching';
+  await expect(swarm.demoIdeaReview(idea.id, 'agree')).rejects.toThrow(/being researched/);
+  expect(state().ideaReviews).toEqual([]);
+  expect(state().ideas[0].status).toBe('researching');
 });
 
 it('promotes the third revision with its findings when reviewers keep disagreeing', async () => {
@@ -83,10 +91,10 @@ it('carries a review on after a restart', async () => {
   await swarm.demoIdeaReview(idea.id, 'disagree');
   await vi.advanceTimersByTimeAsync(2500);
   await swarm.shutdown();
-  const saved = JSON.parse(await read(file, 'utf8')) as { agents: unknown[]; ideaReviews: IdeaReviewCycleView[] };
+  const saved = JSON.parse(await fs.readFile(file, 'utf8')) as { agents: unknown[]; ideaReviews: IdeaReviewCycleView[] };
   expect(saved.ideaReviews[0].rounds[0].reviews).toHaveLength(1);
   saved.agents = []; // the stand-ins above aren't whole agents; the cycle already names its reviewers
-  await write(file, JSON.stringify(saved));
+  await fs.writeFile(file, JSON.stringify(saved));
   swarm = office(false);
   await swarm.init();
   await runOut();

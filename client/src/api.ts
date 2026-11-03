@@ -28,6 +28,8 @@ export interface FloorOptions {
 
 export const api = {
   submitIdea: (input: IdeaInput) => call<IdeaView>('POST', '/api/ideas', input),
+  replyToIdea: (id: string, answer: string) => call<IdeaView>('POST', `/api/ideas/${encodeURIComponent(id)}/reply`, { answer }),
+  retryIdeaResearch: (id: string) => call<IdeaView>('POST', `/api/ideas/${encodeURIComponent(id)}/retry`),
   draftDemoIssuePlan: (ideaId: string) => call<IssuePlanView>('POST', `/api/ideas/${encodeURIComponent(ideaId)}/plans/demo`),
   decideProposal: (id: string, decision: ProposalDecisionInput) => call<ProposalView>('POST', `/api/proposals/${encodeURIComponent(id)}/decision`, decision),
   seedDemoProposal: (ideaId: string) => call<ProposalView>('POST', `/api/ideas/${encodeURIComponent(ideaId)}/proposals/demo`),

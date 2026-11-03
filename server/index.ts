@@ -173,6 +173,8 @@ app.post('/api/office/update', route((req) => swarm.updateOffice(req.body?.actio
 app.post('/api/telegram', route((req) => swarm.telegramCommand(str(req.body?.action), req.body ?? {})));
 app.post('/api/ceo/message', route((req) => swarm.messageCeo(str(req.body.text))));
 app.post('/api/ceo/review', route(() => swarm.requestReview()));
+app.post('/api/ideas/:id/reply', route((req) => swarm.replyToIdea(String(req.params.id), req.body?.answer)));
+app.post('/api/ideas/:id/retry', route((req) => swarm.retryIdeaResearch(String(req.params.id))));
 app.post('/api/research', route((req) => swarm.briefResearcher(str(req.body.text), str(req.body.repoId) || undefined)));
 app.post('/api/phone/read', route((req) => swarm.markPhoneRead(Number(req.body?.at) || Date.now())));
 app.post(

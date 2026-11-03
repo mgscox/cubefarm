@@ -51,6 +51,14 @@ You can message an agent at any time. While they're working, the message is inje
 - **Floor researchers** sit at free developer desks (they share the floor's 12 desks with developers). Hire them in the manager's console → Team, or the CEO proposes them. They take issues labelled `swarm:research`, and nothing else; developers never get those issues automatically. Their docs go into `docs/research/` by pull request, which closes the issue.
 - New research waits while Claude's usage is pacing or paused, like new issues.
 
+## Ideas
+
+Submit a description in the manager's **Ideas** tab. Research starts automatically when the office is open and a session slot is available. The lobby researcher leads one PRD, can ask configured floor researchers or specialists for focused evidence, and treats floor hints as context. Research respects office closure and usage pacing.
+
+A material question appears as **Needs clarification** on the Idea. Reply there to resume. Research errors include a retry action. The completed **PRD ready** record contains linked evidence, assumptions, target-floor rationale and measurable acceptance criteria. **View PRD revision** links to that saved revision for later planning and review. Research itself creates no implementation issues.
+
+Demo research uses fixed illustrative evidence. Include `[clarify]` in the description to exercise the question/reply path; otherwise it requests focused floor input when available and saves the PRD. With no configured floors, it asks the manager to configure one before continuing.
+
 ## The team
 
 Agents get names from a pool of computing pioneers (developers), fictional detectives (QA testers) and scientists (researchers). Each character's look is picked from their name, so Ada, Grace and Marple are drawn with long hair, a ponytail or a bun. You can change any agent's name or look in the manager's console → Team.
