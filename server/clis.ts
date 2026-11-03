@@ -158,6 +158,7 @@ export interface LaunchContext {
   /** Codex's hook program: forwards each hook to the office (notify.url). */
   codexHook: string;
   plugin: string; // file URL of the OpenCode plugin
+  repoSkills?: string; // local Claude plugin root or OpenCode skill directory
   /** The Playwright MCP server, when the floor tests in a browser. Claude Code gets it through its MCP config file. */
   browser: { command: string; args: string[] } | null;
 }
@@ -206,6 +207,7 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         // On top of the manager's own setup (settings, skills, plugins, MCP servers): the office's hooks and servers.
         '--settings',
         ctx.files.settings,
+        ...(ctx.repoSkills ? ['--plugin-dir', ctx.repoSkills] : []),
         ...(ctx.files.mcp ? ['--mcp-config', ctx.files.mcp] : []),
         '--append-system-prompt-file',
         ctx.files.system,
@@ -247,6 +249,7 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         // Bare desk model names are Ollama IDs; other providers must include their prefix.
         ...(ctx.model ? { model: ctx.model.includes('/') ? ctx.model : `ollama/${ctx.model}` } : {}),
         plugins: [ctx.plugin],
+        ...(ctx.repoSkills ? { skills: [ctx.repoSkills] } : {}),
         instructions: [ctx.files.system],
         update: 'disable', // several agents starting at once must not each reinstall it
         permission: { edit: 'allow', bash: 'allow', webfetch: 'allow' }, // it can't stop to ask either

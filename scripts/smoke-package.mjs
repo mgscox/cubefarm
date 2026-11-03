@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { tsImport } from 'tsx/esm/api';
 
 const root = path.resolve(import.meta.dirname, '..');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cubefarm-package-'));
@@ -17,6 +18,7 @@ const sh = (cmd, cwd) => {
 
 let server;
 try {
+  const { ACTIVE_REPO_SKILLS, readRepoSkills } = await tsImport('../server/repoSkills.ts', import.meta.url);
   const tarball = path.join(root, sh('npm pack --silent', root).split(/\r?\n/).pop());
   sh('npm init -y', tmp);
   sh(`npm install --no-audit --no-fund "${tarball}"`, tmp);
@@ -24,7 +26,16 @@ try {
   const version = sh('npx --no-install cubefarm --version', tmp);
   console.log(`cubefarm --version: ${version}`);
 
-  const bin = path.join(tmp, 'node_modules', 'cubefarm', 'bin', 'cubefarm.js');
+  const installed = path.join(tmp, 'node_modules', 'cubefarm');
+  const packed = readRepoSkills(installed, version);
+  const expected = ACTIVE_REPO_SKILLS.files;
+  if (packed.files.length !== expected.length || packed.files.some((file, i) =>
+    file.path !== expected[i].path || !file.content.equals(expected[i].content))) {
+    throw new Error('npm package repo skills differ from the checkout');
+  }
+  console.log(`repo skills verified: ${packed.skills.length}`);
+
+  const bin = path.join(installed, 'bin', 'cubefarm.js');
   server = spawn(process.execPath, [bin, '--demo', '--no-open', '--port', String(PORT)], {
     env: { ...process.env, SWARM_HOME: path.join(tmp, 'home') },
     stdio: ['ignore', 'inherit', 'inherit'],

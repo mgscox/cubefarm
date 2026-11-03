@@ -13,6 +13,8 @@ import { rebootStatus } from './rebootStatus.ts';
 import type { CliPlan } from './machine.ts';
 import type { DeskBase } from './workspace.ts';
 import { createResourceReader } from './machineResources.ts';
+import { ACTIVE_REPO_SKILLS, pruneDeskSkills } from './repoSkills.ts';
+import type { HeldPty } from './ptyProtocol.ts';
 
 // What a box does for an office on another machine, on the box's own disk: desks in its own clones (workspace.ts), CLI
 // session files and command lines (cliFiles.ts), screenshots. Paths are the box's. Its bridge (boxStdio.ts) runs these,
@@ -32,10 +34,11 @@ function sessionDir(dir: unknown): string {
 }
 
 /** keeperStale: see BoxInfo. root: the cubefarm checkout this bridge runs from (tests). */
-export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[]; keeperStale?: boolean; root?: string }) {
+export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[]; held?: HeldPty[]; keeperStale?: boolean; root?: string }) {
   // The commit this bridge started on, not the checkout's HEAD later: an update moves HEAD under a running link, and the
   // office has to see the old one to redial it (say, when the office itself restarted in between).
   const commit = checkoutCommit(ctx.root);
+  if (ctx.held) pruneDeskSkills(ACTIVE_REPO_SKILLS, WORKSPACE_ROOT, ctx.held);
   const prepared = new Map<string, { cli: CliLaunch; at: number }>();
   const resources = createResourceReader();
   const str = (v: unknown) => String(v ?? '');

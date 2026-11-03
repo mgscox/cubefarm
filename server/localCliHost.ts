@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import { recoverCliTurn } from './cliTranscript.ts';
-import { HOME_DIR } from './config.ts';
+import { HOME_DIR, WORKSPACE_ROOT } from './config.ts';
 import { cliLabel, codexThread, readClaudeTurn } from './clis.ts';
 import { adoptPty, discardPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, startKeeper, terminalsAvailable } from './ptyClient.ts';
 import { screenshotFile } from './agentRunner.ts';
 import { BIN_DIR, removeSessionDir, SESSIONS_DIR, sessionShots, writeCliSession } from './cliFiles.ts';
 import type { CliHost, CliPlan, PreparedCli } from './machine.ts';
+import { ACTIVE_REPO_SKILLS, pruneDeskSkills } from './repoSkills.ts';
 
 // The office's own machine as a place to run CLIs: session files under <SWARM_HOME>/sessions, the helper scripts in
 // <SWARM_HOME>/bin (cliFiles.ts), and the CLIs in the office's terminal keeper (ptyClient.ts).
@@ -39,7 +40,11 @@ export const localCliHost: CliHost = {
   savedShot: screenshotFile,
   codexThread,
   removeDir: removeSessionDir,
-  reconnect: (onHook) => startKeeper(HOME_DIR, onHook),
+  reconnect: async (onHook) => {
+    const held = await startKeeper(HOME_DIR, onHook);
+    if (keeperPid()) pruneDeskSkills(ACTIVE_REPO_SKILLS, WORKSPACE_ROOT, held);
+    return held;
+  },
   adopt: adoptPty,
   discard: discardPty,
   hooksReady,
