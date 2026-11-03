@@ -1,10 +1,9 @@
 // Manager decisions through the Swarm with the demo backend, its fake downstream worker and an isolated state file.
 import fs from 'node:fs/promises';
-import path from 'node:path';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Swarm } from './swarm.ts';
 import { createDemoBackend } from './demo.ts';
-import { STATE_FILE } from './config.ts';
+import { HOME_DIR, STATE_FILE } from './config.ts';
 import { DEMO_WORK_MS } from './proposalFixture.ts';
 import type { ProposalWorker } from './proposals.ts';
 import type { IdeaView, ProposalView, ServerEvent } from '../shared/types.ts';
@@ -16,16 +15,21 @@ type Harness = {
   state: { repos: { id: string; fullName: string }[]; proposals: ProposalView[] };
   ideaSubmissions: Promise<unknown>;
 };
-let folder: string;
-let file: string;
+
+// A SWARM_HOME of this file's own: the run's shared one is used by other workers' Swarms (state, terminals), and a
+// late write from a timed-out test must not land outside it once the test is torn down.
+await vi.hoisted(async () => {
+  const [{ mkdtemp }, os, path] = await Promise.all([import('node:fs/promises'), import('node:os'), import('node:path')]);
+  process.env.SWARM_HOME = await mkdtemp(path.join(os.tmpdir(), 'cubefarm-proposal-decision-'));
+});
+// Every decision is a real disk write: on a busy CI host a handful can take seconds.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
+
+const file = STATE_FILE;
 let swarm: Swarm;
-const read = fs.readFile.bind(fs);
-const write = fs.writeFile.bind(fs);
-const rename = fs.rename.bind(fs);
-const rm = fs.rm.bind(fs);
 const FLOORS = ['demo-co/pixel-todo', 'demo-co/weather-api'].map((id) => ({ id, fullName: id }));
 const harness = (s = swarm) => s as unknown as Harness;
-const saved = async () => JSON.parse(await read(file, 'utf8')) as { ideas: IdeaView[]; proposals: ProposalView[] };
+const saved = async () => JSON.parse(await fs.readFile(file, 'utf8')) as { ideas: IdeaView[]; proposals: ProposalView[] };
 // The fake worker answers on a timer; its save is real disk I/O, so wait for the Idea chain too.
 const settle = async () => { await vi.advanceTimersByTimeAsync(DEMO_WORK_MS); await harness().ideaSubmissions; };
 const pair = (p: ProposalView) => ({ prdRevision: p.prd.revision, planRevision: p.plan.revision });
@@ -41,14 +45,8 @@ async function seeded() {
   return { idea, proposal: await swarm.seedDemoProposal(idea.id) };
 }
 
-beforeEach(async () => {
+beforeEach(() => {
   vi.useFakeTimers();
-  folder = await fs.mkdtemp(path.join(process.cwd(), '.proposal-test-'));
-  file = path.join(folder, 'demo-state.json');
-  vi.spyOn(fs, 'readFile').mockImplementation((location, ...args) => read(location === STATE_FILE ? file : location, ...args));
-  vi.spyOn(fs, 'writeFile').mockImplementation((location, ...args) => write(location === `${STATE_FILE}.tmp` ? `${file}.tmp` : location, ...args));
-  vi.spyOn(fs, 'rename').mockImplementation((from, to) => rename(from === `${STATE_FILE}.tmp` ? `${file}.tmp` : from, to === STATE_FILE ? file : to));
-  vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
   swarm = office();
 });
 
@@ -57,8 +55,10 @@ afterEach(async () => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
-  await rm(folder, { recursive: true, force: true, maxRetries: 5 });
+  await fs.rm(HOME_DIR, { recursive: true, force: true, maxRetries: 5 });
 });
+
+afterAll(() => fs.rm(HOME_DIR, { recursive: true, force: true, maxRetries: 5 }));
 
 it('seeds a reviewed handoff with a newer draft flagged and the displayed pair still open', async () => {
   const { proposal } = await seeded();
