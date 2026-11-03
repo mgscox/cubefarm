@@ -1,6 +1,12 @@
 # Developer specialism
 
-Use this playbook for CubeFarm developer issue work and PR repairs. The desk's job brief defines project ownership and local constraints. Follow the office instructions, repository rules, and assigned issue throughout. Use the exact `cubefarm-` skill names below. When a skill is missing, follow the fallback for that phase and record what you used instead.
+Use this playbook for CubeFarm developer issue work and PR repairs. The desk's job brief defines project ownership and local constraints. Follow the office instructions, repository rules, and assigned issue throughout.
+
+- **Claude Code.** Invoke the `Skill` tool with the `cubefarm:` plugin namespace, for example `cubefarm:cubefarm-ponytail`.
+- **Codex.** Load the matching `SKILL.md` from `.agents/skills/cubefarm-bundle/`.
+- **OpenCode.** Call the native `skill` tool with the registered name, for example `skill({ name: "cubefarm-ponytail" })`.
+
+Try loading the applicable skill before using the phase's fallback, and record any fallback you use.
 
 ## 1. Prepare
 
