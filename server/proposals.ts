@@ -1,6 +1,7 @@
 // The manager's decision on a Proposal (one exact PRD + Issue Plan pair): handoff checks and decision rules.
 // Pure; swarm.ts serializes, persists and hands decisions to the downstream workers.
 import type { IdeaView, ProposalDecisionInput, ProposalIssue, ProposalReview, ProposalView } from '../shared/types.ts';
+import { isDeepStrictEqual } from 'node:util';
 import { HttpError } from './httpError.ts';
 
 export const MAX_REVIEW_ROUNDS = 3;
@@ -50,17 +51,20 @@ function checkIssues(issues: ProposalIssue[], floors: string[]) {
   for (const issue of issues) visit(issue.key, []);
 }
 
-/**
- * True when `next` changes only wording against `prev`: the same issues on the same floors, with the same reused issues,
- * requirements, dependencies and number of acceptance criteria. Anything else needs a fresh review cycle.
- */
-export function wordingOnly(prev: ProposalView['plan'], next: ProposalView['plan']): boolean {
-  if (prev.issues.length !== next.issues.length) return false;
-  const before = new Map(prev.issues.map((i) => [i.key, i]));
-  return next.issues.every((i) => {
+// Free text cannot prove semantic equivalence. Only line endings and trailing whitespace can safely skip review.
+const wording = (text: string) => text.replace(/\r\n/g, '\n').replace(/[\t ]+$/gm, '');
+
+/** Conservatively compare all requirements and issue content, ignoring revision numbers and cosmetic whitespace. */
+export function wordingOnly(prev: Pick<ProposalView, 'prd' | 'plan'>, next: Pick<ProposalView, 'prd' | 'plan'>): boolean {
+  if (wording(prev.prd.title) !== wording(next.prd.title) || wording(prev.prd.body) !== wording(next.prd.body)) return false;
+  if (prev.plan.issues.length !== next.plan.issues.length) return false;
+  const before = new Map(prev.plan.issues.map((i) => [i.key, i]));
+  return next.plan.issues.every((i) => {
     const b = before.get(i.key);
-    return !!b && b.repo === i.repo && b.existing?.number === i.existing?.number && b.requirement === i.requirement
-      && b.criteria.length === i.criteria.length && [...b.blockedBy].sort().join() === [...i.blockedBy].sort().join();
+    return !!b && b.repo === i.repo && isDeepStrictEqual(b.existing, i.existing) && b.requirement === i.requirement
+      && wording(b.title) === wording(i.title) && wording(b.brief) === wording(i.brief)
+      && isDeepStrictEqual(b.criteria.map(wording), i.criteria.map(wording))
+      && isDeepStrictEqual([...b.blockedBy].sort(), [...i.blockedBy].sort());
   });
 }
 
@@ -84,18 +88,50 @@ export function proposalFromHandoff(
   if (reviews.some((r) => !Number.isInteger(r.round) || r.round < 1 || r.round > MAX_REVIEW_ROUNDS)) {
     throw new HttpError(400, `Review rounds run from 1 to ${MAX_REVIEW_ROUNDS}`);
   }
+  if (mine.length && !handoff.revises) throw new HttpError(409, 'A revised Proposal must answer its refinement request with revises');
   if (handoff.revises) {
     const prev = mine.find((p) => p.id === handoff.revises);
     if (prev?.decision?.action !== 'refine') throw new HttpError(409, 'A revision must answer a refinement request on the same Idea');
     if (mine.some((p) => p.revises === prev.id)) throw new HttpError(409, 'That refinement request already has a revised Proposal');
-    if (handoff.reviewSkipped && !wordingOnly(prev.plan, handoff.plan)) {
-      throw new HttpError(400, 'This revision changes issues, floors, dependencies or scope, so it needs a fresh review cycle');
+    const prdChanged = prev.prd.title !== handoff.prd.title || prev.prd.body !== handoff.prd.body;
+    const planChanged = !isDeepStrictEqual(prev.plan.issues, handoff.plan.issues);
+    for (const [name, before, after, changed] of [
+      ['PRD', prev.prd.revision, handoff.prd.revision, prdChanged],
+      ['Issue Plan', prev.plan.revision, handoff.plan.revision, planChanged],
+    ] as const) {
+      if (after < before || (changed && after === before)) {
+        throw new HttpError(400, `The ${name} must advance its revision when its content changes; revisions cannot go backwards`);
+      }
+    }
+    if (handoff.reviewSkipped && !wordingOnly(prev, handoff)) {
+      throw new HttpError(400, 'This revision changes requirements, briefs, criteria or scope, so it needs a fresh review cycle');
+    }
+    if (!handoff.reviewSkipped) {
+      const rounds = [...new Set(reviews.map((r) => r.round))].sort((a, b) => a - b);
+      if (!rounds.length || rounds.some((round, index) => round !== index + 1)) {
+        throw new HttpError(400, 'A fresh review cycle must start at round 1 and have consecutive rounds');
+      }
+      if (reviews.some((r) => r.prdRevision < prev.prd.revision + Number(prdChanged)
+        || r.planRevision < prev.plan.revision + Number(planChanged)
+        || (r.prdRevision <= prev.prd.revision && r.planRevision <= prev.plan.revision))) {
+        throw new HttpError(400, 'A fresh review cycle must review the revised content, without reusing earlier reviews');
+      }
     }
   } else if (handoff.reviewSkipped) {
     throw new HttpError(400, 'Only a wording revision can skip review');
   }
-  if (!handoff.reviewSkipped && !reviews.some((r) => r.prdRevision === handoff.prd.revision)) {
-    throw new HttpError(400, `No review covers PRD v${handoff.prd.revision}`);
+  if (!handoff.reviewSkipped) {
+    for (const r of reviews) {
+      revision(r.prdRevision, 'The reviewed PRD');
+      revision(r.planRevision, 'The reviewed Issue Plan');
+      if (r.prdRevision > handoff.prd.revision || r.planRevision > handoff.plan.revision) {
+        throw new HttpError(400, 'Reviews cannot cover revisions newer than the Proposal');
+      }
+    }
+    const lastRound = Math.max(0, ...reviews.map((r) => r.round));
+    if (!reviews.some((r) => r.round === lastRound && r.prdRevision === handoff.prd.revision && r.planRevision === handoff.plan.revision)) {
+      throw new HttpError(400, `No review covers PRD v${handoff.prd.revision} · Issue Plan v${handoff.plan.revision} in the final round`);
+    }
   }
   return {
     id, ideaId: idea.id, prd: handoff.prd, plan: handoff.plan, reviews,

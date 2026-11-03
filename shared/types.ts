@@ -525,6 +525,7 @@ export interface ProposalReview {
   reviewer: string;
   focus: 'evidence' | 'feasibility';
   prdRevision: number;
+  planRevision: number;
   round: number;
   endorsed: boolean;
   findings: string[];

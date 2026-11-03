@@ -111,6 +111,71 @@ describe('revisions after refinement', () => {
     expect(() => revise(prev, { ...h, reviewSkipped: true })).toThrow(/needs a fresh review cycle/);
   });
 
+  it.each(['requirement', 'brief', 'criterion'] as const)('refuses skipped review when a %s changes without changing plan structure', (field) => {
+    const prev = sentBack(true);
+    const h = demoRevision(prev);
+    if (field === 'requirement') h.prd.body = h.prd.body.replace('The API serves a weekly plan for a team.', 'The API deletes all team data.');
+    if (field === 'brief') h.plan.issues[0].brief = 'Delete all team data.';
+    if (field === 'criterion') h.plan.issues[0].criteria[0] = 'DELETE /team removes all team data';
+    h.reviews = [];
+    expect(() => revise(prev, h)).toThrow(/needs a fresh review cycle/);
+  });
+
+  it.each(['prd', 'plan'] as const)('requires changed %s content to advance its revision', (field) => {
+    const prev = sentBack(false);
+    const h = demoRevision(prev);
+    h[field].revision = prev[field].revision;
+    expect(() => revise(prev, h)).toThrow(/advance.*revision/);
+  });
+
+  it('refuses a substantive revision with the previous pair and reviews', () => {
+    const prev = sentBack(false);
+    const h = demoRevision(prev);
+    h.prd.revision = prev.prd.revision;
+    h.plan.revision = prev.plan.revision;
+    h.reviews = structuredClone(prev.reviews);
+    expect(() => revise(prev, h)).toThrow(/advance.*revision/);
+  });
+
+  it('refuses reused reviews even alongside a new review of the revised PRD', () => {
+    const prev = sentBack(false);
+    const h = demoRevision(prev);
+    h.reviews = [...structuredClone(prev.reviews), ...h.reviews];
+    expect(() => revise(prev, h)).toThrow(/fresh review cycle/);
+  });
+
+  it.each([2, 3])('refuses a substantive review cycle starting at round %s', (round) => {
+    const prev = sentBack(false);
+    const h = demoRevision(prev);
+    h.reviews.forEach((r) => { r.round = round; });
+    expect(() => revise(prev, h)).toThrow(/start at round 1/);
+  });
+
+  it('cannot bypass refinement validation by omitting revises', () => {
+    const prev = sentBack(false);
+    const h = demoRevision(prev);
+    delete h.revises;
+    expect(() => revise(prev, h)).toThrow(/refinement request/);
+  });
+
+  it('requires reviews of the revised plan even when the PRD did not change', () => {
+    const prev = sentBack(false);
+    const h = demoRevision(prev);
+    h.prd = structuredClone(prev.prd);
+    h.reviews.forEach((r) => { r.prdRevision = prev.prd.revision; });
+    expect(revise(prev, h).prd.revision).toBe(prev.prd.revision);
+    h.reviews.forEach((r) => { r.planRevision = prev.plan.revision; });
+    expect(() => revise(prev, h)).toThrow(/fresh review cycle/);
+  });
+
+  it('allows a PRD-only revision with a fresh review of the unchanged plan', () => {
+    const prev = sentBack(false);
+    const h = demoRevision(prev);
+    h.plan = structuredClone(prev.plan);
+    h.reviews.forEach((r) => { r.planRevision = prev.plan.revision; });
+    expect(revise(prev, h).plan.revision).toBe(prev.plan.revision);
+  });
+
   it('only accepts a revision of a refinement request', () => {
     const p = open();
     expect(() => revise(p, { ...demoHandoff(idea.id, floors), revises: p.id })).toThrow(/awaiting a decision/);
@@ -119,24 +184,28 @@ describe('revisions after refinement', () => {
   });
 
   it('treats floors, reuse, dependencies and scope as substance', () => {
-    const plan = demoHandoff(idea.id, floors).plan;
+    const original = demoHandoff(idea.id, floors);
+    const plan = original.plan;
     const copy = () => structuredClone(plan);
     const reworded = copy();
-    reworded.issues[0].title = 'Serve the plan';
-    reworded.issues[0].brief = 'Shorter.';
-    expect(wordingOnly(plan, reworded)).toBe(true);
+    reworded.issues[0].title += '  ';
+    reworded.issues[0].brief += '  ';
+    expect(wordingOnly(original, { ...original, plan: reworded })).toBe(true);
     const changes: ((p: typeof plan) => void)[] = [
       (p) => { p.issues[0].repo = 'demo-co/pixel-todo'; },
       (p) => { p.issues[1].existing = undefined; },
       (p) => { p.issues[2].blockedBy = ['plan-endpoint']; },
       (p) => { p.issues[0].criteria.push('More'); },
+      (p) => { p.issues[0].criteria[0] = 'Delete all data'; },
+      (p) => { p.issues[0].brief = 'Delete all data'; },
+      (p) => { p.issues[0].title = 'Delete all data'; },
       (p) => { p.issues[0].requirement = 'R9'; },
       (p) => { p.issues.pop(); },
     ];
     for (const change of changes) {
       const next = copy();
       change(next);
-      expect(wordingOnly(plan, next)).toBe(false);
+      expect(wordingOnly(original, { ...original, plan: next })).toBe(false);
     }
   });
 });

@@ -4,7 +4,7 @@ import { ideaProposals, ideaStage, newerDraftNote, reviewSummary, targetFloors, 
 
 const idea: IdeaView = { id: 'i1', description: 'Idea', links: [], constraints: '', floorHints: [], status: 'queued', createdAt: 1 };
 const review = (round: number, focus: ProposalReview['focus'], endorsed: boolean, findings: string[] = []): ProposalReview =>
-  ({ reviewer: focus === 'evidence' ? 'Ada' : 'Grace', focus, prdRevision: round, round, endorsed, findings });
+  ({ reviewer: focus === 'evidence' ? 'Ada' : 'Grace', focus, prdRevision: round, planRevision: 4, round, endorsed, findings });
 const proposal = (patch: Partial<ProposalView> = {}): ProposalView => ({
   id: 'p1', ideaId: 'i1', createdAt: 1, prd: { revision: 2, title: 'PRD', body: '' },
   plan: { revision: 4, issues: [

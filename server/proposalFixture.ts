@@ -41,12 +41,12 @@ export function demoHandoff(ideaId: string, floors: { id: string; fullName: stri
       blockedBy: ['plan-endpoint', 'due-dates'] },
   ];
   const reviews: ProposalReview[] = [
-    { reviewer: 'Ada', focus: 'evidence', prdRevision: 1, round: 1, endorsed: false, findings: ['R3 has no evidence teammates follow links from plans.'] },
-    { reviewer: 'Grace', focus: 'feasibility', prdRevision: 1, round: 1, endorsed: false, findings: ['The panel needs the endpoint first; say so in the plan.'] },
-    { reviewer: 'Ada', focus: 'evidence', prdRevision: 2, round: 2, endorsed: true, findings: [] },
-    { reviewer: 'Grace', focus: 'feasibility', prdRevision: 2, round: 2, endorsed: false, findings: ['Two-second load time is untested on the demo API.'] },
-    { reviewer: 'Ada', focus: 'evidence', prdRevision: 3, round: 3, endorsed: true, findings: [] },
-    { reviewer: 'Grace', focus: 'feasibility', prdRevision: 3, round: 3, endorsed: false, findings: ['Two-second load time is still untested; add a cached response or relax the target.'] },
+    { reviewer: 'Ada', focus: 'evidence', prdRevision: 1, planRevision: 2, round: 1, endorsed: false, findings: ['R3 has no evidence teammates follow links from plans.'] },
+    { reviewer: 'Grace', focus: 'feasibility', prdRevision: 1, planRevision: 2, round: 1, endorsed: false, findings: ['The panel needs the endpoint first; say so in the plan.'] },
+    { reviewer: 'Ada', focus: 'evidence', prdRevision: 2, planRevision: 3, round: 2, endorsed: true, findings: [] },
+    { reviewer: 'Grace', focus: 'feasibility', prdRevision: 2, planRevision: 3, round: 2, endorsed: false, findings: ['Two-second load time is untested on the demo API.'] },
+    { reviewer: 'Ada', focus: 'evidence', prdRevision: 3, planRevision: 4, round: 3, endorsed: true, findings: [] },
+    { reviewer: 'Grace', focus: 'feasibility', prdRevision: 3, planRevision: 4, round: 3, endorsed: false, findings: ['Two-second load time is still untested; add a cached response or relax the target.'] },
   ];
   return { ideaId, prd: { revision: 3, title: 'Weekly plan for new teammates', body: PRD_BODY }, plan: { revision: 4, issues }, reviews };
 }
@@ -57,14 +57,16 @@ export function demoRevision(prev: ProposalView): ProposalHandoff {
   const prd = { revision: prev.prd.revision + 1, title: prev.prd.title, body: `${prev.prd.body}\n\n## Revision note\nAddressed the manager's feedback: ${feedback}` };
   const base = { ideaId: prev.ideaId, prd, revises: prev.id };
   if (prev.decision?.wordingOnly) {
-    const issues = prev.plan.issues.map((i) => (i.existing ? i : { ...i, brief: `${i.brief} (Reworded after feedback.)` }));
+    // Cosmetic-only demo: free-text edits conservatively take the substantive path.
+    prd.body = prev.prd.body.replace(/\n/g, '  \r\n');
+    const issues = structuredClone(prev.plan.issues).map((i) => ({ ...i, brief: `${i.brief}  ` }));
     return { ...base, plan: { revision: prev.plan.revision + 1, issues }, reviews: prev.reviews, reviewSkipped: true };
   }
-  const issues = prev.plan.issues.map((i, n) => (n === 0 ? { ...i, criteria: [...i.criteria, `Addresses: ${feedback}`] } : i));
+  const issues = structuredClone(prev.plan.issues).map((i, n) => (n === 0 ? { ...i, criteria: [...i.criteria, `Addresses: ${feedback}`] } : i));
   // A fresh review cycle starts at round one again.
   const reviews: ProposalReview[] = [
-    { reviewer: 'Ada', focus: 'evidence', prdRevision: prd.revision, round: 1, endorsed: true, findings: [] },
-    { reviewer: 'Grace', focus: 'feasibility', prdRevision: prd.revision, round: 1, endorsed: true, findings: [] },
+    { reviewer: 'Ada', focus: 'evidence', prdRevision: prd.revision, planRevision: prev.plan.revision + 1, round: 1, endorsed: true, findings: [] },
+    { reviewer: 'Grace', focus: 'feasibility', prdRevision: prd.revision, planRevision: prev.plan.revision + 1, round: 1, endorsed: true, findings: [] },
   ];
   return { ...base, plan: { revision: prev.plan.revision + 1, issues }, reviews };
 }
