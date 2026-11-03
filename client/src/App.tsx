@@ -27,8 +27,8 @@ export function App() {
   useEffect(() => {
     // Resolve the link before entry so the open panel keeps the pointer free.
     const openIdea = () => {
-      const id = window.location.hash.match(/^#idea\/([a-zA-Z0-9-]+)$/)?.[1];
-      if (id) useStore.getState().openOverlay({ kind: 'manager', tab: 'ideas', ideaId: id });
+      const [, id, prd] = window.location.hash.match(/^#idea\/([a-zA-Z0-9-]+)(?:\/prd\/([a-zA-Z0-9-]+))?$/) ?? [];
+      if (id) useStore.getState().openOverlay({ kind: 'manager', tab: 'ideas', ideaId: id, prd });
     };
     openIdea();
     window.addEventListener('hashchange', openIdea);

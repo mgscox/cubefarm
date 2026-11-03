@@ -854,7 +854,7 @@ export function SettingsTab() {
   );
 }
 
-export function ManagerConsole({ initialTab, initialRepo, initialIdea, onFloor }: { initialTab?: ManagerTab; initialRepo?: string; initialIdea?: string; onFloor?: (floor: number) => void }) {
+export function ManagerConsole({ initialTab, initialRepo, initialIdea, initialPrd, onFloor }: { initialTab?: ManagerTab; initialRepo?: string; initialIdea?: string; initialPrd?: string; onFloor?: (floor: number) => void }) {
   const [tab, setTab] = useState<ManagerTab>(initialTab ?? 'floors');
   useEffect(() => { if (initialIdea) setTab('ideas'); }, [initialIdea]);
   const pending = useStore((s) => pendingRequests(s.requests).length);
@@ -882,7 +882,7 @@ export function ManagerConsole({ initialTab, initialRepo, initialIdea, onFloor }
         {tab === 'ceo' && <CeoTab />}
         {tab === 'team' && <TeamTab />}
         {tab === 'fleet' && <FleetTab />}
-        {tab === 'ideas' && <IdeasTab initialIdea={initialIdea} />}
+        {tab === 'ideas' && <IdeasTab initialIdea={initialIdea} initialPrd={initialPrd} />}
         {tab === 'issues' && <IssuesTab initialRepo={initialRepo} />}
         {tab === 'settings' && <SettingsTab />}
       </div>

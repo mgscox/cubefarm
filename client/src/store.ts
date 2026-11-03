@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CEO_ID, type IdeaView, type IdeaRecordView, type IdeaReviewCycleView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type IdeaView, type IdeaReviewCycleView, type IdeaRecordView, type ProposalView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { appendPhoneMessage } from '../../shared/phone';
 import { hasLabel, issueBlockers, issueReadinessReason, issueWorkNote, NEEDS_HUMAN, NEEDS_REVIEW } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
@@ -13,7 +13,7 @@ export type Overlay =
   | { kind: 'kanban'; repoId: string }
   | { kind: 'app'; repoId: string }
   | { kind: 'elevator' }
-  | { kind: 'manager'; tab?: ManagerTab; repoId?: string; ideaId?: string }
+  | { kind: 'manager'; tab?: ManagerTab; repoId?: string; ideaId?: string; prd?: string } // prd: a Proposal whose PRD revision to show
   | { kind: 'phone'; tab?: PhoneTab; requestId?: string }
   | { kind: 'help' };
 
@@ -60,6 +60,7 @@ interface State {
   research: ResearchInfo;
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
+  proposals: ProposalView[];
   ideaReviews: IdeaReviewCycleView[];
   messages: PhoneMessage[];
   phoneReadAt: number;
@@ -167,6 +168,7 @@ export const useStore = create<State>((set, get) => ({
   research: { queue: [], job: null, done: [] },
   ideas: [],
   ideaRecords: [],
+  proposals: [],
   ideaReviews: [],
   messages: [],
   phoneReadAt: 0,
@@ -220,6 +222,7 @@ export const useStore = create<State>((set, get) => ({
           research: d.research ?? { queue: [], job: null, done: [] },
           ideas: d.ideas ?? [],
           ideaRecords: d.ideaRecords ?? [],
+          proposals: d.proposals ?? [],
           ideaReviews: d.ideaReviews ?? [],
           messages: d.messages,
           phoneReadAt: d.phoneReadAt,
@@ -328,6 +331,9 @@ export const useStore = create<State>((set, get) => ({
         break;
       case 'ideaRecord':
         set({ ideaRecords: [...get().ideaRecords.filter((r) => r.ideaId !== ev.record.ideaId || r.kind !== ev.record.kind || r.id !== ev.record.id), ev.record] });
+        break;
+      case 'proposal':
+        set({ proposals: [...get().proposals.filter((p) => p.id !== ev.proposal.id), ev.proposal] });
         break;
       case 'ideaReview':
         set({ ideaReviews: [...get().ideaReviews.filter((r) => r.ideaId !== ev.review.ideaId), ev.review] });
