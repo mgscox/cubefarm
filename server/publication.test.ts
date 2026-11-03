@@ -538,6 +538,28 @@ describe('cross-floor plans', () => {
     expect(releases).toBe(2);
   });
 
+  it('reconciles a lost release response after the issue closes, then resumes sibling releases on restart', async () => {
+    const edit = tracker.editIssue.bind(tracker);
+    let releases = 0;
+    vi.spyOn(tracker, 'editIssue').mockImplementation(async (repo, number, change) => {
+      await edit(repo, number, change);
+      if (change.removeLabels && ++releases === 1) throw new Error('lost release response');
+    });
+    const view = await publisher.publish(plan());
+    await settle();
+    expect(view.issues[1].step).toBe('releasing');
+    tracker.issues.find((i) => i.repo === REPO && i.number === view.issues[1].number)!.state = 'CLOSED';
+    publisher.stop();
+    records = JSON.parse(disk.at(-1)!);
+    publisher = new Publisher(host);
+    publisher.resumeAll();
+    await settle();
+    expect(records.p1.status).toBe('complete');
+    expect(records.p1.issues.map((i) => i.step)).toEqual(['held', 'released', 'released', 'referenced', 'held']);
+    expect(releases).toBe(2);
+    expect(tracker.issues).toHaveLength(5);
+  });
+
   it('replays wiring after a lost write response and never edits an existing reference', async () => {
     const edit = tracker.editIssue.bind(tracker);
     let lose = true;

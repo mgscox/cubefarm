@@ -154,7 +154,7 @@ export function verifyProblem(plan: PlanIssue, entry: PublishedIssue, got: Track
   if (!got) return `${ref} isn't on GitHub any more.`;
   if (!sameRepo(got.repo, entry.repo) || got.number !== entry.number) return `${ref} answered as ${got.repo}#${got.number}.`;
   if (!got.body.includes(entry.marker)) return `${ref} no longer carries its plan-entry marker.`;
-  if (got.state !== 'OPEN') return `${ref} was closed before its release.`;
+  if (got.state !== 'OPEN' && !(entry.step === 'releasing' && isReleased(plan, got))) return `${ref} was closed before its release.`;
   if (got.title !== heldTitle(plan.title) && got.title !== plan.title) return `${ref} has a different title: "${got.title}".`;
   if (!normalized(got.body).includes(normalized(plan.body))) return `${ref} no longer matches the approved brief.`;
   return null;
@@ -316,6 +316,15 @@ export class Publisher {
 
   /** Preflight, create or find each issue held, verify the whole plan, then release it issue by issue. */
   private async advance(rec: PublicationView) {
+    // A lost release response may already have dispatched and closed the issue. Reconcile before the open backlog.
+    for (const entry of rec.issues.filter((i) => i.step === 'releasing')) {
+      const got = await this.checked(rec, entry);
+      if (isReleased(this.plan(rec, entry), got)) {
+        entry.step = 'released';
+        await this.save(rec);
+        this.host.released(entry.repo, entry.number!);
+      }
+    }
     await this.preflight(rec);
     for (const entry of rec.issues) await this.place(rec, entry);
     // Wire only new issues; reference entries are never mutated, including their reciprocal links.
@@ -371,8 +380,8 @@ export class Publisher {
         if (!got || normalized(got.body) !== normalized(wiredBody(rec, plan))) throw new Error(`${entry.entryId} is not visible to dispatch with its approved links yet.`);
         if (plan.specialty && !got.labels.includes(`swarm:${plan.specialty}`)) throw new Error(`${entry.entryId}'s routing is not visible to dispatch yet.`);
         if (!holdReason(plan)) {
+          if (got.subIssues === null || got.nativeBlockers === null) throw new Error(`${entry.entryId}: dispatch metadata has not loaded yet.`);
           const reason = issueWaitReason({ ...got, title: plan.title, labels: got.labels.filter((l) => l.toLowerCase() !== PUBLICATION_HOLD) }, new Set(visible.map((i) => i.number)));
-          if (reason?.includes('have not loaded')) throw new Error(`${entry.entryId}: ${reason}.`);
           if (reason) throw new PublicationBlock(`${entry.entryId} cannot enter ordinary dispatch: ${reason}. Resolve it or approve a revised proposal.`, 'conflict');
         } else if (got.title !== heldTitle(plan.title) || !got.labels.includes(PUBLICATION_HOLD)) throw new Error(`${entry.entryId}'s hold is not visible to dispatch yet.`);
       }
