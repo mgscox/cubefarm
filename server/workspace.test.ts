@@ -92,7 +92,7 @@ afterAll(async () => {
     else process.env[k] = v;
   }
   await fs.rm(ROOT, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
-});
+}, 60_000); // dozens of git repos: removing them outlasts the default 10s on a busy CI disk
 
 describe('syncMain', { timeout: 60_000 }, () => {
   beforeAll(() => {

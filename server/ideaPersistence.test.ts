@@ -1,14 +1,22 @@
 // Real atomic state writes and startup recovery, using only an isolated file and demo backend.
 import fs from 'node:fs/promises';
-import path from 'node:path';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Swarm } from './swarm.ts';
 import { createDemoBackend, demoIdeaResearch } from './demo.ts';
-import { STATE_FILE } from './config.ts';
+import { HOME_DIR, STATE_FILE } from './config.ts';
 import { RESEARCHER_ID, type IdeaView, type ServerEvent } from '../shared/types.ts';
 import { nextIdeaResearch } from './ideaResearch.ts';
 import type { ResearchJob } from './research.ts';
 import type { SessionResult } from './agentRunner.ts';
+
+// A SWARM_HOME of this file's own: the run's shared one is used by other workers' Swarms (state, terminals), and a
+// late write from a timed-out test must not land outside it once the test is torn down.
+await vi.hoisted(async () => {
+  const [{ mkdtemp }, os, path] = await Promise.all([import('node:fs/promises'), import('node:os'), import('node:path')]);
+  process.env.SWARM_HOME = await mkdtemp(path.join(os.tmpdir(), 'cubefarm-idea-persistence-'));
+});
+// Every step is a real disk write: on a busy CI host a handful can take seconds.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 type Harness = { broadcast(event: ServerEvent): void; writeState(): Promise<void> };
 type ResearchHarness = Harness & {
@@ -19,22 +27,11 @@ type ResearchHarness = Harness & {
   startResearchWork(): void;
   agentRt: Map<string, { generation?: number }>;
 };
-let folder: string;
-let file: string;
+const file = STATE_FILE;
 let swarm: Swarm;
-const read = fs.readFile.bind(fs);
-const write = fs.writeFile.bind(fs);
-const rename = fs.rename.bind(fs);
-const rm = fs.rm.bind(fs);
 
-beforeEach(async () => {
+beforeEach(() => {
   vi.useFakeTimers();
-  folder = await fs.mkdtemp(path.join(process.cwd(), '.idea-test-'));
-  file = path.join(folder, 'demo-state.json');
-  vi.spyOn(fs, 'readFile').mockImplementation((location, ...args) => read(location === STATE_FILE ? file : location, ...args));
-  vi.spyOn(fs, 'writeFile').mockImplementation((location, ...args) => write(location === `${STATE_FILE}.tmp` ? `${file}.tmp` : location, ...args));
-  vi.spyOn(fs, 'rename').mockImplementation((from, to) => rename(from === `${STATE_FILE}.tmp` ? `${file}.tmp` : from, to === STATE_FILE ? file : to));
-  vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
   swarm = new Swarm(createDemoBackend());
 });
 
@@ -43,8 +40,10 @@ afterEach(async () => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
-  await rm(folder, { recursive: true, force: true, maxRetries: 5 });
+  await fs.rm(HOME_DIR, { recursive: true, force: true, maxRetries: 5 });
 });
+
+afterAll(() => fs.rm(HOME_DIR, { recursive: true, force: true, maxRetries: 5 }));
 
 it('acknowledges and broadcasts only after the queued Idea is durable, without creating GitHub issues', async () => {
   const backend = createDemoBackend();
@@ -61,7 +60,7 @@ it('acknowledges and broadcasts only after the queued Idea is durable, without c
   expect(events).toEqual([]);
   release();
   const ideas = await Promise.all(submissions);
-  const saved = JSON.parse(await read(file, 'utf8')) as { ideas: IdeaView[] };
+  const saved = JSON.parse(await fs.readFile(file, 'utf8')) as { ideas: IdeaView[] };
   expect(saved.ideas).toEqual(ideas);
   expect(new Set(ideas.map((idea) => idea.id)).size).toBe(2);
   expect(events).toEqual(ideas.map((idea) => ({ type: 'idea', idea })));
@@ -80,10 +79,10 @@ it('does not acknowledge a failed save and allows the next submission', async ()
 
 it('loads the same identity and queued state at startup and tolerates legacy state without Ideas', async () => {
   const idea = await swarm.submitIdea({ description: 'Survive a restart' });
-  const saved = JSON.parse(await read(file, 'utf8'));
+  const saved = JSON.parse(await fs.readFile(file, 'utf8'));
   const record = { id: 'research-1', ideaId: idea.id, kind: 'research', title: 'Independent evidence', body: 'A source', createdAt: 1 };
   saved.ideaRecords = [record];
-  await write(file, JSON.stringify(saved));
+  await fs.writeFile(file, JSON.stringify(saved));
   const backend = createDemoBackend();
   vi.spyOn(backend, 'listMyRepos').mockResolvedValue([]);
   swarm = new Swarm(backend);
@@ -91,7 +90,7 @@ it('loads the same identity and queued state at startup and tolerates legacy sta
   expect(swarm.snapshot().ideas).toEqual([idea]);
   expect(swarm.snapshot().ideaRecords).toEqual([record]);
   await swarm.shutdown();
-  await write(file, JSON.stringify({ officeHeld: true, settings: { ceoHeartbeatMin: 0 } }));
+  await fs.writeFile(file, JSON.stringify({ officeHeld: true, settings: { ceoHeartbeatMin: 0 } }));
   swarm = new Swarm(backend);
   await swarm.init();
   expect(swarm.snapshot().ideas).toEqual([]);
@@ -134,7 +133,7 @@ it('persists clarification, focused evidence and one lead-authored PRD, then rec
   // A duplicate or stale session completion cannot append another PRD.
   await h.finishIdeaResearch(final.agent, final.job, { structured: final.report, ok: true, text: '', errors: [], turns: 1, costUsd: 0 }, h.agentRt.get(final.agent.id)?.generation);
   expect(swarm.snapshot().ideaRecords).toHaveLength(1);
-  const saved = JSON.parse(await read(file, 'utf8'));
+  const saved = JSON.parse(await fs.readFile(file, 'utf8'));
   expect(saved.research.job).toBeNull();
   expect(saved.ideaRecords).toEqual(done.ideaRecords);
   h.state.officeHeld = true;
@@ -169,7 +168,7 @@ it('keeps an invalid research result inspectable and retryable without saving a 
   expect(swarm.snapshot().ideas[0]).toEqual(before);
   await swarm.retryIdeaResearch(idea.id);
   expect(nextIdeaResearch(swarm.snapshot().ideas, RESEARCHER_ID, 123)).toHaveLength(1);
-  expect(JSON.parse(await read(file, 'utf8')).ideas[0].research.error).toBeUndefined();
+  expect(JSON.parse(await fs.readFile(file, 'utf8')).ideas[0].research.error).toBeUndefined();
 });
 
 it('requeues an interrupted focused research session at restart and keeps its original lead', async () => {
@@ -183,15 +182,15 @@ it('requeues an interrupted focused research session at restart and keeps its or
   const repo = await swarm.connectRepo('demo-co/pixel-todo');
   const specialist = swarm.hireAgent(repo.id, { role: 'researcher' });
   const submitted = await swarm.submitIdea({ description: 'Research survives restart' });
-  const saved = JSON.parse(await read(file, 'utf8'));
+  const saved = JSON.parse(await fs.readFile(file, 'utf8'));
   saved.ideas[0] = { ...submitted, status: 'researching', research: { leadAgentId: RESEARCHER_ID, questions: [], requests: [{ id: 'q1', agentId: specialist.id, question: 'Check feasibility' }] } };
   saved.research.job = { ideaId: submitted.id, requestId: 'q1', agentId: specialist.id, topic: 'Idea research', brief: '', at: 123, requestedBy: 'manager' };
   saved.agents.find((a: { id: string }) => a.id === specialist.id).status = 'working';
   saved.officeHeld = true;
-  await write(file, JSON.stringify(saved));
+  await fs.writeFile(file, JSON.stringify(saved));
   swarm = new Swarm(backend);
   await swarm.init();
-  const recovered = JSON.parse(await read(file, 'utf8'));
+  const recovered = JSON.parse(await fs.readFile(file, 'utf8'));
   expect(recovered.research.queue).toContainEqual(saved.research.job);
   expect(recovered.research.job).toBeNull();
   expect(swarm.snapshot().agents.find((a) => a.id === specialist.id)?.status).toBe('idle');
