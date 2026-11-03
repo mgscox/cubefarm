@@ -510,6 +510,65 @@ describe('cross-floor plans', () => {
     expect(view.issues[0].url).toContain('demo-co');
   });
 
+  it('matches existing references by parsed repo and number, ignoring owner/name casing', () => {
+    const cased = plan();
+    cased.issues[3].existing!.url = 'https://github.com/Demo-Co/API/issues/1';
+    expect(snapshotProblem(cased, true)).toBeNull();
+    for (const url of ['https://github.com/demo-co/app/issues/1', 'https://github.com/demo-co/api/issues/2', 'https://github.com/demo-co/api/pull/1',
+      'https://example.com/demo-co/api/issues/1', 'https://github.com/demo-co/api/issues/1#top', 'https://github.com/demo-co/api/issues/01']) {
+      const changed = plan();
+      changed.issues[3].existing!.url = url;
+      expect(snapshotProblem(changed, true), url).toMatch(/existing reference/);
+    }
+  });
+
+  it('publishes and recovers when the canonical read-back of an existing reference differs only in owner/name casing', async () => {
+    const read = tracker.readIssue.bind(tracker);
+    let available = false;
+    vi.spyOn(tracker, 'readIssue').mockImplementation(async (repo, number) => {
+      const got = await read(repo, number);
+      if (!(repo === OTHER && number === 1)) return got;
+      return available && got ? { ...got, repo: 'Demo-Co/API', url: 'https://github.com/Demo-Co/API/issues/1' } : null;
+    });
+    const snapshot = plan();
+    const existing = structuredClone(tracker.issues[0]);
+    const view = await publisher.publish(snapshot);
+    await settle();
+    expect(view.status).toBe('blocked');
+    expect(view.note).toMatch(/Existing reference existing is unavailable/);
+    expect(tracker.log).not.toContain('create');
+
+    // A restart, then GitHub answers with its canonical casing: the same approval completes.
+    publisher.stop();
+    publisher = new Publisher({ ...makeHost(), floors: () => [REPO, OTHER] });
+    available = true;
+    publisher.resumeAll();
+    await settle(15_000);
+    expect(view.status).toBe('complete');
+    expect(view.snapshot).toEqual(snapshot);
+    expect(view.issues[3]).toMatchObject({ step: 'referenced', url: `https://github.com/${OTHER}/issues/1` });
+    expect(tracker.issues[0]).toEqual(existing);
+    expect(await publisher.publish(snapshot)).toBe(view);
+  });
+
+  it.each([
+    ['another repo', { repo: 'demo-co/web', url: 'https://github.com/demo-co/web/issues/1' }],
+    ['another issue', { number: 2, url: `https://github.com/demo-co/api/issues/2` }],
+    ['another repo in its URL', { url: 'https://github.com/demo-co/web/issues/1' }],
+    ['another issue in its URL', { url: 'https://github.com/Demo-Co/API/issues/2' }],
+  ])('blocks an existing reference that reads back as %s', async (_, change) => {
+    const read = tracker.readIssue.bind(tracker);
+    vi.spyOn(tracker, 'readIssue').mockImplementation(async (repo, number) => {
+      const got = await read(repo, number);
+      return got && repo === OTHER && number === 1 ? { ...got, ...change } : got;
+    });
+    const view = await publisher.publish(plan());
+    await settle(15_000);
+    expect(view.status).toBe('blocked');
+    expect(view.note).toMatch(/changed target/);
+    expect(tracker.log).not.toContain('create');
+  });
+
   it('accepts an existing blocker that closes during access recovery without changing it', async () => {
     const create = tracker.createIssue.bind(tracker);
     let refuse = true;

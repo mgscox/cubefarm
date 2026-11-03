@@ -45,6 +45,11 @@ export const heldTitle = (title: string) => `${DRAFT_PREFIX}${title}`;
 export const publishedBody = (issue: PlanIssue, marker: string) => `${issue.body.trim()}\n\n${marker}`;
 export const issueLabels = (issue: PlanIssue) => [PUBLICATION_HOLD, ...(issue.specialty ? [`swarm:${issue.specialty}`] : [])];
 const sameRepo = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+/** Whether a GitHub issue URL names this repo and issue. GitHub owner/name are case-insensitive. */
+const isIssueUrl = (url: unknown, repo: string, number: number) => {
+  const m = typeof url === 'string' ? /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/([1-9]\d*)$/.exec(url) : null;
+  return !!m && sameRepo(m[1], repo) && Number(m[2]) === number;
+};
 const normalized = (text: string) => text.replace(/\r\n/g, '\n').trim();
 
 /** Why an approved snapshot can't be published (null: it can). */
@@ -90,7 +95,7 @@ export function snapshotProblem(input: unknown, fixtures: boolean): string | nul
     if (i.existing !== undefined && (!i.existing || typeof i.existing !== 'object' || Array.isArray(i.existing))) return `Invalid existing reference on ${i.entryId}.`;
     if (i.existing) {
       const ref = `${i.repo.toLowerCase()}#${i.existing.number}`;
-      if (!Number.isInteger(i.existing.number) || i.existing.number < 1 || i.existing.url !== `https://github.com/${i.repo}/issues/${i.existing.number}` || refs.has(ref)) return `Invalid or duplicate existing reference on ${i.entryId}.`;
+      if (!Number.isInteger(i.existing.number) || i.existing.number < 1 || !isIssueUrl(i.existing.url, i.repo, i.existing.number) || refs.has(ref)) return `Invalid or duplicate existing reference on ${i.entryId}.`;
       if (i.parent || i.tracking || i.blockedBy?.length) return `Existing reference ${i.entryId} must remain untouched.`;
       refs.add(ref);
     }
@@ -421,7 +426,7 @@ export class Publisher {
     }
     for (const plan of rec.snapshot.issues.filter((i) => i.existing)) {
       const got = await this.host.tracker.readIssue(plan.repo, plan.existing!.number);
-      if (!got || !sameRepo(got.repo, plan.repo) || got.number !== plan.existing!.number || got.url !== plan.existing!.url) throw new PublicationBlock(`Existing reference ${plan.entryId} is unavailable or changed target. Restore access or approve a revised proposal.`, 'access');
+      if (!got || !sameRepo(got.repo, plan.repo) || got.number !== plan.existing!.number || !isIssueUrl(got.url, plan.repo, plan.existing!.number)) throw new PublicationBlock(`Existing reference ${plan.entryId} is unavailable or changed target. Restore access or approve a revised proposal.`, 'access');
     }
     for (const b of rec.snapshot.issues.flatMap((i) => i.blockedBy ?? [])) {
       if (!('repo' in b)) continue;
