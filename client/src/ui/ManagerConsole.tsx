@@ -694,7 +694,7 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
 
 // ---------- settings ----------
 
-export function SettingsTab() {
+function SettingsTab() {
   const office = useStore((s) => s.officeLifecycle);
   const [officeBusy, setOfficeBusy] = useState(false);
   const changeOffice = async () => {
