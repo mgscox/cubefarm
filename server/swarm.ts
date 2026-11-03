@@ -25,6 +25,8 @@ import { fixGoesTo, prepFailure, prepHeld, PREP_HOLD_MS } from './handOut.ts';
 import { HttpError } from './httpError.ts';
 import { queuedIdea } from './ideas.ts';
 import { IDEA_RESEARCH_PROMPT, IDEA_RESEARCH_SCHEMA, nextIdeaResearch, parseIdeaResearch, renderIdeaPrd, validateIdeaReport } from './ideaResearch.ts';
+import { demoProposalRecords, demoReview, isReviewFixture } from './demoIdeaReview.ts';
+import { currentRound, nextStep, pickReviewers, promote, recordReview, REVIEW_FOCUSES, reviseRound, startReview } from '../shared/ideaReview.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
@@ -56,6 +58,7 @@ import type {
   HireRequestView,
   IdeaView,
   IdeaRecordView,
+  IdeaReviewCycleView,
   IssueInfo,
   NoWorkEnding,
   LogLine,
@@ -202,6 +205,7 @@ interface Persisted {
   research: ResearchState;
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
+  ideaReviews: IdeaReviewCycleView[];
   messages: PhoneMessage[];
   phoneReadAt: number;
   telegram: TelegramState;
@@ -363,6 +367,9 @@ const TERMINALS_DIR = path.join(HOME_DIR, 'terminals');
 const terminalFile = (agentId: string) => path.join(TERMINALS_DIR, `${agentId}.ansi`);
 const TERMINAL_SAVE_MS = 20_000;
 
+// Scripted demo reviewers take a moment per verdict or revision, so the rounds can be watched.
+const IDEA_REVIEW_STEP_MS = 2500;
+
 // ---------- QA report ----------
 
 const QA_SCHEMA: Record<string, unknown> = {
@@ -466,6 +473,7 @@ export class Swarm {
     research: { queue: [], job: null, done: [] },
     ideas: [],
     ideaRecords: [],
+    ideaReviews: [],
     messages: [],
     phoneReadAt: 0,
     telegram: emptyTelegram(),
@@ -614,6 +622,7 @@ export class Swarm {
         research: { ...this.state.research, ...loaded.research },
         ideas: loaded.ideas ?? [],
         ideaRecords: loaded.ideaRecords ?? [],
+        ideaReviews: loaded.ideaReviews ?? [],
         messages: loaded.messages ?? [],
         phoneReadAt: loaded.phoneReadAt ?? 0,
         telegram: loaded.telegram ?? emptyTelegram(),
@@ -744,6 +753,7 @@ export class Swarm {
         this.broadcast({ type: 'clis', clis });
       })
       .catch((err) => console.warn('could not look for agent CLIs', err));
+    for (const r of this.state.ideaReviews) this.scheduleIdeaReview(r.ideaId);
     this.save();
     await this.refreshOfficeLifecycle().catch((err) => console.warn('could not save closing office state', err));
     setTimeout(() => this.schedule(), 1000);
@@ -905,6 +915,7 @@ export class Swarm {
       research: this.researchInfo(),
       ideas: this.state.ideas,
       ideaRecords: this.state.ideaRecords,
+      ideaReviews: this.state.ideaReviews,
       messages: this.state.messages.slice(-100),
       phoneReadAt: this.state.phoneReadAt,
       telegram: this.telegram.view(),
@@ -1070,6 +1081,70 @@ export class Swarm {
       if (!idea.research?.error) throw new HttpError(409, 'This Idea has no failed research to retry');
       delete idea.research.error;
     });
+  }
+
+  // ---------- idea reviews ----------
+
+  private ideaReviewTimers = new Map<string, NodeJS.Timeout>();
+
+  /** Demo only: puts a fixture PRD and Issue Plan on an Idea and has two scripted reviewers take it through review. */
+  async demoIdeaReview(ideaId: string, fixture: unknown): Promise<IdeaReviewCycleView> {
+    if (!this.backend.demo) throw new HttpError(404, 'Demo fixtures are only available in the demo office');
+    if (!isReviewFixture(fixture)) throw new HttpError(400, 'fixture must be "agree" or "disagree"');
+    if (!this.state.ideas.some((i) => i.id === ideaId)) throw new HttpError(404, 'No such Idea');
+    const reviewers = pickReviewers(RESEARCHER_ID, this.state.agents);
+    if (!reviewers) throw new HttpError(409, 'Reviewing a PRD takes two agents besides the lead researcher');
+    const cycle: IdeaReviewCycleView = { ...startReview(ideaId, RESEARCHER_ID, reviewers, 1, 1), fixture };
+    // Serialized with research so a session starting on the same Idea can't overwrite the review.
+    await this.updateIdea(ideaId, (idea, records) => {
+      if (this.state.ideaReviews.some((r) => r.ideaId === ideaId)) throw new HttpError(409, 'This Idea already has a proposal under review');
+      if (idea.status !== 'queued' && idea.status !== 'researched') throw new HttpError(409, 'This Idea is being researched; try again when its PRD is ready');
+      records.push(...demoProposalRecords(idea, 1, Date.now()));
+      this.state.ideaReviews.push(cycle);
+      idea.status = 'reviewing';
+    }).catch((err) => {
+      this.state.ideaReviews = this.state.ideaReviews.filter((r) => r !== cycle);
+      throw err;
+    });
+    this.broadcast({ type: 'ideaReview', review: cycle });
+    this.scheduleIdeaReview(ideaId);
+    return cycle;
+  }
+
+  private scheduleIdeaReview(ideaId: string) {
+    const cycle = this.state.ideaReviews.find((r) => r.ideaId === ideaId);
+    if (!cycle?.fixture || !this.backend.demo || nextStep(cycle) === 'done' || this.ideaReviewTimers.has(ideaId)) return;
+    this.ideaReviewTimers.set(ideaId, setTimeout(() => {
+      this.ideaReviewTimers.delete(ideaId);
+      this.stepIdeaReview(ideaId);
+    }, IDEA_REVIEW_STEP_MS));
+  }
+
+  /** One move of a scripted review: a reviewer's verdict, the lead's revision, or the handoff to the manager. */
+  private stepIdeaReview(ideaId: string) {
+    const index = this.state.ideaReviews.findIndex((r) => r.ideaId === ideaId);
+    const idea = this.state.ideas.find((i) => i.id === ideaId);
+    let cycle = this.state.ideaReviews[index];
+    if (!cycle?.fixture || !idea) return;
+    const round = currentRound(cycle);
+    const step = nextStep(cycle);
+    if (step === 'wait') {
+      const focus = REVIEW_FOCUSES.find((f) => !round.reviews.some((r) => r.focus === f))!;
+      cycle = recordReview(cycle, { focus, reviewer: cycle.reviewers[focus], prdRevision: round.prdRevision, ...demoReview(cycle.fixture, focus, round.round), at: Date.now() });
+    } else if (step === 'revise') {
+      const records = demoProposalRecords(idea, round.prdRevision + 1, Date.now());
+      this.state.ideaRecords.push(...records);
+      for (const record of records) this.broadcast({ type: 'ideaRecord', record });
+      cycle = reviseRound(cycle, round.prdRevision + 1, round.planRevision + 1);
+    } else if (step === 'promote') {
+      cycle = promote(cycle, Date.now());
+      idea.status = 'proposed';
+      this.broadcast({ type: 'idea', idea });
+    } else return;
+    this.state.ideaReviews[index] = cycle;
+    this.broadcast({ type: 'ideaReview', review: cycle });
+    this.save();
+    this.scheduleIdeaReview(ideaId);
   }
 
   // ---------- lookups ----------
@@ -1909,6 +1984,7 @@ export class Swarm {
     this.handoffRetry = null;
     await this.managerCommands;
     await this.ideaSubmissions;
+    for (const t of this.ideaReviewTimers.values()) clearTimeout(t);
     await this.writeState().catch((err) => console.warn('could not save the state', err));
     await this.backend.releaseClis(restart); // before the terminals are saved: whatever they print next waits in the keeper
     for (const c of this.boxConns.values()) c.close();
