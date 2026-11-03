@@ -1,5 +1,5 @@
 import { useStore } from './store';
-import type { IdeaInput, IdeaView, IdeaReviewCycleView, ProposalDecisionInput, ProposalView, AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
+import type { IdeaInput, IdeaReviewCycleView, IdeaView, IssuePlanView, ProposalDecisionInput, ProposalView, AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
 
 import type { ManagerMcpSettingsPatch, ManagerMcpSettingsView } from '../../shared/types';
 
@@ -30,6 +30,7 @@ export const api = {
   submitIdea: (input: IdeaInput) => call<IdeaView>('POST', '/api/ideas', input),
   replyToIdea: (id: string, answer: string) => call<IdeaView>('POST', `/api/ideas/${encodeURIComponent(id)}/reply`, { answer }),
   retryIdeaResearch: (id: string) => call<IdeaView>('POST', `/api/ideas/${encodeURIComponent(id)}/retry`),
+  draftDemoIssuePlan: (ideaId: string) => call<IssuePlanView>('POST', `/api/ideas/${encodeURIComponent(ideaId)}/plans/demo`),
   decideProposal: (id: string, decision: ProposalDecisionInput) => call<ProposalView>('POST', `/api/proposals/${encodeURIComponent(id)}/decision`, decision),
   seedDemoProposal: (ideaId: string) => call<ProposalView>('POST', `/api/ideas/${encodeURIComponent(ideaId)}/proposals/demo`),
   demoIdeaReview: (ideaId: string, fixture: 'agree' | 'disagree') => call<IdeaReviewCycleView>('POST', `/api/ideas/${encodeURIComponent(ideaId)}/demo-review`, { fixture }),
@@ -108,5 +109,5 @@ export const api = {
   approveRequest: (id: string, overrides: { name?: string; model?: string; effort?: string } = {}) => call('POST', `/api/requests/${id}/approve`, overrides),
   rejectRequest: (id: string, note?: string) => call('POST', `/api/requests/${id}/reject`, { note }),
   retryPublication: (proposalId: string) => call('POST', `/api/publications/${encodeURIComponent(proposalId)}/retry`),
-  demoPublication: (fault: '' | 'lost-create' | 'refused') => call('POST', '/api/publications/demo', { fault }),
+  demoPublication: (fault: '' | 'lost-create' | 'refused' | 'blocked') => call('POST', '/api/publications/demo', { fault }),
 };

@@ -35,6 +35,11 @@ try {
   }
   console.log(`repo skills verified: ${packed.skills.length}`);
 
+  const specialism = path.join('docs', 'specialisms', 'developer.md');
+  if (!fs.readFileSync(path.join(installed, specialism)).equals(fs.readFileSync(path.join(root, specialism)))) {
+    throw new Error('npm package developer specialism differs from the checkout');
+  }
+
   const bin = path.join(installed, 'bin', 'cubefarm.js');
   server = spawn(process.execPath, [bin, '--demo', '--no-open', '--port', String(PORT)], {
     env: { ...process.env, SWARM_HOME: path.join(tmp, 'home') },

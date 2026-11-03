@@ -17,6 +17,11 @@ vi.mock('./clis.ts', async (importOriginal) => ({
   ...await importOriginal<typeof import('./clis.ts')>(),
   commandFor: vi.fn(() => ({ file: 'fake-agent', args: [] })),
 }));
+// Skill staging needs a real Git desk and filesystem. repoSkills.test.ts exercises it separately.
+vi.mock('./repoSkills.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./repoSkills.ts')>(),
+  stageCodexSkills: vi.fn(),
+}));
 vi.mock('./ptyClient.ts', async (importOriginal) => ({
   ...await importOriginal<typeof import('./ptyClient.ts')>(),
   terminalsAvailable: true,

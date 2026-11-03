@@ -85,6 +85,8 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
 - `research.ts`: researchers' prompts, branches and briefs. The lobby researcher (always present) takes briefs into
   the company research folder (`<SWARM_HOME>/research`, local git) or a floor's `docs/research/`; floor researchers take
   `swarm:research` issues. Research PRs skip QA.
+- `issuePlan.ts`: an Idea's Issue Plan drafted from a PRD revision: pure checks, reuse of open issues, cycle rejection.
+  `planFixture.ts` is the demo's PRD and draft (`POST /api/ideas/:id/plans/demo`, demo only).
 - `publication.ts`: publishing an approved Proposal's Issue Plan (Ideas): the recorded approval and progress persisted
   before GitHub writes, issues created held (`[Draft] ` title + `held-for-publication`) with a plan-entry marker, read
   back, then released; retries and restarts find a lost create by its marker. The demo's fixture approval is refused elsewhere.

@@ -13,6 +13,15 @@ const STEP: Record<PublishedStep, string> = {
   verified: 'verified, releasing',
   released: 'released to the floor',
 };
+/** The approved prerequisites of a plan entry, as issue links where publication recorded them. */
+function blockers(p: PublicationView, entryId: string) {
+  const plan = p.snapshot.issues.find((i) => i.entryId === entryId);
+  return (plan?.blockedBy ?? []).map((b) => {
+    if ('repo' in b) return `${b.repo}#${b.number}`;
+    const dep = p.issues.find((i) => i.entryId === b.entryId);
+    return dep?.number != null ? `${dep.repo}#${dep.number}` : b.entryId;
+  }).join(', ');
+}
 const time = (t: number) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 export function PublicationsCard() {
@@ -20,7 +29,7 @@ export function PublicationsCard() {
   const demo = useStore((s) => s.demo);
   const [busy, setBusy] = useState(false);
   if (!demo && publications.length === 0) return null;
-  const seed = (fault: '' | 'lost-create' | 'refused') => {
+  const seed = (fault: '' | 'lost-create' | 'refused' | 'blocked') => {
     setBusy(true);
     void api.demoPublication(fault).catch(() => undefined).finally(() => setBusy(false));
   };
@@ -34,6 +43,7 @@ export function PublicationsCard() {
             <button className="btn btn-small" disabled={busy} onClick={() => seed('')}>Publish sample</button>
             <button className="btn btn-small" disabled={busy} onClick={() => seed('lost-create')}>…lose the create response</button>
             <button className="btn btn-small" disabled={busy} onClick={() => seed('refused')}>…refuse writes for 20 s</button>
+            <button className="btn btn-small" disabled={busy} onClick={() => seed('blocked')}>…waiting on another floor's issue</button>
           </div>
         </>
       )}
@@ -56,6 +66,7 @@ export function PublicationsCard() {
                     i.repo
                   )}{' '}
                   · {STEP[i.step]}
+                  {blockers(p, i.entryId) && <span className="muted"> · waits for {blockers(p, i.entryId)}</span>}
                 </div>
               ))}
               {p.note && <div className="muted small">{p.needsManager ? '⚠ ' : ''}{p.note}</div>}

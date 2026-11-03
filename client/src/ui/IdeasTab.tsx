@@ -6,6 +6,7 @@ import { ideaProposals, ideaStage } from '../proposals';
 import { FOCUS_LABEL, REVIEW_FOCUSES } from '../../../shared/ideaReview';
 import { prdLinkTarget, reviewProgress, verdictText } from '../ideas';
 import { useStore } from '../store';
+import { IssuePlanSection } from './IssuePlan';
 import { Markdown } from './Markdown';
 import { PrdView, ProposalCard } from './ProposalCard';
 
@@ -137,6 +138,7 @@ export function IdeaDetail({ idea, records, proposals = [], prd, onLinkedIdea }:
           void api.retryIdeaResearch(idea.id).catch(() => undefined).finally(() => setBusy(false));
         }}>Retry research</button>}</div>}
       </section>}
+      <IssuePlanSection ideaId={idea.id} archived={idea.status === 'archived'} />
       {cycle && <IdeaReview cycle={cycle} />}
       {!cycle && !latest && demo && (idea.status === 'queued' || idea.status === 'researched') && <DemoReviewFixture ideaId={idea.id} />}
       <h4>Research, reviews & proposals</h4>

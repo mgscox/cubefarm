@@ -457,10 +457,11 @@ export interface TrackedIssue {
   body: string;
   labels: string[];
   state: 'OPEN' | 'CLOSED';
+  stateReason?: string | null; // GitHub's state_reason: completed, not_planned, duplicate, reopened or null
 }
 
 interface RestIssue {
-  number: number; title: string; body: string | null; html_url: string; state: string; labels: ({ name: string } | string)[]; pull_request?: unknown;
+  number: number; title: string; body: string | null; html_url: string; state: string; state_reason?: string | null; labels: ({ name: string } | string)[]; pull_request?: unknown;
 }
 
 const trackedIssue = (raw: RestIssue): TrackedIssue => ({
@@ -471,6 +472,7 @@ const trackedIssue = (raw: RestIssue): TrackedIssue => ({
   body: raw.body ?? '',
   labels: raw.labels.map((l) => (typeof l === 'string' ? l : l.name)),
   state: raw.state.toUpperCase() === 'OPEN' ? 'OPEN' : 'CLOSED',
+  stateReason: raw.state_reason ?? null,
 });
 
 export interface IssueAccess {
