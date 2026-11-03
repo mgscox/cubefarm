@@ -19,6 +19,7 @@ async function withOffice(branch: string, use: (url: string) => Promise<void>, s
   try {
     await Promise.all([
       cp(path.join(root, 'dist-server'), path.join(folder, 'dist-server'), { recursive: true }),
+      cp(path.join(root, 'docs', 'specialisms'), path.join(folder, 'docs', 'specialisms'), { recursive: true }),
       cp(path.join(root, 'package.json'), path.join(folder, 'package.json')),
       symlink(path.join(root, 'dist'), path.join(folder, 'dist'), 'junction'),
       symlink(path.join(root, 'node_modules'), path.join(folder, 'node_modules'), 'junction'),
