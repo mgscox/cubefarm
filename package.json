@@ -29,6 +29,7 @@
     "bin",
     "dist",
     "dist-server",
+    "docs/specialisms/developer.md",
     "skills"
   ],
   "engines": {

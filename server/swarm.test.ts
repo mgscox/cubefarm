@@ -1,3 +1,4 @@
+import syncFs from 'node:fs';
 import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { CommandError, ghJson, run } from './exec.ts';
@@ -3318,6 +3319,28 @@ describe('fixes across office restarts', () => {
     s.recover([dev]);
     expect(message).toHaveBeenCalledExactlyOnceWith('a1', expect.stringContaining('fixing PR #45 after QA round 2'));
     expect(message.mock.calls[0][1]).toContain('git push origin HEAD:swarm/issue-12-ada');
+  });
+});
+
+describe('developer specialism', () => {
+  it('reads the current playbook for issue and repair prompts, separately from the job brief', () => {
+    const read = vi.spyOn(syncFs, 'readFileSync').mockReturnValueOnce('First playbook').mockReturnValueOnce('Edited playbook');
+    Object.assign(repo, { links: [], defaultBranch: 'main' });
+    const a = Object.assign(s.state.agents[0], { brief: 'Project-specific ownership' });
+    const p = s as unknown as Record<string, (...args: unknown[]) => string>;
+
+    const issuePrompt = p.buildSystemAppend(a, repo, '/desk', 'swarm/issue-1-ada');
+    const fixPrompt = p.buildSystemAppend(a, repo, '/desk', 'swarm/13', { pr: 13, headRef: 'swarm/13' });
+    const qaPrompt = p.buildQaSystemAppend(a, repo, '/desk', 'qa/pr-13-ada', { number: 13, title: 'Chaser', headRefName: 'swarm/13', url: '' });
+
+    const playbook = new URL('../docs/specialisms/developer.md', import.meta.url);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(read).toHaveBeenCalledWith(playbook, 'utf8');
+    expect(issuePrompt).toContain('First playbook');
+    expect(issuePrompt).toContain('Project-specific ownership');
+    expect(fixPrompt).toContain('Edited playbook');
+    expect(fixPrompt).not.toContain('First playbook');
+    expect(qaPrompt).not.toContain('playbook');
   });
 });
 

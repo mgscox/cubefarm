@@ -1,3 +1,4 @@
+import syncFs from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -305,6 +306,7 @@ const MAX_DESKS: Record<AgentRole, number> = { dev: 12, qa: 3, ceo: 1, researche
 // A floor's researchers sit at developer desks: the two share the floor's desk slots.
 const deskPool = (role: AgentRole) => (role === 'researcher' ? 'dev' : role);
 const ROLE_TITLE: Record<AgentRole, string> = { dev: 'Developer', qa: 'QA tester', ceo: 'CEO', researcher: 'Researcher' };
+const DEVELOPER_SPECIALISM = new URL('../docs/specialisms/developer.md', import.meta.url);
 const MAX_QA_ROUNDS = 3;
 // Every agent runs Claude Opus 5.5 at medium effort unless the manager overrides it.
 const DEFAULT_MODEL = 'claude-opus-5-5';
@@ -2720,12 +2722,21 @@ export class Swarm {
 
   private buildSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, fixing?: { pr: number; headRef: string }) {
     if (a.role === 'researcher' && !fixing) return this.researcherSystemAppend(a, { kind: 'floor', repo: repo.fullName, defaultBranch: repo.defaultBranch, summary: repo.summary, mission: repo.mission, cwd, branch, autoMerge: repo.autoMerge });
+    let specialism = '';
+    if (a.role === 'dev') {
+      try {
+        specialism = syncFs.readFileSync(DEVELOPER_SPECIALISM, 'utf8').trim();
+      } catch (err) {
+        console.warn('could not read the developer specialism', err);
+      }
+    }
     const linked = this.linkedRepos(repo).map((r) => `- ${r.fullName}: read-only reference clone at ${this.machineFor(a).mainDir(r.fullName)}`);
     const push = fixing ? `git push origin HEAD:${fixing.headRef}` : `git push -u origin ${branch}`;
     return [
       `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a software engineer'} on an autonomous agent team ("cubefarm"). Several teammates work in parallel on other issues of the same repository, each in their own git worktree. Nobody is watching live to answer questions, so make sensible decisions yourself and record assumptions in the PR description. The manager may occasionally send you messages; follow their instructions.`,
       `Every pull request is reviewed and tested by a QA teammate. ${repo.autoMerge ? "Once they sign off and GitHub's checks pass, the office merges it by itself" : 'Once they sign off, the manager merges it'}. If they find problems, or checks fail, or it conflicts with the default branch, you will get the details; fix them on the same branch.`,
       a.brief ? `\nYour job description:\n${a.brief}` : '',
+      specialism ? `\n${specialism}` : '',
       '',
       `Repository: ${repo.fullName} (default branch: ${repo.defaultBranch})`,
       repo.summary ? `Project: ${repo.summary}` : '',
