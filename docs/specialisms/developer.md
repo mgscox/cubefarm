@@ -32,6 +32,7 @@ Use `cubefarm-tdd` when a focused test can capture a regression or prove new beh
 ## 3. Check
 
 - Use `cubefarm-verification-before-completion` to gather fresh evidence for the current diff. If unavailable, run the relevant checks directly. Record the commands, what they proved, and what remains unverified. Follow the desk brief and repository guidance for required checks.
+- If Chrome or Playwright hits a proxy error, blank page, or navigation timeout on a local or LAN preview, read `cubefarm-browser-proxy-resolve`. Confirm the route from the browser host and rerun the affected browser check before handing off.
 - Use `cubefarm-code-review` to review the diff against the issue and the repo's conventions. If unavailable, perform that review directly. Keep review feedback in the session and address it before hand-off.
 - Use `cubefarm-humanizer` if available and useful to make the hand-off easy to read. Preserve the evidence, caveats, and exact issue reference.
 

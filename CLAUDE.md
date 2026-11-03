@@ -33,6 +33,11 @@ It ships on npm as `cubefarm` (`npx cubefarm`); it used to be called Office Swar
   and instructions, not in enforcement: don't add hooks, permission rules or sandboxes that refuse tool calls.
   `ANTHROPIC_*` / `CLAUDE_*` are stripped from agent and preview env.
 
+## Browser test failures
+
+When Chrome or Playwright gets a proxy error, blank page, or timeout loading a local or LAN preview, read
+[cubefarm-browser-proxy-resolve](skills/cubefarm-browser-proxy-resolve/SKILL.md) before retrying or recording a QA verdict.
+
 ## Scripts
 
 | Command | What it does |
