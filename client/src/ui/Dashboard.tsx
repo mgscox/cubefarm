@@ -103,7 +103,7 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
     if (view === 'settings' || next === 0) setView('agents');
   };
 
-  const goToPhoneFloor = (next: number) => {
+  const visitFloor = (next: number) => {
     selectFloor(next);
     setView('agents');
     useStore.getState().openOverlay(null);
@@ -164,7 +164,7 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
           <p className="dashboard-empty">No agents on this floor yet.</p>
         )}
       </main>
-      <Overlays onPhoneFloor={goToPhoneFloor} />
+      <Overlays onFloor={visitFloor} />
     </div>
   );
 }

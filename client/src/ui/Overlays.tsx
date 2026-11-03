@@ -182,14 +182,14 @@ function Help() {
   );
 }
 
-export function Overlays({ onPhoneFloor }: { onPhoneFloor?: (floor: number) => void }) {
+export function Overlays({ onFloor }: { onFloor?: (floor: number) => void }) {
   const overlay = useStore((s) => s.overlay);
   if (!overlay) return null;
   switch (overlay.kind) {
     case 'terminal':
-      return overlay.agentId === CEO_ID ? <ManagerConsole initialTab="ceo" /> : overlay.agentId === RESEARCHER_ID ? <ResearchDesk /> : <TerminalView agentId={overlay.agentId} />;
+      return overlay.agentId === CEO_ID ? <ManagerConsole initialTab="ceo" onFloor={onFloor} /> : overlay.agentId === RESEARCHER_ID ? <ResearchDesk /> : <TerminalView agentId={overlay.agentId} />;
     case 'phone':
-      return <Phone tab={overlay.tab} requestId={overlay.requestId} onFloor={onPhoneFloor} />;
+      return <Phone tab={overlay.tab} requestId={overlay.requestId} onFloor={onFloor} />;
     case 'kanban':
       return <KanbanView repoId={overlay.repoId} />;
     case 'app':
@@ -197,7 +197,7 @@ export function Overlays({ onPhoneFloor }: { onPhoneFloor?: (floor: number) => v
     case 'elevator':
       return <ElevatorPanel />;
     case 'manager':
-      return <ManagerConsole initialTab={overlay.tab} initialRepo={overlay.repoId} initialIdea={overlay.ideaId} />;
+      return <ManagerConsole initialTab={overlay.tab} initialRepo={overlay.repoId} initialIdea={overlay.ideaId} onFloor={onFloor} />;
     case 'help':
       return <Help />;
   }
