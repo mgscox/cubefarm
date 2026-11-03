@@ -39,7 +39,21 @@ function PhoneButton() {
   );
 }
 
-export function HUD() {
+export function Toasts() {
+  const toasts = useStore((s) => s.toasts);
+  const dismiss = useStore((s) => s.dismissToast);
+  return (
+    <div className="toasts">
+      {toasts.map((t) => (
+        <div key={t.id} className={`toast toast-${t.level}`} onClick={() => dismiss(t.id)}>
+          {t.text}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function HUD({ onDashboard }: { onDashboard: () => void }) {
   const floor = useStore((s) => s.floor);
   const repos = useStore((s) => s.repos);
   const agents = useStore((s) => s.agents);
@@ -56,8 +70,6 @@ export function HUD() {
   const locked = useStore((s) => s.locked);
   const started = useStore((s) => s.started);
   const travel = useStore((s) => s.travel);
-  const toasts = useStore((s) => s.toasts);
-  const dismiss = useStore((s) => s.dismissToast);
 
   const repo = floor === 0 ? null : repoOnFloor(repos, floor);
   const running = useMemo(() => Object.values(agents).filter((a) => a.status === 'working' || a.status === 'preparing').length, [agents]);
@@ -80,6 +92,7 @@ export function HUD() {
       </div>
 
       <div className="hud-status">
+        {started && <button className="btn btn-small" disabled={!connected || !!travel} onClick={onDashboard}>Dashboard</button>}
         {demo && <span className="pill pill-demo">DEMO</span>}
         <span className={`pill ${connected ? 'pill-ok' : restarting ? 'pill-demo' : 'pill-bad'}`}>{connected ? '● live' : restarting ? '○ restarting' : '○ reconnecting'}</span>
         <span className="pill">
@@ -114,13 +127,6 @@ export function HUD() {
           </div>
         )}
         <PhoneButton />
-      </div>
-      <div className="toasts">
-        {toasts.map((t) => (
-          <div key={t.id} className={`toast toast-${t.level}`} onClick={() => dismiss(t.id)}>
-            {t.text}
-          </div>
-        ))}
       </div>
     </div>
   );

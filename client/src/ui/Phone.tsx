@@ -325,9 +325,8 @@ function useCompany() {
   }, [repos, agents, qa, requests, settings, info]);
 }
 
-function Company() {
+function Company({ onFloor }: { onFloor: (floor: number) => void }) {
   const c = useCompany();
-  const goToFloor = useStore((s) => s.goToFloor);
   const tiles: [string, string | number, string][] = [
     ['🏢', c.floors.length, c.floors.length === 1 ? 'project' : 'projects'],
     ['📋', c.issues, 'open issues'],
@@ -365,7 +364,7 @@ function Company() {
               <b className="proj-name">{f.repo.fullName.split('/')[1]}</b>
               <div className="muted small proj-sum">{f.repo.summary || f.repo.description || f.repo.fullName}</div>
             </div>
-            <button className="btn btn-small" onClick={() => goToFloor(f.repo.floor)}>
+            <button className="btn btn-small" onClick={() => onFloor(f.repo.floor)}>
               Go
             </button>
           </div>
@@ -388,7 +387,7 @@ function Company() {
             <b className="proj-name">Lobby</b>
             <div className="muted small proj-sum">Manager's office and the CEO</div>
           </div>
-          <button className="btn btn-small" onClick={() => goToFloor(0)}>
+          <button className="btn btn-small" onClick={() => onFloor(0)}>
             Go
           </button>
         </div>
@@ -407,7 +406,7 @@ const waitingNow = () => {
   return pendingRequests(s.requests).length + unreadMessages(s.messages, s.phoneReadAt);
 };
 
-export function Phone({ tab: initialTab, requestId }: { tab?: PhoneTab; requestId?: string }) {
+export function Phone({ tab: initialTab, requestId, onFloor }: { tab?: PhoneTab; requestId?: string; onFloor?: (floor: number) => void }) {
   const [tab, setTab] = useState<PhoneTab>(() =>
     resumeGames && !requestId && waitingNow() <= resumeGames.waiting ? 'games' : (initialTab ?? (requestId ? 'hires' : 'chat')),
   );
@@ -423,6 +422,7 @@ export function Phone({ tab: initialTab, requestId }: { tab?: PhoneTab; requestI
     [],
   );
   const openOverlay = useStore((s) => s.openOverlay);
+  const goToFloor = useStore((s) => s.goToFloor);
   const requests = useStore((s) => s.requests);
   const messages = useStore((s) => s.messages);
   const readAt = useStore((s) => s.phoneReadAt);
@@ -470,7 +470,7 @@ export function Phone({ tab: initialTab, requestId }: { tab?: PhoneTab; requestI
         <div className="phone-screen">
           {tab === 'chat' && <Chat />}
           {tab === 'hires' && <Hires focusId={requestId} />}
-          {tab === 'company' && <Company />}
+          {tab === 'company' && <Company onFloor={onFloor ?? goToFloor} />}
           {tab === 'games' && <Games game={game} onGame={setGame} />}
         </div>
         <nav className="phone-tabs">
