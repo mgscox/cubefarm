@@ -440,8 +440,21 @@ export interface PhoneMessage {
   text: string;
   at: number;
   requestId?: string; // a hire / let-go proposal this message is about
-  origin?: 'web' | 'telegram';
+  origin?: 'web' | 'telegram' | 'mcp';
   telegram?: { updateId: number; chatId: number; messageId: number };
+  mcpRequestId?: string; // retry key retained with the canonical message
+}
+
+export interface ManagerMcpSettingsView {
+  available: boolean;
+  enabled: boolean;
+  tokenSource: 'settings' | 'startup' | null;
+  canManage: boolean;
+}
+
+export interface ManagerMcpSettingsPatch {
+  enabled?: boolean;
+  token?: string | null;
 }
 
 /** Non-secret Telegram connection state; delivery never changes phone read state. */

@@ -76,6 +76,22 @@ afterEach(async () => {
 });
 
 describe('one phone conversation through both transports', () => {
+  it('persists the MCP retry key in the shared phone and mirrors the message only once', async () => {
+    await pair();
+    const id = '2b055b60-aae4-4e85-97e3-dc0335302e31';
+    const first = await swarm.messageCeoFromMcp('Check the floor', id);
+    expect(saved.messages).toEqual([expect.objectContaining({ id: first.messageId, origin: 'mcp', mcpRequestId: id })]);
+    await flush();
+    expect(sent().map((m) => m.text)).toEqual(['Manager (MCP): Check the floor']);
+    const persisted = saved;
+    await swarm.telegram.stop();
+    await setup(transport, persisted);
+    expect(await swarm.messageCeoFromMcp(' Check the floor ', id)).toEqual(first);
+    await expect(swarm.messageCeoFromMcp('Different text', id)).rejects.toThrow('different message');
+    expect(s.state.messages).toHaveLength(1);
+    expect(s.state.ceo.queue).toHaveLength(1);
+  });
+
   it('accepts Telegram once, broadcasts the canonical manager identity, shares the queue, and never echoes', async () => {
     await swarm.messageCeo('Existing web conversation');
     await pair();
