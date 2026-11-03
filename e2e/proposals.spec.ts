@@ -7,11 +7,7 @@ test('approve, refine and reject Proposals from the approval card', async ({ pag
   page.on('pageerror', (error) => errors.push(error.message));
   await page.route((url) => !url.href.startsWith(baseURL!) && !url.protocol.startsWith('data'), (route) => route.fulfill({ status: 200, body: '' }));
   const initial = await (await request.get('/api/state')).json() as WorldSnapshot;
-  const issueCount = async () => {
-    const state = await (await request.get('/api/state')).json() as WorldSnapshot;
-    return state.repos.map((r) => r.issues.length);
-  };
-  const before = await issueCount();
+  const before = new Set(initial.repos.flatMap((r) => r.issues.map((i) => `${r.id}#${i.number}`)));
   await request.patch('/api/settings', { data: { tutorialStep: -1 } });
   const seeded = async (description: string) => {
     const idea = await (await request.post('/api/ideas', { data: { description } })).json() as IdeaView;
@@ -91,7 +87,10 @@ test('approve, refine and reject Proposals from the approval card', async ({ pag
     await expect(detail).toContainText('Continues an earlier Idea');
     await expect(detail.getByRole('link', { name: 'an earlier Idea' })).toHaveAttribute('href', `#idea/${rejected.idea.id}`);
 
-    expect(await issueCount()).toEqual(before);
+    // Demo agents may complete existing issues while the manager decides; no new implementation issues should appear.
+    const after = await (await request.get('/api/state')).json() as WorldSnapshot;
+    const added = after.repos.flatMap((r) => r.issues.map((i) => `${r.id}#${i.number}`)).filter((id) => !before.has(id));
+    expect(added).toEqual([]);
     expect(errors).toEqual([]);
   } finally {
     await request.patch('/api/settings', { data: { tutorialStep: initial.settings.tutorialStep } });
