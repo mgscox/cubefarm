@@ -49,7 +49,8 @@ export function forHuman(labels: string[]) {
 export const PUBLICATION_HOLD = 'held-for-publication';
 
 /** Preparation gates that must be cleared before automatic or explicit agent starts. */
-export function issueReadinessReason(issue: Pick<IssueInfo, 'labels' | 'title'>) {
+export function issueReadinessReason(issue: Pick<IssueInfo, 'labels' | 'title' | 'held'>) {
+  if (issue.held) return issue.held;
   if (issue.labels.some((l) => l.toLowerCase() === PUBLICATION_HOLD)) return 'held for publication';
   if (hasLabel(issue.labels, NEEDS_HUMAN)) return 'needs-human';
   if (issue.labels.some((l) => /^needs-triage$/i.test(l))) return 'needs triage';

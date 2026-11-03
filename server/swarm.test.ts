@@ -9,16 +9,18 @@ import { handleHook, startCliSession } from './cliRunner.ts';
 import type { BoxConnection, CliHost } from './machine.ts';
 import { BOX_CLI_CHECK_MS } from './fleet.ts';
 import type { AgentTerminal } from './terminal.ts';
-import { createDemoBackend } from './demo.ts';
+import { createDemoBackend, demoApprovedProposal } from './demo.ts';
+import { newPublication } from './publication.ts';
+import type { TrackedIssue } from './github.ts';
 import { HttpError, Swarm } from './swarm.ts';
 import { VERSION } from './config.ts';
 import { operationSignal } from './operation.ts';
-import { CEO_ID, type IssueInfo, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
+import { CEO_ID, type ApprovedSnapshot, type IssueInfo, type PublicationView, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
 import { ceoSystemPrompt, type OfficeTools } from './ceo.ts';
 import { researcherSystemPrompt } from './research.ts';
 import { ONE_TURN } from './clis.ts';
 import { QA_RESUME_PROMPT } from './qaRetry.ts';
-import { AGENT_COMMENT_MARKER } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, issueWorkNote } from '../shared/issues.ts';
 import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRunner.ts';
 
 // A Swarm that is never init()ed: no state file, scheduler timers or real sessions.
@@ -4289,5 +4291,134 @@ describe('boxes', () => {
     expect(() => swarm.addBox('x', '-oProxyCommand=evil')).toThrow(HttpError);
     expect(() => swarm.updateAgent('a1', { box: 'nope' })).toThrow(/No box/);
     expect(() => swarm.updateAgent(CEO_ID, { box: '' })).toThrow(/office's machine/);
+  });
+});
+
+describe('approved Idea blockers', () => {
+  const PREREQ = { repo: 'demo-co/weather-api', number: 7 };
+  const url = (n: number) => `https://github.com/${repo.fullName}/issues/${n}`;
+  const idea = (body = ''): IssueInfo => ({ ...issue(50, [], body), url: url(50), nativeBlockers: [] });
+  const read = (state: 'OPEN' | 'CLOSED', stateReason: string | null = null): TrackedIssue =>
+    ({ repo: PREREQ.repo, number: PREREQ.number, url: '', title: 'Add /forecast endpoint', body: '', labels: [], state, stateReason });
+  let answer: TrackedIssue | null | Error;
+  let list: Mock;
+
+  /** A publication the office recorded: entry `e` released as #50 on this floor. */
+  const seed = (plan: Partial<ApprovedSnapshot['issues'][number]> = {}, extra: ApprovedSnapshot['issues'] = [], numbers: Record<string, number | null> = {}) => {
+    const snapshot = demoApprovedProposal(repo.fullName, 1);
+    snapshot.issues = [{ ...snapshot.issues[0], entryId: 'e', ...plan }, ...extra];
+    const rec = newPublication(snapshot, 1);
+    for (const i of rec.issues) Object.assign(i, { step: 'released', number: i.entryId === 'e' ? 50 : numbers[i.entryId] ?? null });
+    (s.state as unknown as { publications: Record<string, PublicationView> }).publications = { [rec.proposalId]: rec };
+  };
+  const sync = () => swarm.syncRepo(repo.id);
+  const waitReason = () => JSON.parse(s.companyStatus()).floors[0].backlog.find((i: { number: number }) => i.number === 50).waitReason;
+
+  beforeEach(() => {
+    Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
+    Object.assign(s.repoRt.get(repo.id)!, { lastMergedAt: null });
+    list = vi.spyOn(s.backend, 'listIssues').mockResolvedValue([idea(), issue(51)]);
+    vi.spyOn(s.backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    answer = read('OPEN');
+    vi.spyOn(s.backend, 'readIssue').mockImplementation(async () => {
+      if (answer instanceof Error) throw answer;
+      return answer;
+    });
+    seed({ blockedBy: [PREREQ] });
+  });
+
+  it('holds an Idea issue behind an open cross-repository prerequisite on both start paths, and says why', async () => {
+    await sync();
+    expect(s.backend.readIssue).toHaveBeenCalledWith(PREREQ.repo, PREREQ.number);
+    expect(ready()).toEqual([51]); // ordinary work is unaffected
+    expect(waitReason()).toBe('waits for approved prerequisite demo-co/weather-api#7 (open)');
+    expect(issueWorkNote((s.repoView(repo) as { issues: IssueInfo[] }).issues[0])).toContain('demo-co/weather-api#7 (open)');
+    await expect(swarm.assign('a1', 50)).rejects.toMatchObject({ status: 409, message: expect.stringContaining('held by its approved plan: waits for approved prerequisite demo-co/weather-api#7 (open)') });
+    expect(await s.officeTools().call('start_issue', { floor: 1, number: 50 })).toMatch(/^Refused: .*demo-co\/weather-api#7 \(open\)/);
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(runTask).toHaveBeenCalledOnce();
+    expect(runTask.mock.calls[0][2].number).toBe(51);
+  });
+
+  it.each([
+    ['unreadable', () => new Error('HTTP 502'), 'unreadable'],
+    ['missing', () => null, 'missing'],
+    ['closed as not planned', () => read('CLOSED', 'not_planned'), 'closed as not planned, delivery not confirmed'],
+    ['closed as a duplicate', () => read('CLOSED', 'duplicate'), 'closed as duplicate, delivery not confirmed'],
+  ] as [string, () => TrackedIssue | null | Error, string][])('keeps it held when the prerequisite is %s, whatever the body and native links say', async (_case, make, note) => {
+    // The body and a native read both claim the prerequisite closed: neither replaces the approved identity's read.
+    list.mockResolvedValue([{ ...idea(`Depends on https://github.com/${PREREQ.repo}/issues/7`), bodyBlockers: [{ ...PREREQ, state: 'CLOSED' }], nativeBlockers: [{ ...PREREQ, state: 'CLOSED' }] }]);
+    answer = make();
+    await sync();
+    expect(ready()).toEqual([]);
+    expect(waitReason()).toContain(`demo-co/weather-api#7 (${note})`);
+    await expect(swarm.assign('a1', 50)).rejects.toMatchObject({ status: 409 });
+    expect(s.startIssueWork(repo)).toBe(false);
+    expect(runTask).not.toHaveBeenCalled();
+  });
+
+  it('holds until the first read, and never trusts a stale delivered read once a newer one fails', async () => {
+    expect(ready()).toEqual([]);
+    s.repoRt.get(repo.id)!.issues = [idea()];
+    expect(waitReason()).toContain('(not read yet)');
+    answer = read('CLOSED', 'completed');
+    await sync();
+    expect(ready()).toEqual([50, 51]);
+    answer = new Error('HTTP 502');
+    await sync();
+    expect(ready()).toEqual([51]);
+    expect(waitReason()).toContain('(unreadable)');
+  });
+
+  it('starts automatically once delivery is confirmed', async () => {
+    list.mockResolvedValue([idea()]);
+    await sync();
+    expect(s.startIssueWork(repo)).toBe(false);
+    answer = read('CLOSED', 'completed');
+    await sync();
+    expect(waitReason()).toBeUndefined();
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(runTask.mock.calls[0][2].number).toBe(50);
+  });
+
+  it('lets the manager start it once delivery is confirmed, with the ordinary readiness rules back in charge', async () => {
+    answer = read('CLOSED', 'completed');
+    list.mockResolvedValue([{ ...idea(), labels: ['needs-info'] }]);
+    await sync();
+    await expect(swarm.assign('a1', 50)).rejects.toMatchObject({ status: 409, message: expect.stringContaining('waiting for info') });
+    list.mockResolvedValue([idea()]);
+    await sync();
+    await swarm.assign('a1', 50);
+    expect(runTask.mock.calls[0][2].number).toBe(50);
+  });
+
+  it('resolves a plan-entry blocker to the issue publication recorded, and holds it until that one is published', async () => {
+    const other = { ...demoApprovedProposal(repo.fullName, 1).issues[0], entryId: 'api', repo: PREREQ.repo };
+    seed({ blockedBy: [{ entryId: 'api' }] }, [other], { api: null });
+    await sync();
+    expect(s.backend.readIssue).not.toHaveBeenCalled();
+    expect(waitReason()).toBe('waits for approved prerequisite plan entry api (not published yet)');
+    seed({ blockedBy: [{ entryId: 'api' }] }, [other], { api: 7 });
+    answer = read('CLOSED', 'completed');
+    await sync();
+    expect(s.backend.readIssue).toHaveBeenCalledWith(PREREQ.repo, 7);
+    expect(ready()).toEqual([50, 51]);
+  });
+
+  it('keeps a Tracking Parent out of both start paths', async () => {
+    seed({ tracking: true });
+    await sync();
+    expect(ready()).toEqual([51]);
+    expect(waitReason()).toMatch(/Tracking Parent/);
+    await expect(swarm.assign('a1', 50)).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('leaves ordinary issues to their existing rules: an explicit start still overrides a body dependency', async () => {
+    list.mockResolvedValue([issue(60), issue(61, [], 'Depends on #60')]);
+    await sync();
+    expect(s.backend.readIssue).not.toHaveBeenCalled();
+    expect(ready()).toEqual([60]);
+    await swarm.assign('a1', 61);
+    expect(runTask.mock.calls[0][2].number).toBe(61);
   });
 });

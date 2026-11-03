@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
 import type { TrackedIssue } from './github.ts';
 import {
-  failure, heldTitle, loadPublications, planMarker, PublicationBlock, publishedBody, Publisher, snapshotProblem, verifyProblem,
+  failure, heldTitle, loadPublications, planMarker, PublicationBlock, publishedBody, Publisher, sameApproval, snapshotProblem, verifyProblem,
   type PublicationHost, type PublicationTracker,
 } from './publication.ts';
 import { createDemoBackend, demoApprovedProposal } from './demo.ts';
@@ -121,6 +121,15 @@ describe('approved snapshots', () => {
     expect(snapshotProblem(approved({ proposalId: 'p1 -->' }), true)).toMatch(/ids/);
   });
 
+  it('accepts approved blockers that name another plan entry or an owner/name#number issue', () => {
+    const blocked = (blockedBy: unknown) => ({ ...approved(), issues: [{ ...approved().issues[0], blockedBy }] }) as ApprovedSnapshot;
+    expect(snapshotProblem(blocked([{ repo: 'demo-co/api', number: 7 }]), true)).toBeNull();
+    for (const bad of [[{ entryId: 'e1' }], [{ entryId: 'nope' }], [{ repo: 'nope', number: 7 }], [{ repo: 'demo-co/api', number: 0 }], 'demo-co/api#7']) {
+      expect(snapshotProblem(blocked(bad), true)).toMatch(/blocker/);
+    }
+    expect(sameApproval(blocked([{ repo: 'demo-co/api', number: 7 }]), approved())).toBe(false);
+  });
+
   it('refuses a fixture in an office without fixtures before anything is written', async () => {
     publisher = new Publisher({ ...host, fixtures: false });
     await expect(publisher.publish(approved())).rejects.toMatchObject({ status: 400 });
@@ -150,7 +159,7 @@ describe('publishing one approved issue', () => {
     expect(view).toMatchObject({ status: 'complete', note: null, attempts: 1 });
     expect(view.issues[0]).toMatchObject({ step: 'released', number: 1, url: `https://github.com/${REPO}/issues/1` });
     expect(host.released).toHaveBeenCalledWith(REPO, 1);
-    expect(publisher.issueOrigin('DEMO-CO/app', 1)).toEqual({ proposalId: 'p1', entryId: 'e1', step: 'released' });
+    expect(publisher.issueOrigin('DEMO-CO/app', 1)).toEqual({ proposalId: 'p1', entryId: 'e1', step: 'released', tracking: false, blockers: [] });
     expect(schedulable(created.labels, created.title)).toBe(true);
   });
 
@@ -465,6 +474,19 @@ describe('the demo office', () => {
     expect(Object.prototype.hasOwnProperty.call(Object.prototype, 'snapshot')).toBe(false);
     expect(swarm.publisher.list().map((p) => p.proposalId)).toEqual([view.proposalId]);
     expect(swarm.publisher.list().every((p) => Array.isArray(p.issues))).toBe(true);
+    swarm.publisher.stop();
+  });
+
+  it('seeds a proposal whose approved prerequisite is an issue on another floor', async () => {
+    const { swarm } = office();
+    const s = swarm as unknown as { state: { repos: { id: string; fullName: string; floor: number }[] }; repoRt: Map<string, { issues: { number: number }[] }> };
+    s.state.repos.push({ id: 'r2', fullName: 'demo-co/weather-api', floor: 2 });
+    s.repoRt.set('r1', { issues: [] });
+    s.repoRt.set('r2', { issues: [{ number: 3 }] });
+    const view = await swarm.publishDemoProposal('blocked');
+    await swarm.publisher.settled(view.proposalId);
+    expect(view.snapshot.issues[0].blockedBy).toEqual([{ repo: 'demo-co/weather-api', number: 3 }]);
+    expect(swarm.publisher.issueOrigin('demo-co/pixel-todo', view.issues[0].number!)?.blockers).toEqual([{ ref: 'demo-co/weather-api#3', repo: 'demo-co/weather-api', number: 3 }]);
     swarm.publisher.stop();
   });
 

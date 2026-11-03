@@ -8,6 +8,7 @@ import { CommandError } from './exec.ts';
 import { HttpError } from './httpError.ts';
 import { PUBLICATION_HOLD } from '../shared/issues.ts';
 import type { ApprovedSnapshot, PlanIssue, PublicationView, PublishedIssue } from '../shared/types.ts';
+import type { IdeaIssueOrigin } from './approvedBlockers.ts';
 
 export type PublicationTracker = Pick<Backend, 'issueAccess' | 'createIssue' | 'readIssue' | 'findIssuesByMarker' | 'editIssue'>;
 
@@ -69,6 +70,17 @@ export function snapshotProblem(input: unknown, fixtures: boolean): string | nul
     if (typeof i.title !== 'string' || !i.title.trim() || i.title.length > 200) return `Plan entry ${i.entryId} needs a title (200 characters at most).`;
     if (typeof i.body !== 'string') return `Plan entry ${i.entryId} needs a body.`;
     if (i.specialty !== undefined && (typeof i.specialty !== 'string' || !/^[a-z0-9-]{1,40}$/.test(i.specialty))) return `Plan entry ${i.entryId} has an invalid specialty.`;
+    if (i.tracking !== undefined && typeof i.tracking !== 'boolean') return `Plan entry ${i.entryId} has an invalid tracking flag.`;
+  }
+  for (const i of issues) {
+    if (i.blockedBy === undefined) continue;
+    if (!Array.isArray(i.blockedBy)) return `Plan entry ${i.entryId} needs a list of blockers.`;
+    for (const b of i.blockedBy as unknown[]) {
+      const ref = b as { entryId?: unknown; repo?: unknown; number?: unknown } | null;
+      const entry = typeof ref?.entryId === 'string' && entries.has(ref.entryId) && ref.entryId !== i.entryId;
+      const tracked = typeof ref?.repo === 'string' && REPO.test(ref.repo) && Number.isInteger(ref.number) && (ref.number as number) > 0;
+      if (!entry && !tracked) return `Plan entry ${i.entryId} has a blocker that is neither another plan entry nor an owner/name#number issue.`;
+    }
   }
   return null;
 }
@@ -76,7 +88,7 @@ export function snapshotProblem(input: unknown, fixtures: boolean): string | nul
 /** The parts of a snapshot an approval authorizes: a repeat must match them exactly. */
 const approved = (s: ApprovedSnapshot) =>
   JSON.stringify([s.approval.decisionId, s.approval.proposalId, s.approval.prdRevision, s.approval.planRevision,
-    s.issues.map((i) => [i.entryId, i.repo, i.title, i.body, i.specialty ?? ''])]);
+    s.issues.map((i) => [i.entryId, i.repo, i.title, i.body, i.specialty ?? '', i.blockedBy ?? [], !!i.tracking])]);
 export const sameApproval = (a: ApprovedSnapshot, b: ApprovedSnapshot) => approved(a) === approved(b);
 
 /** Publications from the state file: own, well-formed records keyed by their proposal id, whatever the key. */
@@ -162,11 +174,21 @@ export class Publisher {
     return Object.hasOwn(records, proposalId) && !this.accepting.has(proposalId) ? records[proposalId] : null;
   }
 
-  /** The publication an issue came from, for dispatch: null when it wasn't published from an Idea. */
-  issueOrigin(repo: string, number: number): { proposalId: string; entryId: string; step: PublishedIssue['step'] } | null {
+  /**
+   * The publication an issue came from, for dispatch: null when it wasn't published from an Idea. Its approved
+   * blockers resolve to the issues publication recorded, never to what the issue body or native links say now.
+   */
+  issueOrigin(repo: string, number: number): IdeaIssueOrigin | null {
     for (const p of this.list()) {
       const i = p.issues.find((x) => x.number === number && sameRepo(x.repo, repo));
-      if (i) return { proposalId: p.proposalId, entryId: i.entryId, step: i.step };
+      if (!i) continue;
+      const plan = this.plan(p, i);
+      const blockers = (plan.blockedBy ?? []).map((b) => {
+        if ('repo' in b) return { ref: `${b.repo}#${b.number}`, repo: b.repo, number: b.number };
+        const dep = p.issues.find((x) => x.entryId === b.entryId);
+        return dep?.number != null ? { ref: `${dep.repo}#${dep.number}`, repo: dep.repo, number: dep.number } : { ref: `plan entry ${b.entryId}`, repo: null, number: null };
+      });
+      return { proposalId: p.proposalId, entryId: i.entryId, step: i.step, tracking: !!plan.tracking, blockers };
     }
     return null;
   }
