@@ -45,6 +45,7 @@ const repoId = (req: Request) => decodeURIComponent(String(req.params.repo));
 
 app.get('/api/state', route(() => swarm.snapshot()));
 app.post('/api/ideas', route((req) => swarm.submitIdea(req.body)));
+app.post('/api/ideas/:id/plans/demo', route((req) => swarm.draftDemoIssuePlan(String(req.params.id))));
 
 app.get('/api/github/repos', route((req) => swarm.listGithubRepos(str(req.query.owner) || undefined)));
 

@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import type { IdeaRecordView, IdeaView } from '../../../shared/types';
 import { api } from '../api';
 import { useStore } from '../store';
+import { IssuePlanSection } from './IssuePlan';
 import { Markdown } from './Markdown';
 
 const ideaLink = (id: string) => `#idea/${id}`;
@@ -22,6 +23,7 @@ export function IdeaDetail({ idea, records }: { idea: IdeaView; records: IdeaRec
       <p>{idea.floorHints.length ? idea.floorHints.join(', ') : 'No floor hints — affected repositories are open.'}</p>
       {idea.constraints && <><h4>Constraints</h4><p className="idea-prose">{idea.constraints}</p></>}
       {idea.links.length > 0 && <><h4>Links</h4><ul>{idea.links.map((link) => <li key={link}><a href={link} target="_blank" rel="noreferrer">{link}</a></li>)}</ul></>}
+      <IssuePlanSection ideaId={idea.id} />
       <h4>Research, reviews & proposals</h4>
       {records.length === 0 && <p className="muted">No records yet.</p>}
       {[...records].sort((a, b) => a.createdAt - b.createdAt).map((record) => (

@@ -24,6 +24,8 @@ import { fixNeedsHuman, fixOutcome } from './fixOutcome.ts';
 import { fixGoesTo, prepFailure, prepHeld, PREP_HOLD_MS } from './handOut.ts';
 import { HttpError } from './httpError.ts';
 import { queuedIdea } from './ideas.ts';
+import { draftIssuePlan } from './issuePlan.ts';
+import { DEMO_TODO, DEMO_WEATHER, demoPlanDraft, demoPrd } from './planFixture.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
@@ -56,6 +58,8 @@ import type {
   IdeaView,
   IdeaRecordView,
   IssueInfo,
+  IssuePlanView,
+  PrdForPlanning,
   NoWorkEnding,
   LogLine,
   OfficeUpdateView,
@@ -201,6 +205,7 @@ interface Persisted {
   research: ResearchState;
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
+  issuePlans: IssuePlanView[];
   messages: PhoneMessage[];
   phoneReadAt: number;
   telegram: TelegramState;
@@ -465,6 +470,7 @@ export class Swarm {
     research: { queue: [], job: null, done: [] },
     ideas: [],
     ideaRecords: [],
+    issuePlans: [],
     messages: [],
     phoneReadAt: 0,
     telegram: emptyTelegram(),
@@ -613,6 +619,7 @@ export class Swarm {
         research: { ...this.state.research, ...loaded.research },
         ideas: loaded.ideas ?? [],
         ideaRecords: loaded.ideaRecords ?? [],
+        issuePlans: loaded.issuePlans ?? [],
         messages: loaded.messages ?? [],
         phoneReadAt: loaded.phoneReadAt ?? 0,
         telegram: loaded.telegram ?? emptyTelegram(),
@@ -904,6 +911,7 @@ export class Swarm {
       research: this.researchInfo(),
       ideas: this.state.ideas,
       ideaRecords: this.state.ideaRecords,
+      issuePlans: this.state.issuePlans,
       messages: this.state.messages.slice(-100),
       phoneReadAt: this.state.phoneReadAt,
       telegram: this.telegram.view(),
@@ -1029,6 +1037,47 @@ export class Swarm {
     });
     this.ideaSubmissions = submit.catch(() => undefined);
     return submit;
+  }
+
+  /** The lead researcher's Issue Plan for a PRD revision: checked, reconciled with open issues, saved as the Idea's next revision. */
+  draftIssuePlan(ideaId: string, prd: PrdForPlanning, draft: unknown): Promise<IssuePlanView> {
+    const save = this.ideaSubmissions.then(async () => {
+      if (!this.state.ideas.some((i) => i.id === ideaId)) throw new HttpError(404, 'No such Idea');
+      if (prd.ideaId !== ideaId) throw new HttpError(400, 'That PRD revision belongs to another Idea');
+      const result = draftIssuePlan(draft, {
+        prd,
+        floors: this.state.repos.map((r) => r.id),
+        openIssues: (id) => this.repoRt.get(id)?.issues ?? [],
+        specialties: (id) => [
+          ...this.state.agents.filter((a) => a.repoId === id && a.specialty).map((a) => a.specialty.toLowerCase()),
+          ...this.state.requests.filter((r) => r.status === 'pending' && r.kind === 'hire' && r.repoId === id && r.specialty).map((r) => r.specialty),
+        ],
+      });
+      if (!result.ok) throw new HttpError(400, `The Issue Plan wasn't saved. ${result.problems.join(' ')}`);
+      const revision = 1 + Math.max(0, ...this.state.issuePlans.filter((p) => p.ideaId === ideaId).map((p) => p.revision));
+      const { entries, parents, dependencies } = result;
+      const plan: IssuePlanView = { id: crypto.randomUUID(), ideaId, revision, prdRevision: prd.revision, entries, parents, dependencies, createdAt: Date.now() };
+      this.state.issuePlans.push(plan);
+      try {
+        await this.writeState();
+      } catch (err) {
+        this.state.issuePlans = this.state.issuePlans.filter((p) => p.id !== plan.id);
+        throw err;
+      }
+      this.broadcast({ type: 'issuePlan', plan });
+      return plan;
+    });
+    this.ideaSubmissions = save.catch(() => undefined);
+    return save;
+  }
+
+  /** Demo only: draft the fixture plan from the fixture PRD on an Idea. */
+  draftDemoIssuePlan(ideaId: string) {
+    if (!this.backend.demo) throw new HttpError(404, 'Demo Issue Plans are only available in the demo');
+    if (![DEMO_TODO, DEMO_WEATHER].every((id) => this.state.repos.some((r) => r.id === id))) {
+      throw new HttpError(409, `The demo Issue Plan needs the floors ${DEMO_TODO} and ${DEMO_WEATHER}`);
+    }
+    return this.draftIssuePlan(ideaId, demoPrd(ideaId), demoPlanDraft((id) => this.repoRt.get(id)?.issues ?? []));
   }
 
   // ---------- lookups ----------

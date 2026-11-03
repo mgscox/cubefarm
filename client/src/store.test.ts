@@ -48,4 +48,14 @@ describe('Idea state', () => {
     expect(useStore.getState().ideaRecords).toHaveLength(3);
     expect(useStore.getState().ideaRecords[0].body).toBe('More sources');
   });
+
+  it('keeps every Issue Plan revision, replacing only the same plan', () => {
+    useStore.setState({ issuePlans: [] });
+    const apply = useStore.getState().apply;
+    const plan = { id: 'p1', ideaId: 'i1', revision: 1, prdRevision: 1, entries: [], parents: [], dependencies: [], createdAt: 1 };
+    apply({ type: 'issuePlan', plan });
+    apply({ type: 'issuePlan', plan: { ...plan, id: 'p2', revision: 2 } });
+    apply({ type: 'issuePlan', plan });
+    expect(useStore.getState().issuePlans.map((p) => p.revision).sort()).toEqual([1, 2]);
+  });
 });
