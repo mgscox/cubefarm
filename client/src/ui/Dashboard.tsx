@@ -1,5 +1,5 @@
 // The browser dashboard shares the office's live data, terminals and management panels.
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { CEO_ID, RESEARCHER_ID, type AgentRole } from '../../../shared/types';
 import { agentsOnRepo, pendingRequests, repoOnFloor, unreadMessages, usePhoneBadge, useStore, type Agent } from '../store';
 import { isConfirmOpen } from './Confirm';
@@ -17,10 +17,26 @@ const ROLES: Record<AgentRole, string> = {
   qa: 'QA tester',
 };
 
-function AgentLog({ agentId }: { agentId: string }) {
+function AgentLog({ agentId, expanded }: { agentId: string; expanded: boolean }) {
   const log = useStore((s) => s.logs[agentId]);
+  const scroller = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
+
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (el && following.current) el.scrollTop = el.scrollHeight;
+  }, [log, expanded]);
+
   return (
-    <div className="term dashboard-log" tabIndex={0} aria-label="Agent output">
+    <div
+      className="term dashboard-log"
+      ref={scroller}
+      tabIndex={0}
+      aria-label="Agent output"
+      onScroll={({ currentTarget: el }) => {
+        following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+      }}
+    >
       {log?.length ? log.map((line) => (
         <div className={`term-line term-${line.kind}`} key={line.id}>{line.text}</div>
       )) : <div className="term-line term-system">No terminal output yet.</div>}
@@ -50,7 +66,7 @@ function AgentTile({ agent, expanded, toggle }: { agent: Agent; expanded: boolea
       </header>
       {agent.terminal && !inDetails
         ? <LiveTerminal agentId={agent.id} idleHint="Not running · open Details to send a message" />
-        : <AgentLog agentId={agent.id} />}
+        : <AgentLog agentId={agent.id} expanded={expanded} />}
     </section>
   );
 }
