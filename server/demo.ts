@@ -710,6 +710,7 @@ export function createDemoBackend(): Backend {
       return {
         number,
         title: pr.title,
+        labels: pr.labels ?? [],
         body: `Implements the change.\n\nCloses #${pr.closesIssues[0] ?? '?'}`,
         url: pr.url,
         headRefName: pr.headRefName,

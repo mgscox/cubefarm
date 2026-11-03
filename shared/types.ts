@@ -41,6 +41,7 @@ export interface IssueInfo {
 export interface PullInfo {
   number: number;
   title: string;
+  labels?: string[];
   url: string;
   headRefName: string;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
