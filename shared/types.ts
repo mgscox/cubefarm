@@ -492,8 +492,28 @@ export interface IdeaView {
   links: string[];
   constraints: string;
   floorHints: string[];
-  status: 'queued';
+  status: 'queued' | 'researching' | 'needs-clarification' | 'researched';
   createdAt: number;
+  research?: IdeaResearchView;
+}
+
+/** Research stays on the Idea; one lead owns every immutable PRD revision. */
+export interface IdeaResearchView {
+  leadAgentId: string;
+  questions: { question: string; answer?: string }[];
+  requests: { id: string; agentId: string; question: string; answer?: string; sources?: string[] }[];
+  error?: string;
+  prdRevisionId?: string;
+}
+
+export interface IdeaPrd {
+  problem: string;
+  outcome: string;
+  scope: string;
+  evidence: { source: string; finding: string }[];
+  assumptions: string[];
+  targetFloors: { repoId: string; rationale: string }[];
+  acceptanceCriteria: string[];
 }
 
 /** Read-only presentation of records produced by the owning research, review and proposal slices. */
@@ -501,6 +521,8 @@ export interface IdeaRecordView {
   id: string;
   ideaId: string;
   kind: 'research' | 'review' | 'proposal';
+  prd?: IdeaPrd; // immutable payload on a PRD revision record
+  authorAgentId?: string;
   title: string;
   body: string;
   createdAt: number;

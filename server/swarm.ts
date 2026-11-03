@@ -24,6 +24,7 @@ import { fixNeedsHuman, fixOutcome } from './fixOutcome.ts';
 import { fixGoesTo, prepFailure, prepHeld, PREP_HOLD_MS } from './handOut.ts';
 import { HttpError } from './httpError.ts';
 import { queuedIdea } from './ideas.ts';
+import { IDEA_RESEARCH_PROMPT, IDEA_RESEARCH_SCHEMA, nextIdeaResearch, parseIdeaResearch, renderIdeaPrd, validateIdeaReport } from './ideaResearch.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
@@ -185,7 +186,7 @@ interface CeoState {
 
 interface ResearchState {
   queue: ResearchJob[];
-  job: ResearchJob | null; // the job the lobby researcher is on right now
+  job: ResearchJob | null; // the current brief or focused Idea evidence session
   done: ResearchDoc[];
 }
 
@@ -653,7 +654,7 @@ export class Swarm {
     const back: ReconnectedCli[] = await this.backend
       .reconnectClis((id) => {
         const a = this.state.agents.find((x) => x.id === id);
-        return a && a.role !== 'ceo' && a.id !== RESEARCHER_ID ? this.terminalFor(a) : null;
+        return a && a.role !== 'ceo' && a.id !== RESEARCHER_ID && a.id !== this.state.research.job?.agentId ? this.terminalFor(a) : null;
       })
       .catch((err) => {
         console.warn('could not reconnect to the terminal keeper', err);
@@ -1031,6 +1032,46 @@ export class Swarm {
     return submit;
   }
 
+  /** Manager replies and session outcomes share intake's durable, serialized command path. */
+  private updateIdea(id: string, change: (idea: IdeaView, records: IdeaRecordView[]) => void): Promise<IdeaView> {
+    const command = this.ideaSubmissions.then(async () => {
+      const previous = this.state.ideas.find((i) => i.id === id);
+      if (!previous) throw new HttpError(404, 'Idea not found');
+      const idea = structuredClone(previous);
+      const records: IdeaRecordView[] = [];
+      change(idea, records);
+      this.state.ideas = this.state.ideas.map((i) => i.id === id ? idea : i);
+      this.state.ideaRecords.push(...records);
+      try { await this.writeState(); } catch (err) {
+        this.state.ideas = this.state.ideas.map((i) => i.id === id ? previous : i);
+        this.state.ideaRecords = this.state.ideaRecords.filter((r) => !records.includes(r));
+        throw err;
+      }
+      this.broadcast({ type: 'idea', idea });
+      for (const record of records) this.broadcast({ type: 'ideaRecord', record });
+      return idea;
+    });
+    this.ideaSubmissions = command.catch(() => undefined);
+    return command;
+  }
+
+  replyToIdea(id: string, answer: unknown): Promise<IdeaView> {
+    if (typeof answer !== 'string' || !answer.trim() || answer.length > 10000) throw new HttpError(400, 'Reply must contain 1–10000 characters');
+    return this.updateIdea(id, (idea) => {
+      const question = idea.research?.questions.at(-1);
+      if (idea.status !== 'needs-clarification' || !question || question.answer !== undefined) throw new HttpError(409, 'This Idea has no open question');
+      question.answer = answer.trim();
+      idea.status = 'researching';
+    });
+  }
+
+  retryIdeaResearch(id: string): Promise<IdeaView> {
+    return this.updateIdea(id, (idea) => {
+      if (!idea.research?.error) throw new HttpError(409, 'This Idea has no failed research to retry');
+      delete idea.research.error;
+    });
+  }
+
   // ---------- lookups ----------
 
   private repo(id: string) {
@@ -1119,7 +1160,7 @@ export class Swarm {
   /** An agent's terminal, for a CLI a keeper or box kept running (the CEO and the lobby researcher's are resumed instead). */
   private keptTerminal(agentId: string) {
     const a = this.state.agents.find((x) => x.id === agentId);
-    return a && a.role !== 'ceo' && a.id !== RESEARCHER_ID ? this.terminalFor(a) : null;
+    return a && a.role !== 'ceo' && a.id !== RESEARCHER_ID && a.id !== this.state.research.job?.agentId ? this.terminalFor(a) : null;
   }
 
   /**
@@ -1399,8 +1440,22 @@ export class Swarm {
     this.emitAgent(a);
   }
 
+  private abandonIdeaResearch(a: PersistedAgent) {
+    const job = this.state.research.job;
+    if (!job?.ideaId || job.agentId !== a.id) return;
+    this.state.research.job = null;
+    const idea = this.state.ideas.find((i) => i.id === job.ideaId);
+    if (idea?.research) {
+      idea.research.error = 'Research task was replaced or its agent removed; retry when ready';
+      this.broadcast({ type: 'idea', idea });
+    }
+    this.emitResearch();
+    this.save();
+  }
+
   /** The agent's task or session changes: a session end still being handled for the old one must not act on it. */
   private nextGeneration(a: PersistedAgent) {
+    this.abandonIdeaResearch(a);
     const rt = this.agentRt.get(a.id);
     if (rt) {
       rt.generation = (rt.generation ?? 0) + 1;
@@ -2191,6 +2246,7 @@ export class Swarm {
       this.decide(r, { status: 'approved', note: 'They were let go directly.', decidedBy: 'manager' });
     }
 
+    this.abandonIdeaResearch(a);
     this.agentRt.get(id)?.session?.stop();
     this.agentRt.get(id)?.terminal?.releaseIdle?.();
     this.agentRt.get(id)?.terminal?.dispose();
@@ -4445,6 +4501,12 @@ export class Swarm {
       this.appendLog(a, [{ kind: 'system', text: '↺ The office server restarted. Starting that research over.' }]);
     }
     if (this.state.research.job) {
+      const contributor = this.state.agents.find((x) => x.id === this.state.research.job?.agentId);
+      if (contributor) {
+        const index = interrupted.indexOf(contributor);
+        if (index >= 0) interrupted.splice(index, 1);
+        contributor.status = 'idle';
+      }
       this.state.research.queue.unshift(this.state.research.job);
       this.state.research.job = null;
     }
@@ -4512,13 +4574,37 @@ export class Swarm {
     return `Queued for ${a.name} (${waiting} waiting). The doc goes into ${where}; company_status lists research filed recently.`;
   }
 
-  /** Start the lobby researcher's next brief when they're free and a session slot is open. A floor's brief waits for its clone. */
+  private ideaResearchFinishing = false;
+
+  /** Start a brief or Idea session within the shared budget; floor briefs wait for their clone. */
   private startResearchWork(): void {
-    if (this.state.officeHeld) return;
-    const a = this.state.agents.find((x) => x.id === RESEARCHER_ID);
+    if (this.state.officeHeld || this.ideaResearchFinishing) return;
     const r = this.state.research;
-    if (!a || BUSY.includes(a.status) || r.job || r.queue.length === 0) return;
-    if (this.slotsFull() || !this.mayStart('issue')) return;
+    if (r.job || this.slotsFull() || !this.mayStart('issue')) return;
+    const stale = r.queue.filter((j) => j.ideaId && (!this.state.agents.some((a) => a.id === j.agentId) ||
+      !this.state.ideas.some((i) => i.id === j.ideaId && i.status === 'researching' && !i.research?.error && !i.research?.prdRevisionId)));
+    if (stale.length) {
+      r.queue = r.queue.filter((j) => !stale.includes(j));
+      this.emitResearch();
+      this.save();
+    }
+    const ideaJob = nextIdeaResearch(this.state.ideas, RESEARCHER_ID, Date.now(), this.ideaSpecialists().map((a) => a.id)).find((job) => {
+      const agent = this.state.agents.find((x) => x.id === job.agentId);
+      return agent && (FREE.includes(agent.status) || agent.status === 'error') && !agent.heldRetry && !agent.startupFailed;
+    });
+    // Finish an Idea's clarification/evidence cycle before starting another ordinary brief.
+    const recovered = r.queue.find((j) => j.ideaId);
+    const continuing = ideaJob && this.state.ideas.find((i) => i.id === ideaJob.ideaId)?.status === 'researching';
+    const next = recovered ?? (r.queue.length === 0 || continuing ? ideaJob : undefined);
+    if (next) {
+      const agent = this.state.agents.find((x) => x.id === next.agentId);
+      if (!agent || BUSY.includes(agent.status) || agent.heldRetry || agent.startupFailed) return;
+      r.queue = r.queue.filter((j) => j !== next);
+      void this.trackOfficeActivity(agent.id, () => this.prepareIdeaResearch(agent, next));
+      return;
+    }
+    const a = this.state.agents.find((x) => x.id === RESEARCHER_ID);
+    if (!a || BUSY.includes(a.status) || r.queue.length === 0) return;
     const job = r.queue.find((j) => {
       const rt = j.repoId ? this.repoRt.get(j.repoId) : undefined;
       return !rt || rt.cloneStatus === 'ready' || rt.cloneStatus === 'error';
@@ -4533,6 +4619,111 @@ export class Swarm {
       return this.startResearchWork();
     }
     void this.trackOfficeActivity(a.id, () => this.prepareResearchJob(a, job, repo ?? null));
+  }
+
+  private ideaSpecialists() {
+    return this.state.agents.filter((a) => a.id !== RESEARCHER_ID && ['researcher', 'dev'].includes(a.role) && this.state.repos.some((r) => r.id === a.repoId));
+  }
+
+  private async prepareIdeaResearch(a: PersistedAgent, job: ResearchJob) {
+    const rt = this.agentRt.get(a.id)!;
+    this.nextGeneration(a);
+    const generation = rt.generation;
+    this.state.research.job = job;
+    Object.assign(a, { status: 'preparing', task: null, issueNumber: null, branch: null, prNumber: null, prUrl: null, sessionId: null, issueTitle: job.topic, startedAt: Date.now(), endedAt: null, lastError: null });
+    this.emitAgent(a);
+    this.emitResearch();
+    try {
+      const idea = await this.updateIdea(job.ideaId!, (idea) => {
+        if (!['queued', 'researching'].includes(idea.status)) throw new Error('Idea is no longer awaiting research');
+        idea.status = 'researching';
+        idea.research ??= { leadAgentId: RESEARCHER_ID, questions: [], requests: [] };
+      });
+      await this.backend.prepareResearchFolder(RESEARCH_DIR);
+      if (this.officeUpdate.handedOver || rt.generation !== generation) return;
+      if (a.status === 'stopped') throw new Error('Research was stopped; retry when ready');
+      if (this.state.officeHeld) {
+        this.state.research.job = null;
+        a.status = 'idle';
+        this.emitResearch();
+        this.emitAgent(a);
+        this.save();
+        return;
+      }
+      const specialists = this.ideaSpecialists();
+      const context = {
+        idea,
+        records: this.state.ideaRecords.filter((r) => r.ideaId === idea.id),
+        earlierResearch: this.state.research.done,
+        floors: this.state.repos.map((r) => ({ id: r.id, summary: r.summary, mission: r.mission, path: this.backend.mainDir(r.fullName) })),
+        specialists: specialists.map((s) => ({ id: s.id, repoId: s.repoId, title: s.title, specialty: s.specialty })),
+        request: idea.research!.requests.find((r) => r.id === job.requestId) ?? null,
+      };
+      a.status = 'working';
+      this.emitAgent(a);
+      rt.session = this.backend.startSession({
+        cwd: RESEARCH_DIR, prompt: JSON.stringify(context), systemAppend: IDEA_RESEARCH_PROMPT,
+        outputSchema: IDEA_RESEARCH_SCHEMA, model: this.modelFor(a, 'claude'), effort: a.effort || this.state.settings.defaultEffort,
+        browserTesting: false, additionalDirectories: this.readyClones(), role: 'researcher', ...this.sessionRuntime({ ...a, role: 'researcher' }),
+      }, {
+        log: (entries) => { if (rt.generation === generation) this.appendLog(a, entries); },
+        tool: (tool) => { if (rt.generation === generation) { rt.currentTool = tool; this.emitAgent(a); } },
+        sessionId: (id) => { if (rt.generation === generation) { a.sessionId = id; a.sessionCli = 'claude'; } },
+        browserUrl: () => undefined, screenshot: () => undefined,
+        limited: (at) => this.pauseForLimit(at), usageWarning: (info) => this.paceForWarning(info),
+        finished: (result) => { void this.trackOfficeActivity(a.id, () => this.finishIdeaResearch(a, job, result, generation)); },
+      });
+    } catch (err) {
+      await this.finishIdeaResearch(a, job, { ok: false, errors: [(err as Error).message], text: '', turns: 0, costUsd: 0 }, generation);
+    }
+  }
+
+  private async finishIdeaResearch(a: PersistedAgent, job: ResearchJob, result: SessionResult, generation: number | undefined) {
+    const rt = this.agentRt.get(a.id)!;
+    if (!rt || this.officeUpdate.handedOver || rt.generation !== generation || this.state.research.job !== job) return;
+    rt.session = null;
+    rt.currentTool = null;
+    a.endedAt = Date.now();
+    a.costUsd += result.costUsd;
+    a.turns += result.turns;
+    this.ideaResearchFinishing = true;
+    this.state.research.job = null; // The outcome and cleared job must be in the same durable snapshot.
+    try {
+      if (a.status === 'stopped' || result.interrupted) throw new Error('Research was stopped; retry when ready');
+      const report = parseIdeaResearch(result);
+      await this.updateIdea(job.ideaId!, (idea, records) => {
+        validateIdeaReport(report, job, idea, this.state.repos.map((r) => r.id), this.ideaSpecialists().map((a) => a.id));
+        const research = idea.research!;
+        if (job.requestId) {
+          const request = research.requests.find((r) => r.id === job.requestId)!;
+          request.answer = report.answer;
+          request.sources = report.sources;
+        } else if (report.action === 'clarify') {
+          research.questions.push({ question: report.question.trim() });
+          idea.status = 'needs-clarification';
+        } else if (report.action === 'request') {
+          research.requests.push(...report.requests.map((r) => ({ ...r, id: crypto.randomUUID() })));
+        } else {
+          const number = this.state.ideaRecords.filter((r) => r.ideaId === idea.id && r.prd).length + 1;
+          const revision = `${idea.id}-prd-${number}`;
+          records.push({ id: revision, ideaId: idea.id, kind: 'research', title: `PRD revision ${number}`,
+            body: renderIdeaPrd(report.prd!), prd: report.prd!, authorAgentId: research.leadAgentId, createdAt: Date.now() });
+          research.prdRevisionId = revision;
+          idea.status = 'researched';
+        }
+      });
+      a.status = 'done';
+    } catch (err) {
+      a.status = 'error';
+      a.lastError = (err as Error).message;
+      await this.updateIdea(job.ideaId!, (idea) => { idea.research ??= { leadAgentId: RESEARCHER_ID, questions: [], requests: [] }; idea.research.error = a.lastError!; }).catch((error) => console.warn('could not save Idea research error', error));
+      this.appendLog(a, [{ kind: 'error', text: a.lastError }]);
+    }
+    this.ideaResearchFinishing = false;
+    this.emitAgent(a);
+    this.emitResearch();
+    this.save();
+    setTimeout(() => this.schedule(), 300);
   }
 
   private async prepareResearchJob(a: PersistedAgent, job: ResearchJob, repo: PersistedRepo | null) {

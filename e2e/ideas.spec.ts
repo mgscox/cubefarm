@@ -8,6 +8,7 @@ test('submit, inspect and reload Ideas, with optional hints and independent reco
   page.on('pageerror', (error) => errors.push(error.message));
   await page.route((url) => !url.href.startsWith(baseURL!) && !url.protocol.startsWith('data'), (route) => route.fulfill({ status: 200, body: '' }));
   const initial = await (await request.get('/api/state')).json() as WorldSnapshot;
+  await request.post('/api/office/close'); // Keep intake queued while research is covered separately.
   await request.patch('/api/settings', { data: { tutorialStep: -1 } });
   await page.addInitScript((spot) => localStorage.setItem('cubefarm:view', JSON.stringify(spot)), {
     floor: 0, x: MANAGER_DESK.x, z: MANAGER_DESK.z + MANAGER_DESK.d / 2 + 0.8, yaw: 0, pitch: -0.6,
@@ -88,6 +89,7 @@ test('submit, inspect and reload Ideas, with optional hints and independent reco
     await page.screenshot({ path: testInfo.outputPath('idea-mobile.png') });
     expect(errors).toEqual([]);
   } finally {
+    if (initial.officeLifecycle.state === 'open') await request.post('/api/office/reopen');
     await request.patch('/api/settings', { data: { tutorialStep: initial.settings.tutorialStep } });
   }
 });

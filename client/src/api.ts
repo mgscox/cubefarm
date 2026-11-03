@@ -26,6 +26,8 @@ export interface FloorOptions {
 
 export const api = {
   submitIdea: (input: IdeaInput) => call<IdeaView>('POST', '/api/ideas', input),
+  replyToIdea: (id: string, answer: string) => call<IdeaView>('POST', `/api/ideas/${encodeURIComponent(id)}/reply`, { answer }),
+  retryIdeaResearch: (id: string) => call<IdeaView>('POST', `/api/ideas/${encodeURIComponent(id)}/retry`),
   githubRepos: (owner?: string) => call<GhRepoSummary[]>('GET', `/api/github/repos${owner ? `?owner=${encodeURIComponent(owner)}` : ''}`),
   connectRepo: (fullName: string, floor: FloorOptions = {}) => call<RepoView>('POST', '/api/repos', { fullName, ...floor }),
   createRepo: (body: FloorOptions & { name: string; description: string; visibility: 'private' | 'public'; owner?: string }) =>

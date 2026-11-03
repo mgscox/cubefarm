@@ -8,13 +8,14 @@ import type { PreviewBackend } from './previewRunner.ts';
 import { describeOfficeTool, type LogEntry, type SessionCallbacks, type SessionHandle, type SessionOptions } from './agentRunner.ts';
 import { bootNotice, CLIS } from './clis.ts';
 import { updateFailure } from './fleet.ts';
-import type { CliView, GhRepoSummary, IssueInfo, PullInfo, MachineSample, MachineTelemetry } from '../shared/types.ts';
+import type { IdeaView, IdeaRecordView, CliView, GhRepoSummary, IssueInfo, PullInfo, MachineSample, MachineTelemetry } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
 import { dependencyUrls, READY_FOR_HUMAN, RESEARCH } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR } from './config.ts';
 import { takeLastUpdate, underLauncher, type OfficeHost } from './officeUpdate.ts';
 import type { prStatusView } from './ceo.ts';
+import type { IdeaResearchReport } from './ideaResearch.ts';
 
 // `npm run demo`: a fake GitHub and fake Claude Code sessions, so the office (including the
 // dev → QA → fix loop) can be explored without spending any usage or touching real repos.
@@ -194,7 +195,46 @@ function fixScript(pr: number, pushes: boolean): Step[] {
   ];
 }
 
+/** Fixed evidence and decisions: no random output, web access, files or tracker writes. */
+export function demoIdeaResearch(context: {
+  idea: IdeaView; records: IdeaRecordView[];
+  floors: { id: string }[]; specialists: { id: string; repoId: string; title: string }[];
+  request: { question: string } | null;
+}): IdeaResearchReport {
+  const { idea, floors, specialists, request } = context;
+  const base: IdeaResearchReport = { action: 'prd', question: '', requests: [], answer: '', sources: [], prd: null };
+  if (request) return { ...base, action: 'evidence', answer: `Demo feasibility evidence for: ${request.question}. The configured floor can own this change; verify the assumptions during review.`, sources: ['https://example.com/demo-research'] };
+  if (!floors.length) return { ...base, action: 'clarify', question: 'Configure a target floor in CubeFarm, then reply with the intended outcome.' };
+  if (idea.description.includes('[clarify]') && !idea.research?.questions.length) return { ...base, action: 'clarify', question: 'Who is the primary user, and what measurable outcome should this Idea deliver?' };
+  const floor = floors.find((f) => idea.floorHints.includes(f.id)) ?? floors[0];
+  const specialist = specialists.find((s) => s.repoId === floor.id && /research/i.test(s.title)) ?? specialists.find((s) => s.repoId === floor.id);
+  if (specialist && !idea.research?.requests.length) return { ...base, action: 'request', requests: [{ agentId: specialist.id, question: 'Check feasibility and existing research for this Idea on your floor; cite the evidence and open risks.' }] };
+  const sources = [...new Set([...idea.links, ...(idea.research?.requests.flatMap((r) => r.sources ?? []) ?? []), 'https://example.com/demo-research'])];
+  return { ...base, prd: {
+    problem: idea.description,
+    outcome: idea.research?.questions.at(-1)?.answer ?? 'A new teammate can complete the requested workflow without assistance.',
+    scope: `Deliver the requested workflow on ${floor.id}.${idea.constraints ? ` Constraints: ${idea.constraints}` : ''}`,
+    evidence: sources.map((source) => ({ source, finding: 'Illustrative demo evidence; no live research was performed.' })),
+    assumptions: ['The target user and feasibility need independent validation; demo evidence is illustrative.'],
+    targetFloors: [{ repoId: floor.id, rationale: idea.floorHints.includes(floor.id) ? 'The hinted floor is configured and owns the demo workflow.' : 'The first configured floor owns the demo workflow; no hint was required.' }],
+    acceptanceCriteria: ['A new teammate completes the requested workflow in under 3 minutes in 4 of 5 observed trials.', 'The workflow succeeds at desktop and 390px viewport widths with zero uncaught errors.'],
+  } };
+}
+
+function fakeIdeaSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
+  cb.log([{ kind: 'text', text: '● Inspecting the Idea and linked research (deterministic demo).' }]);
+  const timer = setTimeout(() => {
+    const structured = demoIdeaResearch(JSON.parse(opts.prompt));
+    cb.finished({ ok: true, text: JSON.stringify(structured), structured, costUsd: 0, turns: 1, errors: [] });
+  }, 500);
+  return { send: () => undefined, stop: () => {
+    clearTimeout(timer);
+    cb.finished({ ok: false, text: '', costUsd: 0, turns: 0, errors: ['Stopped'], interrupted: true });
+  } };
+}
+
 function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: string): SessionHandle {
+  if (opts.outputSchema && 'action' in (opts.outputSchema.properties as object ?? {})) return fakeIdeaSession(opts, cb);
   const timers: NodeJS.Timeout[] = [];
   let stopped = false;
   const kind = opts.role === 'qa' ? 'qa' : /FAILED|taking over pull request|git push origin HEAD:/.test(opts.prompt) ? 'fix' : opts.role === 'researcher' ? 'research' : 'issue';

@@ -22,7 +22,7 @@ export interface SessionOptions {
   browserTesting: boolean;
   additionalDirectories: string[]; // read-only reference clones of linked repos
   role: AgentRole;
-  /** JSON schema for a structured final answer (QA reports). */
+  /** JSON schema for a structured final answer (QA or Idea research). */
   outputSchema?: Record<string, unknown>;
   resumeSessionId?: string;
   /** The CEO's in-process MCP server (mcp__office__*). */

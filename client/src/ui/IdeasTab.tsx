@@ -6,13 +6,24 @@ import { useStore } from '../store';
 import { Markdown } from './Markdown';
 
 const ideaLink = (id: string) => `#idea/${id}`;
+const status = { queued: 'Queued', researching: 'Researching', 'needs-clarification': 'Needs clarification', researched: 'PRD ready' };
 
 export function IdeaDetail({ idea, records }: { idea: IdeaView; records: IdeaRecordView[] }) {
+  const [answer, setAnswer] = useState('');
+  const [busy, setBusy] = useState(false);
+  const agents = useStore((s) => s.agents);
+  const connected = useStore((s) => s.connected);
+  const research = idea.research;
+  const revision = window.location.hash.split('/prd/')[1];
+  const revisionReady = records.some((record) => record.id === revision);
+  useEffect(() => {
+    if (revisionReady) document.getElementById(revision)?.scrollIntoView();
+  }, [revision, revisionReady]);
   return (
     <article className="card idea-detail" aria-label="Idea detail">
       <div className="row wrap">
         <h3>Idea</h3>
-        <span className="idea-status" role="status">Queued</span>
+        <span className="idea-status" role="status">{status[idea.status]}</span>
         <span className="spacer" />
         <a href={ideaLink(idea.id)}>Link to this Idea</a>
       </div>
@@ -22,12 +33,40 @@ export function IdeaDetail({ idea, records }: { idea: IdeaView; records: IdeaRec
       <p>{idea.floorHints.length ? idea.floorHints.join(', ') : 'No floor hints — affected repositories are open.'}</p>
       {idea.constraints && <><h4>Constraints</h4><p className="idea-prose">{idea.constraints}</p></>}
       {idea.links.length > 0 && <><h4>Links</h4><ul>{idea.links.map((link) => <li key={link}><a href={link} target="_blank" rel="noreferrer">{link}</a></li>)}</ul></>}
+      {research && <section aria-label="Idea research">
+        <h4>Research</h4>
+        <p>Lead: {agents[research.leadAgentId]?.name ?? research.leadAgentId}</p>
+        {research.questions.map((q, i) => <div key={i}>
+          <p><b>{q.question}</b></p>
+          {q.answer !== undefined && <p className="idea-prose">Manager: {q.answer}</p>}
+        </div>)}
+        {idea.status === 'needs-clarification' && <form onSubmit={(event) => {
+          event.preventDefault();
+          if (busy) return;
+          setBusy(true);
+          void api.replyToIdea(idea.id, answer).then(() => setAnswer('')).catch(() => undefined).finally(() => setBusy(false));
+        }}>
+          <label className="field">Reply to researcher<textarea required maxLength={10000} rows={3} value={answer} onChange={(e) => setAnswer(e.target.value)} /></label>
+          <button className="btn btn-good" disabled={busy || !connected || !answer.trim()}>Reply and resume research</button>
+        </form>}
+        {research.requests.map((r) => <details key={r.id} open={r.answer === undefined}>
+          <summary>Focused input · {agents[r.agentId]?.name ?? r.agentId} · {r.answer !== undefined ? 'Received' : agents[r.agentId] ? 'Waiting' : 'Unavailable'}</summary>
+          <p className="idea-prose">{r.question}</p>
+          {r.answer !== undefined && <p className="idea-prose">{r.answer}</p>}
+          {r.sources?.map((source) => <p key={source}>{source}</p>)}
+        </details>)}
+        {research.error && <div role="alert"><p className="idea-prose">{research.error}</p><button className="btn" disabled={busy || !connected} onClick={() => {
+          setBusy(true);
+          void api.retryIdeaResearch(idea.id).catch(() => undefined).finally(() => setBusy(false));
+        }}>Retry research</button></div>}
+      </section>}
       <h4>Research, reviews & proposals</h4>
       {records.length === 0 && <p className="muted">No records yet.</p>}
       {[...records].sort((a, b) => a.createdAt - b.createdAt).map((record) => (
-        <section className="card" key={`${record.kind}:${record.id}`}>
+        <section className="card" id={record.id} key={`${record.kind}:${record.id}`}>
           <div className="small muted">{record.kind} · {new Date(record.createdAt).toLocaleString()}</div>
           <h4>{record.title}</h4>
+          {record.prd && <a href={`${ideaLink(idea.id)}/prd/${record.id}`}>View PRD revision</a>}
           <Markdown text={record.body} />
         </section>
       ))}
@@ -63,12 +102,12 @@ export function IdeasTab({ initialIdea }: { initialIdea?: string }) {
           {ideas.length === 0 && <p className="muted">Your first Idea starts here.</p>}
           {[...ideas].sort((a, b) => b.createdAt - a.createdAt).map((item) => (
             <a className={`card idea-entry ${item.id === selected ? 'idea-selected' : ''}`} href={ideaLink(item.id)} key={item.id} onClick={() => setSelected(item.id)}>
-              <b>{item.description}</b><span className="small">Queued</span>
+              <b>{item.description}</b><span className="small">{status[item.status]}</span>
             </a>
           ))}
         </nav>
         {selected ? (
-          idea ? <IdeaDetail idea={idea} records={records.filter((record) => record.ideaId === idea.id)} /> : <p role="status">Idea not found in this office.</p>
+          idea ? <IdeaDetail key={idea.id} idea={idea} records={records.filter((record) => record.ideaId === idea.id)} /> : <p role="status">Idea not found in this office.</p>
         ) : (
           <form className="card" onSubmit={(event) => {
             event.preventDefault();
