@@ -117,6 +117,7 @@ export async function main(argv: string[]): Promise<void> {
   const ops = createBoxOps({
     hookUrl: () => `http://127.0.0.1:${ready.hookPort}`,
     pids: () => [process.pid, ...(ready.pid ? [ready.pid] : []), ...cliPids.values()],
+    held: ready.ptys,
     keeperStale: keeperStale(ready.build, keeperBuild(import.meta.dirname, ext)),
   });
 

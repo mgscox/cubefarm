@@ -7,6 +7,12 @@ import { spawnPty } from './ptyClient.ts';
 import type { AgentTerminal } from './terminal.ts';
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({ query: vi.fn(() => (async function* () {})()) }));
+// Skill staging has its own worktree tests. These fixtures stub session filesystem writes.
+vi.mock('./repoSkills.ts', () => ({
+  ACTIVE_REPO_SKILLS: { release: 'fixture', skills: [], files: [] },
+  stageCodexSkills: vi.fn(),
+  writeSessionSkills: vi.fn(),
+}));
 vi.mock('./clis.ts', async (importOriginal) => ({
   ...await importOriginal<typeof import('./clis.ts')>(),
   commandFor: vi.fn(() => ({ file: 'fake-agent', args: [] })),

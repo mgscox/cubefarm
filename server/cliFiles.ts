@@ -6,6 +6,7 @@ import { projectEnv } from './projectEnv.ts';
 import { cliLabel, cliSearchLocations, CODEX_HOOK_SOURCE, commandFor, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE } from './clis.ts';
 import { newScreenshots } from './agentRunner.ts';
 import type { CliPlan } from './machine.ts';
+import { ACTIVE_REPO_SKILLS, stageCodexSkills, writeSessionSkills } from './repoSkills.ts';
 
 // A CLI's session on the machine it runs on: its files under <SWARM_HOME>/sessions/<token>, the helper scripts in
 // <SWARM_HOME>/bin, and its command line and environment. The office's own machine (localCliHost.ts) and a box
@@ -66,6 +67,7 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
   const dir = path.join(SESSIONS_DIR, plan.token);
   const browser = plan.browserTesting ? playwrightServer(path.join(dir, 'browser')) : null;
   let prompt = plan.prompt;
+  let repoSkills: string | undefined;
   let files: { settings: string; mcp: string | null; system: string };
   try {
     writeHelpers();
@@ -86,6 +88,8 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
       fs.writeFileSync(file, prompt);
       prompt = `Your task is in ${file}. Read all of it first, then do what it says.`;
     }
+    if (plan.cli === 'codex') stageCodexSkills(ACTIVE_REPO_SKILLS, plan.cwd, dir);
+    else repoSkills = writeSessionSkills(ACTIVE_REPO_SKILLS, dir, plan.cli);
   } catch (err) {
     throw new Error(`Could not prepare ${label}: ${(err as Error).message}`);
   }
@@ -105,6 +109,7 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
     notify: { script: path.join(BIN_DIR, 'notify.cjs'), url: hookUrl },
     codexHook: path.join(BIN_DIR, 'codex-hook.cjs'),
     plugin: pathToFileURL(path.join(BIN_DIR, 'opencode-plugin')).href,
+    repoSkills,
     browser,
   });
 
