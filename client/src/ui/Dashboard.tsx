@@ -5,8 +5,10 @@ import { agentsOnRepo, isBusy, pendingRequests, repoOnFloor, unreadMessages, use
 import { isConfirmOpen } from './Confirm';
 import { KanbanView } from './KanbanView';
 import { LiveTerminal } from './LiveTerminal';
+import { OfficeNotices } from './OfficeNotices';
 import { Overlays } from './Overlays';
 import { StatusPill } from './TerminalView';
+import { WorkersPanel } from './WorkersPanel';
 import './dashboard.css';
 
 const ROLES: Record<AgentRole, string> = {
@@ -183,6 +185,9 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
             <button className="dashboard-action dashboard-office" onClick={onOffice}>3D Office</button>
           </nav>
         </header>
+
+        <OfficeNotices />
+        {!repo && <WorkersPanel dashboard />}
 
         {pane === 'kanban' && repo ? (
           <KanbanView key={repo.id} repoId={repo.id} inline />

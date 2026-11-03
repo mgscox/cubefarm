@@ -223,6 +223,26 @@
   outline-offset: 2px;
 }
 
+.dashboard-main > :is(.workers, .office-chip, .hud-banner) {
+  position: static;
+  max-width: 100%;
+  flex: none;
+}
+
+.dashboard-main > .workers {
+  align-self: flex-end;
+  max-height: 35dvh;
+}
+
+.dashboard-main > .office-chip {
+  align-self: flex-start;
+}
+
+.dashboard-main > .hud-banner {
+  transform: none;
+  overflow-wrap: anywhere;
+}
+
 .dashboard-terminals {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));

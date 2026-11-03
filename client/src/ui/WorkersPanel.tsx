@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { agentsOnRepo, useStore, type Agent } from '../store';
-import { CEO_ID, type LogLine, type RepoView } from '../../../shared/types';
+import { agentsOnRepo, isBusy, useStore, type Agent } from '../store';
+import { CEO_ID, RESEARCHER_ID, type LogLine, type RepoView } from '../../../shared/types';
 import { BOOT_TEXT } from '../world/draw';
 
 // Who is busy with what, across the whole company: everyone working right now with their project and their latest
@@ -8,7 +8,6 @@ import { BOOT_TEXT } from '../world/draw';
 // their screen; Tab shows and hides the list.
 
 const SHOWN: LogLine['kind'][] = ['tool', 'text', 'thinking', 'error', 'done', 'manager'];
-const isWorking = (a: Agent) => a.status === 'working' || a.status === 'preparing';
 const STORAGE_KEY = 'cubefarm:workers';
 
 /** The latest line worth showing, cleaned of the terminal's bullets. */
@@ -80,8 +79,8 @@ function loadCollapsed(): Set<string> {
   }
 }
 
-export function WorkersPanel() {
-  const floor = useStore((s) => s.floor);
+export function WorkersPanel({ dashboard = false }: { dashboard?: boolean }) {
+  const floor = useStore((s) => dashboard ? 0 : s.floor);
   const repos = useStore((s) => s.repos);
   const agents = useStore((s) => s.agents);
   const started = useStore((s) => s.started);
@@ -120,6 +119,7 @@ export function WorkersPanel() {
     });
   // Tab shows and hides it, like a game's player list. Not while a panel is open or you're typing.
   useEffect(() => {
+    if (dashboard) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.code !== 'Tab' || e.repeat || e.altKey || e.ctrlKey || e.metaKey || useStore.getState().overlay) return;
       if ((e.target as HTMLElement | null)?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
@@ -128,31 +128,31 @@ export function WorkersPanel() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
-  if (!started) return null;
+  }, [dashboard]);
+  if (!started && !dashboard) return null;
 
-  const ceo = agents[CEO_ID];
+  const hq = [agents[CEO_ID], agents[RESEARCHER_ID]].filter((a) => a && isBusy(a));
   const floors = [...repos].sort((x, y) => (x.floor === floor ? -1 : y.floor === floor ? 1 : x.floor - y.floor));
   const groups: Group[] = [
-    ...(ceo && isWorking(ceo) ? [{ key: 'hq', label: 'HQ', title: 'The CEO, in the lobby', color: ceo.color, list: [ceo] }] : []),
+    { key: 'hq', label: 'HQ', title: 'Lobby', color: hq[0]?.color ?? '#ff8a5b', list: hq },
     ...floors.map((r: RepoView) => ({
       key: r.id,
       label: `${r.floor} · ${r.fullName.split('/')[1]}`,
       title: `Floor ${r.floor}: ${r.fullName}`,
       color: r.color,
-      list: agentsOnRepo(agents, r.id).filter(isWorking),
+      list: agentsOnRepo(agents, r.id).filter(isBusy),
     })),
   ].filter((g) => g.list.length > 0);
   const total = groups.reduce((n, g) => n + g.list.length, 0);
 
   return (
     <div className={`workers ${open ? '' : 'workers-closed'}`}>
-      <button className="wk-head" onClick={toggle} title={open ? 'Hide the list (Tab)' : 'Show who is working (Tab)'}>
+      <button className="wk-head" onClick={toggle} aria-expanded={open} title={`${open ? 'Hide the list' : 'Show who is working'}${dashboard ? '' : ' (Tab)'}`}>
         <span>
           Working <b>{total}</b>
         </span>
-        <span className="wk-chevron">
-          <kbd>Tab</kbd> {open ? '▾' : '▸'}
+        <span className="wk-chevron" aria-hidden="true">
+          {!dashboard && <kbd>Tab</kbd>} {open ? '▾' : '▸'}
         </span>
       </button>
       {open && (
@@ -162,8 +162,8 @@ export function WorkersPanel() {
             const shut = collapsed.has(g.key);
             return (
               <div key={g.key} className="wk-group">
-                <button className="wk-group-head" onClick={() => toggleGroup(g.key)} title={`${g.title} · click to ${shut ? 'expand' : 'collapse'}`}>
-                  <span className="wk-group-arrow">{shut ? '▸' : '▾'}</span>
+                <button className="wk-group-head" onClick={() => toggleGroup(g.key)} aria-expanded={!shut} title={`${g.title} · click to ${shut ? 'expand' : 'collapse'}`}>
+                  <span className="wk-group-arrow" aria-hidden="true">{shut ? '▸' : '▾'}</span>
                   <span className="wk-swatch" style={{ background: g.color }} />
                   <span className="wk-group-name">{g.label}</span>
                   <span className="wk-group-count">{g.list.length}</span>
