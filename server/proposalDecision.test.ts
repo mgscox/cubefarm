@@ -130,7 +130,7 @@ it('returns a wording refinement directly for a new decision', async () => {
   const [, revised] = (await saved()).proposals;
   expect(revised).toMatchObject({ revises: proposal.id, reviewSkipped: true, prd: { revision: 4 }, plan: { revision: 5 } });
   expect(revised.decision).toBeUndefined();
-  expect(revised.prd.body.replace(/  \r\n/g, '\n')).toBe(proposal.prd.body);
+  expect(revised.prd.body.trimEnd()).toBe(proposal.prd.body);
   expect((await saved()).proposals[0].decision?.feedback).toBe('Say "weekly" not "this week"');
 });
 

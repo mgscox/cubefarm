@@ -58,7 +58,7 @@ export function demoRevision(prev: ProposalView): ProposalHandoff {
   const base = { ideaId: prev.ideaId, prd, revises: prev.id };
   if (prev.decision?.wordingOnly) {
     // Cosmetic-only demo: free-text edits conservatively take the substantive path.
-    prd.body = prev.prd.body.replace(/\n/g, '  \r\n');
+    prd.body = `${prev.prd.body}  `;
     const issues = structuredClone(prev.plan.issues).map((i) => ({ ...i, brief: `${i.brief}  ` }));
     return { ...base, plan: { revision: prev.plan.revision + 1, issues }, reviews: prev.reviews, reviewSkipped: true };
   }
