@@ -3,10 +3,12 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { CEO_ID, RESEARCHER_ID, type AgentRole } from '../../../shared/types';
 import { agentsOnRepo, isBusy, pendingRequests, repoOnFloor, unreadMessages, usePhoneBadge, useStore, type Agent } from '../store';
 import { isConfirmOpen } from './Confirm';
+import { OfficeNotices } from './HUD';
 import { KanbanView } from './KanbanView';
 import { LiveTerminal } from './LiveTerminal';
 import { Overlays } from './Overlays';
 import { StatusPill } from './TerminalView';
+import { WorkersPanel } from './WorkersPanel';
 import './dashboard.css';
 
 const ROLES: Record<AgentRole, string> = {
@@ -125,6 +127,7 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
   const agents = useStore((s) => s.agents);
   const company = useStore((s) => s.settings.companyName);
   const connected = useStore((s) => s.connected);
+  const restarting = useStore((s) => s.restarting);
   const demo = useStore((s) => s.demo);
   const openOverlay = useStore((s) => s.openOverlay);
   const repo = repoOnFloor(repos, floor);
@@ -165,7 +168,7 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
         </nav>
         <div className="dashboard-connection" role="status">
           <span className={`dashboard-connection-dot${connected ? ' is-live' : ''}`} />
-          {connected ? (demo ? 'Demo office' : 'Connected') : 'Reconnecting'}
+          {connected ? (demo ? 'Demo office' : 'Connected') : restarting ? 'Office restarting' : 'Reconnecting'}
         </div>
       </aside>
 
@@ -183,17 +186,23 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
             <button className="dashboard-action dashboard-office" onClick={onOffice}>3D Office</button>
           </nav>
         </header>
+        <div className="dashboard-notices"><OfficeNotices /></div>
 
         {pane === 'kanban' && repo ? (
           <KanbanView key={repo.id} repoId={repo.id} inline />
-        ) : team.length ? (
-          <div className={`dashboard-terminals${focused ? ' dashboard-expanded' : ''}`}>
-            {(focused ? [focused] : team).map((agent) => (
-              <AgentTile key={agent.id} agent={agent} expanded={focused?.id === agent.id} toggle={() => setExpanded(focused ? null : agent.id)} />
-            ))}
-          </div>
         ) : (
-          <p className="dashboard-empty">No agents on this floor yet.</p>
+          <div className={`dashboard-body${!repo && !focused ? ' dashboard-lobby' : ''}`}>
+            {team.length ? (
+              <div className={`dashboard-terminals${focused ? ' dashboard-expanded' : ''}`}>
+                {(focused ? [focused] : team).map((agent) => (
+                  <AgentTile key={agent.id} agent={agent} expanded={focused?.id === agent.id} toggle={() => setExpanded(focused ? null : agent.id)} />
+                ))}
+              </div>
+            ) : (
+              <p className="dashboard-empty">No agents on this floor yet.</p>
+            )}
+            {!repo && !focused && <WorkersPanel inline />}
+          </div>
         )}
       </main>
       <Overlays onFloor={visitFloor} />

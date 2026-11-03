@@ -39,6 +39,18 @@ function PhoneButton() {
   );
 }
 
+/** The office's own notices: an update or restart on its way, and GitHub not being usable. */
+export function OfficeNotices() {
+  const ghReady = useStore((s) => s.ghReady);
+  const ghError = useStore((s) => s.ghError);
+  return (
+    <>
+      <OfficeUpdateChip />
+      {!ghReady && ghError && <div className="hud-banner" role="alert">⚠️ {ghError}</div>}
+    </>
+  );
+}
+
 export function Toasts() {
   const toasts = useStore((s) => s.toasts);
   const dismiss = useStore((s) => s.dismissToast);
@@ -62,8 +74,6 @@ export function HUD({ onDashboard }: { onDashboard: () => void }) {
   const restarting = useStore((s) => s.restarting);
   const demo = useStore((s) => s.demo);
   const user = useStore((s) => s.user);
-  const ghReady = useStore((s) => s.ghReady);
-  const ghError = useStore((s) => s.ghError);
   const focus = useStore((s) => s.focus);
   const held = useStore((s) => s.held);
   const overlay = useStore((s) => s.overlay);
@@ -102,9 +112,7 @@ export function HUD({ onDashboard }: { onDashboard: () => void }) {
       </div>
 
       <WorkersPanel />
-      <OfficeUpdateChip />
-
-      {!ghReady && ghError && <div className="hud-banner">⚠️ {ghError}</div>}
+      <OfficeNotices />
 
       {started && !overlay && !travel && <div className={`crosshair ${focus ? 'crosshair-hot' : ''}`} />}
       {started && !overlay && focus && (

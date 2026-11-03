@@ -32,3 +32,40 @@ test('Dashboard opens every Manager console panel and can visit a floor', async 
   await expect(consoleTitle).toBeHidden();
   await expect(page.getByRole('button', { name: 'Kanban', exact: true })).toBeVisible();
 });
+
+test('Dashboard Lobby shows who is working and the office notices, and leaves Tab to focus', async ({ page, baseURL }, testInfo) => {
+  await page.route((url) => !url.href.startsWith(baseURL!) && !url.protocol.startsWith('data'), (route) => route.fulfill({ status: 200, body: '' }));
+  // The demo office never fails GitHub or updates itself: add both to its snapshot.
+  await page.routeWebSocket(/\/ws$/, (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((message) => {
+      const event = JSON.parse(String(message));
+      if (event.type === 'snapshot') {
+        event.data.ghReady = false;
+        event.data.ghError = 'GitHub CLI is not logged in';
+        event.data.officeUpdate = { state: 'waiting', behind: 2, launcher: true, drainingSince: null, running: 1, detail: null };
+      }
+      ws.send(JSON.stringify(event));
+    });
+  });
+  await page.addInitScript(() => localStorage.setItem('cubefarm:mode', 'dashboard'));
+  await page.goto('/');
+
+  await expect(page.getByRole('alert').filter({ hasText: 'GitHub CLI is not logged in' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Updating the office after 1 session finishes/ })).toBeVisible();
+
+  const working = page.getByRole('region', { name: 'Working' });
+  await expect(working.getByRole('heading', { name: /Working/ })).toBeVisible();
+  // The CEO's details are the Manager console; a floor agent's are their terminal.
+  const row = working.locator('.wk-group').filter({ hasNot: page.getByText('Lobby', { exact: true }) }).locator('.wk-row').first();
+  await expect(row).toBeVisible({ timeout: 60_000 });
+  await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('dashboard-lobby-working.png') });
+
+  await page.getByRole('button', { name: 'Manager console', exact: true }).focus();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: /^Phone/ })).toBeFocused();
+  await expect(working).toBeVisible();
+
+  await row.click();
+  await expect(page.getByPlaceholder(/while they work/)).toBeVisible();
+});

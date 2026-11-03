@@ -1,14 +1,15 @@
 import { useEffect, useState } from 'react';
-import { agentsOnRepo, useStore, type Agent } from '../store';
-import { CEO_ID, type LogLine, type RepoView } from '../../../shared/types';
+import { useStore, type Agent } from '../store';
+import type { LogLine } from '../../../shared/types';
 import { BOOT_TEXT } from '../world/draw';
+import { workingGroups } from '../working';
 
 // Who is busy with what, across the whole company: everyone working right now with their project and their latest
 // thought, reply or tool call. Idle workers are left out; the floor you're on comes first. Click someone to watch
-// their screen; Tab shows and hides the list.
+// their screen; Tab shows and hides the list. The Dashboard's Lobby shows it inline, always open, and leaves Tab to
+// ordinary focus navigation.
 
 const SHOWN: LogLine['kind'][] = ['tool', 'text', 'thinking', 'error', 'done', 'manager'];
-const isWorking = (a: Agent) => a.status === 'working' || a.status === 'preparing';
 const STORAGE_KEY = 'cubefarm:workers';
 
 /** The latest line worth showing, cleaned of the terminal's bullets. */
@@ -64,14 +65,6 @@ function Row({ a, now }: { a: Agent; now: number }) {
   );
 }
 
-interface Group {
-  key: string;
-  label: string;
-  title: string;
-  color: string;
-  list: Agent[];
-}
-
 function loadCollapsed(): Set<string> {
   try {
     return new Set(JSON.parse(localStorage.getItem(`${STORAGE_KEY}:collapsed`) ?? '[]') as string[]);
@@ -80,8 +73,8 @@ function loadCollapsed(): Set<string> {
   }
 }
 
-export function WorkersPanel() {
-  const floor = useStore((s) => s.floor);
+export function WorkersPanel({ inline = false }: { inline?: boolean }) {
+  const floor = useStore((s) => (inline ? 0 : s.floor));
   const repos = useStore((s) => s.repos);
   const agents = useStore((s) => s.agents);
   const started = useStore((s) => s.started);
@@ -120,6 +113,7 @@ export function WorkersPanel() {
     });
   // Tab shows and hides it, like a game's player list. Not while a panel is open or you're typing.
   useEffect(() => {
+    if (inline) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.code !== 'Tab' || e.repeat || e.altKey || e.ctrlKey || e.metaKey || useStore.getState().overlay) return;
       if ((e.target as HTMLElement | null)?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
@@ -128,41 +122,39 @@ export function WorkersPanel() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
-  if (!started) return null;
+  }, [inline]);
+  if (!started && !inline) return null;
 
-  const ceo = agents[CEO_ID];
-  const floors = [...repos].sort((x, y) => (x.floor === floor ? -1 : y.floor === floor ? 1 : x.floor - y.floor));
-  const groups: Group[] = [
-    ...(ceo && isWorking(ceo) ? [{ key: 'hq', label: 'HQ', title: 'The CEO, in the lobby', color: ceo.color, list: [ceo] }] : []),
-    ...floors.map((r: RepoView) => ({
-      key: r.id,
-      label: `${r.floor} · ${r.fullName.split('/')[1]}`,
-      title: `Floor ${r.floor}: ${r.fullName}`,
-      color: r.color,
-      list: agentsOnRepo(agents, r.id).filter(isWorking),
-    })),
-  ].filter((g) => g.list.length > 0);
+  const groups = workingGroups(agents, repos, floor);
   const total = groups.reduce((n, g) => n + g.list.length, 0);
+  const shown = inline || open;
 
   return (
-    <div className={`workers ${open ? '' : 'workers-closed'}`}>
-      <button className="wk-head" onClick={toggle} title={open ? 'Hide the list (Tab)' : 'Show who is working (Tab)'}>
-        <span>
-          Working <b>{total}</b>
-        </span>
-        <span className="wk-chevron">
-          <kbd>Tab</kbd> {open ? '▾' : '▸'}
-        </span>
-      </button>
-      {open && (
+    <section className={`workers${inline ? ' workers-inline' : shown ? '' : ' workers-closed'}`} aria-label="Working">
+      {inline ? (
+        <h2 className="wk-head">
+          <span>
+            Working <b>{total}</b>
+          </span>
+        </h2>
+      ) : (
+        <button className="wk-head" onClick={toggle} aria-expanded={open} title={open ? 'Hide the list (Tab)' : 'Show who is working (Tab)'}>
+          <span>
+            Working <b>{total}</b>
+          </span>
+          <span className="wk-chevron">
+            <kbd>Tab</kbd> {open ? '▾' : '▸'}
+          </span>
+        </button>
+      )}
+      {shown && (
         <div className="wk-list">
           {total === 0 && <div className="wk-empty">Nobody is working right now.</div>}
           {groups.map((g) => {
             const shut = collapsed.has(g.key);
             return (
               <div key={g.key} className="wk-group">
-                <button className="wk-group-head" onClick={() => toggleGroup(g.key)} title={`${g.title} · click to ${shut ? 'expand' : 'collapse'}`}>
+                <button className="wk-group-head" onClick={() => toggleGroup(g.key)} aria-expanded={!shut} title={`${g.title} · click to ${shut ? 'expand' : 'collapse'}`}>
                   <span className="wk-group-arrow">{shut ? '▸' : '▾'}</span>
                   <span className="wk-swatch" style={{ background: g.color }} />
                   <span className="wk-group-name">{g.label}</span>
@@ -174,6 +166,6 @@ export function WorkersPanel() {
           })}
         </div>
       )}
-    </div>
+    </section>
   );
 }
