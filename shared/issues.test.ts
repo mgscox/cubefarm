@@ -193,6 +193,8 @@ describe('issue wait decisions', () => {
     { labels: [], title: 'DRAFT: Foo', reason: 'draft' },
     { labels: ['held-for-publication'], title: 'Implement', reason: 'held for publication' },
     { labels: ['Held-For-Publication'], title: '[Draft] Implement', reason: 'held for publication' },
+    { labels: ['Needs-Human'], title: 'Implement', reason: 'needs-human' },
+    { labels: ['held-for-publication', 'needs-human'], title: 'Implement', reason: 'held for publication' },
   ])('keeps $title ($labels) off the schedule with reason $reason', ({ labels, title, reason }) => {
     expect(schedulable(labels, title)).toBe(false);
     expect(issueWaitReason({ ...issue, labels, title }, open())).toBe(reason);

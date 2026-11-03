@@ -18,7 +18,7 @@ function strings(value: unknown, name: string): string[] {
 }
 
 /** A floor hint is optional context, never a publication target or a dispatch instruction. */
-export function queuedIdea(input: unknown, configuredFloors: string[], id: string, at: number): IdeaView {
+export function queuedIdea(input: unknown, configuredFloors: string[], id: string, at: number, knownIdeas: string[] = []): IdeaView {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new HttpError(400, 'An Idea description is required');
   const body = input as Record<string, unknown>;
   const description = text(body.description, 'Description', 2000, true);
@@ -31,5 +31,7 @@ export function queuedIdea(input: unknown, configuredFloors: string[], id: strin
   }
   const floorHints = strings(body.floorHints, 'Floor hints');
   if (floorHints.some((hint) => !configuredFloors.includes(hint))) throw new HttpError(400, 'Floor hints must refer to configured floors');
-  return { id, description, constraints, links, floorHints, status: 'queued', createdAt: at };
+  const linkedFrom = text(body.linkedFrom, 'Linked Idea', 100);
+  if (linkedFrom && !knownIdeas.includes(linkedFrom)) throw new HttpError(400, 'The linked Idea is not in this office');
+  return { id, description, constraints, links, floorHints, status: 'queued', createdAt: at, ...(linkedFrom ? { linkedFrom } : {}) };
 }

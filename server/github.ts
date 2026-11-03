@@ -256,6 +256,7 @@ export async function listIssues(fullName: string, query: BoardQuery<RawIssue[]>
 interface RawPull {
   number: number;
   title: string;
+  labels?: { name: string }[];
   url: string;
   headRefName: string;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
@@ -274,7 +275,7 @@ interface RawPull {
 }
 
 const PR_FIELDS =
-  'number,title,url,headRefName,headRefOid,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions';
+  'number,title,labels,url,headRefName,headRefOid,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions';
 
 type Check = NonNullable<RawPull['statusCheckRollup']>[number];
 const BAD = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'];
@@ -293,6 +294,7 @@ function toPull(p: RawPull): PullInfo {
   return {
     number: p.number,
     title: p.title,
+    labels: (p.labels ?? []).map((label) => label.name),
     url: p.url,
     headRefName: p.headRefName,
     state: p.state,
@@ -556,6 +558,7 @@ export async function branchAhead(fullName: string, base: string, branch: string
 export interface PrDetails {
   number: number;
   title: string;
+  labels?: string[];
   body: string;
   url: string;
   headRefName: string;
@@ -571,6 +574,7 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
   const raw = await ghJson<{
     number: number;
     title: string;
+    labels: { name: string }[];
     body: string;
     url: string;
     headRefName: string;
@@ -580,10 +584,11 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     state: PrDetails['state'];
     mergeable: string;
     mergeStateStatus: string;
-  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,body,url,headRefName,headRefOid,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
+  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,labels,body,url,headRefName,headRefOid,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
   return {
     number: raw.number,
     title: raw.title,
+    labels: (raw.labels ?? []).map((label) => label.name),
     body: raw.body ?? '',
     url: raw.url,
     headRefName: raw.headRefName,

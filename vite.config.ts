@@ -14,6 +14,7 @@ export default defineConfig({
     port: clientPort,
     strictPort: true,
     proxy: {
+      '/api/settings/mcp': { target: `http://127.0.0.1:${serverPort}`, xfwd: true },
       '/api': `http://127.0.0.1:${serverPort}`,
       '/ws': { target: `ws://127.0.0.1:${serverPort}`, ws: true },
     },

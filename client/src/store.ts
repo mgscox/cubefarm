@@ -1,7 +1,7 @@
 import { create } from 'zustand';
-import { CEO_ID, type IdeaView, type IdeaRecordView, type IdeaReviewCycleView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type PublicationView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type IdeaView, type IdeaReviewCycleView, type IdeaRecordView, type ProposalView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type PublicationView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { appendPhoneMessage } from '../../shared/phone';
-import { issueBlockers, issueWorkNote } from '../../shared/issues';
+import { hasLabel, issueBlockers, issueReadinessReason, issueWorkNote, NEEDS_HUMAN, NEEDS_REVIEW } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
 export type Agent = Omit<AgentView, 'log'>;
@@ -17,7 +17,7 @@ export type Overlay =
   | { kind: 'kanban'; repoId: string }
   | { kind: 'app'; repoId: string }
   | { kind: 'elevator' }
-  | { kind: 'manager'; tab?: ManagerTab; repoId?: string; ideaId?: string }
+  | { kind: 'manager'; tab?: ManagerTab; repoId?: string; ideaId?: string; prd?: string } // prd: a Proposal whose PRD revision to show
   | { kind: 'phone'; tab?: PhoneTab; requestId?: string }
   | { kind: 'help' };
 
@@ -64,6 +64,7 @@ interface State {
   research: ResearchInfo;
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
+  proposals: ProposalView[];
   ideaReviews: IdeaReviewCycleView[];
   messages: PhoneMessage[];
   phoneReadAt: number;
@@ -173,6 +174,7 @@ export const useStore = create<State>((set, get) => ({
   research: { queue: [], job: null, done: [] },
   ideas: [],
   ideaRecords: [],
+  proposals: [],
   ideaReviews: [],
   messages: [],
   phoneReadAt: 0,
@@ -226,6 +228,7 @@ export const useStore = create<State>((set, get) => ({
           research: d.research ?? { queue: [], job: null, done: [] },
           ideas: d.ideas ?? [],
           ideaRecords: d.ideaRecords ?? [],
+          proposals: d.proposals ?? [],
           ideaReviews: d.ideaReviews ?? [],
           messages: d.messages,
           phoneReadAt: d.phoneReadAt,
@@ -335,6 +338,9 @@ export const useStore = create<State>((set, get) => ({
         break;
       case 'ideaRecord':
         set({ ideaRecords: [...get().ideaRecords.filter((r) => r.ideaId !== ev.record.ideaId || r.kind !== ev.record.kind || r.id !== ev.record.id), ev.record] });
+        break;
+      case 'proposal':
+        set({ proposals: [...get().proposals.filter((p) => p.id !== ev.proposal.id), ev.proposal] });
         break;
       case 'ideaReview':
         set({ ideaReviews: [...get().ideaReviews.filter((r) => r.ideaId !== ev.review.ideaId), ev.review] });
@@ -464,17 +470,21 @@ export interface KanbanCard {
   tone?: 'warn' | 'bad' | 'good';
   prNumber?: number;
   qa?: QaView;
+  needsHumanLabel?: boolean;
 }
 
 export interface KanbanColumns {
   backlog: KanbanCard[];
+  todo: KanbanCard[];
   progress: KanbanCard[];
   qa: KanbanCard[];
+  review: KanbanCard[];
   ready: KanbanCard[];
   merged: KanbanCard[];
+  blocked: KanbanCard[];
 }
 
-/** Sort a floor's GitHub state and QA pipeline into the five office Kanban columns. */
+/** Sort a floor's GitHub state and QA pipeline into the office Kanban columns. */
 export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<string, QaView>): KanbanColumns {
   const openPulls = repo.pulls.filter((p) => p.state === 'OPEN');
   const byId = new Map(agents.map((a) => [a.id, a]));
@@ -482,9 +492,12 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
   const authorOf = (n: number, head: string) => devs.find((a) => a.prNumber === n) ?? devs.find((a) => a.branch && a.branch === head);
 
   const progress: KanbanCard[] = [];
+  const blocked: KanbanCard[] = [];
+  const issuesByNumber = new Map(repo.issues.map((issue) => [issue.number, issue]));
   for (const a of devs) {
     if (a.issueNumber == null || a.task !== 'issue' || a.status === 'idle') continue;
     if (a.prNumber != null && openPulls.some((p) => p.number === a.prNumber)) continue;
+    if (hasLabel(issuesByNumber.get(a.issueNumber)?.labels, NEEDS_HUMAN)) continue;
     const note =
       a.status === 'preparing' ? 'setting up' : a.status === 'working' ? 'working' : a.status === 'error' ? 'needs help' : a.status === 'stopped' ? 'stopped' : 'finished · no PR';
     progress.push({
@@ -498,13 +511,29 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
   }
 
   const qa: KanbanCard[] = [];
+  const review: KanbanCard[] = [];
   const ready: KanbanCard[] = [];
   for (const p of openPulls) {
     const rec = qaRecords[qaKey(repo.id, p.number)];
     const dev = (rec?.devAgentId ? byId.get(rec.devAgentId) : undefined) ?? authorOf(p.number, p.headRefName);
     const tester = rec?.qaAgentId ? byId.get(rec.qaAgentId) : undefined;
     const base = { key: `pr-${p.number}`, number: p.number, prNumber: p.number, title: p.title, url: p.url, qa: rec };
+    const humanLabel = hasLabel(p.labels, NEEDS_HUMAN);
+    if (humanLabel || rec?.status === 'needs-human') {
+      blocked.push({
+        ...base,
+        agent: rec?.status === 'testing' ? tester : dev,
+        note: `⚠️ needs you${rec?.mergeNote ? ` · ${rec.mergeNote}` : ''}`,
+        tone: 'bad',
+        needsHumanLabel: humanLabel,
+      });
+      continue;
+    }
     if (rec?.status === 'passed') {
+      if (hasLabel(p.labels, NEEDS_REVIEW)) {
+        review.push({ ...base, agent: dev, note: 'QA ✓ · waiting for review', tone: 'warn' });
+        continue;
+      }
       ready.push({
         ...base,
         agent: dev,
@@ -536,29 +565,31 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
               ? '❌ failed · back to dev'
               : status === 'fixing'
                 ? `🔧 fixing · round ${rec!.round}`
-                : status === 'needs-human'
-                  ? `⚠️ needs you${rec!.mergeNote ? ` · ${rec!.mergeNote}` : ''}`
-                  : p.isDraft
-                    ? 'draft'
-                    : 'not tested yet',
-      tone: status === 'failed' || status === 'needs-human' ? 'bad' : status === 'fixing' || !status ? 'warn' : undefined,
+                : p.isDraft
+                  ? 'draft'
+                  : 'not tested yet',
+      tone: status === 'failed' ? 'bad' : status === 'fixing' || !status ? 'warn' : undefined,
     });
   }
 
   const claimed = new Set<number>([...progress.map((c) => c.number), ...openPulls.flatMap((p) => p.closesIssues)]);
   const open = new Set(repo.issues.map((i) => i.number));
-  const backlog: KanbanCard[] = repo.issues
-    .filter((i) => !claimed.has(i.number))
-    .map((i) => {
-      const waits = issueBlockers(i, open);
-      const labels = i.labels.map((l) => l.replace(/^swarm:/i, '🎯 ')).slice(0, 2).join(', ');
-      return { key: `i-${i.number}`, number: i.number, title: i.title, url: i.url, note: issueWorkNote(i) || (waits.length ? `⏳ after ${waits.map((n) => typeof n === 'number' ? `#${n}` : n).join(', ')}` : labels || undefined) };
-    });
+  const backlog: KanbanCard[] = [];
+  const todo: KanbanCard[] = [];
+  for (const i of repo.issues) {
+    if (claimed.has(i.number)) continue;
+    const waits = issueBlockers(i, open);
+    const labels = i.labels.map((l) => l.replace(/^swarm:/i, '🎯 ')).slice(0, 2).join(', ');
+    const card = { key: `i-${i.number}`, number: i.number, title: i.title, url: i.url, note: issueWorkNote(i) || (waits.length ? `⏳ after ${waits.map((n) => typeof n === 'number' ? `#${n}` : n).join(', ')}` : labels || undefined) };
+    if (hasLabel(i.labels, NEEDS_HUMAN)) blocked.push({ ...card, note: '⚠️ needs you', tone: 'bad', needsHumanLabel: true });
+    else if (issueReadinessReason(i)) backlog.push(card);
+    else todo.push(card);
+  }
 
   const merged: KanbanCard[] = repo.pulls
     .filter((p) => p.state === 'MERGED')
     .sort((a, b) => (b.mergedAt ?? '').localeCompare(a.mergedAt ?? ''))
     .map((p) => ({ key: `m-${p.number}`, number: p.number, prNumber: p.number, title: p.title, url: p.url, agent: authorOf(p.number, p.headRefName) }));
 
-  return { backlog, progress, qa, ready, merged };
+  return { backlog, todo, progress, qa, review, ready, merged, blocked };
 }

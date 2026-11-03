@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { hasLabel, NEEDS_REVIEW } from '../../../shared/issues';
 import { api } from '../api';
 import { agentsOnRepo, kanbanFor, useStore, type Agent, type KanbanCard } from '../store';
 import { confirmDialog } from './Confirm';
@@ -45,7 +46,7 @@ export function IssueForm({ repoId, agents, onDone }: { repoId: string; agents: 
       <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Describe what you want. Acceptance criteria help the developer and the QA tester a lot." rows={5} />
       <div className="row">
         <select value={assignTo} onChange={(e) => setAssignTo(e.target.value)}>
-          <option value="">Leave in backlog (auto-assign picks it up if enabled)</option>
+          <option value="">Leave in To do (auto-assign picks it up if enabled)</option>
           {free.map((a) => (
             <option key={a.id} value={a.id}>
               Give it to {a.name} right away
@@ -179,11 +180,11 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
         </button>
         <label className="toggle">
           <input type="checkbox" checked={repo.autoAssign} onChange={(e) => void api.updateRepo(repo.id, { autoAssign: e.target.checked }).catch(() => undefined)} />
-          ⚡ Auto-assign backlog to free developers
+          ⚡ Auto-assign issues to free developers
         </label>
-        <label className="toggle" title="Merge a PR as soon as QA has signed off on its latest commit and GitHub's checks are green">
+        <label className="toggle" title="Merge a PR after QA, green checks and any required review">
           <input type="checkbox" checked={repo.autoMerge} onChange={(e) => void api.updateRepo(repo.id, { autoMerge: e.target.checked }).catch(() => undefined)} />
-          🔀 Auto-merge when QA and checks pass
+          🔀 Auto-merge when ready
         </label>
         <span className="spacer" />
         <button className="btn" onClick={() => openOverlay({ kind: 'app', repoId: repo.id })} title="Open this floor's running app">
@@ -197,13 +198,20 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
       {repo.syncError && <div className="term-error">⚠️ {repo.syncError}</div>}
       {showForm && <IssueForm repoId={repo.id} agents={devs} onDone={() => setShowForm(false)} />}
 
-      <div className="kanban kanban-5">
+      <div className="kanban">
         {column(
           '📋 Backlog',
           'kcol-backlog',
           cols.backlog,
+          (c) => <div className="kcard-foot muted small">{c.note}</div>,
+          'No issues waiting for triage.',
+        )}
+        {column(
+          '📝 To do',
+          'kcol-todo',
+          cols.todo,
           (c) => (
-            <div className="kcard-foot">
+            <div className="kcard-foot kcard-foot-wrap">
               {c.note && <span className="muted small">{c.note}</span>}
               <select
                 value=""
@@ -226,7 +234,7 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
           'kcol-progress',
           cols.progress,
           (c) => (
-            <div className="kcard-foot">
+            <div className="kcard-foot kcard-foot-wrap">
               <AgentChip agent={c.agent} />
               <span className="muted small">{c.note}</span>
               <span className="spacer" />
@@ -249,14 +257,9 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
                 <QaLink card={c} />
                 {previewButton(c)}
                 {(st === 'testing' || st === 'fixing') && terminalButton(c)}
-                {(!st || st === 'needs-human') && (
+                {!st && (
                   <button className="btn btn-small btn-good" disabled={pending === c.key} onClick={() => act(c.key, () => api.sendToQa(repo.id, c.number))}>
-                    {st === 'needs-human' ? 'Retry QA' : 'Send to QA'}
-                  </button>
-                )}
-                {st === 'needs-human' && (
-                  <button className="btn btn-small btn-ghost" disabled={pending === c.key} onClick={() => merge(c)}>
-                    Merge anyway
+                    Send to QA
                   </button>
                 )}
               </div>
@@ -265,8 +268,22 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
           'Nothing waiting for testing.',
         )}
         {column(
-          '✅ Ready to merge',
+          '👀 Review',
           'kcol-review',
+          cols.review,
+          (c) => (
+            <div className="kcard-foot kcard-foot-wrap">
+              <AgentChip agent={c.agent} />
+              <span className="muted small">{c.note}. Remove needs-review on GitHub when approved.</span>
+              <QaLink card={c} />
+              {previewButton(c)}
+            </div>
+          ),
+          'Nothing waiting for review.',
+        )}
+        {column(
+          '✅ Ready to merge',
+          'kcol-ready',
           cols.ready,
           (c) => {
             const pr = repo.pulls.find((p) => p.number === c.prNumber);
@@ -308,6 +325,32 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
             </div>
           ),
           'Nothing merged yet.',
+        )}
+        {column(
+          '🚧 Blocked',
+          'kcol-blocked',
+          cols.blocked,
+          (c) => (
+            <div className="kcard-foot kcard-foot-wrap">
+              <AgentChip agent={c.agent} />
+              <span className="muted small">{c.note}{c.needsHumanLabel && ' · remove needs-human on GitHub to resume'}</span>
+              <QaLink card={c} />
+              {c.prNumber && previewButton(c)}
+              {c.qa?.status === 'needs-human' && !c.needsHumanLabel && (
+                <>
+                  <button className="btn btn-small btn-good" disabled={pending === c.key} onClick={() => act(c.key, () => api.sendToQa(repo.id, c.number))}>
+                    Retry QA
+                  </button>
+                  {!hasLabel(repo.pulls.find((p) => p.number === c.prNumber)?.labels, NEEDS_REVIEW) && (
+                    <button className="btn btn-small btn-ghost" disabled={pending === c.key} onClick={() => merge(c)}>
+                      Merge anyway
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          ),
+          'Nothing needs your intervention.',
         )}
       </div>
     </Panel>

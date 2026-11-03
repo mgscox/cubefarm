@@ -41,6 +41,7 @@ export interface IssueInfo {
 export interface PullInfo {
   number: number;
   title: string;
+  labels?: string[];
   url: string;
   headRefName: string;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
@@ -440,8 +441,21 @@ export interface PhoneMessage {
   text: string;
   at: number;
   requestId?: string; // a hire / let-go proposal this message is about
-  origin?: 'web' | 'telegram';
+  origin?: 'web' | 'telegram' | 'mcp';
   telegram?: { updateId: number; chatId: number; messageId: number };
+  mcpRequestId?: string; // retry key retained with the canonical message
+}
+
+export interface ManagerMcpSettingsView {
+  available: boolean;
+  enabled: boolean;
+  tokenSource: 'settings' | 'startup' | null;
+  canManage: boolean;
+}
+
+export interface ManagerMcpSettingsPatch {
+  enabled?: boolean;
+  token?: string | null;
 }
 
 /** Non-secret Telegram connection state; delivery never changes phone read state. */
@@ -484,6 +498,7 @@ export interface IdeaInput {
   links?: string[];
   constraints?: string;
   floorHints?: string[]; // configured repo ids, advisory only
+  linkedFrom?: string; // an earlier (e.g. rejected) Idea whose history this one reuses as context
 }
 
 export interface IdeaView {
@@ -492,8 +507,10 @@ export interface IdeaView {
   links: string[];
   constraints: string;
   floorHints: string[];
-  status: 'queued' | 'reviewing' | 'proposed';
+  status: 'queued' | 'reviewing' | 'proposed' | 'archived'; // archived: rejected, kept read-only with its history
   createdAt: number;
+  archivedAt?: number;
+  linkedFrom?: string;
 }
 
 /** Read-only presentation of records produced by the owning research, review and proposal slices. */
@@ -503,6 +520,62 @@ export interface IdeaRecordView {
   kind: 'research' | 'review' | 'proposal';
   title: string;
   body: string;
+  createdAt: number;
+}
+
+/** One proposed implementation issue as the manager's approval card shows it. */
+export interface ProposalIssue {
+  key: string; // stable plan reference, used by dependencies
+  title: string;
+  repo: string; // configured floor (repo id)
+  brief: string;
+  criteria: string[];
+  requirement?: string; // the PRD requirement it implements, e.g. "R2"
+  existing?: { number: number; url: string }; // reuses an existing issue instead of creating one
+  blockedBy: string[]; // keys of other issues in the same plan
+}
+
+export interface ProposalReview {
+  reviewer: string;
+  focus: 'evidence' | 'feasibility';
+  prdRevision: number;
+  planRevision: number;
+  round: number;
+  endorsed: boolean;
+  findings: string[];
+}
+
+export type ProposalAction = 'approve' | 'refine' | 'reject';
+
+/** What the card sends: the decision and the exact pair it displayed. */
+export interface ProposalDecisionInput {
+  action: ProposalAction;
+  prdRevision: number;
+  planRevision: number;
+  feedback?: string; // required for refine
+  wordingOnly?: boolean; // refine: copy changes only, no fresh review needed
+}
+
+export interface ProposalDecisionView {
+  action: ProposalAction;
+  at: number;
+  feedback?: string;
+  wordingOnly?: boolean;
+  /** approve: the exact pair handed to publication, once. */
+  publication?: { status: 'queued' | 'accepted'; at: number; note?: string };
+}
+
+/** A Proposal: one exact pair of PRD and Issue Plan revisions presented to the manager for one decision. */
+export interface ProposalView {
+  id: string;
+  ideaId: string;
+  prd: { revision: number; title: string; body: string };
+  plan: { revision: number; issues: ProposalIssue[] };
+  reviews: ProposalReview[];
+  reviewSkipped?: boolean; // a wording-only revision returned directly to the manager
+  revises?: string; // the Proposal this one revises after a refinement request
+  newerDraft?: { prdRevision: number; planRevision: number; at: number };
+  decision?: ProposalDecisionView;
   createdAt: number;
 }
 
@@ -556,6 +629,7 @@ export interface WorldSnapshot {
   research: ResearchInfo;
   ideas: IdeaView[];
   ideaRecords: IdeaRecordView[];
+  proposals: ProposalView[];
   ideaReviews: IdeaReviewCycleView[];
   messages: PhoneMessage[];
   phoneReadAt: number; // CEO messages newer than this are unread
@@ -588,6 +662,7 @@ export type ServerEvent =
   | { type: 'research'; research: ResearchInfo }
   | { type: 'idea'; idea: IdeaView }
   | { type: 'ideaRecord'; record: IdeaRecordView }
+  | { type: 'proposal'; proposal: ProposalView }
   | { type: 'ideaReview'; review: IdeaReviewCycleView }
   | { type: 'message'; message: PhoneMessage }
   | { type: 'phoneRead'; at: number }

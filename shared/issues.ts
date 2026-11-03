@@ -33,6 +33,12 @@ export const isResearchIssue = (labels: string[]) => issueSpecialty(labels) === 
 
 /** The label the manager puts on issues that need a person (hardware, live servers, accounts, sign-off). */
 export const READY_FOR_HUMAN = 'ready-for-human';
+export const NEEDS_HUMAN = 'needs-human';
+export const NEEDS_REVIEW = 'needs-review';
+
+export function hasLabel(labels: readonly string[] | undefined, name: string) {
+  return labels?.some((label) => label.toLowerCase() === name) ?? false;
+}
 
 /** Whether an issue is reserved for a human: agents never get it, whatever its letter case. */
 export function forHuman(labels: string[]) {
@@ -45,6 +51,7 @@ export const PUBLICATION_HOLD = 'held-for-publication';
 /** Preparation gates that must be cleared before automatic or explicit agent starts. */
 export function issueReadinessReason(issue: Pick<IssueInfo, 'labels' | 'title'>) {
   if (issue.labels.some((l) => l.toLowerCase() === PUBLICATION_HOLD)) return 'held for publication';
+  if (hasLabel(issue.labels, NEEDS_HUMAN)) return 'needs-human';
   if (issue.labels.some((l) => /^needs-triage$/i.test(l))) return 'needs triage';
   if (issue.labels.some((l) => /^needs-info$/i.test(l))) return 'waiting for info';
   if (/^(?:\[Draft\]|Draft:)/i.test(issue.title)) return 'draft';

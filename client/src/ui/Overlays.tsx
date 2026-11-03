@@ -197,7 +197,7 @@ export function Overlays({ onFloor }: { onFloor?: (floor: number) => void }) {
     case 'elevator':
       return <ElevatorPanel />;
     case 'manager':
-      return <ManagerConsole initialTab={overlay.tab} initialRepo={overlay.repoId} initialIdea={overlay.ideaId} onFloor={onFloor} />;
+      return <ManagerConsole initialTab={overlay.tab} initialRepo={overlay.repoId} initialIdea={overlay.ideaId} initialPrd={overlay.prd} onFloor={onFloor} />;
     case 'help':
       return <Help />;
   }

@@ -18,6 +18,7 @@ import { ProjectPicker } from './ProjectPicker';
 import { PublicationsCard } from './Publications';
 import { StatusPill } from './TerminalView';
 import { RepoRefreshStatus } from './RepoRefreshStatus';
+import { ManagerMcpSettings } from './ManagerMcpSettings';
 
 const MODELS = ['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5'];
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -842,6 +843,7 @@ export function SettingsTab() {
         <h3>🖱️ Mouse</h3>
         <MouseSettings />
         <p className="muted small">Saved in this browser. Turning speed already allows for big, high-resolution screens; use the slider to fine-tune it.</p>
+        <ManagerMcpSettings />
         <h3>ℹ️ Environment</h3>
         <div className="small">
           GitHub: <b>{user ?? 'not signed in'}</b>
@@ -854,7 +856,7 @@ export function SettingsTab() {
   );
 }
 
-export function ManagerConsole({ initialTab, initialRepo, initialIdea, onFloor }: { initialTab?: ManagerTab; initialRepo?: string; initialIdea?: string; onFloor?: (floor: number) => void }) {
+export function ManagerConsole({ initialTab, initialRepo, initialIdea, initialPrd, onFloor }: { initialTab?: ManagerTab; initialRepo?: string; initialIdea?: string; initialPrd?: string; onFloor?: (floor: number) => void }) {
   const [tab, setTab] = useState<ManagerTab>(initialTab ?? 'floors');
   useEffect(() => { if (initialIdea) setTab('ideas'); }, [initialIdea]);
   const pending = useStore((s) => pendingRequests(s.requests).length);
@@ -882,7 +884,7 @@ export function ManagerConsole({ initialTab, initialRepo, initialIdea, onFloor }
         {tab === 'ceo' && <CeoTab />}
         {tab === 'team' && <TeamTab />}
         {tab === 'fleet' && <FleetTab />}
-        {tab === 'ideas' && <IdeasTab initialIdea={initialIdea} />}
+        {tab === 'ideas' && <IdeasTab initialIdea={initialIdea} initialPrd={initialPrd} />}
         {tab === 'issues' && <IssuesTab initialRepo={initialRepo} />}
         {tab === 'settings' && <SettingsTab />}
       </div>

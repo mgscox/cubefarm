@@ -935,6 +935,14 @@ describe('CEO merge_pr', () => {
     expect(s.backend.mergePull).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'rebase');
   });
 
+  it.each(['needs-review', 'needs-human'])('holds manual and CEO merges when the fresh PR has %s', async (label) => {
+    vi.mocked(s.backend.prDetails).mockResolvedValue({ ...pull, labels: [label], body: '', isCrossRepository: false });
+    await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow(`Remove ${label}`);
+    await expect(swarm.mergePr(args)).rejects.toThrow(`Remove ${label}`);
+    expect(s.backend.commentPull).not.toHaveBeenCalled();
+    expect(s.backend.mergePull).not.toHaveBeenCalled();
+  });
+
   const qaSession = () => {
     const tester = { id: 'q1', name: 'Poirot', repoId: repo.id, role: 'qa', specialty: '', status: 'idle', task: null, issueNumber: null, desk: 0, endedAt: null, model: '', effort: '', cli: '' };
     s.state.agents.push(tester);
@@ -1757,6 +1765,7 @@ describe('native issue dependencies', () => {
 describe('issues awaiting preparation', () => {
   const gates = [
     { labels: ['needs-triage'], title: 'Foo', reason: 'needs triage', release: 'needs-triage label' },
+    { labels: ['Needs-Human'], title: 'Foo', reason: 'needs-human', release: 'needs-human label' },
     { labels: ['Needs-Info'], title: 'Foo', reason: 'waiting for info', release: 'needs-info label' },
     { labels: [], title: '[Draft] Foo', reason: 'draft', release: 'title prefix' },
     { labels: [], title: 'dRaFt: Foo', reason: 'draft', release: 'title prefix' },
@@ -3744,11 +3753,33 @@ describe('manual office closure', () => {
     Object.assign(rec, { status: 'passed', passedSha: 'sha-1' });
     s.state.qa.push(rec);
     const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...qaPull(), body: '', isCrossRepository: false });
     await swarm.closeOffice();
     await f.advanceMerges(repo);
     expect(merge).not.toHaveBeenCalled();
     expect(rec.status).toBe('passed');
     await swarm.reopenOffice();
+    await f.advanceMerges(repo);
+    expect(merge).toHaveBeenCalledOnce();
+  });
+
+  it.each(['needs-review', 'needs-human'])('holds automatic merges until %s is removed', async (label) => {
+    Object.assign(repo, { autoMerge: true });
+    const pull = { ...qaPull(), labels: [label] };
+    Object.assign(s.repoRt.get(repo.id)!, { fetchedAt: Date.now(), pulls: [pull] });
+    const rec = { ...qaRecord(), status: 'passed' as const, passedSha: pull.headSha };
+    s.state.qa.push(rec);
+    const details = vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pull, body: '', isCrossRepository: false }));
+    const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+    await f.advanceMerges(repo);
+    expect(details).not.toHaveBeenCalled();
+    expect(merge).not.toHaveBeenCalled();
+
+    // A label added after the list refresh still holds the actual merge.
+    details.mockResolvedValueOnce({ ...pull, body: '', isCrossRepository: false });
+    pull.labels = [];
+    await f.advanceMerges(repo);
+    expect(merge).not.toHaveBeenCalled();
     await f.advanceMerges(repo);
     expect(merge).toHaveBeenCalledOnce();
   });
