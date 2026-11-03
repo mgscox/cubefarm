@@ -5,7 +5,7 @@ import { CEO_ID } from '../../../shared/types';
 import { SetupWizard } from './SetupWizard';
 import { unlockAudio } from './sfx';
 
-export function StartScreen() {
+export function StartScreen({ onDashboard }: { onDashboard: () => void }) {
   const started = useStore((s) => s.started);
   const loaded = useStore((s) => s.loaded);
   const connected = useStore((s) => s.connected);
@@ -41,9 +41,17 @@ export function StartScreen() {
             💻 Walk up behind anyone to watch their screen, or press <kbd>E</kbd> (or click) on things to use them. <kbd>H</kbd> for help.
           </li>
         </ul>
-        <button className="btn btn-big" onClick={enter} disabled={!loaded}>
-          {loaded ? 'Enter the office' : connected ? 'Loading…' : 'Connecting to the swarm server…'}
-        </button>
+        <div className="start-actions">
+          <button className="btn btn-big" onClick={enter} disabled={!loaded}>
+            {loaded ? 'Enter the office' : connected ? 'Loading…' : 'Connecting to the swarm server…'}
+          </button>
+          {loaded && (
+            <button className="btn btn-ghost" onClick={() => {
+              unlockAudio();
+              onDashboard();
+            }}>Open dashboard</button>
+          )}
+        </div>
         <div className="start-meta">{demo && <span className="pill pill-demo">DEMO MODE: fake repos, fake agents</span>}</div>
       </div>
     </div>

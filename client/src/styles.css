@@ -834,6 +834,13 @@ input.inline:focus {
   display: grid;
   gap: 8px;
 }
+.start-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+}
 .start-meta {
   margin-top: 16px;
   display: flex;
