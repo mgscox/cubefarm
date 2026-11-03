@@ -107,9 +107,8 @@ function OfficeRow({ update }: { update: OfficeUpdateView }) {
   );
 }
 
-function FloorRow({ repo, all }: { repo: RepoView; all: RepoView[] }) {
+function FloorRow({ repo, all, onFloor }: { repo: RepoView; all: RepoView[]; onFloor: (floor: number) => void }) {
   const agents = useStore((s) => s.agents);
-  const goToFloor = useStore((s) => s.goToFloor);
   const openOverlay = useStore((s) => s.openOverlay);
   // The office's own folder isn't fast-forwarded; its update is on the Office row instead.
   const officeFolder = useStore((s) => !!s.officeUpdate) && !!repo.folderSync?.startsWith('update ready');
@@ -140,7 +139,7 @@ function FloorRow({ repo, all }: { repo: RepoView; all: RepoView[] }) {
           <RepoRefreshStatus repo={repo} onRefresh={() => void attempt(() => api.syncRepo(repo.id))} />
         </div>
         <input type="color" value={repo.color} onChange={(e) => patch({ color: e.target.value })} title="Floor colour" />
-        <button className="btn btn-small" onClick={() => goToFloor(repo.floor)}>
+        <button className="btn btn-small" onClick={() => onFloor(repo.floor)}>
           Visit
         </button>
       </div>
@@ -205,7 +204,7 @@ function FloorRow({ repo, all }: { repo: RepoView; all: RepoView[] }) {
   );
 }
 
-function FloorsTab() {
+function FloorsTab({ onFloor }: { onFloor: (floor: number) => void }) {
   const repos = useStore((s) => s.repos);
   const officeUpdate = useStore((s) => s.officeUpdate);
   return (
@@ -215,7 +214,7 @@ function FloorsTab() {
         <h3 className="section">🏢 Floors</h3>
         {repos.length === 0 && <p className="muted">No floors yet. Add a project →</p>}
         {[...repos].sort((a, b) => a.floor - b.floor).map((r) => (
-          <FloorRow key={r.id} repo={r} all={repos} />
+          <FloorRow key={r.id} repo={r} all={repos} onFloor={onFloor} />
         ))}
       </div>
       <div className="card">
@@ -692,7 +691,7 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
 
 // ---------- settings ----------
 
-function SettingsTab() {
+export function SettingsTab() {
   const office = useStore((s) => s.officeLifecycle);
   const [officeBusy, setOfficeBusy] = useState(false);
   const changeOffice = async () => {
@@ -853,10 +852,11 @@ function SettingsTab() {
   );
 }
 
-export function ManagerConsole({ initialTab, initialRepo, initialIdea, initialPrd }: { initialTab?: ManagerTab; initialRepo?: string; initialIdea?: string; initialPrd?: string }) {
+export function ManagerConsole({ initialTab, initialRepo, initialIdea, initialPrd, onFloor }: { initialTab?: ManagerTab; initialRepo?: string; initialIdea?: string; initialPrd?: string; onFloor?: (floor: number) => void }) {
   const [tab, setTab] = useState<ManagerTab>(initialTab ?? 'floors');
   useEffect(() => { if (initialIdea) setTab('ideas'); }, [initialIdea]);
   const pending = useStore((s) => pendingRequests(s.requests).length);
+  const goToFloor = useStore((s) => s.goToFloor);
   const tabs: [ManagerTab, string][] = [
     ['floors', '🏢 Floors & repos'],
     ['ceo', `🧠 CEO & hiring${pending ? ` (${pending})` : ''}`],
@@ -876,7 +876,7 @@ export function ManagerConsole({ initialTab, initialRepo, initialIdea, initialPr
         ))}
       </div>
       <div className="tab-body">
-        {tab === 'floors' && <FloorsTab />}
+        {tab === 'floors' && <FloorsTab onFloor={onFloor ?? goToFloor} />}
         {tab === 'ceo' && <CeoTab />}
         {tab === 'team' && <TeamTab />}
         {tab === 'fleet' && <FleetTab />}

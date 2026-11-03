@@ -69,7 +69,7 @@ function QaLink({ card }: { card: KanbanCard }) {
   );
 }
 
-export function KanbanView({ repoId }: { repoId: string }) {
+export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolean }) {
   const repo = useStore((s) => s.repos.find((r) => r.id === repoId));
   const allAgents = useStore((s) => s.agents);
   const qaRecords = useStore((s) => s.qa);
@@ -81,7 +81,7 @@ export function KanbanView({ repoId }: { repoId: string }) {
 
   if (!repo || !cols) {
     return (
-      <Panel title="Kanban">
+      <Panel title="Kanban" inline={inline}>
         <p className="muted">This floor no longer exists.</p>
       </Panel>
     );
@@ -162,6 +162,7 @@ export function KanbanView({ repoId }: { repoId: string }) {
   return (
     <Panel
       wide
+      inline={inline}
       accent={repo.color}
       title={
         <span>

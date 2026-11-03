@@ -210,6 +210,7 @@ export function Player({ colliders, floor }: { colliders: Rect[]; floor: number 
     const stopLookLock = watchLookLock(requestLook, hushMouse);
     return () => {
       stopLookLock();
+      if (canvasEl === gl.domElement) canvasEl = null;
       gl.domElement.removeEventListener('mousedown', onMouseDown);
       window.removeEventListener('mouseup', onMouseUp);
       for (const type of QUIET_EVENTS) window.removeEventListener(type, onQuietMouse, true);
