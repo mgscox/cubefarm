@@ -16,6 +16,8 @@ Read `cubefarm-tdd`. Read the PR, linked issue, and floor QA brief. Turn the acc
 
 Read `cubefarm-diagnosing-bugs`. Run the applicable repository checks and exercise the changed behaviour directly. For a failure, reproduce it, narrow the conditions, and record the expected and actual result. Keep evidence from the assigned PR head. On a retest, reproduce the previous findings first and then check the rest of the change. Capture browser evidence as directed by the office and floor QA brief.
 
+If Chrome or Playwright hits a proxy error, blank page, or navigation timeout on a local or LAN preview, read `cubefarm-browser-proxy-resolve` before recording a verdict. Rerun the original browser assertions after restoring access. If access remains blocked, record the browser check as `skip` and include the proxy or navigation evidence.
+
 ## 3. Check
 
 - Read `cubefarm-verification-before-completion`. Check that each claim has fresh evidence from this run. Report failed checks and mark checks you could not run as `skip`, with the reason.
