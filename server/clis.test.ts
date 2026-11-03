@@ -175,6 +175,15 @@ describe('launchArgs', () => {
     browser: null,
     ...patch,
   });
+
+  it('registers the release skills only for the corresponding launch', () => {
+    const repoSkills = path.resolve('release skills');
+    const claude = launchArgs('claude', ctx({ repoSkills })).args;
+    expect(claude[claude.indexOf('--plugin-dir') + 1]).toBe(repoSkills);
+    const openCode = launchArgs('opencode', ctx({ repoSkills })).env.OPENCODE_CONFIG_CONTENT;
+    expect(JSON.parse(openCode).skills).toEqual([repoSkills]);
+    expect(launchArgs('claude', ctx()).args).not.toContain('--plugin-dir');
+  });
   it('starts Claude Code on a chosen session id, with the prompt after --', () => {
     const { args } = launchArgs('claude', ctx());
     expect(args.slice(0, 2)).toEqual(['--session-id', '11111111-1111-1111-1111-111111111111']);

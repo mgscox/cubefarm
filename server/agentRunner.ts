@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { query, type CanUseTool, type Options, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentBoot, AgentCli, AgentRole, EffortLevel, LogKind } from '../shared/types.ts';
@@ -9,6 +10,7 @@ import type { AgentTerminal } from './terminal.ts';
 import { CROSS_TURN_TOOLS } from './clis.ts';
 import { VERSION } from './config.ts';
 import { projectEnv } from './projectEnv.ts';
+import { ACTIVE_REPO_SKILLS, writeSessionSkills } from './repoSkills.ts';
 
 // One Claude Code instance (via the Claude Agent SDK) working one issue in its own git worktree.
 // The CEO runs through here too, with the office tools instead of a shell.
@@ -500,7 +502,13 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
   };
 
   (async () => {
+    let skillDir: string | undefined;
     try {
+      if (ACTIVE_REPO_SKILLS.skills.length) {
+        skillDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cubefarm-sdk-skills-'));
+        const plugin = writeSessionSkills(ACTIVE_REPO_SKILLS, skillDir, 'claude');
+        if (plugin) options.plugins = [{ type: 'local', path: plugin }];
+      }
       for await (const msg of query({ prompt: input, options })) handle(msg);
       if (pendingTurns > 0) {
         const lost = !stopped && !begun && conversation.lost(startup);
@@ -511,6 +519,8 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
       let message = stopped ? 'Stopped by manager' : err instanceof Error ? err.message : String(err);
       if (!stopped && !begun && conversation.lost(`${startup}\n${message}`)) message = LOST_CONVERSATION;
       cb.finished({ ok: false, text: '', costUsd: lastCost, turns: lastTurns, errors: [message] });
+    } finally {
+      if (skillDir) fs.rm(skillDir, { recursive: true, force: true, maxRetries: 5 }, () => undefined);
     }
   })();
 

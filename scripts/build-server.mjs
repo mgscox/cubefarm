@@ -4,10 +4,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { build } from 'esbuild';
+import { tsImport } from 'tsx/esm/api';
 
 const root = path.resolve(import.meta.dirname, '..');
 const out = path.join(root, 'dist-server');
 
+// Validate before replacing the server bundle so the existing updater can roll back a bad release.
+try {
+  await tsImport('../server/repoSkills.ts', import.meta.url);
+} catch (err) {
+  console.error(`Repo skills validation failed: ${err.message}`);
+  process.exit(1);
+}
 fs.rmSync(out, { recursive: true, force: true });
 await build({
   // The terminal keeper (ptyHost) runs as a process of its own, started from the server's folder; `cubefarm box` runs
