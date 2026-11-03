@@ -60,6 +60,21 @@ test('approve, refine and reject Proposals from the approval card', async ({ pag
     await expect(card).toContainText('Endorsed by both reviewers in round 1');
     await expect(card).toContainText('PRD v5 · Issue Plan v6');
     await expect(card.getByRole('button', { name: 'Approve' })).toBeEnabled();
+    await card.getByText('Review history', { exact: false }).click();
+    await card.getByText('Earlier Proposal: PRD v3 · Issue Plan v4', { exact: true }).click();
+    const original = card.getByRole('region', { name: 'Earlier Proposal PRD v3 · Issue Plan v4', exact: true });
+    await expect(original).toContainText('R3 has no evidence teammates follow links from plans.');
+    await expect(original).toContainText('Two-second load time is still untested');
+    await expect(original).toContainText('Say "weekly" everywhere');
+    await original.getByText('Serve the weekly plan at /plan', { exact: true }).click();
+    await expect(original).toContainText('Add a read-only');
+    await expect(original).toContainText('GET /plan?team=x returns this week\'s items as JSON');
+    await expect(original).not.toContainText('Addresses: Cache the plan');
+    await page.screenshot({ path: testInfo.outputPath('proposal-earlier-history.png') });
+    await original.getByRole('link', { name: 'View PRD v3', exact: true }).click();
+    await expect(prd).toContainText('paired with Issue Plan v4');
+    await expect(prd).not.toContainText('Revision note');
+    await prd.getByRole('link', { name: 'Back to the card' }).click();
 
     const rejected = await seeded('Help reviewers find context');
     await open(`#idea/${rejected.idea.id}`);

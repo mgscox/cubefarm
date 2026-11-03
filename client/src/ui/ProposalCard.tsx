@@ -50,33 +50,49 @@ function Issues({ proposal }: { proposal: ProposalView }) {
   );
 }
 
-function History({ proposal, earlier }: { proposal: ProposalView; earlier: ProposalView[] }) {
+function Reviews({ proposal }: { proposal: ProposalView }) {
   const rounds = [...new Set(proposal.reviews.map((r) => r.round))].sort((a, b) => a - b);
   return (
-    <details className="proposal-history">
-      <summary>Review history ({proposal.reviews.length} review{proposal.reviews.length === 1 ? '' : 's'}{earlier.length ? `, ${earlier.length} earlier proposal${earlier.length === 1 ? '' : 's'}` : ''})</summary>
+    <>
       {rounds.map((round) => (
         <div key={round}>
           <b className="small">Round {round}</b>
           <ul>
             {proposal.reviews.filter((r) => r.round === round).map((r) => (
               <li key={`${r.reviewer}:${r.focus}`}>
-                {r.reviewer} ({r.focus}, PRD v{r.prdRevision}): {r.endorsed ? 'endorsed' : r.findings.join(' ')}
+                {r.reviewer} ({r.focus}, PRD v{r.prdRevision}{r.planRevision ? ` · Issue Plan v${r.planRevision}` : ''}): {r.endorsed ? 'endorsed' : 'not endorsed'}
+                {r.findings.length > 0 && <ul>{r.findings.map((finding, index) => <li key={index}>{finding}</li>)}</ul>}
               </li>
             ))}
           </ul>
         </div>
       ))}
+    </>
+  );
+}
+
+function History({ proposal, earlier }: { proposal: ProposalView; earlier: ProposalView[] }) {
+  return (
+    <details className="proposal-history">
+      <summary>Review history ({proposal.reviews.length} review{proposal.reviews.length === 1 ? '' : 's'}{earlier.length ? `, ${earlier.length} earlier proposal${earlier.length === 1 ? '' : 's'}` : ''})</summary>
+      <Reviews proposal={proposal} />
       {earlier.map((p) => (
-        <div key={p.id} className="small">
-          <a href={prdLink(p)}>PRD v{p.prd.revision}</a> · Issue Plan v{p.plan.revision}: {p.decision?.action === 'refine' ? `sent back${p.decision.wordingOnly ? ' (wording only)' : ''} — “${p.decision.feedback}”` : p.decision?.action ?? 'open'}
-        </div>
+        <details key={p.id}>
+          <summary>Earlier Proposal: PRD v{p.prd.revision} · Issue Plan v{p.plan.revision}</summary>
+          <section aria-label={`Earlier Proposal PRD v${p.prd.revision} · Issue Plan v${p.plan.revision}`}>
+            <a href={prdLink(p)}>View PRD v{p.prd.revision}</a>
+            <div className="small muted">{reviewSummary(p)}</div>
+            <Issues proposal={p} />
+            <Reviews proposal={p} />
+            {p.decision && <Decision proposal={p} />}
+          </section>
+        </details>
       ))}
     </details>
   );
 }
 
-function Decision({ proposal, onLinkedIdea }: { proposal: ProposalView; onLinkedIdea: () => void }) {
+function Decision({ proposal, onLinkedIdea }: { proposal: ProposalView; onLinkedIdea?: () => void }) {
   const d = proposal.decision!;
   if (d.action === 'approve') {
     const pub = d.publication;
@@ -98,7 +114,7 @@ function Decision({ proposal, onLinkedIdea }: { proposal: ProposalView; onLinked
     <div role="status" className="proposal-decision">
       <p>Rejected {when(d.at)}. The Idea is archived with its history; no issues were created.
         {d.feedback && <span className="proposal-quote">“{d.feedback}”</span>}</p>
-      <button className="btn btn-small" onClick={onLinkedIdea}>Start a linked Idea</button>
+      {onLinkedIdea && <button className="btn btn-small" onClick={onLinkedIdea}>Start a linked Idea</button>}
     </div>
   );
 }
