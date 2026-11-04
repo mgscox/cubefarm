@@ -1,7 +1,7 @@
 import { useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
-import { Outlines } from '@react-three/drei';
+import { Outlines } from './Outlines';
 import type { Agent } from '../store';
 import { ACCENTS, appearanceFor } from './appearance';
 import { PARTS } from './characterParts';
