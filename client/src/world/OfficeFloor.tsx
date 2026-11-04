@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import type { RepoView } from '../../../shared/types';
 import { agentsOnRepo, useStore } from '../store';
+import { qaCounts } from '../qaCounts';
 import { AppMonitor } from './AppMonitor';
 import { Desk } from './Desk';
 import { drawSign } from './draw';
@@ -49,8 +50,8 @@ export function OfficeFloor({ repo }: { repo: RepoView }) {
   const qaBySlot = useMemo(() => new Map(agents.filter((a) => a.role === 'qa').map((a) => [a.desk, a])), [agents]);
   const working = agents.filter((a) => a.status === 'working' || a.status === 'preparing').length;
   const qaRecords = useStore((s) => s.qa);
-  const inQa = Object.values(qaRecords).filter((q) => q.repoId === repo.id && q.status !== 'passed').length;
-  const ready = Object.values(qaRecords).filter((q) => q.repoId === repo.id && q.status === 'passed').length;
+  // Only records whose PR is still open count, as in the HUD.
+  const { inQa, readyToMerge: ready } = useMemo(() => qaCounts(Object.values(qaRecords), new Map([[repo.id, repo.pulls]])), [qaRecords, repo.id, repo.pulls]);
   const name = repo.fullName.split('/')[1] ?? repo.fullName;
   const rugColor = shade(repo.color, 0.24);
 
