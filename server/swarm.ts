@@ -36,6 +36,7 @@ import { createDemoProposalWorker, demoHandoff } from './proposalFixture.ts';
 import { demoProposalRecords, demoReview, isReviewFixture } from './demoIdeaReview.ts';
 import { currentRound, nextStep, pickReviewers, promote, recordReview, REVIEW_FOCUSES, reviseRound, startReview } from '../shared/ideaReview.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
+import { qaOutcome } from './qaOutcome.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
 import { pickRequestedStart, retainRequestedStarts } from './requestedStarts.ts';
@@ -185,6 +186,8 @@ interface QaRecord extends QaView {
   pendingSince: number | null; // when auto-merge started waiting on its checks
   mergeRetryAt: number | null; // GitHub refused the merge: try again after this
   alerted: boolean; // the manager has been told it's stuck
+  checkRerunSha: string | null;
+  checkRerunAt: number | null;
 }
 
 type PrepJob = { rec: QaRecord; task: 'qa' } | { rec: QaRecord; task: 'fix'; author: string | null };
@@ -689,6 +692,8 @@ export class Swarm {
           pendingSince: q.pendingSince ?? null,
           mergeRetryAt: q.mergeRetryAt ?? null,
           alerted: q.alerted ?? false,
+          checkRerunSha: q.checkRerunSha ?? null,
+          checkRerunAt: q.checkRerunAt ?? null,
           // Merge progress is re-read after a restart; why a PR needs the manager isn't.
           mergeNote: q.status === 'needs-human' ? (q.mergeNote ?? null) : null,
         })),
@@ -973,6 +978,8 @@ export class Swarm {
       checks: q.checks,
       commentUrl: q.commentUrl,
       mergeNote: q.mergeNote,
+      checkRerunSha: q.checkRerunSha,
+      checkRerunAt: q.checkRerunAt,
       rerunNote: q.rerunNote,
       preparation: q.preparation,
       updatedAt: q.updatedAt,
@@ -2105,6 +2112,11 @@ export class Swarm {
     }
     if (this.holdForSecurityReview(repo, rec, pr, false)) return false;
     if (hasLabel(pr.labels, NEEDS_REVIEW) && step.do !== 'ready') return false;
+    if (step.do === 'rerun') {
+      this.setQa(rec, { checkRerunSha: pr.headSha, checkRerunAt: Date.now(), pendingSince: null, mergeNote: 're-running failed checks once' });
+      await this.backend.rerunFailedJobs(repo.fullName, step.runIds);
+      return false;
+    }
     if (step.do === 'send-back') return this.sendBack(repo, rec, step.reason, step.instructions, step.needsHuman);
     if (step.do === 'wait') {
       if (step.alert) {
@@ -3566,6 +3578,8 @@ export class Swarm {
         pendingSince: null,
         mergeRetryAt: null,
         alerted: false,
+        checkRerunSha: null,
+        checkRerunAt: null,
       };
       this.state.qa.push(rec);
       this.setQa(rec, {});
@@ -3623,6 +3637,7 @@ export class Swarm {
       `Your worktree: ${cwd}. It has the pull request's code at HEAD (local branch ${branch}, or detached if another worktree holds it).`,
       '',
       'How to test:',
+      `A conflict with ${repo.defaultBranch} is not a QA fail. Test the PR's head; the office sends conflicts to a developer before merging.`,
       '1. Read the PR description and the linked issue, and work out the acceptance criteria.',
       `2. Review the code as a careful reviewer would: git diff origin/${repo.defaultBranch}...HEAD. Look for bugs, unhandled errors and edge cases, security problems, leftover debug code, and new logic without tests.`,
       "3. Install dependencies if needed, then run the project's test suite, linters, type checks and build (whichever exist).",
@@ -3736,7 +3751,7 @@ export class Swarm {
       `URL: ${pr.url}`,
       `Author: ${dev ? `${dev.name} (developer agent)` : 'a teammate'} · QA round ${rec.round}`,
       rec.rerunNote?.round === rec.round ? `Note from the manager: ${rec.rerunNote.text}` : '',
-      rec.fixReason === 'conflict'
+      rec.fixReason === 'conflict' && rec.passedSha
         ? `\nQA passed it before, but since then the branch was updated with ${repo.defaultBranch} to resolve merge conflicts. Re-check everything, especially where this change meets the newly merged work.`
         : rec.fixReason === 'checks'
           ? '\nQA passed it before, but since then the developer changed the code to fix failing GitHub checks. Re-check everything.'
@@ -3874,6 +3889,19 @@ export class Swarm {
         }
         a.status = 'done';
       };
+      const qaRounds = rec.round - rec.retests; // rounds QA itself asked for
+      let conflict: PrDetails | null = null;
+      if (!security && !pass && !incomplete && !escalate && qaRounds >= MAX_QA_ROUNDS && rec.mergeFixes < MAX_MERGE_FIXES) {
+        try {
+          const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
+          if (gone()) return;
+          if (pr.state === 'OPEN' && pr.headSha === rec.testedSha) conflict = pr;
+        } catch (err) {
+          this.appendLog(a, [{ kind: 'error', text: `Could not check for a merge conflict: ${oneLine(err)}` }]);
+        }
+      }
+      if (gone()) return;
+      const outcome = () => qaOutcome({ pass, incomplete, escalate, security, qaRounds, mergeFixes: rec.mergeFixes }, conflict, MAX_QA_ROUNDS);
       try {
         if (security) {
           const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
@@ -3881,7 +3909,7 @@ export class Swarm {
           if (!isCurrentAudit(pr)) return handBackStaleAudit(pr);
         }
         this.appendLog(a, [{ kind: 'system', text: '📎 Uploading evidence and posting the QA report on the PR…' }]);
-        const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security);
+        const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security, outcome().conflictFix);
         if (gone()) return;
         commentUrl = (await this.backend.commentPull(repo.fullName, rec.prNumber, body)) || null;
         if (gone()) return;
@@ -3909,16 +3937,17 @@ export class Swarm {
           report.summary = `Could not finish the security review handoff: ${oneLine(err)}`;
         }
       }
-      const qaRounds = rec.round - rec.retests; // rounds QA itself asked for
-      const nextStatus = escalate ? 'queued' : pass ? 'passed' : incomplete || qaRounds >= MAX_QA_ROUNDS ? 'needs-human' : 'failed';
+      const { status: nextStatus, conflictFix } = outcome();
+      const findings = report.fixInstructions ?? report.checks.filter((c) => c.result === 'fail').map((c) => `${c.name}: ${c.details}`).join('\n');
       this.setQa(rec, {
         status: nextStatus,
         summary: report.summary,
         checks: report.checks,
         commentUrl: commentUrl ?? rec.commentUrl,
-        fixInstructions: report.fixInstructions ?? report.checks.filter((c) => c.result === 'fail').map((c) => `${c.name}: ${c.details}`).join('\n'),
+        fixInstructions: conflictFix ? `It conflicts with ${repo.defaultBranch}.\n${findings}` : findings,
         sessionFailures: 0,
-        fixReason: pass || incomplete ? null : 'qa',
+        fixReason: pass || incomplete ? null : conflictFix ? 'conflict' : 'qa',
+        ...(conflictFix ? { mergeFixes: rec.mergeFixes + 1 } : {}),
         passedSha: pass && !escalate ? rec.testedSha : null,
         failedSha: pass || incomplete ? null : rec.testedSha,
         securityReview: security && pass && rec.testedSha ? { ...review, approvedSha: rec.testedSha } : rec.securityReview,
@@ -3953,7 +3982,7 @@ export class Swarm {
     this.toast('info', `PR #${rec.prNumber} is unchanged since QA failed it: ${human ? 'it needs a human' : 'back to a developer, no re-test'}`);
   }
 
-  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[], security = false) {
+  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[], security = false, conflictFix = false) {
     const pass = report.verdict === 'pass';
     const images: string[] = [];
     const evidence = shots.slice(-8);
@@ -3993,7 +4022,8 @@ export class Swarm {
     const merge = repo.autoMerge ? "merges automatically once GitHub's checks pass" : 'ready for the manager to merge';
     const next = security && pass ? 'audit result applies to the cited revision. CubeFarm verifies it before clearing the merge hold'
       : !security && pass && (report.securityReviewReason || rec.securityReview) ? 'waiting for detailed security review'
-      : pass ? merge : report.verdict === 'incomplete' || rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes';
+      : pass ? merge : conflictFix ? 'sent back to the developer to resolve the conflict and address QA findings'
+      : report.verdict === 'incomplete' || rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes';
     lines.push('', `<sub>Posted by cubefarm · ${next}</sub>`);
     return lines.join('\n');
   }

@@ -364,6 +364,8 @@ export interface QaView {
   checks: QaCheck[];
   commentUrl: string | null; // the PR comment with the latest QA report
   mergeNote: string | null; // where auto-merge stands once QA passed, e.g. "waiting for checks: Vercel"
+  checkRerunSha?: string | null; // head whose failed CI jobs the office already retried
+  checkRerunAt?: number | null; // when that retry was requested, before GitHub refreshes its checks
   updatedAt: number;
 }
 
