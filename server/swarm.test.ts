@@ -3277,6 +3277,29 @@ describe('QA rounds', () => {
       expect(merge).not.toHaveBeenCalled();
     });
 
+    it('keeps a label request observed by manual merge before the PR had a QA record', async () => {
+      s.state.qa = [];
+      const pr = { ...pull, labels: ['ready-for-review'], baseSha: 'base-1', body: '', isCrossRepository: false };
+      vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pr }));
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('requires a passing security review');
+      expect(s.state.qa[0]).toMatchObject({ status: 'queued', securityReview: { qaSha: null } });
+      pr.labels = [];
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('requires a passing security review');
+      expect(merge).not.toHaveBeenCalled();
+    });
+
+    it('keeps a label request observed during ordinary QA after GitHub removes the label', async () => {
+      const pr = { ...pull, labels: [], baseSha: 'base-1', body: '', isCrossRepository: false };
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue(pr);
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      rec.status = 'testing';
+      s.reconcilePulls(repo, [{ ...pr, labels: ['ready-for-review'] }]);
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('requires a passing security review');
+      expect(rec.status).toBe('testing');
+      expect(merge).not.toHaveBeenCalled();
+    });
+
     it('honors a new security label between fallback attempts on an ordinary PR', async () => {
       const pr = { ...pull, labels: [] as string[], baseSha: 'base-1', body: '', isCrossRepository: false };
       vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pr }));

@@ -2360,7 +2360,8 @@ export class Swarm {
       if (pr?.state === 'OPEN' && q.closed) {
         this.setQa(q, { closed: false, status: 'queued', mergeNote: 'QA and security review required after reopening' });
         setTimeout(() => this.schedule(), 200);
-      } else if (pr?.state === 'OPEN' && q.status === 'passed') {
+      }
+      if (pr?.state === 'OPEN') {
         const fresh = (this.repoRt.get(repo.id)?.fetchedAt ?? 0) >= q.updatedAt;
         this.holdForSecurityReview(repo, q, pr, fresh);
       }
@@ -2372,7 +2373,10 @@ export class Swarm {
       if (this.state.qa.some((q) => q.repoId === repo.id && q.prNumber === pr.number)) continue;
       const dev = this.state.agents.find((a) => (a.role === 'dev' || a.role === 'researcher') && a.task !== 'qa' && (a.prNumber === pr.number || a.branch === pr.headRefName) && (a.repoId === repo.id || a.id === RESEARCHER_ID));
       if (isResearchBranch(pr.headRefName) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) this.skipQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null, pr.headSha || null);
-      else this.queueQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null);
+      else {
+        const rec = this.queueQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null);
+        this.holdForSecurityReview(repo, rec, pr);
+      }
     }
     this.save();
   }
@@ -2491,10 +2495,14 @@ export class Swarm {
     if (approval) rt.parking = true;
     try {
       const pr = await this.backend.prDetails(repo.fullName, number);
-      const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number);
+      let rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number);
       const checkSecurityReview = (current: PrDetails) => {
-        if ((rec?.securityReview && !current.baseSha) ||
-          (rec ? this.holdForSecurityReview(repo, rec, current) : hasLabel(current.labels, READY_FOR_SECURITY_REVIEW))) {
+        const labeled = hasLabel(current.labels, READY_FOR_SECURITY_REVIEW);
+        if (!rec && labeled && current.state === 'OPEN') {
+          rec = this.queueQa(repo, number, null, current.closesIssues[0] ?? null);
+        }
+        const held = rec ? this.holdForSecurityReview(repo, rec, current) : labeled;
+        if (held || (rec?.securityReview && !current.baseSha)) {
           throw new HttpError(409, `PR #${number} requires a passing security review for its current head and base`);
         }
       };
@@ -3470,6 +3478,8 @@ export class Swarm {
         mergeNote: 'waiting for detailed security review',
       });
       setTimeout(() => this.schedule(), 200);
+    } else if (labeled && !review) {
+      this.setQa(rec, { securityReview: { reason: 'Requested by the PR label.', qaSha: null } });
     }
     return true;
   }
@@ -3477,7 +3487,7 @@ export class Swarm {
   private queueQa(repo: PersistedRepo, prNumber: number, dev: PersistedAgent | null, issueNumber: number | null) {
     let rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === prNumber);
     if (rec) {
-      if (rec.status === 'testing') return;
+      if (rec.status === 'testing') return rec;
       this.setQa(rec, { status: 'queued', devAgentId: dev?.id ?? rec.devAgentId, devSessionId: dev?.sessionId ?? rec.devSessionId });
     } else {
       rec = {
@@ -3511,6 +3521,7 @@ export class Swarm {
       this.setQa(rec, {});
     }
     setTimeout(() => this.schedule(), 200);
+    return rec;
   }
 
   /**
