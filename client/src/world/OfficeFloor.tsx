@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import type { RepoView } from '../../../shared/types';
 import { agentsOnRepo, useStore } from '../store';
 import { AppMonitor } from './AppMonitor';
@@ -38,15 +39,18 @@ export function WallSign({
 }
 
 export function OfficeFloor({ repo }: { repo: RepoView }) {
-  const allAgents = useStore((s) => s.agents);
-  const agents = useMemo(() => agentsOnRepo(allAgents, repo.id), [allAgents, repo.id]);
+  // Shallow: another floor's agent changing leaves this floor's list (and the whole room) alone.
+  const agents = useStore(useShallow((s) => agentsOnRepo(s.agents, repo.id)));
   // Researchers sit at developer desks.
   const devBySlot = useMemo(() => new Map(agents.filter((a) => a.role === 'dev' || a.role === 'researcher').map((a) => [a.desk, a])), [agents]);
   const qaBySlot = useMemo(() => new Map(agents.filter((a) => a.role === 'qa').map((a) => [a.desk, a])), [agents]);
   const working = agents.filter((a) => a.status === 'working' || a.status === 'preparing').length;
-  const qaRecords = useStore((s) => s.qa);
-  const inQa = Object.values(qaRecords).filter((q) => q.repoId === repo.id && q.status !== 'passed').length;
-  const ready = Object.values(qaRecords).filter((q) => q.repoId === repo.id && q.status === 'passed').length;
+  const [inQa, ready] = useStore(
+    useShallow((s) => {
+      const qa = Object.values(s.qa).filter((q) => q.repoId === repo.id);
+      return [qa.filter((q) => q.status !== 'passed').length, qa.filter((q) => q.status === 'passed').length];
+    }),
+  );
   const name = repo.fullName.split('/')[1] ?? repo.fullName;
   const rugColor = shade(repo.color, 0.24);
 

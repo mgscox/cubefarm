@@ -1,7 +1,7 @@
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
 import * as THREE from 'three';
-import { AdaptiveResolution, FrameWhilePaused, MAX_DPR, StatsProbe, statsEnabled, useRenderPaused } from '../perf';
+import { AdaptiveResolution, currentDpr, FrameWhilePaused, StatsProbe, statsEnabled, useRenderPaused } from '../perf';
 import { repoOnFloor, useStore } from '../store';
 import { ding, whoosh } from '../ui/sfx';
 import { lobbyColliders, officeColliders } from './layout';
@@ -9,6 +9,12 @@ import { Lobby } from './Lobby';
 import { OfficeFloor } from './OfficeFloor';
 import { Player } from './Player';
 import { Lights } from './Shell';
+
+/** The floor's room, re-rendered when its own repo changes, not Game. */
+function OfficeRoom({ repoId }: { repoId: string }) {
+  const repo = useStore((s) => s.repos.find((r) => r.id === repoId));
+  return repo ? <OfficeFloor repo={repo} /> : null;
+}
 
 function Travel() {
   const travel = useStore((s) => s.travel);
@@ -32,19 +38,18 @@ function Travel() {
 
 export function Game() {
   const floor = useStore((s) => s.floor);
-  const repos = useStore((s) => s.repos);
-  const repo = floor === 0 ? null : repoOnFloor(repos, floor);
-  const isOffice = !!repo;
+  // Only this floor's id: any floor's repo event re-rendering Game would re-render the whole scene.
+  const repoId = useStore((s) => (floor === 0 ? null : (repoOnFloor(s.repos, floor)?.id ?? null)));
+  const isOffice = !!repoId;
   const colliders = useMemo(() => (isOffice ? officeColliders() : lobbyColliders()), [isOffice]);
   // Stop drawing while nobody can see the office; switching back to 'always' draws a fresh frame at once.
   const paused = useRenderPaused();
-  const [maxDpr, setMaxDpr] = useState(MAX_DPR);
 
   return (
     <Canvas
       shadows
       frameloop={paused ? 'never' : 'always'}
-      dpr={[1, maxDpr]}
+      dpr={currentDpr()}
       camera={{ fov: 72, near: 0.05, far: 90, position: [0, 1.65, 10] }}
       gl={{ antialias: true, powerPreference: 'high-performance' }}
       onCreated={({ gl }) => {
@@ -56,11 +61,11 @@ export function Game() {
       <color attach="background" args={['#bfe3ff']} />
       <fog attach="fog" args={['#f3ece2', 30, 70]} />
       <Lights />
-      <Suspense fallback={null}>{repo ? <OfficeFloor key={repo.id} repo={repo} /> : <Lobby />}</Suspense>
+      <Suspense fallback={null}>{repoId ? <OfficeRoom key={repoId} repoId={repoId} /> : <Lobby />}</Suspense>
       <Player colliders={colliders} floor={floor} />
       <Travel />
       <FrameWhilePaused paused={paused} />
-      <AdaptiveResolution onChange={setMaxDpr} />
+      <AdaptiveResolution paused={paused} />
       {statsEnabled && <StatsProbe paused={paused} />}
     </Canvas>
   );
