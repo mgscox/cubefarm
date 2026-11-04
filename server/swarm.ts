@@ -46,7 +46,7 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_HUMAN, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
 import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
@@ -167,6 +167,7 @@ interface HeldRetry {
 
 /** A pull request's trip through QA. */
 interface QaRecord extends QaView {
+  securityReview?: { reason: string; qaSha: string | null; approvedSha?: string; auditBaseSha?: string };
   issueNumber: number | null;
   devSessionId: string | null; // the dev's Claude Code session, resumed to fix QA findings
   fixInstructions: string | null;
@@ -274,12 +275,13 @@ interface RepoRuntime {
 }
 
 interface QaReport {
-  verdict: 'pass' | 'fail';
+  verdict: 'pass' | 'fail' | 'incomplete';
   summary: string;
   checks: QaCheck[];
   commands: { command: string; result: string }[];
   screenshots: string[];
   fixInstructions?: string;
+  securityReviewReason?: string;
 }
 
 // ---------- flavour ----------
@@ -314,7 +316,7 @@ const MAX_DESKS: Record<AgentRole, number> = { dev: 12, qa: 3, ceo: 1, researche
 // A floor's researchers sit at developer desks: the two share the floor's desk slots.
 const deskPool = (role: AgentRole) => (role === 'researcher' ? 'dev' : role);
 const ROLE_TITLE: Record<AgentRole, string> = { dev: 'Developer', qa: 'QA tester', ceo: 'CEO', researcher: 'Researcher' };
-function readSpecialism(name: 'developer' | 'qa') {
+function readSpecialism(name: 'developer' | 'qa' | 'security') {
   try {
     return syncFs.readFileSync(new URL(`../docs/specialisms/${name}.md`, import.meta.url), 'utf8').trim();
   } catch (err) {
@@ -395,7 +397,7 @@ const IDEA_REVIEW_STEP_MS = 2500;
 
 // ---------- QA report ----------
 
-const QA_SCHEMA: Record<string, unknown> = {
+const QA_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['verdict', 'summary', 'checks', 'commands', 'screenshots'],
@@ -432,10 +434,20 @@ const QA_SCHEMA: Record<string, unknown> = {
       items: { type: 'string' },
     },
     fixInstructions: { type: 'string', description: 'When the verdict is fail: precise, actionable instructions for the developer.' },
+    securityReviewReason: { type: 'string', description: 'For a QA pass that requires specialist security review, name the changed surface and risk.' },
   },
 };
 
-function parseReport(result: SessionResult): QaReport | null {
+const SECURITY_SCHEMA = {
+  ...QA_SCHEMA,
+  properties: {
+    ...QA_SCHEMA.properties,
+    verdict: { type: 'string', enum: ['pass', 'fail', 'incomplete'], description: 'Pass only after a complete scoped audit. Fail for a confirmed blocking finding. Incomplete when required coverage or validation could not finish.' },
+  },
+};
+const REQUIRED_AUDIT_CHECKS = ['Scoped audit coverage', 'validate-findings.cjs', 'validate-coverage-ledger.cjs'];
+
+function parseReport(result: SessionResult, security = false): QaReport | null {
   let raw: unknown = result.structured;
   if (!raw && result.text) {
     // Terminal agents end their last message with the report, usually in a ```json block.
@@ -451,14 +463,15 @@ function parseReport(result: SessionResult): QaReport | null {
   }
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Partial<QaReport>;
-  if (r.verdict !== 'pass' && r.verdict !== 'fail') return null;
+  if (r.verdict !== 'pass' && r.verdict !== 'fail' && !(security && r.verdict === 'incomplete')) return null;
   return {
     verdict: r.verdict,
     summary: String(r.summary ?? ''),
-    checks: Array.isArray(r.checks) ? r.checks.map((c) => ({ name: String(c.name ?? ''), result: c.result === 'fail' ? 'fail' : c.result === 'skip' ? 'skip' : 'pass', details: String(c.details ?? '') })) : [],
-    commands: Array.isArray(r.commands) ? r.commands.map((c) => ({ command: String(c.command ?? ''), result: String(c.result ?? '') })) : [],
+    checks: Array.isArray(r.checks) ? r.checks.map((c) => ({ name: String(c?.name ?? ''), result: c?.result === 'fail' ? 'fail' : c?.result === 'skip' || (security && c?.result !== 'pass') ? 'skip' : 'pass', details: String(c?.details ?? '') })) : [],
+    commands: Array.isArray(r.commands) ? r.commands.map((c) => ({ command: String(c?.command ?? ''), result: String(c?.result ?? '') })) : [],
     screenshots: Array.isArray(r.screenshots) ? r.screenshots.map(String) : [],
     fixInstructions: r.fixInstructions ? String(r.fixInstructions) : undefined,
+    securityReviewReason: typeof r.securityReviewReason === 'string' ? r.securityReviewReason.trim().slice(0, 1000) : undefined,
   };
 }
 
@@ -2066,7 +2079,7 @@ export class Swarm {
     }
     if (this.state.officeHeld || hasLabel(pr.labels, NEEDS_HUMAN)) return false;
     Object.assign(rec, step.set);
-    if (step.do === 'requeue' && isResearchBranch(pr.headRefName)) {
+    if (step.do === 'requeue' && isResearchBranch(pr.headRefName) && !rec.securityReview && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) {
       this.setQa(rec, { passedSha: pr.headSha, testedSha: pr.headSha, mergeNote: null, pendingSince: null }); // more research: still nothing to test
       return false;
     }
@@ -2076,6 +2089,7 @@ export class Swarm {
       setTimeout(() => this.schedule(), 200);
       return false;
     }
+    if (this.holdForSecurityReview(rec, pr, false)) return false;
     if (hasLabel(pr.labels, NEEDS_REVIEW) && step.do !== 'ready') return false;
     if (step.do === 'send-back') return this.sendBack(repo, rec, step.reason, step.instructions, step.needsHuman);
     if (step.do === 'wait') {
@@ -2094,12 +2108,13 @@ export class Swarm {
       this.mergeNote(rec, `updating the branch with ${repo.defaultBranch}`);
       await this.backend.updateBranch(repo.fullName, pr.number);
       const details = await this.backend.prDetails(repo.fullName, pr.number);
-      this.setQa(rec, { passedSha: details.headSha });
+      if (!rec.securityReview) this.setQa(rec, { passedSha: details.headSha });
       return false;
     }
     if (step.do !== 'merge') return false;
     const latest = await this.backend.prDetails(repo.fullName, pr.number);
     if (this.state.officeHeld || hasLabel(latest.labels, NEEDS_HUMAN) || hasLabel(latest.labels, NEEDS_REVIEW)) return false;
+    if ((rec.securityReview && !latest.baseSha) || this.holdForSecurityReview(rec, latest)) return false;
     this.mergeNote(rec, 'merging…');
     let error = '';
     for (const method of ['squash', 'merge', 'rebase'] as const) {
@@ -2323,14 +2338,18 @@ export class Swarm {
         this.state.qa = this.state.qa.filter((x) => x !== q);
         this.broadcast({ type: 'qaRemoved', repoId: repo.id, prNumber: q.prNumber });
       }
+      if (pr?.state === 'OPEN' && q.status === 'passed') {
+        const fresh = (this.repoRt.get(repo.id)?.fetchedAt ?? 0) >= q.updatedAt;
+        this.holdForSecurityReview(q, pr, fresh);
+      }
     }
 
     // Every swarm PR goes through QA, including ones opened before QA existed or while the server was down.
     for (const pr of pulls) {
-      if (pr.state !== 'OPEN' || pr.isDraft || !pr.headRefName.startsWith('swarm/')) continue;
+      if (pr.state !== 'OPEN' || ((pr.isDraft || !pr.headRefName.startsWith('swarm/')) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW))) continue;
       if (this.state.qa.some((q) => q.repoId === repo.id && q.prNumber === pr.number)) continue;
       const dev = this.state.agents.find((a) => (a.role === 'dev' || a.role === 'researcher') && a.task !== 'qa' && (a.prNumber === pr.number || a.branch === pr.headRefName) && (a.repoId === repo.id || a.id === RESEARCHER_ID));
-      if (isResearchBranch(pr.headRefName)) this.skipQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null, pr.headSha || null);
+      if (isResearchBranch(pr.headRefName) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) this.skipQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null, pr.headSha || null);
       else this.queueQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null);
     }
     this.save();
@@ -2437,15 +2456,25 @@ export class Swarm {
     if (approval) rt.parking = true;
     try {
       const pr = await this.backend.prDetails(repo.fullName, number);
+      const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number);
+      const checkSecurityReview = (current: PrDetails) => {
+        if ((rec?.securityReview && !current.baseSha) ||
+          (rec ? this.holdForSecurityReview(rec, current) : hasLabel(current.labels, READY_FOR_SECURITY_REVIEW))) {
+          throw new HttpError(409, `PR #${number} requires a passing security review for its current head and base`);
+        }
+      };
+      checkSecurityReview(pr);
       for (const label of [NEEDS_HUMAN, NEEDS_REVIEW]) {
         if (hasLabel(pr.labels, label)) throw new HttpError(409, `Remove ${label} from PR #${number} before merging`);
       }
       if (approval) {
         preflight(pr, true);
         await this.backend.commentPull(repo.fullName, number, approval.reason);
+        checkSecurityReview(await this.backend.prDetails(repo.fullName, number));
         preflight(pr, true);
       }
       if (approval) await this.backend.mergePull(repo.fullName, number, method, headSha);
+      else if (rec?.securityReview) await this.backend.mergePull(repo.fullName, number, method, pr.headSha);
       else await this.backend.mergePull(repo.fullName, number, method);
       if (approval) rt.parking = false; // The normal refresh reconciles merged agents and removes QA.
       this.toast('success', `Merged PR #${number} into ${repo.defaultBranch}`);
@@ -3371,6 +3400,25 @@ export class Swarm {
 
   // ---------- QA ----------
 
+  private holdForSecurityReview(rec: QaRecord, pr: Pick<PrDetails, 'headSha' | 'baseSha' | 'labels'>, fresh = true): boolean {
+    const labeled = hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW);
+    const review = rec.securityReview;
+    const approved = review?.approvedSha === pr.headSha && (!pr.baseSha || review.auditBaseSha === pr.baseSha);
+    if (approved && (!fresh || !labeled)) return false;
+    if (!review && !labeled) return false;
+    if (rec.status === 'passed') {
+      const qaSha = rec.passedSha === pr.headSha ? pr.headSha : null;
+      this.setQa(rec, {
+        status: 'queued',
+        passedSha: null,
+        securityReview: { reason: review?.reason ?? 'Requested by the PR label.', qaSha },
+        mergeNote: 'waiting for detailed security review',
+      });
+      setTimeout(() => this.schedule(), 200);
+    }
+    return true;
+  }
+
   private queueQa(repo: PersistedRepo, prNumber: number, dev: PersistedAgent | null, issueNumber: number | null) {
     let rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === prNumber);
     if (rec) {
@@ -3455,6 +3503,7 @@ export class Swarm {
       ...(repo.mission ? [`What the team is building (the manager's brief): ${repo.mission}`] : []),
       ...(repo.qaBrief ? [`What to check on this project (from the CEO):\n${repo.qaBrief}`] : []),
       `Pull request #${pr.number} "${pr.title}" from branch ${pr.headRefName}: ${pr.url}`,
+      `PR base commit: ${pr.baseSha ?? `origin/${repo.defaultBranch}`}. Assigned PR head: ${pr.headSha ?? 'HEAD'}.`,
       `Your worktree: ${cwd}. It has the pull request's code at HEAD (local branch ${branch}, or detached if another worktree holds it).`,
       '',
       'How to test:',
@@ -3470,6 +3519,19 @@ export class Swarm {
       ...(specialism ? ['', specialism] : []),
       ONE_TURN,
     ].join('\n');
+  }
+
+  private buildSecuritySystemAppend(repo: PersistedRepo, cwd: string, pr: PrDetails, reason: string, playbook: string) {
+    return [
+      'You are the CubeFarm QA specialist assigned a detailed security review. Return the structured security report.',
+      `Repository: ${repo.fullName}. Pull request #${pr.number}: ${pr.url}`,
+      `Worktree: ${cwd}. Audit the PR from the merge base of ${pr.baseSha} and ${pr.headSha} through head ${pr.headSha}.`,
+      `Escalation reason: ${reason}`,
+      ...(repo.qaBrief ? [`Floor QA brief:\n${repo.qaBrief}`] : []),
+      'Leave target source and GitHub state intact. The office records your verdict and owns the merge hold.',
+      playbook,
+      ONE_TURN,
+    ].join('\n\n');
   }
 
   private async runQa(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord) {
@@ -3517,7 +3579,13 @@ export class Swarm {
       return;
     }
     if (rec.failedSha === pr.headSha) return this.skipUnchangedQa(a, rec, lastTester);
+    const review = rec.securityReview;
+    const security = !!review && review.qaSha === pr.headSha && review.approvedSha !== pr.headSha;
     rec.testedSha = pr.headSha;
+    if (security) {
+      this.appendLog(a, [{ kind: 'system', text: `Detailed security review · PR #${pr.number}` }]);
+      this.setQa(rec, { mergeNote: 'detailed security review in progress' });
+    }
 
     const cwd = await this.prepare(a, repo, { pr: rec.prNumber }, branch, { rec, task: 'qa' });
     if (gone()) return;
@@ -3528,7 +3596,7 @@ export class Swarm {
 
     const dev = rec.devAgentId ? this.state.agents.find((x) => x.id === rec.devAgentId) : null;
     const prompt = [
-      `Please QA pull request #${pr.number}: ${pr.title}`,
+      `Please ${security ? 'perform a detailed security review of' : 'QA'} pull request #${pr.number}: ${pr.title}`,
       `URL: ${pr.url}`,
       `Author: ${dev ? `${dev.name} (developer agent)` : 'a teammate'} · QA round ${rec.round}`,
       rec.rerunNote?.round === rec.round ? `Note from the manager: ${rec.rerunNote.text}` : '',
@@ -3548,16 +3616,35 @@ export class Swarm {
       .join('\n');
 
     try {
-      const systemAppend = this.buildQaSystemAppend(a, repo, cwd, branch, pr);
+      let systemAppend: string;
+      if (security) {
+        const playbook = readSpecialism('security');
+        if (!playbook || !pr.baseSha) throw new Error('Security review requires its playbook and the PR base commit.');
+        const head = await this.machineFor(a).deskHead(repo.fullName, this.agentSlug(a));
+        if (gone()) return;
+        if (head !== pr.headSha) {
+          this.setQa(rec, { status: 'queued', qaAgentId: null });
+          this.clearTask(a);
+          return;
+        }
+        if (!hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) {
+          await this.backend.setSecurityReviewLabel(repo.fullName, pr.number, true);
+          if (gone()) return;
+        }
+        this.setQa(rec, { securityReview: { ...review, auditBaseSha: pr.baseSha } });
+        systemAppend = this.buildSecuritySystemAppend(repo, cwd, pr, review.reason, playbook);
+      } else {
+        systemAppend = this.buildQaSystemAppend(a, repo, cwd, branch, pr);
+      }
       const rt = this.agentRt.get(a.id);
       if (rt) rt.qaResume = { cwd, systemAppend };
-      await this.startAgentSession(a, repo, cwd, prompt, systemAppend, undefined, QA_SCHEMA);
+      await this.startAgentSession(a, repo, cwd, prompt, systemAppend, undefined, security ? SECURITY_SCHEMA : QA_SCHEMA);
     } catch (err) {
       a.status = 'error';
       a.endedAt = Date.now();
       a.lastError = (err as Error).message;
       this.appendLog(a, [{ kind: 'error', text: `✗ ${a.lastError}` }]);
-      this.setQa(rec, { status: 'queued', qaAgentId: null });
+      this.setQa(rec, { status: security ? 'needs-human' : 'queued', qaAgentId: null, ...(security ? { mergeNote: a.lastError } : {}) });
       this.emitAgent(a);
     }
   }
@@ -3569,7 +3656,9 @@ export class Swarm {
     const generation = rt.generation;
     const gone = () => !this.state.agents.includes(a) || rt.generation !== generation || this.officeUpdate.handedOver ||
       (rec !== undefined && (!this.state.qa.includes(rec) || rec.status !== 'testing' || rec.qaAgentId !== a.id || orphanedQa(rec, this.state.agents)));
-    const report = result.ok ? parseReport(result) : null;
+    const review = rec?.securityReview;
+    const security = !!review?.auditBaseSha && review.qaSha === rec?.testedSha && review.approvedSha !== rec?.testedSha;
+    const report = result.ok ? parseReport(result, security) : null;
 
     const resume = rt.qaResume;
     const next = qaRetry({ stopped: a.status === 'stopped', limited: this.limited(), ok: result.ok, report: !!report, owned: !!rec && !gone(), canResume: !!resume && !!a.sessionId });
@@ -3583,7 +3672,7 @@ export class Swarm {
         this.appendLog(a, [{ kind: 'system', text: '↻ The session ended without a QA report. Resuming it once to finish.' }]);
         a.endedAt = null;
         try {
-          await this.startAgentSession(a, repo, resume.cwd, QA_RESUME_PROMPT, resume.systemAppend, a.sessionId, QA_SCHEMA);
+          await this.startAgentSession(a, repo, resume.cwd, QA_RESUME_PROMPT, resume.systemAppend, a.sessionId, security ? SECURITY_SCHEMA : QA_SCHEMA);
           return;
         } catch (err) {
           a.endedAt = Date.now();
@@ -3607,25 +3696,75 @@ export class Swarm {
     }
 
     // Keep the desk busy until the report is recorded: uploads/comments can outlast a scheduler tick.
-    const pass = report.verdict === 'pass';
-    this.appendLog(a, [{ kind: pass ? 'done' : 'error', text: `${pass ? '✅ QA passed' : '❌ QA failed'} PR #${a.prNumber} · ${report.checks.length} checks · ${rt.shots.length} screenshots` }]);
+    if (security && report.verdict === 'pass' && (report.checks.some((c) => c.result !== 'pass') ||
+      REQUIRED_AUDIT_CHECKS.some((name) => !report.checks.some((c) => c.name === name && c.details.trim())))) {
+      report.verdict = 'incomplete';
+      report.summary = `Required audit checks were missing or did not pass. ${report.summary}`;
+    }
+    let pass = report.verdict === 'pass';
+    let incomplete = report.verdict === 'incomplete';
+    const label = security ? 'Security review' : 'QA';
+    this.appendLog(a, [{ kind: pass ? 'done' : 'error', text: `${label} ${report.verdict}: PR #${a.prNumber} · ${report.checks.length} checks · ${rt.shots.length} screenshots` }]);
 
     // Evidence + comment on the PR
     let commentUrl: string | null = null;
     if (rec) {
+      if (security && gone()) return;
+      const pullLabels = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.labels;
+      const securityReason = report.securityReviewReason || review?.reason ||
+        (hasLabel(pullLabels, READY_FOR_SECURITY_REVIEW) ? 'Requested by the PR label.' : '');
+      const escalate = !security && pass && !!securityReason;
+      if (escalate) {
+        this.setQa(rec, { securityReview: { reason: securityReason, qaSha: rec.testedSha }, passedSha: null });
+        if (!hasLabel(pullLabels, READY_FOR_SECURITY_REVIEW)) {
+          await this.backend.setSecurityReviewLabel(repo.fullName, rec.prNumber, true).catch((err) => {
+            this.appendLog(a, [{ kind: 'error', text: `Could not add the security review label: ${oneLine(err)}. The office will retry before starting the audit.` }]);
+          });
+          if (gone()) return;
+        }
+      }
+      const isCurrentAudit = (pr: PrDetails) => pr.state === 'OPEN' && pr.headSha === rec.testedSha && pr.baseSha === review?.auditBaseSha;
+      const requeueAudit = () => {
+        this.setQa(rec, { status: 'queued', qaAgentId: null, passedSha: null, mergeNote: 'PR changed during security review; checking the current revision' });
+        a.status = 'done';
+      };
       try {
+        if (security) {
+          const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
+          if (gone()) return;
+          if (!isCurrentAudit(pr)) return requeueAudit();
+        }
         this.appendLog(a, [{ kind: 'system', text: '📎 Uploading evidence and posting the QA report on the PR…' }]);
-        const body = await this.renderQaComment(a, repo, rec, report, rt.shots);
+        const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security);
         if (gone()) return;
         commentUrl = (await this.backend.commentPull(repo.fullName, rec.prNumber, body)) || null;
         if (gone()) return;
         this.appendLog(a, [{ kind: 'system', text: `  ⎿ ${commentUrl ?? 'comment posted'}` }]);
       } catch (err) {
         this.appendLog(a, [{ kind: 'error', text: `  ⎿ Could not post the QA report: ${(err as Error).message}` }]);
+        if (security) {
+          pass = false;
+          incomplete = true;
+          report.summary = `Could not verify and publish the security report: ${oneLine(err)}`;
+        }
       }
       if (gone()) return;
+      if (security && pass) {
+        try {
+          const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
+          if (gone()) return;
+          if (!isCurrentAudit(pr)) return requeueAudit();
+          await this.backend.setSecurityReviewLabel(repo.fullName, rec.prNumber, false);
+          if (gone()) return;
+        } catch (err) {
+          if (gone()) return;
+          pass = false;
+          incomplete = true;
+          report.summary = `Could not finish the security review handoff: ${oneLine(err)}`;
+        }
+      }
       const qaRounds = rec.round - rec.retests; // rounds QA itself asked for
-      const nextStatus = pass ? 'passed' : qaRounds >= MAX_QA_ROUNDS ? 'needs-human' : 'failed';
+      const nextStatus = escalate ? 'queued' : pass ? 'passed' : incomplete || qaRounds >= MAX_QA_ROUNDS ? 'needs-human' : 'failed';
       this.setQa(rec, {
         status: nextStatus,
         summary: report.summary,
@@ -3633,22 +3772,23 @@ export class Swarm {
         commentUrl: commentUrl ?? rec.commentUrl,
         fixInstructions: report.fixInstructions ?? report.checks.filter((c) => c.result === 'fail').map((c) => `${c.name}: ${c.details}`).join('\n'),
         sessionFailures: 0,
-        fixReason: pass ? null : 'qa',
-        passedSha: pass ? rec.testedSha : null,
-        failedSha: pass ? null : rec.testedSha,
-        mergeNote: null,
+        fixReason: pass || incomplete ? null : 'qa',
+        passedSha: pass && !escalate ? rec.testedSha : null,
+        failedSha: pass || incomplete ? null : rec.testedSha,
+        securityReview: security && pass && rec.testedSha ? { ...review, approvedSha: rec.testedSha } : rec.securityReview,
+        mergeNote: escalate ? 'waiting for detailed security review' : incomplete ? report.summary : null,
         pendingSince: null,
         mergeRetryAt: null,
         alerted: false,
       });
-      const pullLabels = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.labels;
       const nextAfterQa = hasLabel(pullLabels, NEEDS_HUMAN) ? 'needs human intervention'
-        : hasLabel(pullLabels, NEEDS_REVIEW) ? 'waiting for review'
+        : escalate ? 'waiting for detailed security review' : hasLabel(pullLabels, NEEDS_REVIEW) ? 'waiting for review'
         : repo.autoMerge ? "it merges once GitHub's checks are green" : 'ready to merge';
       this.toast(
         pass ? 'success' : 'error',
         pass
           ? `✅ ${a.name} passed PR #${rec.prNumber}: ${nextAfterQa}`
+          : incomplete ? `⚠️ Security review of PR #${rec.prNumber} is incomplete; merge remains held.`
           : nextStatus === 'needs-human'
             ? `❌ PR #${rec.prNumber} failed QA ${qaRounds} times and needs a human`
             : `❌ ${a.name} failed PR #${rec.prNumber}; sending it back to the developer`,
@@ -3666,7 +3806,7 @@ export class Swarm {
     this.toast('info', `PR #${rec.prNumber} is unchanged since QA failed it: ${human ? 'it needs a human' : 'back to a developer, no re-test'}`);
   }
 
-  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[]) {
+  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[], security = false) {
     const pass = report.verdict === 'pass';
     const images: string[] = [];
     const evidence = shots.slice(-8);
@@ -3686,10 +3826,12 @@ export class Swarm {
     }
     const dev = rec.devAgentId ? this.state.agents.find((x) => x.id === rec.devAgentId) : null;
     const lines = [
-      `## 🔍 QA report: ${pass ? '✅ Passed' : '❌ Failed'}`,
+      `## 🔍 ${security ? 'Security review' : 'QA'} report: ${pass ? '✅ Passed' : report.verdict === 'incomplete' ? '⚠️ Incomplete' : '❌ Failed'}`,
       `**Tester:** ${a.name} (cubefarm QA agent) · **Round:** ${rec.round}${dev ? ` · **Author:** ${dev.name}` : ''}`,
       '',
       report.summary,
+      ...(security ? ['', `**Base:** \`${rec.securityReview?.auditBaseSha}\` · **Head:** \`${rec.testedSha}\``] : []),
+      ...(!security && pass && (report.securityReviewReason || rec.securityReview) ? ['', `**Detailed security review required:** ${report.securityReviewReason || rec.securityReview?.reason}`] : []),
       '',
       '| | Check | Details |',
       '|---|---|---|',
@@ -3702,7 +3844,10 @@ export class Swarm {
     if (images.length) lines.push('', '### 📸 Evidence', '', ...images.flatMap((img) => [img, '']));
     else lines.push('', '_No browser screenshots were taken in this round._');
     const merge = repo.autoMerge ? "merges automatically once GitHub's checks pass" : 'ready for the manager to merge';
-    lines.push('', `<sub>Posted by cubefarm · ${pass ? merge : rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes'}</sub>`);
+    const next = security && pass ? 'audit result applies to the cited revision. CubeFarm verifies it before clearing the merge hold'
+      : !security && pass && (report.securityReviewReason || rec.securityReview) ? 'waiting for detailed security review'
+      : pass ? merge : report.verdict === 'incomplete' || rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes';
+    lines.push('', `<sub>Posted by cubefarm · ${next}</sub>`);
     return lines.join('\n');
   }
 

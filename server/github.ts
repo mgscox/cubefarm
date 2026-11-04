@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CommandError, gh, ghJson } from './exec.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo, PullRefresh } from '../shared/types.ts';
-import { AGENT_COMMENT_MARKER, dependencyUrls } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, dependencyUrls, READY_FOR_SECURITY_REVIEW } from '../shared/issues.ts';
 
 // All GitHub access goes through the gh CLI so it reuses the user's existing `gh auth login`.
 
@@ -530,6 +530,25 @@ export async function markPullReady(fullName: string, number: number): Promise<v
   await gh(['pr', 'ready', String(number), '-R', fullName]);
 }
 
+export async function setSecurityReviewLabel(fullName: string, number: number, present: boolean): Promise<void> {
+  const label = READY_FOR_SECURITY_REVIEW;
+  const endpoint = `repos/${fullName}/issues/${number}/labels`;
+  const notFound = (err: unknown) => err instanceof CommandError && /\bHTTP 404\b/.test(err.stderr);
+  if (!present) {
+    await gh(['api', '-X', 'DELETE', `${endpoint}/${label}`]).catch((err) => {
+      if (!notFound(err)) throw err;
+    });
+    return;
+  }
+  const lookup = () => gh(['api', `repos/${fullName}/labels/${label}`]);
+  await lookup().catch(async (err) => {
+    if (!notFound(err)) throw err;
+    await gh(['label', 'create', label, '-R', fullName, '--color', 'd4a72c', '--description', 'CubeFarm security review pending'])
+      .catch(() => lookup()); // another office may have created it
+  });
+  await gh(['api', '-X', 'POST', endpoint, '-f', `labels[]=${label}`]);
+}
+
 export async function closePull(fullName: string, number: number): Promise<void> {
   await gh(['pr', 'close', String(number), '-R', fullName]);
 }
@@ -565,6 +584,7 @@ export interface PrDetails {
   url: string;
   headRefName: string;
   headSha: string;
+  baseSha?: string;
   isCrossRepository: boolean;
   closesIssues: number[];
   state: 'OPEN' | 'CLOSED' | 'MERGED';
@@ -581,12 +601,13 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     url: string;
     headRefName: string;
     headRefOid: string;
+    baseRefOid: string;
     isCrossRepository: boolean;
     closingIssuesReferences: { number: number }[] | null;
     state: PrDetails['state'];
     mergeable: string;
     mergeStateStatus: string;
-  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,labels,body,url,headRefName,headRefOid,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
+  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,labels,body,url,headRefName,headRefOid,baseRefOid,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
   return {
     number: raw.number,
     title: raw.title,
@@ -595,6 +616,7 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     url: raw.url,
     headRefName: raw.headRefName,
     headSha: raw.headRefOid,
+    baseSha: raw.baseRefOid,
     isCrossRepository: raw.isCrossRepository,
     closesIssues: (raw.closingIssuesReferences ?? []).map((r) => r.number),
     state: raw.state,

@@ -931,6 +931,15 @@ describe('CEO merge_pr', () => {
     expect(s.repoRt.get(repo.id)).toMatchObject({ merging: false, parking: false });
   });
 
+  it('holds a CEO merge when security review is requested while its comment is posted', async () => {
+    s.backend.commentPull = vi.fn(async () => {
+      pull.labels = ['ready-for-review'];
+      return 'comment-url';
+    });
+    await expect(swarm.mergePr(args)).rejects.toThrow('requires a passing security review');
+    expect(s.backend.mergePull).not.toHaveBeenCalled();
+  });
+
   it('preserves manager-facing merge behavior without tested QA or a CEO comment', async () => {
     s.state.qa = [];
     await swarm.mergePull(repo.id, 13, 'rebase');
@@ -3182,6 +3191,69 @@ describe('QA rounds', () => {
       answer('sha-0');
       await ending;
       expect(rec).toMatchObject({ status: 'fixing', fixCrashes: [] });
+    });
+  });
+
+  describe('detailed security review on a QA desk', () => {
+    const auditChecks = ['Scoped audit coverage', 'validate-findings.cjs', 'validate-coverage-ledger.cjs']
+      .map((name) => ({ name, result: 'pass', details: 'Complete for the assigned diff' }));
+
+    it('queues a labeled PR that already passed regular QA, even when automatic merge is off', () => {
+      Object.assign(rec, { status: 'passed', passedSha: pull.headSha, testedSha: pull.headSha });
+      s.reconcilePulls(repo, [{ ...pull, labels: ['ready-for-review'] }]);
+      expect(rec).toMatchObject({ status: 'queued', mergeNote: 'waiting for detailed security review' });
+    });
+
+    it.each(['pass', 'fail', 'incomplete', 'missing checks', 'changed head', 'changed base', 'publication failed'] as const)('keeps merge eligibility tied to the specialist outcome: %s', async (outcome) => {
+      const tester = addAgent('q2', 'Marple', 'qa', 1);
+      const pr = { ...pull, labels: [] as string[], baseSha: 'base-1', body: '', isCrossRepository: false };
+      const details = vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pr }));
+      vi.spyOn(s.backend, 'deskHead').mockImplementation(async () => pr.headSha);
+      vi.spyOn(s, 'prepare').mockResolvedValue('/fake-desk');
+      const session = vi.spyOn(s, 'startAgentSession').mockImplementation((agent) => {
+        Object.assign(agent as object, { status: 'working', sessionId: 'qa-session' });
+      });
+      const label = vi.spyOn(s.backend, 'setSecurityReviewLabel').mockImplementation(async (_repo, _number, present) => {
+        pr.labels = present ? ['ready-for-review'] : [];
+      });
+      const comment = vi.spyOn(s.backend, 'commentPull');
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      rec.status = 'queued';
+      await s.runQa(tester, repo, rec);
+      await s.onQaFinished(tester, repo, result(true, {
+        verdict: 'pass', summary: 'QA passed', checks: [], securityReviewReason: 'Changed session authentication.',
+      }));
+      expect(rec).toMatchObject({ status: 'queued', passedSha: null });
+      expect(label).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, true);
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('requires a passing security review');
+      await s.runQa(tester, repo, rec);
+      expect(session.mock.calls[1][4]).toMatch(/Security review specialism/);
+      expect(session.mock.calls[1][4]).toContain('base-1');
+      expect(session.mock.calls[1][5]).toBeUndefined();
+      if (outcome === 'changed head') pr.headSha = 'sha-2';
+      if (outcome === 'changed base') pr.baseSha = 'base-2';
+      if (outcome === 'publication failed') comment.mockRejectedValueOnce(new Error('Unavailable'));
+      await s.onQaFinished(tester, repo, result(true, {
+        verdict: outcome === 'incomplete' || outcome === 'fail' ? outcome : 'pass', summary: 'Audit report',
+        checks: outcome === 'missing checks' ? auditChecks.slice(0, 1) : auditChecks,
+      }));
+      if (outcome !== 'pass') {
+        expect(label).toHaveBeenCalledTimes(1);
+        expect(rec.status).toBe(outcome.startsWith('changed') ? 'queued' : outcome === 'fail' ? 'failed' : 'needs-human');
+        await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('requires a passing security review');
+        expect(merge).not.toHaveBeenCalled();
+        return;
+      }
+      expect(label).toHaveBeenLastCalledWith(repo.fullName, 13, false);
+      expect(rec).toMatchObject({ status: 'passed', passedSha: 'sha-1' });
+      // A pull list fetched during the audit can still show the label after the office clears it.
+      await s.advanceMerge(repo, rec, { ...pull, labels: ['ready-for-review'] });
+      expect(merge).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'squash', 'sha-1');
+      merge.mockClear();
+      details.mockResolvedValueOnce({ ...pr, baseSha: 'base-2' });
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('requires a passing security review');
+      expect(rec.status).toBe('queued');
+      expect(merge).not.toHaveBeenCalled();
     });
   });
 

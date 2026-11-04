@@ -11,7 +11,7 @@ import { updateFailure } from './fleet.ts';
 import type { ApprovedSnapshot, IdeaView, IdeaRecordView, CliView, GhRepoSummary, IssueInfo, PullInfo, MachineSample, MachineTelemetry } from '../shared/types.ts';
 import type { TrackedIssue } from './github.ts';
 import { monitorResources } from './machineHealth.ts';
-import { dependencyUrls, READY_FOR_HUMAN, RESEARCH } from '../shared/issues.ts';
+import { dependencyUrls, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR } from './config.ts';
 import { CommandError } from './exec.ts';
@@ -332,6 +332,7 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
   const prMatch = opts.prompt.match(/pull request #(\d+)(?::\s*(.+))?/);
   const issueMatch = opts.prompt.match(/#(\d+):\s*(.+)/);
   const number = Number((kind === 'issue' ? issueMatch?.[1] : prMatch?.[1]) ?? 0);
+  const security = kind === 'qa' && opts.prompt.startsWith('Please perform a detailed security review of');
   const title = (kind === 'issue' ? issueMatch?.[2] : prMatch?.[2])?.trim() ?? 'follow-up';
   const round = Number(opts.prompt.match(/QA round (\d+)/)?.[1] ?? 1);
   // Now and then a QA fix ends without pushing, so the office's "no new commits" check can be seen.
@@ -345,13 +346,26 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
   const topic = (issueMatch?.[2] ?? opts.prompt.match(/Topic: (.+)/)?.[1] ?? 'the brief').trim();
   const docName = `${new Date().toISOString().slice(0, 10)}-${topic.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)}.md`;
   const doc = fullName ? `docs/research/${docName}` : path.join(opts.cwd, docName);
-  const body = kind === 'qa' ? qaScript(cb, number, title, round) : kind === 'fix' ? fixScript(number, pushes) : kind === 'research' ? researchScript(topic, doc, !!fullName) : devScript(opts, cb, number, title);
+  const body = security ? [[{ kind: 'text' as const, text: '● Checking the changed trust boundaries and validating the simulated audit reports.' }]]
+    : kind === 'qa' ? qaScript(cb, number, title, round) : kind === 'fix' ? fixScript(number, pushes) : kind === 'research' ? researchScript(topic, doc, !!fullName) : devScript(opts, cb, number, title);
   const script = [header, ...body];
 
   const finish = () => {
     const costUsd = 0.3 + Math.random();
     const turns = 15 + Math.floor(Math.random() * 20);
     cb.tool(null);
+    if (security) {
+      cb.finished({
+        ok: true, text: '', costUsd, turns, errors: [],
+        structured: {
+          verdict: 'pass', summary: 'The simulated scoped audit passed.',
+          checks: ['Scoped audit coverage', 'validate-findings.cjs', 'validate-coverage-ledger.cjs']
+            .map((name) => ({ name, result: 'pass', details: 'Passed in the demo fixture.' })),
+          commands: [], screenshots: [],
+        },
+      });
+      return;
+    }
     if (kind === 'qa') {
       // Most first rounds pass; some fail so the fix loop can be seen in action.
       const pass = round > 1 || Math.random() > 0.35;
@@ -716,6 +730,7 @@ export function createDemoBackend(): Backend {
   // Tie each fake session back to its repo via the desk directory name.
   const deskRepo = new Map<string, string>();
   const deskBranches = new Map<string, string | null>();
+  const deskPulls = new Map<string, number | undefined>();
   /** Fake desks under a folder: the office's own (/demo), or a box's. */
   const desks = (root: string) => ({
     mainDir: (fullName: string) => `${root}/${fullName}/main`,
@@ -727,12 +742,14 @@ export function createDemoBackend(): Backend {
       if (holder) note?.(`${branch} is checked out at ${holder}; this desk uses detached HEAD at origin/pr/${base.pr}. Push fixes with git push origin HEAD:${branch}.`);
       deskBranches.set(dir, holder ? null : branch);
       deskRepo.set(dir, fullName);
+      deskPulls.set(dir, base.pr);
       return dir;
     },
     removeDesk: async () => undefined,
     releaseDesk: async () => undefined,
     deskAhead: async () => 0,
-    deskHead: async () => 'demo-head',
+    deskHead: async (fullName: string, slug: string) => repos.get(fullName)?.pulls
+      .find((pr) => pr.number === deskPulls.get(`${root}/${fullName}/desks/${slug}`))?.headSha ?? 'demo-head',
   });
   const startSession: Machine['startSession'] = (opts, cb) => {
     if (++sessionsStarted === USAGE_WARNING_AT) fakeUsageWarning(cb);
@@ -851,6 +868,12 @@ export function createDemoBackend(): Backend {
       if (!pr) throw new Error('Unknown PR');
       pr.isDraft = false;
     },
+    setSecurityReviewLabel: async (fullName, number, present) => {
+      const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
+      if (!pr) throw new Error('Unknown PR');
+      pr.labels = (pr.labels ?? []).filter((label) => label !== READY_FOR_SECURITY_REVIEW);
+      if (present) pr.labels.push(READY_FOR_SECURITY_REVIEW);
+    },
     closePull: async (fullName, number) => {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
       if (pr) pr.state = 'CLOSED';
@@ -868,6 +891,7 @@ export function createDemoBackend(): Backend {
         url: pr.url,
         headRefName: pr.headRefName,
         headSha: pr.headSha,
+        baseSha: 'demo-base',
         isCrossRepository: false,
         closesIssues: pr.closesIssues,
         state: pr.state,

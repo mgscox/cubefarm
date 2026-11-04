@@ -35,6 +35,7 @@ export const isResearchIssue = (labels: string[]) => issueSpecialty(labels) === 
 export const READY_FOR_HUMAN = 'ready-for-human';
 export const NEEDS_HUMAN = 'needs-human';
 export const NEEDS_REVIEW = 'needs-review';
+export const READY_FOR_SECURITY_REVIEW = 'ready-for-review';
 
 export function hasLabel(labels: readonly string[] | undefined, name: string) {
   return labels?.some((label) => label.toLowerCase() === name) ?? false;
