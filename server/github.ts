@@ -269,13 +269,15 @@ interface RawPull {
   additions: number;
   deletions: number;
   headRefOid: string;
+  baseRefOid?: string;
+  baseRefName?: string;
   mergeStateStatus: string;
   // check runs (GitHub Actions…) carry name/status/conclusion/detailsUrl; commit statuses (Vercel…) carry context/state/targetUrl
   statusCheckRollup?: { name?: string; context?: string; status?: string; conclusion?: string; state?: string; detailsUrl?: string; targetUrl?: string }[] | null;
 }
 
 const PR_FIELDS =
-  'number,title,labels,url,headRefName,headRefOid,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions';
+  'number,title,labels,url,headRefName,headRefOid,baseRefOid,baseRefName,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions';
 
 type Check = NonNullable<RawPull['statusCheckRollup']>[number];
 const BAD = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'];
@@ -308,6 +310,8 @@ function toPull(p: RawPull): PullInfo {
     deletions: p.deletions,
     checks: checksOf(p.statusCheckRollup),
     headSha: p.headRefOid,
+    baseSha: p.baseRefOid,
+    baseRefName: p.baseRefName,
     mergeState: p.mergeStateStatus || 'UNKNOWN',
     failedChecks: (p.statusCheckRollup ?? []).filter(failed).map((c) => ({ name: checkName(c), url: c.detailsUrl || c.targetUrl || null })),
     pendingChecks: (p.statusCheckRollup ?? []).filter(pending).map(checkName),
@@ -585,6 +589,7 @@ export interface PrDetails {
   headRefName: string;
   headSha: string;
   baseSha?: string;
+  baseRefName?: string;
   isCrossRepository: boolean;
   closesIssues: number[];
   state: 'OPEN' | 'CLOSED' | 'MERGED';
@@ -602,12 +607,13 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     headRefName: string;
     headRefOid: string;
     baseRefOid: string;
+    baseRefName: string;
     isCrossRepository: boolean;
     closingIssuesReferences: { number: number }[] | null;
     state: PrDetails['state'];
     mergeable: string;
     mergeStateStatus: string;
-  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,labels,body,url,headRefName,headRefOid,baseRefOid,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
+  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,labels,body,url,headRefName,headRefOid,baseRefOid,baseRefName,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
   return {
     number: raw.number,
     title: raw.title,
@@ -617,6 +623,7 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     headRefName: raw.headRefName,
     headSha: raw.headRefOid,
     baseSha: raw.baseRefOid,
+    baseRefName: raw.baseRefName,
     isCrossRepository: raw.isCrossRepository,
     closesIssues: (raw.closingIssuesReferences ?? []).map((r) => r.number),
     state: raw.state,

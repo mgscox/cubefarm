@@ -1,7 +1,7 @@
 import type { PullInfo, QaView } from '../shared/types.ts';
 
 // A CEO handoff starts a fresh QA budget without losing the PR's report history.
-export type FixReason = 'qa' | 'conflict' | 'checks' | 'other';
+export type FixReason = 'qa' | 'conflict' | 'checks' | 'base' | 'other';
 
 export function planDevFix(qa: Pick<QaView, 'status' | 'round' | 'summary' | 'checks'>, pr: Pick<PullInfo, 'mergeable' | 'mergeState' | 'failedChecks'>, defaultBranch: string, note?: string, reason?: FixReason) {
   const conflict = pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY';

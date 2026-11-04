@@ -167,7 +167,8 @@ interface HeldRetry {
 
 /** A pull request's trip through QA. */
 interface QaRecord extends QaView {
-  securityReview?: { reason: string; qaSha: string | null; approvedSha?: string; auditBaseSha?: string };
+  closed?: boolean; // Keep the security requirement if this PR is reopened.
+  securityReview?: { reason: string; qaSha: string | null; approvedSha?: string; auditBaseSha?: string; needsReconcile?: boolean };
   issueNumber: number | null;
   devSessionId: string | null; // the dev's Claude Code session, resumed to fix QA findings
   fixInstructions: string | null;
@@ -975,7 +976,7 @@ export class Swarm {
       settings: this.state.settings,
       repos: this.state.repos.map((r) => this.repoView(r)),
       agents: this.state.agents.map((a) => this.agentView(a, true)),
-      qa: this.state.qa.map((q) => this.qaView(q)),
+      qa: this.state.qa.filter((q) => !q.closed).map((q) => this.qaView(q)),
       requests: this.state.requests,
       ceo: this.ceoInfo(),
       research: this.researchInfo(),
@@ -2089,7 +2090,7 @@ export class Swarm {
       setTimeout(() => this.schedule(), 200);
       return false;
     }
-    if (this.holdForSecurityReview(rec, pr, false)) return false;
+    if (this.holdForSecurityReview(repo, rec, pr, false)) return false;
     if (hasLabel(pr.labels, NEEDS_REVIEW) && step.do !== 'ready') return false;
     if (step.do === 'send-back') return this.sendBack(repo, rec, step.reason, step.instructions, step.needsHuman);
     if (step.do === 'wait') {
@@ -2106,19 +2107,33 @@ export class Swarm {
     if (step.do === 'update-branch') {
       // The repo only merges up-to-date branches. GitHub merges the base in cleanly (or refuses); CI checks the result.
       this.mergeNote(rec, `updating the branch with ${repo.defaultBranch}`);
+      if (rec.securityReview) {
+        const latest = await this.backend.prDetails(repo.fullName, pr.number);
+        if (latest.headSha !== pr.headSha) {
+          this.holdForSecurityReview(repo, rec, latest);
+        } else if (latest.baseSha) {
+          this.sendBackForSecurityBase(repo, rec, latest);
+        }
+        return false;
+      }
       await this.backend.updateBranch(repo.fullName, pr.number);
       const details = await this.backend.prDetails(repo.fullName, pr.number);
-      if (!rec.securityReview) this.setQa(rec, { passedSha: details.headSha });
+      this.setQa(rec, { passedSha: details.headSha });
       return false;
     }
     if (step.do !== 'merge') return false;
     const latest = await this.backend.prDetails(repo.fullName, pr.number);
     if (this.state.officeHeld || hasLabel(latest.labels, NEEDS_HUMAN) || hasLabel(latest.labels, NEEDS_REVIEW)) return false;
-    if ((rec.securityReview && !latest.baseSha) || this.holdForSecurityReview(rec, latest)) return false;
+    if ((rec.securityReview && !latest.baseSha) || this.holdForSecurityReview(repo, rec, latest)) return false;
     this.mergeNote(rec, 'merging…');
     let error = '';
     for (const method of ['squash', 'merge', 'rebase'] as const) {
       if (this.state.officeHeld) break;
+      if (method !== 'squash' && rec.securityReview) {
+        const current = await this.backend.prDetails(repo.fullName, pr.number);
+        if (this.state.officeHeld || !current.baseSha || hasLabel(current.labels, NEEDS_HUMAN) ||
+          hasLabel(current.labels, NEEDS_REVIEW) || this.holdForSecurityReview(repo, rec, current)) return false;
+      }
       try {
         await this.backend.mergePull(repo.fullName, pr.number, method, rec.passedSha ?? pr.headSha);
         error = '';
@@ -2129,6 +2144,10 @@ export class Swarm {
       }
     }
     if (error && /head (branch|commit)/i.test(error)) return this.mergeNote(rec, 'new commits arrived; QA checks them first'); // the next sync re-queues it
+    if (error && rec.securityReview) {
+      const current = await this.backend.prDetails(repo.fullName, pr.number);
+      if (this.holdForSecurityReview(repo, rec, current)) return false;
+    }
     if (error) {
       rec.mergeRetryAt = Date.now() + MERGE_RETRY_MS;
       if (!rec.alerted) {
@@ -2151,10 +2170,12 @@ export class Swarm {
   }
 
   /** QA passed, but the PR can't merge as it is: a developer fixes it, and QA re-tests if the code changed. */
-  private sendBack(repo: PersistedRepo, rec: QaRecord, reason: 'checks' | 'conflict', fixInstructions: string, needsHuman: boolean) {
+  private sendBack(repo: PersistedRepo, rec: QaRecord, reason: 'checks' | 'conflict' | 'base', fixInstructions: string, needsHuman: boolean) {
     if (needsHuman) {
       this.setQa(rec, { status: 'needs-human', mergeNote: null });
-      this.postMessage('office', `⚠️ PR #${rec.prNumber} on ${repo.fullName} still ${reason === 'conflict' ? `conflicts with ${repo.defaultBranch}` : 'fails its checks'} after ${MAX_MERGE_FIXES} fixes, so it needs you.`);
+      const problem = reason === 'conflict' ? `conflicts with ${repo.defaultBranch}` :
+        reason === 'base' ? 'needs reconciliation with its current base' : 'fails its checks';
+      this.postMessage('office', `⚠️ PR #${rec.prNumber} on ${repo.fullName} still ${problem} after ${MAX_MERGE_FIXES} fixes, so it needs you.`);
       return false;
     }
     this.setQa(rec, { status: 'failed', fixReason: reason, fixInstructions, mergeFixes: rec.mergeFixes + 1, mergeNote: null, pendingSince: null });
@@ -2331,16 +2352,17 @@ export class Swarm {
       this.clearTask(a);
     }
 
-    // Finished PRs leave QA.
     for (const q of this.state.qa.filter((x) => x.repoId === repo.id)) {
       const pr = pulls.find((p) => p.number === q.prNumber);
       if (pr && pr.state !== 'OPEN' && q.status !== 'testing' && q.status !== 'fixing') {
-        this.state.qa = this.state.qa.filter((x) => x !== q);
-        this.broadcast({ type: 'qaRemoved', repoId: repo.id, prNumber: q.prNumber });
+        this.closeQaRecord(q, pr.state);
       }
-      if (pr?.state === 'OPEN' && q.status === 'passed') {
+      if (pr?.state === 'OPEN' && q.closed) {
+        this.setQa(q, { closed: false, status: 'queued', mergeNote: 'QA and security review required after reopening' });
+        setTimeout(() => this.schedule(), 200);
+      } else if (pr?.state === 'OPEN' && q.status === 'passed') {
         const fresh = (this.repoRt.get(repo.id)?.fetchedAt ?? 0) >= q.updatedAt;
-        this.holdForSecurityReview(q, pr, fresh);
+        this.holdForSecurityReview(repo, q, pr, fresh);
       }
     }
 
@@ -2355,13 +2377,27 @@ export class Swarm {
     this.save();
   }
 
+  private closeQaRecord(rec: QaRecord, state: 'CLOSED' | 'MERGED') {
+    const review = rec.securityReview;
+    if (state === 'CLOSED' && review) {
+      if (rec.closed) return;
+      Object.assign(rec, {
+        closed: true, passedSha: null,
+        securityReview: { reason: review.reason, qaSha: null, needsReconcile: review.needsReconcile },
+      });
+    } else {
+      this.state.qa = this.state.qa.filter((q) => q !== rec);
+    }
+    this.broadcast({ type: 'qaRemoved', repoId: rec.repoId, prNumber: rec.prNumber });
+  }
+
   /**
    * The sync only lists open and recently merged PRs, so a record whose PR merged or closed a while ago never shows up
    * finished there. Ask GitHub about each one; a failed lookup keeps the record for the next sync. The first sync after
    * startup clears records left over from before this check.
    */
   private async pruneUnlistedQa(repo: PersistedRepo, pulls: PullInfo[]) {
-    const unlisted = this.state.qa.filter((q) => q.repoId === repo.id && q.status !== 'testing' && q.status !== 'fixing' && !pulls.some((p) => p.number === q.prNumber));
+    const unlisted = this.state.qa.filter((q) => q.repoId === repo.id && !q.closed && q.status !== 'testing' && q.status !== 'fixing' && !pulls.some((p) => p.number === q.prNumber));
     if (!unlisted.length) return;
     const states = await Promise.all(unlisted.map((q) => this.backend.prDetails(repo.fullName, q.prNumber).then((d) => d.state, () => null)));
     let removed = false;
@@ -2369,8 +2405,7 @@ export class Swarm {
       const state = states[i];
       // The record may have moved on (a QA run started) while GitHub answered.
       if (!state || state === 'OPEN' || !this.state.qa.includes(q) || q.status === 'testing' || q.status === 'fixing') return;
-      this.state.qa = this.state.qa.filter((x) => x !== q);
-      this.broadcast({ type: 'qaRemoved', repoId: repo.id, prNumber: q.prNumber });
+      this.closeQaRecord(q, state);
       removed = true;
     });
     if (removed) this.save();
@@ -2459,7 +2494,7 @@ export class Swarm {
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number);
       const checkSecurityReview = (current: PrDetails) => {
         if ((rec?.securityReview && !current.baseSha) ||
-          (rec ? this.holdForSecurityReview(rec, current) : hasLabel(current.labels, READY_FOR_SECURITY_REVIEW))) {
+          (rec ? this.holdForSecurityReview(repo, rec, current) : hasLabel(current.labels, READY_FOR_SECURITY_REVIEW))) {
           throw new HttpError(409, `PR #${number} requires a passing security review for its current head and base`);
         }
       };
@@ -3400,18 +3435,38 @@ export class Swarm {
 
   // ---------- QA ----------
 
-  private holdForSecurityReview(rec: QaRecord, pr: Pick<PrDetails, 'headSha' | 'baseSha' | 'labels'>, fresh = true): boolean {
+  private sendBackForSecurityBase(repo: PersistedRepo, rec: QaRecord, pr: Pick<PrDetails, 'headSha' | 'baseSha' | 'baseRefName' | 'labels'>) {
+    const review = rec.securityReview!;
+    const base = pr.baseRefName ?? repo.defaultBranch;
+    const instructions = `The security review requires the latest base of this pull request. Fetch origin, reconcile the PR branch with origin/${base} (observed at ${pr.baseSha}), run the applicable checks, and push the updated PR branch. QA and security review will rerun.`;
+    Object.assign(rec, {
+      testedSha: pr.headSha, failedSha: pr.headSha, passedSha: null,
+      securityReview: { reason: review.reason, qaSha: null, needsReconcile: true },
+    });
+    this.sendBack(repo, rec, 'base', instructions, rec.mergeFixes >= MAX_MERGE_FIXES);
+    if (review.approvedSha && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) {
+      void this.backend.setSecurityReviewLabel(repo.fullName, rec.prNumber, true).catch((err) => {
+        console.warn(`Could not restore the security review label on ${repo.fullName}#${rec.prNumber}: ${oneLine(err)}`);
+      });
+    }
+  }
+
+  private holdForSecurityReview(repo: PersistedRepo, rec: QaRecord, pr: Pick<PrDetails, 'headSha' | 'baseSha' | 'baseRefName' | 'labels'>, fresh = true): boolean {
     const labeled = hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW);
     const review = rec.securityReview;
-    const approved = review?.approvedSha === pr.headSha && (!pr.baseSha || review.auditBaseSha === pr.baseSha);
+    const approved = review?.approvedSha === pr.headSha && (!fresh || !pr.baseSha || review.auditBaseSha === pr.baseSha);
     if (approved && (!fresh || !labeled)) return false;
     if (!review && !labeled) return false;
     if (rec.status === 'passed') {
+      if (fresh && review?.approvedSha === pr.headSha && pr.baseSha && review.auditBaseSha !== pr.baseSha) {
+        this.sendBackForSecurityBase(repo, rec, pr);
+        return true;
+      }
       const qaSha = rec.passedSha === pr.headSha ? pr.headSha : null;
       this.setQa(rec, {
         status: 'queued',
         passedSha: null,
-        securityReview: { reason: review?.reason ?? 'Requested by the PR label.', qaSha },
+        securityReview: { reason: review?.reason ?? 'Requested by the PR label.', qaSha, needsReconcile: review?.needsReconcile },
         mergeNote: 'waiting for detailed security review',
       });
       setTimeout(() => this.schedule(), 200);
@@ -3573,13 +3628,31 @@ export class Swarm {
     }
     if (pr.state !== 'OPEN') {
       this.appendLog(a, [{ kind: 'system', text: `PR #${pr.number} is ${pr.state.toLowerCase()}; nothing to test.` }]);
-      this.state.qa = this.state.qa.filter((q) => q !== rec);
-      this.broadcast({ type: 'qaRemoved', repoId: repo.id, prNumber: rec.prNumber });
+      this.closeQaRecord(rec, pr.state);
       this.clearTask(a);
+      this.save();
       return;
     }
     if (rec.failedSha === pr.headSha) return this.skipUnchangedQa(a, rec, lastTester);
     const review = rec.securityReview;
+    if (review?.needsReconcile) {
+      try {
+        if (!pr.baseSha) throw new Error('The PR base commit is unavailable.');
+        // Compare in reverse: the current base must have no commits that are missing from the PR head.
+        const behind = await this.backend.branchAhead(repo.fullName, pr.headSha, pr.baseSha);
+        if (gone()) return;
+        if (behind > 0) {
+          this.sendBackForSecurityBase(repo, rec, pr);
+          this.clearTask(a);
+          return;
+        }
+      } catch (err) {
+        if (gone()) return;
+        this.setQa(rec, { status: 'needs-human', qaAgentId: null, mergeNote: `Could not verify base reconciliation: ${oneLine(err)}` });
+        this.clearTask(a);
+        return;
+      }
+    }
     const security = !!review && review.qaSha === pr.headSha && review.approvedSha !== pr.headSha;
     rec.testedSha = pr.headSha;
     if (security) {
@@ -3715,7 +3788,7 @@ export class Swarm {
         (hasLabel(pullLabels, READY_FOR_SECURITY_REVIEW) ? 'Requested by the PR label.' : '');
       const escalate = !security && pass && !!securityReason;
       if (escalate) {
-        this.setQa(rec, { securityReview: { reason: securityReason, qaSha: rec.testedSha }, passedSha: null });
+        this.setQa(rec, { securityReview: { reason: securityReason, qaSha: rec.testedSha, needsReconcile: review?.needsReconcile }, passedSha: null });
         if (!hasLabel(pullLabels, READY_FOR_SECURITY_REVIEW)) {
           await this.backend.setSecurityReviewLabel(repo.fullName, rec.prNumber, true).catch((err) => {
             this.appendLog(a, [{ kind: 'error', text: `Could not add the security review label: ${oneLine(err)}. The office will retry before starting the audit.` }]);
@@ -3724,15 +3797,19 @@ export class Swarm {
         }
       }
       const isCurrentAudit = (pr: PrDetails) => pr.state === 'OPEN' && pr.headSha === rec.testedSha && pr.baseSha === review?.auditBaseSha;
-      const requeueAudit = () => {
-        this.setQa(rec, { status: 'queued', qaAgentId: null, passedSha: null, mergeNote: 'PR changed during security review; checking the current revision' });
+      const handBackStaleAudit = (pr: PrDetails) => {
+        if (pr.state === 'OPEN' && pr.headSha === rec.testedSha && pr.baseSha && pr.baseSha !== review?.auditBaseSha) {
+          this.sendBackForSecurityBase(repo, rec, pr);
+        } else {
+          this.setQa(rec, { status: 'queued', qaAgentId: null, passedSha: null, mergeNote: 'PR changed during security review; checking the current revision' });
+        }
         a.status = 'done';
       };
       try {
         if (security) {
           const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
           if (gone()) return;
-          if (!isCurrentAudit(pr)) return requeueAudit();
+          if (!isCurrentAudit(pr)) return handBackStaleAudit(pr);
         }
         this.appendLog(a, [{ kind: 'system', text: '📎 Uploading evidence and posting the QA report on the PR…' }]);
         const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security);
@@ -3753,7 +3830,7 @@ export class Swarm {
         try {
           const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
           if (gone()) return;
-          if (!isCurrentAudit(pr)) return requeueAudit();
+          if (!isCurrentAudit(pr)) return handBackStaleAudit(pr);
           await this.backend.setSecurityReviewLabel(repo.fullName, rec.prNumber, false);
           if (gone()) return;
         } catch (err) {
@@ -3866,7 +3943,9 @@ export class Swarm {
       dev,
       // The session they held was another task's (QA, say); the author's own is resumed below, from rec.devSessionId.
       { task: 'fix', issueNumber: rec.issueNumber, issueTitle: pull?.title ?? `PR #${rec.prNumber}`, branch: headRef, prNumber: rec.prNumber, prUrl: pull?.url ?? null, sessionId: null },
-      rec.fixReason === 'conflict' ? `Resolving conflicts on PR #${rec.prNumber}` : rec.fixReason === 'checks' ? `Fixing checks on PR #${rec.prNumber}` : `Fixing PR #${rec.prNumber} after QA round ${rec.round}`,
+      rec.fixReason === 'base' ? `Reconciling PR #${rec.prNumber} with its latest base` :
+        rec.fixReason === 'conflict' ? `Resolving conflicts on PR #${rec.prNumber}` :
+        rec.fixReason === 'checks' ? `Fixing checks on PR #${rec.prNumber}` : `Fixing PR #${rec.prNumber} after QA round ${rec.round}`,
       `Checking out PR #${rec.prNumber}…`,
     );
     this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
@@ -4108,7 +4187,7 @@ export class Swarm {
     const testers = this.available(repo, 'qa');
     const pulls = this.repoRt.get(repo.id)?.pulls ?? [];
     const waiting = (status: QaRecord['status'], task: PrepJob['task']) => this.state.qa.filter((q) => {
-      if (q.repoId !== repo.id || q.status !== status) return false;
+      if (q.repoId !== repo.id || q.closed || q.status !== status) return false;
       const pr = pulls.find((p) => p.number === q.prNumber);
       return !hasLabel(pr?.labels, NEEDS_HUMAN) && !prepHeld(q.preparation?.[task], pr?.headSha ?? null, Date.now());
     }).sort((x, y) => x.updatedAt - y.updatedAt);
@@ -5975,8 +6054,9 @@ export class Swarm {
       pull.state = 'CLOSED';
       repo.parkedBranches = [...(repo.parkedBranches ?? []).filter((p) => p.prNumber !== x.number),
         ...[...issues].map((issueNumber) => ({ issueNumber, prNumber: x.number, branch: pr.headRefName }))];
-      this.state.qa = this.state.qa.filter((q) => q.repoId !== repo.id || q.prNumber !== x.number);
-      this.broadcast({ type: 'qaRemoved', repoId: repo.id, prNumber: x.number });
+      const qa = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === x.number);
+      if (qa) this.closeQaRecord(qa, 'CLOSED');
+      else this.broadcast({ type: 'qaRemoved', repoId: repo.id, prNumber: x.number });
       for (const a of agents) this.clearTask(a);
       repo.requestedStarts = repo.requestedStarts.filter((r) => !issues.has(r.issueNumber));
       for (const n of issues) this.issueFailures.delete(`${repo.id}#${n}`);
