@@ -3301,12 +3301,12 @@ export class Swarm {
     this.toast('error', `${a.name} hit a problem on ${what}: ${a.lastError.slice(0, 120)}`);
   }
 
-  /** Session text can cite any PR; only an open PR on the office-issued branch establishes ownership. */
+  /** Session text can cite any PR; only an open PR on the office-issued branch of this repo (not a fork's same-named branch) establishes ownership. */
   private async openPullForBranch(repo: PersistedRepo, branch: string): Promise<PrDetails | null> {
     const pr = await this.backend.prForBranch(repo.fullName, branch);
     if (!pr) return null;
     const details = await this.backend.prDetails(repo.fullName, pr.number);
-    return details.state === 'OPEN' && details.headRefName === branch ? details : null;
+    return details.state === 'OPEN' && details.headRefName === branch && details.isCrossRepository === false ? details : null;
   }
 
   /** `released`: the clean-up of the desk the session just left, which a session started on that desk must wait for. */
@@ -3580,6 +3580,8 @@ export class Swarm {
     const pr = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === prNumber && p.state === 'OPEN');
     if (!pr) throw new HttpError(404, `PR #${prNumber} is not open on ${repo.fullName}`);
     if (hasLabel(pr.labels, NEEDS_HUMAN)) throw new HttpError(409, `Remove ${NEEDS_HUMAN} from PR #${prNumber} before sending it to QA`);
+    // a fork can reuse a desk's branch name: match by branch only for a PR confirmed to come from this repo
+    const sameRepo = await this.backend.prDetails(repo.fullName, prNumber).then((d) => d.isCrossRepository === false, () => false);
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === prNumber);
     if (rec?.status === 'testing' || rec?.status === 'fixing') throw new HttpError(409, `PR #${prNumber} is already ${rec.status}`);
     if (rec && (rec.status === 'needs-human' || rec.status === 'passed' || rec.status === 'failed')) {
@@ -3589,7 +3591,7 @@ export class Swarm {
       rec.sessionFailures = 0;
       rec.mergeNote = null;
     }
-    const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && (a.prNumber === prNumber || a.branch === pr.headRefName));
+    const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && (a.prNumber === prNumber || (sameRepo && a.branch === pr.headRefName)));
     if (rec) this.setQa(rec, { preparation: undefined });
     this.queueQa(repo, prNumber, dev ?? null, pr.closesIssues[0] ?? null);
     this.toast('info', `PR #${prNumber} is queued for QA`);

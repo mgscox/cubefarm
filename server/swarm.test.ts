@@ -10,7 +10,7 @@ import { handleHook, startCliSession } from './cliRunner.ts';
 import type { BoxConnection, CliHost } from './machine.ts';
 import { BOX_CLI_CHECK_MS } from './fleet.ts';
 import type { AgentTerminal } from './terminal.ts';
-import { createDemoBackend, demoApprovedProposal } from './demo.ts';
+import { createDemoBackend, demoApprovedProposal, demoForkPull } from './demo.ts';
 import { newPublication } from './publication.ts';
 import type { TrackedIssue } from './github.ts';
 import { HttpError, Swarm } from './swarm.ts';
@@ -322,6 +322,36 @@ describe('developer scores', () => {
       expect(s.state.qa).toEqual([]);
       s.reconcilePulls(repo, [pull]);
       expect(dev().score).toBe(0);
+    });
+
+    it('fork: a cross-repository PR on a same-named branch is not adopted and earns no score', async () => {
+      vi.mocked(s.backend.prForBranch).mockRestore();
+      vi.mocked(s.backend.prDetails).mockRestore();
+      const eve = claimant();
+      const fork = demoForkPull(repo.fullName, String(eve.branch));
+      try {
+        vi.spyOn(swarm, 'message').mockResolvedValue(undefined as never);
+        await finish(eve, fork.pull.number);
+        expect(eve.prNumber).toBeNull();
+        expect(s.state.qa.some((q) => q.prNumber === fork.pull.number)).toBe(false);
+        s.reconcilePulls(repo, [{ ...fork.pull, state: 'MERGED', mergedAt: '2026-11-04' }]);
+        expect(eve.score).toBe(0);
+      } finally {
+        fork.remove();
+      }
+    });
+
+    it.each([true, false])('send to QA credits a desk by branch name only for a same-repo PR (fork: %s)', async (fromFork) => {
+      const eve = claimant();
+      const fork = demoForkPull(repo.fullName, String(eve.branch));
+      try {
+        if (fromFork) vi.mocked(s.backend.prDetails).mockRestore();
+        s.repoRt.get(repo.id)!.pulls = [fork.pull];
+        await swarm.sendToQa(repo.id, fork.pull.number);
+        expect(s.state.qa.find((q) => q.prNumber === fork.pull.number)?.devAgentId).toBe(fromFork ? null : eve.id);
+      } finally {
+        fork.remove();
+      }
     });
   });
 
@@ -4147,7 +4177,7 @@ describe('manual office closure', () => {
 
   it('records developer results and queues QA, waiting for cleanup and disk before reporting safe', async () => {
     vi.spyOn(s.backend, 'prForBranch').mockResolvedValue({ number: 13, url: 'https://github.com/demo-co/pixel-todo/pull/13' });
-    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ number: 13, url: 'https://github.com/demo-co/pixel-todo/pull/13', state: 'OPEN', headRefName: 'swarm/issue-66-ada' } as never);
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ number: 13, url: 'https://github.com/demo-co/pixel-todo/pull/13', state: 'OPEN', headRefName: 'swarm/issue-66-ada', isCrossRepository: false } as never);
     await swarm.assign('a1', 66);
     await drain();
     await swarm.closeOffice();

@@ -43,6 +43,22 @@ const repos = new Map<string, FakeRepo>();
 const bareRepos = new Set<string>();
 const mergedSinceSync = new Map<string, number>(); // merges the fake project folder hasn't pulled yet
 const closedIssues = new Map<string, TrackedIssue>(); // `${fullName}#${n}` → an issue closed (as completed) by a merge
+const forkPulls = new Set<PullInfo>(); // PRs opened from someone's fork: GitHub reports only their bare branch name
+
+/** An open PR from a fork whose branch has the given (bare) name, e.g. one of the office's desk branches. Returns its removal. */
+export function demoForkPull(fullName: string, headRefName: string): { pull: PullInfo; remove: () => void } {
+  const repo = repos.get(fullName);
+  if (!repo) throw new Error(`Unknown demo repo ${fullName}`);
+  const number = repo.nextNumber++;
+  const pull: PullInfo = {
+    number, title: 'Outside contribution', url: `https://github.com/${fullName}/pull/${number}`, headRefName, state: 'OPEN',
+    isDraft: false, mergeable: 'MERGEABLE', reviewDecision: null, closesIssues: [], createdAt: now(), mergedAt: null,
+    additions: 3, deletions: 1, checks: 'passing', headSha: fakeSha(), mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+  };
+  repo.pulls.unshift(pull);
+  forkPulls.add(pull);
+  return { pull, remove: () => { repo.pulls = repo.pulls.filter((p) => p !== pull); forkPulls.delete(pull); } };
+}
 
 const fakeSha = () => crypto.randomBytes(20).toString('hex');
 
@@ -896,7 +912,7 @@ export function createDemoBackend(): Backend {
         headRefName: pr.headRefName,
         headSha: pr.headSha,
         baseSha: 'demo-base',
-        isCrossRepository: false,
+        isCrossRepository: forkPulls.has(pr),
         closesIssues: pr.closesIssues,
         state: pr.state,
         mergeable: pr.mergeable,
