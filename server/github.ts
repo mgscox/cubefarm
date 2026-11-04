@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CommandError, gh, ghJson } from './exec.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo, PullRefresh } from '../shared/types.ts';
-import { AGENT_COMMENT_MARKER, dependencyUrls } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, dependencyUrls, READY_FOR_SECURITY_REVIEW } from '../shared/issues.ts';
 
 // All GitHub access goes through the gh CLI so it reuses the user's existing `gh auth login`.
 
@@ -269,13 +269,15 @@ interface RawPull {
   additions: number;
   deletions: number;
   headRefOid: string;
+  baseRefOid?: string;
+  baseRefName?: string;
   mergeStateStatus: string;
   // check runs (GitHub Actions…) carry name/status/conclusion/detailsUrl; commit statuses (Vercel…) carry context/state/targetUrl
   statusCheckRollup?: { name?: string; context?: string; status?: string; conclusion?: string; state?: string; detailsUrl?: string; targetUrl?: string }[] | null;
 }
 
 const PR_FIELDS =
-  'number,title,labels,url,headRefName,headRefOid,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions';
+  'number,title,labels,url,headRefName,headRefOid,baseRefOid,baseRefName,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions';
 
 type Check = NonNullable<RawPull['statusCheckRollup']>[number];
 const BAD = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'];
@@ -308,6 +310,8 @@ function toPull(p: RawPull): PullInfo {
     deletions: p.deletions,
     checks: checksOf(p.statusCheckRollup),
     headSha: p.headRefOid,
+    baseSha: p.baseRefOid,
+    baseRefName: p.baseRefName,
     mergeState: p.mergeStateStatus || 'UNKNOWN',
     failedChecks: (p.statusCheckRollup ?? []).filter(failed).map((c) => ({ name: checkName(c), url: c.detailsUrl || c.targetUrl || null })),
     pendingChecks: (p.statusCheckRollup ?? []).filter(pending).map(checkName),
@@ -530,6 +534,25 @@ export async function markPullReady(fullName: string, number: number): Promise<v
   await gh(['pr', 'ready', String(number), '-R', fullName]);
 }
 
+export async function setSecurityReviewLabel(fullName: string, number: number, present: boolean): Promise<void> {
+  const label = READY_FOR_SECURITY_REVIEW;
+  const endpoint = `repos/${fullName}/issues/${number}/labels`;
+  const notFound = (err: unknown) => err instanceof CommandError && /\bHTTP 404\b/.test(err.stderr);
+  if (!present) {
+    await gh(['api', '-X', 'DELETE', `${endpoint}/${label}`]).catch((err) => {
+      if (!notFound(err)) throw err;
+    });
+    return;
+  }
+  const lookup = () => gh(['api', `repos/${fullName}/labels/${label}`]);
+  await lookup().catch(async (err) => {
+    if (!notFound(err)) throw err;
+    await gh(['label', 'create', label, '-R', fullName, '--color', 'd4a72c', '--description', 'CubeFarm security review pending'])
+      .catch(() => lookup()); // another office may have created it
+  });
+  await gh(['api', '-X', 'POST', endpoint, '-f', `labels[]=${label}`]);
+}
+
 export async function closePull(fullName: string, number: number): Promise<void> {
   await gh(['pr', 'close', String(number), '-R', fullName]);
 }
@@ -539,13 +562,22 @@ export async function prForBranch(fullName: string, branch: string): Promise<{ n
   return list[0] ?? null;
 }
 
+async function compareAhead(fullName: string, left: string, right: string, api: RestQuery): Promise<number> {
+  const result = await api(['api', `repos/${fullName}/compare/${encodeURIComponent(left)}...${encodeURIComponent(right)}?per_page=1`]) as { ahead_by?: number } | null;
+  const ahead = result?.ahead_by;
+  if (typeof ahead !== 'number' || !Number.isInteger(ahead) || ahead < 0) throw new Error('Branch comparison unavailable');
+  return ahead;
+}
+
+/** A commit is contained only when GitHub confirms the reverse comparison has no missing commits. */
+export async function containsCommit(fullName: string, headSha: string, requiredSha: string, api: RestQuery = ghJson): Promise<boolean> {
+  return await compareAhead(fullName, headSha, requiredSha, api) === 0;
+}
+
 /** Pushed commits ahead of base; zero also covers a verified absent remote branch. Unknown reads throw. */
 export async function branchAhead(fullName: string, base: string, branch: string, api: RestQuery = ghJson): Promise<number> {
   try {
-    const result = await api(['api', `repos/${fullName}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?per_page=1`]) as { ahead_by?: number } | null;
-    const ahead = result?.ahead_by;
-    if (typeof ahead !== 'number' || !Number.isInteger(ahead) || ahead < 0) throw new Error('Branch comparison unavailable');
-    return ahead;
+    return await compareAhead(fullName, base, branch, api);
   } catch (error) {
     if (!(error instanceof CommandError) || !/\bHTTP 404\b/.test(error.stderr)) throw error;
     // A comparison 404 can mean a missing base or inaccessible repo. Only a successful refs read proves absence.
@@ -565,6 +597,8 @@ export interface PrDetails {
   url: string;
   headRefName: string;
   headSha: string;
+  baseSha?: string;
+  baseRefName?: string;
   isCrossRepository: boolean;
   closesIssues: number[];
   state: 'OPEN' | 'CLOSED' | 'MERGED';
@@ -581,12 +615,14 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     url: string;
     headRefName: string;
     headRefOid: string;
+    baseRefOid: string;
+    baseRefName: string;
     isCrossRepository: boolean;
     closingIssuesReferences: { number: number }[] | null;
     state: PrDetails['state'];
     mergeable: string;
     mergeStateStatus: string;
-  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,labels,body,url,headRefName,headRefOid,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
+  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,labels,body,url,headRefName,headRefOid,baseRefOid,baseRefName,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
   return {
     number: raw.number,
     title: raw.title,
@@ -595,6 +631,8 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     url: raw.url,
     headRefName: raw.headRefName,
     headSha: raw.headRefOid,
+    baseSha: raw.baseRefOid,
+    baseRefName: raw.baseRefName,
     isCrossRepository: raw.isCrossRepository,
     closesIssues: (raw.closingIssuesReferences ?? []).map((r) => r.number),
     state: raw.state,

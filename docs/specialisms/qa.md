@@ -24,9 +24,17 @@ If Chrome or Playwright hits a proxy error, blank page, or navigation timeout on
 - Read `cubefarm-test-strategy-skill`. Use its risk and coverage guidance to spot gaps in the checks already run. Run relevant missing checks where possible. Keep this within the QA run's scope and existing acceptance criteria. A separate strategy document, approval gate, or follow-on workflow is unnecessary for this review.
 - Read `cubefarm-humanizer`. Apply it to the wording of the report summary and findings while preserving technical details, evidence, and the report schema.
 
-## 4. Review
+## 4. Review merge candidates
 
-Read `cubefarm-pr-security-review` and examine the PR diff against its base. Report actionable security issues introduced by the change with their location, impact, and a way to verify or fix them. Verify suspected findings independently. If the runtime lacks delegated review, do the false-positive check yourself. Include the security result in the existing QA report.
+Continue when the PR passes the required checks above. If a blocking issue already requires rework, go to Exit.
+
+- Read `cubefarm-pr-security-review` and examine the PR diff against its base. Report actionable security issues introduced by the change with their location, impact, and a way to verify or fix them. Verify suspected findings independently. If the runtime lacks delegated review, do the false-positive check yourself. Include the security result in the existing QA report.
+- Read `cubefarm-code-review`. Use the assigned PR base and head for the Standards and Spec reviews. If the skill is unavailable, compare the diff with the repository rules and the linked issue.
+- Apply the Lean guidance from `cubefarm-ponytail-review` to find unnecessary code or dependencies. If the skill is unavailable, look for unnecessary duplication and abstractions.
+
+## 5. Decide whether to request a detailed security review
+
+Escalate a passing PR if it changes a security boundary, including authentication, authorization, tenant isolation, secret handling, sensitive data access, or untrusted input reaching privileged operations. Escalate even when the quick screen finds no blocking issue. Set `securityReviewReason` in the structured QA report and name the affected surface and risk. CubeFarm applies `ready-for-review` and assigns a fresh QA session with the security playbook. The merge stays held until the specialist passes the current PR head.
 
 ## Exit
 

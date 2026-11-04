@@ -35,10 +35,12 @@ export interface Backend extends Machine {
   updateBranch(fullName: string, number: number): Promise<void>;
   /** Marks a draft PR ready for review. */
   markPullReady(fullName: string, number: number): Promise<void>;
+  setSecurityReviewLabel(fullName: string, number: number, present: boolean): Promise<void>;
   closePull(fullName: string, number: number): Promise<void>;
   prForBranch(fullName: string, branch: string): Promise<{ number: number; url: string } | null>;
   /** Commits a branch has on GitHub ahead of the base branch (throws when the branch was never pushed). */
   branchAhead(fullName: string, base: string, branch: string): Promise<number>;
+  containsCommit(fullName: string, headSha: string, requiredSha: string): Promise<boolean>;
   prDetails(fullName: string, number: number): Promise<github.PrDetails>;
   issueDetails(fullName: string, number: number): Promise<{ title: string; body: string }>;
   commentPull(fullName: string, number: number, body: string): Promise<string>;
@@ -85,9 +87,11 @@ export const realBackend: Backend = {
   mergePull: github.mergePull,
   updateBranch: github.updateBranch,
   markPullReady: github.markPullReady,
+  setSecurityReviewLabel: github.setSecurityReviewLabel,
   closePull: github.closePull,
   prForBranch: github.prForBranch,
   branchAhead: github.branchAhead,
+  containsCommit: github.containsCommit,
   deskAhead: workspace.deskAhead,
   deskHead: workspace.deskHead,
   prDetails: github.prDetails,

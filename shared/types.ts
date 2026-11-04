@@ -56,6 +56,8 @@ export interface PullInfo {
   deletions: number;
   checks: 'pending' | 'passing' | 'failing' | 'none' | 'unavailable';
   headSha: string;
+  baseSha?: string;
+  baseRefName?: string;
   mergeState: string; // GitHub's mergeStateStatus: CLEAN | BEHIND | BLOCKED | DIRTY | UNSTABLE | DRAFT | UNKNOWN …
   failedChecks: { name: string; url: string | null }[];
   pendingChecks: string[];
