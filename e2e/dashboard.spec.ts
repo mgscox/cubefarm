@@ -54,10 +54,10 @@ test('Dashboard Lobby shows who is working and the office notices, and leaves Ta
   await expect(page.getByRole('alert').filter({ hasText: 'GitHub CLI is not logged in' })).toBeVisible();
   await expect(page.getByRole('button', { name: /Updating the office after 1 session finishes/ })).toBeVisible();
 
-  const working = page.getByRole('region', { name: 'Working' });
-  await expect(working.getByRole('heading', { name: /Working/ })).toBeVisible();
+  const working = page.locator('.dashboard-main > .workers');
+  await expect(working.getByRole('button', { name: /^Working/ })).toHaveAttribute('aria-expanded', 'true');
   // The CEO's details are the Manager console; a floor agent's are their terminal.
-  const row = working.locator('.wk-group').filter({ hasNot: page.getByText('Lobby', { exact: true }) }).locator('.wk-row').first();
+  const row = working.locator('.wk-group').filter({ hasNot: page.getByText('HQ', { exact: true }) }).locator('.wk-row').first();
   await expect(row).toBeVisible({ timeout: 60_000 });
   await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('dashboard-lobby-working.png') });
 

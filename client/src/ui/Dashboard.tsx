@@ -3,9 +3,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { CEO_ID, RESEARCHER_ID, type AgentRole } from '../../../shared/types';
 import { agentsOnRepo, isBusy, pendingRequests, repoOnFloor, unreadMessages, usePhoneBadge, useStore, type Agent } from '../store';
 import { isConfirmOpen } from './Confirm';
-import { OfficeNotices } from './HUD';
 import { KanbanView } from './KanbanView';
 import { LiveTerminal } from './LiveTerminal';
+import { OfficeNotices } from './OfficeNotices';
 import { Overlays } from './Overlays';
 import { StatusPill } from './TerminalView';
 import { WorkersPanel } from './WorkersPanel';
@@ -186,23 +186,20 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
             <button className="dashboard-action dashboard-office" onClick={onOffice}>3D Office</button>
           </nav>
         </header>
-        <div className="dashboard-notices"><OfficeNotices /></div>
+
+        <OfficeNotices />
+        {!repo && <WorkersPanel dashboard />}
 
         {pane === 'kanban' && repo ? (
           <KanbanView key={repo.id} repoId={repo.id} inline />
-        ) : (
-          <div className={`dashboard-body${!repo && !focused ? ' dashboard-lobby' : ''}`}>
-            {team.length ? (
-              <div className={`dashboard-terminals${focused ? ' dashboard-expanded' : ''}`}>
-                {(focused ? [focused] : team).map((agent) => (
-                  <AgentTile key={agent.id} agent={agent} expanded={focused?.id === agent.id} toggle={() => setExpanded(focused ? null : agent.id)} />
-                ))}
-              </div>
-            ) : (
-              <p className="dashboard-empty">No agents on this floor yet.</p>
-            )}
-            {!repo && !focused && <WorkersPanel inline />}
+        ) : team.length ? (
+          <div className={`dashboard-terminals${focused ? ' dashboard-expanded' : ''}`}>
+            {(focused ? [focused] : team).map((agent) => (
+              <AgentTile key={agent.id} agent={agent} expanded={focused?.id === agent.id} toggle={() => setExpanded(focused ? null : agent.id)} />
+            ))}
           </div>
+        ) : (
+          <p className="dashboard-empty">No agents on this floor yet.</p>
         )}
       </main>
       <Overlays onFloor={visitFloor} />

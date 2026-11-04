@@ -2,22 +2,9 @@ import { useMemo } from 'react';
 import { repoOnFloor, usePhoneBadge, useStore } from '../store';
 import { CEO_ID } from '../../../shared/types';
 import { HeldHint } from './HeldHint';
+import { OfficeNotices } from './OfficeNotices';
 import { WorkersPanel } from './WorkersPanel';
-import { officeUpdateChip } from '../officeUpdate';
 import { qaCounts } from '../qaCounts';
-
-/** While the office is on its way to updating itself (or restarting to do it); opens the console's Office row. */
-function OfficeUpdateChip() {
-  const text = useStore((s) => (s.restarting ? '⟳ Office restarting…' : officeUpdateChip(s.officeUpdate)));
-  const overlay = useStore((s) => s.overlay);
-  const openOverlay = useStore((s) => s.openOverlay);
-  if (!text || overlay?.kind === 'manager') return null;
-  return (
-    <button className="office-chip" onClick={() => openOverlay({ kind: 'manager', tab: 'floors' })} title="The office is updating itself. Open the manager's console">
-      {text}
-    </button>
-  );
-}
 
 /** The phone in your pocket: always one key (or click) away, with a badge when the CEO is waiting on you. */
 function PhoneButton() {
@@ -36,18 +23,6 @@ function PhoneButton() {
         <kbd>P</kbd> {badge ? `${badge} waiting` : busy ? `${ceo.name} is working` : 'Phone'}
       </span>
     </button>
-  );
-}
-
-/** The office's own notices: an update or restart on its way, and GitHub not being usable. */
-export function OfficeNotices() {
-  const ghReady = useStore((s) => s.ghReady);
-  const ghError = useStore((s) => s.ghError);
-  return (
-    <>
-      <OfficeUpdateChip />
-      {!ghReady && ghError && <div className="hud-banner" role="alert">⚠️ {ghError}</div>}
-    </>
   );
 }
 
