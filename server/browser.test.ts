@@ -8,16 +8,16 @@ import { playwrightMcpCli, playwrightMcpCommand } from './browser.ts';
 describe('Playwright MCP command', () => {
   it('resolves the CLI beside the installed package, rather than through PATH or the agent worktree', () => {
     const cli = playwrightMcpCli();
-    expect(cli).toBe(path.join(path.dirname(createRequire(import.meta.url).resolve('@playwright/mcp/package.json')), 'cli.js'));
+    expect(cli).toBe(path.join(path.dirname(createRequire(import.meta.url).resolve('playwright/package.json')), 'cli.js'));
     expect(fs.statSync(cli).isFile()).toBe(true);
   });
 
   it("resolves from a box's own install", () => {
     const box = fs.mkdtempSync(path.join(os.tmpdir(), 'cubefarm browser box '));
     try {
-      const pkg = path.join(box, 'node_modules', '@playwright', 'mcp');
+      const pkg = path.join(box, 'node_modules', 'playwright');
       fs.mkdirSync(pkg, { recursive: true });
-      fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: '@playwright/mcp', exports: { './package.json': './package.json' } }));
+      fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'playwright', exports: { './package.json': './package.json' } }));
       fs.writeFileSync(path.join(pkg, 'cli.js'), '');
       expect(fs.realpathSync(playwrightMcpCli(path.join(box, 'dist-server', 'boxOps.js')))).toBe(fs.realpathSync(path.join(pkg, 'cli.js')));
     } finally {
@@ -26,12 +26,12 @@ describe('Playwright MCP command', () => {
   });
 
   it.each([
-    ['win32', 'C:\\Program Files\\nodejs\\node.exe', 'C:\\Cube Farm\\node_modules\\@playwright\\mcp\\cli.js', 'C:\\QA session\\browser'],
-    ['posix', '/opt/node bin/node', '/opt/Cube Farm/node_modules/@playwright/mcp/cli.js', '/tmp/QA session/browser'],
+    ['win32', 'C:\\Program Files\\nodejs\\node.exe', 'C:\\Cube Farm\\node_modules\\playwright\\cli.js', 'C:\\QA session\\browser'],
+    ['posix', '/opt/node bin/node', '/opt/Cube Farm/node_modules/playwright/cli.js', '/tmp/QA session/browser'],
   ])('starts Node directly on %s and preserves paths as arguments', (_platform, node, cli, outputDir) => {
     expect(playwrightMcpCommand(outputDir, node, cli)).toEqual({
       command: node,
-      args: [cli, '--headless', '--isolated', '--init-script', path.join(import.meta.dirname, 'browser-init.js'), '--output-dir', outputDir],
+      args: [cli, 'mcp', '--headless', '--isolated', '--init-script', path.join(import.meta.dirname, 'browser-init.js'), '--output-dir', outputDir],
     });
   });
 

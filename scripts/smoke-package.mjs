@@ -29,20 +29,20 @@ try {
 
   const installed = path.join(tmp, 'node_modules', 'cubefarm');
   const fromInstall = createRequire(path.join(installed, 'package.json'));
-  const mcpPackage = fromInstall.resolve('@playwright/mcp/package.json');
+  const mcpPackage = fromInstall.resolve('playwright/package.json');
   const mcpRelative = path.relative(fs.realpathSync(path.join(tmp, 'node_modules')), fs.realpathSync(mcpPackage));
   if (mcpRelative === '..' || mcpRelative.startsWith(`..${path.sep}`) || path.isAbsolute(mcpRelative)) {
     throw new Error('Playwright MCP resolved outside the packed install');
   }
   const mcp = JSON.parse(fs.readFileSync(mcpPackage, 'utf8'));
-  const pinnedMcp = JSON.parse(fs.readFileSync(path.join(installed, 'package.json'), 'utf8')).dependencies['@playwright/mcp'];
-  const browser = spawnSync(process.execPath, [path.join(path.dirname(mcpPackage), 'cli.js'), '--version'], {
+  const pinnedMcp = JSON.parse(fs.readFileSync(path.join(installed, 'package.json'), 'utf8')).dependencies.playwright;
+  const browser = spawnSync(process.execPath, [path.join(path.dirname(mcpPackage), 'cli.js'), 'mcp', '--help'], {
     cwd: tmp, encoding: 'utf8', windowsHide: true, timeout: 30_000,
   });
-  if (mcp.version !== pinnedMcp || browser.status !== 0 || browser.stdout.trim() !== `Version ${pinnedMcp}`) {
+  if (mcp.version !== pinnedMcp || browser.status !== 0 || !browser.stdout.includes('--init-script')) {
     throw new Error(`packed Playwright MCP failed (${pinnedMcp}): ${browser.error ?? browser.stderr ?? browser.stdout}`);
   }
-  console.log(`packed Playwright MCP verified: ${mcp.version}`);
+  console.log(`packed Playwright MCP verified: playwright ${mcp.version}`);
   const packed = readRepoSkills(installed, version);
   const expected = ACTIVE_REPO_SKILLS.files;
   if (packed.files.length !== expected.length || packed.files.some((file, i) =>
