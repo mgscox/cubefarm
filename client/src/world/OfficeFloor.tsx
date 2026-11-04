@@ -37,6 +37,10 @@ export function WallSign({
   );
 }
 
+// Made once, so the memoised desks see the same position every render.
+const DEV_DESKS = Array.from({ length: MAX_DESKS }, (_, slot): [number, number, number] => [deskPosition(slot).x, 0, deskPosition(slot).z]);
+const QA_DESKS = QA_LAB.stations.map((_, slot): [number, number, number] => [qaDeskPosition(slot).x, 0, qaDeskPosition(slot).z]);
+
 export function OfficeFloor({ repo }: { repo: RepoView }) {
   const allAgents = useStore((s) => s.agents);
   const agents = useMemo(() => agentsOnRepo(allAgents, repo.id), [allAgents, repo.id]);
@@ -57,17 +61,15 @@ export function OfficeFloor({ repo }: { repo: RepoView }) {
         <Rug key={z} position={[0, 0.004, z + 0.35]} size={[24.4, 2.9]} color={rugColor} />
       ))}
 
-      {Array.from({ length: MAX_DESKS }, (_, slot) => {
-        const { x, z } = deskPosition(slot);
-        return <Desk key={slot} agent={devBySlot.get(slot) ?? null} accent={repo.color} repoId={repo.id} position={[x, 0, z]} />;
-      })}
+      {DEV_DESKS.map((position, slot) => (
+        <Desk key={slot} agent={devBySlot.get(slot) ?? null} accent={repo.color} repoId={repo.id} position={position} />
+      ))}
 
       {/* QA lab */}
       <Rug position={[QA_LAB.x - 0.4, 0.005, -2]} size={[3.4, 10.4]} color="#ffd8bf" />
-      {QA_LAB.stations.map((_, slot) => {
-        const { x, z } = qaDeskPosition(slot);
-        return <Desk key={`qa${slot}`} role="qa" rotationY={QA_ROTATION} agent={qaBySlot.get(slot) ?? null} accent={repo.color} repoId={repo.id} position={[x, 0, z]} />;
-      })}
+      {QA_DESKS.map((position, slot) => (
+        <Desk key={`qa${slot}`} role="qa" rotationY={QA_ROTATION} agent={qaBySlot.get(slot) ?? null} accent={repo.color} repoId={repo.id} position={position} />
+      ))}
       <WallSign
         position={[HALF_W - 0.03, 3.2, -2]}
         rotationY={-Math.PI / 2}
