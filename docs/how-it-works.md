@@ -57,7 +57,9 @@ Submit a description in the manager's **Ideas** tab. Research starts automatical
 
 A material question appears as **Needs clarification** on the Idea. Reply there to resume. Research errors include a retry action. The completed **PRD ready** record contains linked evidence, assumptions, target-floor rationale and measurable acceptance criteria. **View PRD revision** links to that saved revision for later planning and review. Research itself creates no implementation issues.
 
-Demo research uses fixed illustrative evidence. Include `[clarify]` in the description to exercise the question/reply path; otherwise it requests focused floor input when available and saves the PRD. With no configured floors, it asks the manager to configure one before continuing.
+The lead drafts an Issue Plan from the saved PRD. Two other agents review the exact pair independently. Joint endorsement promotes it immediately; otherwise the lead revises for up to three rounds, then the manager sees the latest pair with remaining findings. The approval card’s **View PRD** opens that paired revision. One approval publishes the displayed graph, with duplicate decisions, partial writes and restarts reconciled by the publisher. Substantive refinement starts fresh reviews; cosmetic changes can return directly for a new decision. Rejection archives the Idea without implementation issues.
+
+Demo research uses fixed illustrative evidence. Include `[clarify]` to exercise the question/reply path, `[cross-floor]` for a two-floor graph, or `[disagree]` for three rounds with findings. A description alone reaches the approval card without fixture buttons. With no configured floors, research asks the manager to configure one before continuing. See [verification evidence and limits](ideas-verification.md).
 
 ## The team
 

@@ -29,8 +29,9 @@ import { HttpError } from './httpError.ts';
 import { queuedIdea } from './ideas.ts';
 import { IDEA_RESEARCH_PROMPT, IDEA_RESEARCH_SCHEMA, nextIdeaResearch, parseIdeaResearch, renderIdeaPrd, validateIdeaReport } from './ideaResearch.ts';
 import { draftIssuePlan } from './issuePlan.ts';
+import { approvedProposal, IDEA_WORK_PROMPT, nextIdeaWork, parseIdeaWork, planForProposal, planningPrd, workSchema } from './ideaWorkflow.ts';
 import { DEMO_TODO, DEMO_WEATHER, demoPlanDraft, demoPrd } from './planFixture.ts';
-import { decideProposal, proposalFromHandoff, withNewerDraft, type ProposalHandoff, type ProposalWorker } from './proposals.ts';
+import { decideProposal, proposalFromHandoff, withNewerDraft, wordingOnly, type ProposalHandoff, type ProposalWorker } from './proposals.ts';
 import { createDemoProposalWorker, demoHandoff } from './proposalFixture.ts';
 import { demoProposalRecords, demoReview, isReviewFixture } from './demoIdeaReview.ts';
 import { currentRound, nextStep, pickReviewers, promote, recordReview, REVIEW_FOCUSES, reviseRound, startReview } from '../shared/ideaReview.ts';
@@ -571,7 +572,7 @@ export class Swarm {
 
   constructor(private backend: Backend, transport?: TelegramTransport | null) {
     this.demoTelegram = backend.demo ? createDemoTelegram() : null;
-    // Real mode hands approvals to the publisher once it's wired in; until then they stay recorded as queued.
+    // Explicit demo fixtures keep their fake worker; saved production pairs use the same publisher in both modes.
     this.proposalWorker = backend.demo ? createDemoProposalWorker({
       acceptPublication: (id, note) => this.acceptPublication(id, note),
       submitProposal: (handoff) => this.submitProposal(handoff),
@@ -1119,8 +1120,12 @@ export class Swarm {
       const { entries, parents, dependencies } = result;
       const plan: IssuePlanView = { id: crypto.randomUUID(), ideaId, revision, prdRevision: prd.revision, entries, parents, dependencies, createdAt: Date.now() };
       this.state.issuePlans.push(plan);
-      const rollback = () => { this.state.issuePlans = this.state.issuePlans.filter((p) => p.id !== plan.id); };
-      return { result: plan, rollback, events: [{ type: 'issuePlan', plan }] };
+      const open = this.state.proposals.find((p) => p.ideaId === ideaId && !p.decision);
+      const newer = open && withNewerDraft(open, { prdRevision: prd.revision, planRevision: revision }, Date.now());
+      const undoProposal = newer ? this.putProposal(newer) : () => undefined;
+      const rollback = () => { this.state.issuePlans = this.state.issuePlans.filter((p) => p.id !== plan.id); undoProposal(); };
+      const events: ServerEvent[] = [{ type: 'issuePlan', plan }, ...(newer ? [{ type: 'proposal' as const, proposal: newer }] : [])];
+      return { result: plan, rollback, events };
     });
   }
 
@@ -1209,9 +1214,20 @@ export class Swarm {
     return proposal;
   }
 
+  private publicationHandoffs = new Set<string>();
+
   private handOffDecision(p: ProposalView) {
-    if (p.decision?.action === 'approve' && p.decision.publication?.status === 'queued') this.proposalWorker?.publish(p);
-    if (p.decision?.action === 'refine' && !this.state.proposals.some((x) => x.revises === p.id)) this.proposalWorker?.refine(p);
+    if (p.decision?.action === 'approve' && p.decision.publication?.status === 'queued') {
+      if (p.prd.recordId || !this.backend.demo) {
+        if (this.publicationHandoffs.has(p.id)) return;
+        this.publicationHandoffs.add(p.id);
+        void this.publishApproved(approvedProposal(p)).then(() => this.acceptPublication(p.id,
+          `Publishing PRD v${p.prd.revision} · Issue Plan v${p.plan.revision}.`)).catch((err) => {
+          this.toast('error', `Publication handoff: ${(err as Error).message}`);
+        }).finally(() => this.publicationHandoffs.delete(p.id));
+      } else this.proposalWorker?.publish(p);
+    }
+    if (!p.prd.recordId && p.decision?.action === 'refine' && !this.state.proposals.some((x) => x.revises === p.id)) this.proposalWorker?.refine(p);
   }
 
   /** The publisher took an approved pair. Only the first acceptance is recorded. */
@@ -4095,6 +4111,7 @@ export class Swarm {
    * so no repo can hog the slots.
    */
   private schedule() {
+    for (const p of this.state.proposals) if (p.prd.recordId && p.decision?.publication?.status === 'queued') this.handOffDecision(p);
     for (const a of this.state.agents) if (a.repoId && this.startStall(a)) this.failedStart(a);
     this.repairDuplicateIssues();
     this.reconcileOrphanedQa();
@@ -4954,19 +4971,21 @@ export class Swarm {
     const r = this.state.research;
     if (r.job || this.slotsFull() || !this.mayStart('issue')) return;
     const stale = r.queue.filter((j) => j.ideaId && (!this.state.agents.some((a) => a.id === j.agentId) ||
-      !this.state.ideas.some((i) => i.id === j.ideaId && i.status === 'researching' && !i.research?.error && !i.research?.prdRevisionId)));
+      !this.state.ideas.some((i) => i.id === j.ideaId && !i.research?.error && (j.ideaPhase ? i.status !== 'archived' : i.status === 'researching' && !i.research?.prdRevisionId))));
     if (stale.length) {
       r.queue = r.queue.filter((j) => !stale.includes(j));
       this.emitResearch();
       this.save();
     }
-    const ideaJob = nextIdeaResearch(this.state.ideas, RESEARCHER_ID, Date.now(), this.ideaSpecialists().map((a) => a.id)).find((job) => {
+    const work = this.state.ideas.flatMap((idea) => nextIdeaWork(idea, this.state.issuePlans,
+      this.state.ideaReviews.find((c) => c.ideaId === idea.id), this.state.proposals, this.state.agents, Date.now()) ?? []);
+    const ideaJob = [...work, ...nextIdeaResearch(this.state.ideas, RESEARCHER_ID, Date.now(), this.ideaSpecialists().map((a) => a.id))].find((job) => {
       const agent = this.state.agents.find((x) => x.id === job.agentId);
       return agent && (FREE.includes(agent.status) || agent.status === 'error') && !agent.heldRetry && !agent.startupFailed;
     });
     // Finish an Idea's clarification/evidence cycle before starting another ordinary brief.
     const recovered = r.queue.find((j) => j.ideaId);
-    const continuing = ideaJob && this.state.ideas.find((i) => i.id === ideaJob.ideaId)?.status === 'researching';
+    const continuing = ideaJob && (ideaJob.ideaPhase || this.state.ideas.find((i) => i.id === ideaJob.ideaId)?.status === 'researching');
     const next = recovered ?? (r.queue.length === 0 || continuing ? ideaJob : undefined);
     if (next) {
       const agent = this.state.agents.find((x) => x.id === next.agentId);
@@ -5007,8 +5026,8 @@ export class Swarm {
     this.emitResearch();
     try {
       const idea = await this.updateIdea(job.ideaId!, (idea) => {
-        if (!['queued', 'researching'].includes(idea.status)) throw new Error('Idea is no longer awaiting research');
-        idea.status = 'researching';
+        if (idea.status === 'archived' || (!job.ideaPhase && !['queued', 'researching'].includes(idea.status))) throw new Error('Idea is no longer awaiting research');
+        if (!job.ideaPhase) idea.status = 'researching';
         idea.research ??= { leadAgentId: RESEARCHER_ID, questions: [], requests: [] };
       });
       await this.backend.prepareResearchFolder(RESEARCH_DIR);
@@ -5023,8 +5042,31 @@ export class Swarm {
         this.save();
         return;
       }
+      if (job.ideaPhase === 'promote') {
+        await this.finishIdeaResearch(a, job, { ok: true, text: '', errors: [], costUsd: 0, turns: 0 }, generation);
+        return;
+      }
       const specialists = this.ideaSpecialists();
-      const context = {
+      const prds = this.state.ideaRecords.filter((r) => r.ideaId === idea.id && r.prd);
+      const cycle = this.state.ideaReviews.find((c) => c.ideaId === idea.id);
+      const latestPlan = this.state.issuePlans.filter((p) => p.ideaId === idea.id).at(-1);
+      const plan = job.ideaPhase === 'review' && cycle ? this.state.issuePlans.find((p) => p.ideaId === idea.id && p.revision === currentRound(cycle).planRevision) : latestPlan;
+      const prd = prds[(plan?.prdRevision ?? prds.length) - 1];
+      const context = job.ideaPhase ? {
+        phase: job.ideaPhase, focus: job.reviewFocus, idea,
+        prd: prd ? { id: prd.id, prd: prd.prd } : null,
+        requirements: prd ? planningPrd(prd, plan?.prdRevision ?? prds.length) : null,
+        plan,
+        // Reviewers never see each other's verdicts on this pair.
+        cycle: job.ideaPhase === 'revise' ? cycle : undefined,
+        previous: job.ideaPhase === 'revise' ? { decision: this.state.proposals.filter((p) => p.ideaId === idea.id).at(-1)?.decision } : undefined,
+        floors: this.state.repos.map((r) => ({ id: r.id, summary: r.summary, path: this.backend.mainDir(r.fullName),
+          ...(job.ideaPhase !== 'review' && prd?.prd?.targetFloors.some((f) => f.repoId === r.id) ? {
+            openIssues: (this.repoRt.get(r.id)?.issues ?? []).map(({ number, title, body, url }) => ({ number, title, body, url })),
+            specialties: specialists.filter((s) => s.repoId === r.id).map((s) => s.specialty).filter(Boolean),
+          } : {}),
+        })),
+      } : {
         idea,
         // A linked Idea continues an archived one: its records are context for this research.
         records: this.state.ideaRecords.filter((r) => r.ideaId === idea.id || r.ideaId === idea.linkedFrom),
@@ -5036,8 +5078,8 @@ export class Swarm {
       a.status = 'working';
       this.emitAgent(a);
       rt.session = this.backend.startSession({
-        cwd: RESEARCH_DIR, prompt: JSON.stringify(context), systemAppend: IDEA_RESEARCH_PROMPT,
-        outputSchema: IDEA_RESEARCH_SCHEMA, model: this.modelFor(a, 'claude'), effort: a.effort || this.state.settings.defaultEffort,
+        cwd: RESEARCH_DIR, prompt: JSON.stringify(context), systemAppend: job.ideaPhase ? IDEA_WORK_PROMPT : IDEA_RESEARCH_PROMPT,
+        outputSchema: job.ideaPhase ? workSchema(job.ideaPhase) : IDEA_RESEARCH_SCHEMA, model: this.modelFor(a, 'claude'), effort: a.effort || this.state.settings.defaultEffort,
         browserTesting: false, additionalDirectories: this.readyClones(), role: 'researcher', ...this.sessionRuntime({ ...a, role: 'researcher' }),
       }, {
         log: (entries) => { if (rt.generation === generation) this.appendLog(a, entries); },
@@ -5052,6 +5094,99 @@ export class Swarm {
     }
   }
 
+  /** One completed phase commits its records, graph, review and manager handoff together. */
+  private finishIdeaWork(job: ResearchJob, result: SessionResult) {
+    return this.commitIdeas(() => {
+      const previous = this.state.ideas.find((i) => i.id === job.ideaId);
+      if (!previous || previous.status === 'archived') throw new Error('Idea is no longer active');
+      const idea = structuredClone(previous);
+      const records = this.state.ideaRecords.filter((r) => r.ideaId === idea.id && r.prd);
+      let record = records.at(-1)!;
+      let prdRevision = records.length;
+      let plan = this.state.issuePlans.filter((p) => p.ideaId === idea.id).at(-1);
+      let cycle = this.state.ideaReviews.find((c) => c.ideaId === idea.id);
+      if (cycle && (job.ideaPhase === 'review' || job.ideaPhase === 'promote')) {
+        const round = currentRound(cycle);
+        prdRevision = round.prdRevision;
+        record = records[prdRevision - 1];
+        plan = this.state.issuePlans.find((p) => p.ideaId === idea.id && p.revision === round.planRevision);
+      }
+      const before = { ideas: this.state.ideas, ideaRecords: this.state.ideaRecords, issuePlans: this.state.issuePlans,
+        ideaReviews: this.state.ideaReviews, proposals: this.state.proposals };
+      const events: ServerEvent[] = [];
+      const refined = this.state.proposals.filter((p) => p.ideaId === idea.id).at(-1);
+      const revises = refined?.decision?.action === 'refine' ? refined.id : undefined;
+      let skipReview = false;
+      if (job.ideaPhase === 'plan' || job.ideaPhase === 'revise') {
+        const report = parseIdeaWork(result, job.ideaPhase);
+        if ('prd' in report) {
+          const targets = report.prd.targetFloors.map((f) => f.repoId);
+          if (new Set(targets).size !== targets.length || targets.some((id) => !this.state.repos.some((r) => r.id === id))) throw new Error('Select distinct configured target floors');
+          prdRevision++;
+          record = { id: `${idea.id}-prd-${prdRevision}`, ideaId: idea.id, kind: 'research', title: `PRD revision ${prdRevision}`,
+            body: renderIdeaPrd(report.prd), prd: report.prd, authorAgentId: idea.research!.leadAgentId, createdAt: Date.now() };
+        }
+        const draft = 'draft' in report ? report.draft : report;
+        const targets = record.prd!.targetFloors.map((f) => f.repoId);
+        const checked = draftIssuePlan(draft, { prd: planningPrd(record, prdRevision), floors: targets,
+          openIssues: (id) => this.repoRt.get(id)?.issues ?? [],
+          specialties: (id) => this.state.agents.filter((a) => a.repoId === id && a.specialty).map((a) => a.specialty.toLowerCase()) });
+        if (!checked.ok) throw new Error(checked.problems.join(' '));
+        const { entries, parents, dependencies } = checked;
+        plan = { id: crypto.randomUUID(), ideaId: idea.id, revision: (plan?.revision ?? 0) + 1, prdRevision, entries, parents, dependencies, createdAt: Date.now() };
+        const pair = { prd: { revision: prdRevision, title: idea.description.slice(0, 120), body: record.body, recordId: record.id }, plan: { revision: plan.revision, issues: planForProposal(plan) } };
+        skipReview = !!(revises && refined?.decision?.wordingOnly && wordingOnly(refined, pair));
+        const reviewers = pickReviewers(idea.research!.leadAgentId, this.state.agents);
+        if (!skipReview && !reviewers) throw new Error('Two configured reviewers other than the lead are required');
+        if (skipReview) cycle = undefined;
+        else if ((previous.status === 'proposed' && revises) || !cycle) cycle = startReview(idea.id, idea.research!.leadAgentId, reviewers!, prdRevision, plan.revision);
+        else cycle = reviseRound(cycle, prdRevision, plan.revision);
+        idea.status = skipReview ? 'proposed' : 'reviewing';
+      } else if (job.ideaPhase === 'review') {
+        if (!plan) throw new Error('Review needs a saved Issue Plan');
+        cycle ??= startReview(idea.id, idea.research!.leadAgentId, pickReviewers(idea.research!.leadAgentId, this.state.agents)!, prdRevision, plan.revision);
+        const report = parseIdeaWork(result, 'review');
+        if (!('verdict' in report)) throw new Error('Expected a review verdict');
+        cycle = recordReview(cycle, { ...report, reviewer: job.agentId!, focus: job.reviewFocus!, prdRevision: currentRound(cycle).prdRevision, at: Date.now() });
+        idea.status = 'reviewing';
+      } else {
+        if (!cycle) throw new Error('Promotion needs a completed review cycle');
+        cycle = promote(cycle, Date.now());
+        idea.status = 'proposed';
+      }
+      if (!plan) throw new Error('Missing paired Issue Plan');
+      if (skipReview || cycle?.handoff) {
+        const handoff: ProposalHandoff = { ideaId: idea.id,
+          prd: { revision: prdRevision, title: idea.description.slice(0, 120), body: record.body, recordId: record.id },
+          plan: { revision: plan.revision, issues: planForProposal(plan) }, revises,
+          ...(skipReview ? { reviewSkipped: true } : {}),
+          reviews: skipReview ? [] : cycle!.rounds.flatMap((r) => r.reviews.map((v) => ({ reviewer: v.reviewer, focus: v.focus,
+            prdRevision: r.prdRevision, planRevision: r.planRevision, round: r.round, endorsed: v.verdict === 'endorse', findings: v.findings }))) };
+        let proposal = proposalFromHandoff(handoff, { idea, proposals: this.state.proposals, floors: this.state.repos.map((r) => r.id) }, crypto.randomUUID(), Date.now());
+        const draft = this.state.issuePlans.filter((p) => p.ideaId === idea.id).at(-1);
+        if (draft) proposal = withNewerDraft(proposal, { prdRevision: draft.prdRevision, planRevision: draft.revision }, Date.now()) ?? proposal;
+        this.state.proposals = [...this.state.proposals, proposal];
+        events.push({ type: 'proposal', proposal });
+      }
+      idea.research!.prdRevisionId = record.id;
+      this.state.ideas = this.state.ideas.map((i) => i.id === idea.id ? idea : i);
+      if (!this.state.ideaRecords.some((r) => r.id === record.id)) {
+        this.state.ideaRecords = [...this.state.ideaRecords, record];
+        events.push({ type: 'ideaRecord', record });
+      }
+      if (!this.state.issuePlans.some((p) => p.id === plan!.id)) {
+        this.state.issuePlans = [...this.state.issuePlans, plan];
+        events.push({ type: 'issuePlan', plan });
+      }
+      if (cycle) {
+        this.state.ideaReviews = [...this.state.ideaReviews.filter((c) => c.ideaId !== idea.id), cycle];
+        events.push({ type: 'ideaReview', review: cycle });
+      }
+      events.push({ type: 'idea', idea });
+      return { result: idea, rollback: () => Object.assign(this.state, before), events };
+    });
+  }
+
   private async finishIdeaResearch(a: PersistedAgent, job: ResearchJob, result: SessionResult, generation: number | undefined) {
     const rt = this.agentRt.get(a.id)!;
     if (!rt || this.officeUpdate.handedOver || rt.generation !== generation || this.state.research.job !== job) return;
@@ -5064,28 +5199,31 @@ export class Swarm {
     this.state.research.job = null; // The outcome and cleared job must be in the same durable snapshot.
     try {
       if (a.status === 'stopped' || result.interrupted) throw new Error('Research was stopped; retry when ready');
-      const report = parseIdeaResearch(result);
-      await this.updateIdea(job.ideaId!, (idea, records) => {
-        validateIdeaReport(report, job, idea, this.state.repos.map((r) => r.id), this.ideaSpecialists().map((a) => a.id));
-        const research = idea.research!;
-        if (job.requestId) {
-          const request = research.requests.find((r) => r.id === job.requestId)!;
-          request.answer = report.answer;
-          request.sources = report.sources;
-        } else if (report.action === 'clarify') {
-          research.questions.push({ question: report.question.trim() });
-          idea.status = 'needs-clarification';
-        } else if (report.action === 'request') {
-          research.requests.push(...report.requests.map((r) => ({ ...r, id: crypto.randomUUID() })));
-        } else {
-          const number = this.state.ideaRecords.filter((r) => r.ideaId === idea.id && r.prd).length + 1;
-          const revision = `${idea.id}-prd-${number}`;
-          records.push({ id: revision, ideaId: idea.id, kind: 'research', title: `PRD revision ${number}`,
-            body: renderIdeaPrd(report.prd!), prd: report.prd!, authorAgentId: research.leadAgentId, createdAt: Date.now() });
-          research.prdRevisionId = revision;
-          idea.status = 'researched';
-        }
-      });
+      if (job.ideaPhase) await this.finishIdeaWork(job, result);
+      else {
+        const report = parseIdeaResearch(result);
+        await this.updateIdea(job.ideaId!, (idea, records) => {
+          validateIdeaReport(report, job, idea, this.state.repos.map((r) => r.id), this.ideaSpecialists().map((a) => a.id));
+          const research = idea.research!;
+          if (job.requestId) {
+            const request = research.requests.find((r) => r.id === job.requestId)!;
+            request.answer = report.answer;
+            request.sources = report.sources;
+          } else if (report.action === 'clarify') {
+            research.questions.push({ question: report.question.trim() });
+            idea.status = 'needs-clarification';
+          } else if (report.action === 'request') {
+            research.requests.push(...report.requests.map((r) => ({ ...r, id: crypto.randomUUID() })));
+          } else {
+            const number = this.state.ideaRecords.filter((r) => r.ideaId === idea.id && r.prd).length + 1;
+            const revision = `${idea.id}-prd-${number}`;
+            records.push({ id: revision, ideaId: idea.id, kind: 'research', title: `PRD revision ${number}`,
+              body: renderIdeaPrd(report.prd!), prd: report.prd!, authorAgentId: research.leadAgentId, createdAt: Date.now() });
+            research.prdRevisionId = revision;
+            idea.status = 'researched';
+          }
+        });
+      }
       a.status = 'done';
     } catch (err) {
       a.status = 'error';
