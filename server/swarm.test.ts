@@ -98,6 +98,103 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('closing issues', () => {
+  const args = { floor: 1, number: 66, reason: 'Superseded by #67' };
+  let pull: PullInfo;
+  beforeEach(() => {
+    Object.assign(repo, { defaultBranch: 'main', links: [] });
+    pull = {
+      number: 13, title: 'Feature', url: '', headRefName: 'swarm/issue-66-ada', state: 'OPEN', isDraft: false,
+      closesIssues: [66, 67], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'tested', reviewDecision: null,
+      createdAt: '', mergedAt: null, additions: 0, deletions: 0, mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+    };
+    setIssues(issue(66), issue(67), issue(68));
+    s.repoRt.get(repo.id)!.pulls = [pull];
+    vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pull, body: '', isCrossRepository: false }));
+    vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+    vi.spyOn(s.backend, 'closeIssue').mockResolvedValue();
+    vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+  });
+
+  it.each(['manual', 'automatic'] as const)('closes all resolved issues after %s merge and broadcasts their removal', async (mode) => {
+    const events = vi.spyOn(s, 'broadcast');
+    if (mode === 'manual') await swarm.mergePull(repo.id, 13);
+    else {
+      const rec: QaRec = { repoId: repo.id, prNumber: 13, status: 'passed', round: 1, retests: 0, passedSha: 'tested',
+        sessionFailures: 0, devAgentId: null, qaAgentId: null, summary: null, checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 };
+      expect(await s.advanceMerge(repo, rec, pull)).toBe(true);
+    }
+    expect(s.backend.closeIssue).toHaveBeenCalledTimes(2);
+    for (const number of [66, 67]) {
+      expect(s.backend.closeIssue).toHaveBeenCalledWith(repo.fullName, number, 'completed', `Completed by PR #13.\n\n${AGENT_COMMENT_MARKER}`);
+    }
+    expect(vi.mocked(s.backend.mergePull).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(s.backend.closeIssue).mock.invocationCallOrder[0]);
+    expect(s.repoRt.get(repo.id)!.issues.map((i) => i.number)).toEqual([68]);
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'repo', repo: expect.objectContaining({ issues: [expect.objectContaining({ number: 68 })] }) }));
+    expect(pull.state).toBe('OPEN'); // Updating the cache must not mutate a previous snapshot.
+  });
+
+  it('keeps merged work taken and closes other issues if one closure fails', async () => {
+    vi.mocked(s.backend.closeIssue).mockRejectedValueOnce(new Error('GitHub denied closure'));
+    const messages = vi.spyOn(s, 'postMessage');
+    await swarm.mergePull(repo.id, 13);
+    expect(s.backend.closeIssue).toHaveBeenCalledTimes(2);
+    expect(s.repoRt.get(repo.id)!.issues.map((i) => i.number)).toEqual([66, 68]);
+    expect(ready()).toEqual([68]);
+    expect(messages).toHaveBeenCalledWith('office', expect.stringContaining('closing issue #66 failed'));
+  });
+
+  it('does not close issues when merging fails', async () => {
+    vi.mocked(s.backend.mergePull).mockRejectedValue(new Error('Merge refused'));
+    await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('Merge refused');
+    expect(s.backend.closeIssue).not.toHaveBeenCalled();
+    expect(s.repoRt.get(repo.id)!.issues).toHaveLength(3);
+  });
+
+  it.each([null, 'CLOSED'] as const)('refuses unavailable issues: %s', async (state) => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue(state ? { ...issue(66), repo: repo.fullName, state } : null);
+    expect(await s.officeTools().call('close_issue', args)).toContain(state ? 'already closed' : 'Unknown issue');
+    expect(s.backend.closeIssue).not.toHaveBeenCalled();
+  });
+
+  it('checks fresh PRs before closing and identifies the blocking PR', async () => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ ...issue(66), repo: repo.fullName, state: 'OPEN' });
+    vi.spyOn(s.backend, 'listPulls').mockResolvedValue({ pulls: [pull] });
+    s.repoRt.get(repo.id)!.pulls = []; // The new PR has not reached the floor's cache yet.
+    expect(await s.officeTools().call('close_issue', args)).toContain('Open PR #13 closes #66. Merge or park that PR first.');
+    expect(s.backend.closeIssue).not.toHaveBeenCalled();
+  });
+
+  it('does not remove issues if GitHub refuses closure', async () => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ ...issue(66), repo: repo.fullName, state: 'OPEN' });
+    vi.spyOn(s.backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    vi.mocked(s.backend.closeIssue).mockRejectedValue(new Error('HTTP 403'));
+    expect(await s.officeTools().call('close_issue', args)).toContain('HTTP 403');
+    expect(s.repoRt.get(repo.id)!.issues).toHaveLength(3);
+  });
+
+  it('surfaces GitHub read failures instead of reporting an unknown issue', async () => {
+    vi.spyOn(s.backend, 'readIssue').mockRejectedValue(new Error('GitHub rate limit exceeded; retry later'));
+    expect(await s.officeTools().call('close_issue', args)).toContain('GitHub rate limit exceeded; retry later');
+    expect(s.backend.closeIssue).not.toHaveBeenCalled();
+  });
+
+  it('closes unwanted issues as not planned through the demo CEO', async () => {
+    vi.mocked(s.backend.closeIssue).mockRestore();
+    const number = await s.backend.createIssue(repo.fullName, 'Unwanted task', 'Superseded');
+    setIssues(issue(number), issue(68));
+    const finished = vi.fn();
+    const handle = s.backend.startSession({ role: 'ceo', cwd: '', prompt: `Manager asks:\nClose issue #${number} on floor 1 because Superseded by #67`,
+      systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools() },
+      { log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: expect.stringContaining(`Closed #${number}`) }));
+    expect(await s.backend.readIssue(repo.fullName, number)).toMatchObject({ state: 'CLOSED', stateReason: 'not_planned' });
+    expect(s.repoRt.get(repo.id)!.issues.map((i) => i.number)).toEqual([68]);
+    handle.stop();
+  });
+});
+
 describe('exclusive issue sessions', () => {
   let starts: Mock;
   const dev = () => s.state.agents[0];

@@ -22,6 +22,7 @@ export interface Backend extends Machine {
   listIssues(fullName: string): Promise<IssueInfo[]>;
   listPulls(fullName: string): Promise<PullRefresh>;
   createIssue(fullName: string, title: string, body: string, labels?: string[]): Promise<number>;
+  closeIssue(fullName: string, number: number, reason: 'completed' | 'not planned', comment: string): Promise<void>;
   /** OPEN or CLOSED; null when there is no such issue. */
   issueState(fullName: string, number: number): Promise<'OPEN' | 'CLOSED' | null>;
   editIssue(fullName: string, number: number, edit: { title?: string; body?: string; addLabels?: string[]; removeLabels?: string[] }): Promise<void>;
@@ -79,6 +80,7 @@ export const realBackend: Backend = {
   listIssues: github.listIssues,
   listPulls: github.listPulls,
   createIssue: github.createIssue,
+  closeIssue: github.closeIssue,
   issueState: github.issueState,
   editIssue: github.editIssue,
   issueAccess: github.issueAccess,
