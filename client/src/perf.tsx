@@ -55,8 +55,8 @@ const dprState = newDpr(dprCap());
 // Its max follows the screen the window is on (moving to another monitor); updated in place, no per-sample object.
 const dprConfig = { ...DPR };
 
-/** The pixel ratio the view draws at now. Game passes it to the Canvas, so a re-render never resets a step. */
-export const currentDpr = () => Math.min(dprState.dpr, dprCap());
+/** Pin Canvas's range to the current DPR in place: R3F reads it again on resize without re-rendering Game. */
+export const adaptiveDpr: [number, number] = [dprState.dpr, dprState.dpr];
 
 /**
  * Lives inside the Canvas. Steps the pixel ratio down toward 1 after sustained slow frames and back up toward
@@ -64,14 +64,17 @@ export const currentDpr = () => Math.min(dprState.dpr, dprCap());
  * between busy and quiet parts of a floor never bounces it, and it never gives up and stays low all day.
  */
 export function AdaptiveResolution({ paused }: { paused: boolean }) {
-  const setDpr = useThree((s) => s.setDpr);
+  const get = useThree((s) => s.get);
   const onSample = useCallback(
     (fps: number, ms: number) => {
       dprConfig.max = dprCap();
-      const next = dprSample(dprState, fps, ms, dprConfig);
-      if (next !== null) setDpr(next);
+      dprState.dpr = Math.min(dprState.dpr, dprConfig.max);
+      dprSample(dprState, fps, ms, dprConfig);
+      adaptiveDpr[0] = adaptiveDpr[1] = dprState.dpr;
+      const { viewport, setDpr } = get();
+      if (viewport.dpr !== dprState.dpr) setDpr(dprState.dpr);
     },
-    [setDpr],
+    [get],
   );
   const onPause = useCallback(() => dprSettle(dprState, dprConfig), []);
   return <FrameRateSampler paused={paused} onSample={onSample} onPause={onPause} />;

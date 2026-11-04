@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
 import * as THREE from 'three';
-import { AdaptiveResolution, currentDpr, FrameWhilePaused, StatsProbe, statsEnabled, useRenderPaused } from '../perf';
+import { AdaptiveResolution, adaptiveDpr, FrameWhilePaused, StatsProbe, statsEnabled, useRenderPaused } from '../perf';
 import { repoOnFloor, useStore } from '../store';
 import { ding, whoosh } from '../ui/sfx';
 import { lobbyColliders, officeColliders } from './layout';
@@ -49,7 +49,7 @@ export function Game() {
     <Canvas
       shadows
       frameloop={paused ? 'never' : 'always'}
-      dpr={currentDpr()}
+      dpr={adaptiveDpr}
       camera={{ fov: 72, near: 0.05, far: 90, position: [0, 1.65, 10] }}
       gl={{ antialias: true, powerPreference: 'high-performance' }}
       onCreated={({ gl }) => {
