@@ -127,6 +127,7 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
   const agents = useStore((s) => s.agents);
   const company = useStore((s) => s.settings.companyName);
   const connected = useStore((s) => s.connected);
+  const restarting = useStore((s) => s.restarting);
   const demo = useStore((s) => s.demo);
   const openOverlay = useStore((s) => s.openOverlay);
   const repo = repoOnFloor(repos, floor);
@@ -167,7 +168,7 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
         </nav>
         <div className="dashboard-connection" role="status">
           <span className={`dashboard-connection-dot${connected ? ' is-live' : ''}`} />
-          {connected ? (demo ? 'Demo office' : 'Connected') : 'Reconnecting'}
+          {connected ? (demo ? 'Demo office' : 'Connected') : restarting ? 'Office restarting' : 'Reconnecting'}
         </div>
       </aside>
 

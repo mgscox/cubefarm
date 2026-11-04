@@ -14,7 +14,7 @@ export function OfficeNotices() {
           {update}
         </button>
       )}
-      {githubError && <div className="hud-banner">⚠️ {githubError}</div>}
+      {githubError && <div className="hud-banner" role="alert">⚠️ {githubError}</div>}
     </>
   );
 }
