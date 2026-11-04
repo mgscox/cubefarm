@@ -3691,17 +3691,19 @@ export class Swarm {
       .join('\n');
 
     try {
+      if (review) {
+        const head = await this.machineFor(a).deskHead(repo.fullName, this.agentSlug(a));
+        if (gone()) return;
+        if (head !== pr.headSha) {
+          this.setQa(rec, { status: 'queued', qaAgentId: null, mergeNote: 'PR head changed during checkout; checking the current revision' });
+          this.clearTask(a);
+          return;
+        }
+      }
       let systemAppend: string;
       if (security) {
         const playbook = readSpecialism('security');
         if (!playbook || !pr.baseSha) throw new Error('Security review requires its playbook and the PR base commit.');
-        const head = await this.machineFor(a).deskHead(repo.fullName, this.agentSlug(a));
-        if (gone()) return;
-        if (head !== pr.headSha) {
-          this.setQa(rec, { status: 'queued', qaAgentId: null });
-          this.clearTask(a);
-          return;
-        }
         if (!hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) {
           await this.backend.setSecurityReviewLabel(repo.fullName, pr.number, true);
           if (gone()) return;
@@ -3719,7 +3721,7 @@ export class Swarm {
       a.endedAt = Date.now();
       a.lastError = (err as Error).message;
       this.appendLog(a, [{ kind: 'error', text: `✗ ${a.lastError}` }]);
-      this.setQa(rec, { status: security ? 'needs-human' : 'queued', qaAgentId: null, ...(security ? { mergeNote: a.lastError } : {}) });
+      this.setQa(rec, { status: review ? 'needs-human' : 'queued', qaAgentId: null, ...(review ? { mergeNote: a.lastError } : {}) });
       this.emitAgent(a);
     }
   }

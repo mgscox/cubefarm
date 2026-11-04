@@ -3307,6 +3307,21 @@ describe('QA rounds', () => {
       expect(rec).toMatchObject({ status: 'failed', fixReason: 'base', fixInstructions: expect.stringContaining('base-2') });
     });
 
+    it('requeues ordinary QA when checkout fetched a head that was not checked for ancestry', async () => {
+      const tester = addAgent('q2', 'Marple', 'qa', 1);
+      const pr = { ...pull, labels: ['ready-for-review'], baseSha: 'base-1', body: '', isCrossRepository: false };
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue(pr);
+      const compare = vi.spyOn(s.backend, 'containsCommit').mockResolvedValue(true);
+      vi.spyOn(s, 'prepare').mockResolvedValue('/fake-desk');
+      vi.spyOn(s.backend, 'deskHead').mockResolvedValue('sha-2');
+      const session = vi.spyOn(s, 'startAgentSession');
+      rec.status = 'queued';
+      await s.runQa(tester, repo, rec);
+      expect(compare).toHaveBeenCalledExactlyOnceWith(repo.fullName, pr.headSha, pr.baseSha);
+      expect(rec).toMatchObject({ status: 'queued', mergeNote: expect.stringContaining('head changed') });
+      expect(session).not.toHaveBeenCalled();
+    });
+
     it('sends the PR back when its head and base move together but the head lacks the current base', async () => {
       const tester = addAgent('q2', 'Marple', 'qa', 1);
       const pr = { ...pull, headSha: 'sha-2', baseSha: 'base-2', baseRefName: 'main', body: '', isCrossRepository: false };
