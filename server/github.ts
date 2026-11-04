@@ -530,6 +530,13 @@ export async function updateBranch(fullName: string, number: number): Promise<vo
   await gh(['pr', 'update-branch', String(number), '-R', fullName], { timeoutMs: 60_000 });
 }
 
+/** Retry only the failed jobs in each GitHub Actions run. */
+export async function rerunFailedJobs(fullName: string, runIds: number[]): Promise<void> {
+  for (const id of runIds) {
+    await gh(['run', 'rerun', String(id), '--failed', '-R', fullName], { timeoutMs: 60_000 });
+  }
+}
+
 export async function markPullReady(fullName: string, number: number): Promise<void> {
   await gh(['pr', 'ready', String(number), '-R', fullName]);
 }

@@ -139,13 +139,15 @@ describe('optional PR checks', () => {
     expect(api).toHaveBeenCalledWith(['api', 'repos/demo/repo/actions/runs?head_sha=abc&per_page=100&page=1']);
     expect(api).toHaveBeenCalledWith(['api', 'repos/demo/repo/commits/abc/status?per_page=100&page=1']);
     expect(checksError?.match(/REST fallback in use/g)).toHaveLength(1);
-    expect(mergeStep(pr, { passedSha: 'abc', mergeFixes: 0, pendingSince: null, mergeRetryAt: null, alerted: false }, 100, { base: 'main' }).do).toBe('merge');
+    expect(mergeStep(pr, { passedSha: 'abc', mergeFixes: 0, pendingSince: null, mergeRetryAt: null, alerted: false, checkRerunSha: null, checkRerunAt: null }, 100, { base: 'main' }).do).toBe('merge');
   });
 
-  it.each(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure'])('sends %s runs back with their URL', async (conclusion) => {
+  it.each(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure'])('retries %s runs once, then sends them back with their URL', async (conclusion) => {
     const { pulls: [pr] } = await listPulls('demo/repo', deniedQuery(), rest([run('completed', conclusion)]));
     expect(pr).toMatchObject({ checks: 'failing', failedChecks: [{ name: 'CI', url: run().html_url }] });
-    expect(mergeStep(pr, { passedSha: 'abc', mergeFixes: 0, pendingSince: null, mergeRetryAt: null, alerted: false }, 100, { base: 'main' }))
+    const rec = { passedSha: 'abc', mergeFixes: 0, pendingSince: null, mergeRetryAt: null, alerted: false, checkRerunSha: null, checkRerunAt: null };
+    expect(mergeStep(pr, rec, 100, { base: 'main' })).toMatchObject({ do: 'rerun', runIds: [123] });
+    expect(mergeStep(pr, { ...rec, checkRerunSha: 'abc', checkRerunAt: 100 }, 120_100, { base: 'main' }))
       .toMatchObject({ do: 'send-back', reason: 'checks', instructions: `- CI: ${run().html_url}` });
   });
 

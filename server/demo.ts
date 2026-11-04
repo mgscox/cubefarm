@@ -863,6 +863,11 @@ export function createDemoBackend(): Backend {
       Object.assign(pr, { headSha: fakeSha(), mergeState: 'CLEAN' });
       runChecks(pr, false);
     },
+    rerunFailedJobs: async (fullName, runIds) => {
+      for (const pr of repos.get(fullName)?.pulls ?? []) {
+        if (runIds.includes(pr.number) && pr.checks === 'failing') runChecks(pr, false);
+      }
+    },
     markPullReady: async (fullName, number) => {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
       if (!pr) throw new Error('Unknown PR');

@@ -21,6 +21,7 @@ import { ceoSystemPrompt, type OfficeTools } from './ceo.ts';
 import { researcherSystemPrompt } from './research.ts';
 import { ONE_TURN } from './clis.ts';
 import { QA_RESUME_PROMPT } from './qaRetry.ts';
+import { CHECK_RERUN_GRACE_MS, MAX_MERGE_FIXES } from './mergeGate.ts';
 import { AGENT_COMMENT_MARKER, issueWorkNote } from '../shared/issues.ts';
 import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRunner.ts';
 
@@ -2888,6 +2889,51 @@ describe('QA rounds', () => {
     expect(comment.mock.calls[0][2]).toContain('needs a human decision');
   });
 
+  it.each([{ mergeable: 'CONFLICTING', mergeState: 'UNKNOWN' }, { mergeable: 'UNKNOWN', mergeState: 'DIRTY' }])('sends a final ordinary QA failure to a conflict fix: %j', async (conflict) => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(rec, { round: 3, mergeFixes: MAX_MERGE_FIXES - 1 });
+    Object.assign(repo, { defaultBranch: 'main' });
+    const comment = vi.spyOn(s.backend, 'commentPull');
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, ...conflict, body: '', isCrossRepository: false });
+    await qaFails(tester);
+    expect(rec).toMatchObject({ status: 'failed', fixReason: 'conflict', mergeFixes: MAX_MERGE_FIXES, passedSha: null,
+      fixInstructions: expect.stringContaining('Chaser: never catches up') });
+    expect(comment.mock.calls[0][2]).toContain('sent back to the developer to resolve the conflict');
+  });
+
+  it.each(['exhausted', 'changed head', 'lookup failed'] as const)('does not grant a final conflict fix when %s', async (why) => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(rec, { round: 3, mergeFixes: why === 'exhausted' ? MAX_MERGE_FIXES : 0 });
+    const details = vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, mergeable: 'CONFLICTING', body: '', isCrossRepository: false,
+      headSha: why === 'changed head' ? 'sha-2' : 'sha-1' });
+    if (why === 'lookup failed') details.mockRejectedValue(new Error('GitHub unavailable'));
+    await qaFails(tester);
+    expect(rec).toMatchObject({ status: 'needs-human', fixReason: 'qa' });
+  });
+
+  it.each([false, true])('reruns checks once per head and sends persistent failures back (API rejects: %s)', async (reject) => {
+    Object.assign(rec, { status: 'passed', passedSha: pull.headSha, mergeFixes: 0 });
+    const pr = { ...pull, checks: 'failing' as const, failedChecks: [{ name: 'CI', url: 'https://github.com/o/r/actions/runs/42/job/7' }] };
+    const rerun = vi.spyOn(s.backend, 'rerunFailedJobs').mockResolvedValue();
+    if (reject) rerun.mockRejectedValue(new Error('Access denied'));
+    const events = vi.spyOn(s, 'broadcast');
+    const merge = vi.spyOn(s.backend, 'mergePull');
+    if (reject) await expect(s.advanceMerge(repo, rec, pr)).rejects.toThrow('Access denied');
+    else await s.advanceMerge(repo, rec, pr);
+    expect(rerun).toHaveBeenCalledExactlyOnceWith(repo.fullName, [42]);
+    expect(rec).toMatchObject({ status: 'passed', checkRerunSha: pull.headSha, checkRerunAt: Date.now(), mergeFixes: 0 });
+    expect(events).toHaveBeenCalledWith({ type: 'qa', qa: expect.objectContaining({ checkRerunSha: pull.headSha, checkRerunAt: Date.now() }) });
+    s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
+    expect(swarm.snapshot().qa[0]).toMatchObject({ checkRerunSha: pull.headSha, checkRerunAt: Date.now() });
+    await s.advanceMerge(repo, rec, pr);
+    expect(rec.status).toBe('passed');
+    vi.setSystemTime(Date.now() + CHECK_RERUN_GRACE_MS);
+    await s.advanceMerge(repo, rec, pr);
+    expect(rec).toMatchObject({ status: 'failed', fixReason: 'checks', mergeFixes: 1 });
+    expect(rerun).toHaveBeenCalledOnce();
+    expect(merge).not.toHaveBeenCalled();
+  });
+
   it('keeps the tester on the first PR until its delayed QA comment is recorded', async () => {
     const tester = addAgent('q1', 'Poirot', 'qa', 0);
     Object.assign(ada, { status: 'working', task: 'issue' }); // Only one tester can take the next PR.
@@ -2999,6 +3045,15 @@ describe('QA rounds', () => {
       vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, body: '', isCrossRepository: false });
       vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
       session = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {}) as Mock;
+    });
+
+    it('keeps failed QA findings in the re-test after a conflict fix', async () => {
+      const tester = addAgent('q2', 'Marple', 'qa', 1);
+      Object.assign(rec, { status: 'queued', round: 4, fixReason: 'conflict', passedSha: null, fixInstructions: 'Fix Chaser timing' });
+      await s.runQa(tester, repo, rec);
+      expect(session).toHaveBeenCalledOnce();
+      expect(session.mock.calls[0][3]).toContain('Last round\'s findings:\nBroken\nFix Chaser timing');
+      expect(session.mock.calls[0][3]).not.toContain('QA passed it before');
     });
 
     it('sends it straight to a developer with the last findings instead of starting a QA session', async () => {
@@ -3162,6 +3217,17 @@ describe('QA rounds', () => {
       Object.assign(rec, { status: 'passed', passedSha: 'sha-1', mergeNote: 'waiting for checks: CI' });
       const [loaded] = await restartFromDisk();
       expect(loaded).toMatchObject({ status: 'passed', mergeNote: null });
+    });
+
+    it('defaults missing retry fields from older state files', async () => {
+      const [loaded] = await restartFromDisk();
+      expect(loaded).toMatchObject({ checkRerunSha: null, checkRerunAt: null });
+    });
+
+    it('preserves a check retry across a restart', async () => {
+      Object.assign(rec, { checkRerunSha: 'sha-1', checkRerunAt: Date.now() });
+      const [loaded] = await restartFromDisk();
+      expect(loaded).toMatchObject({ checkRerunSha: 'sha-1', checkRerunAt: Date.now() });
     });
 
     it("takes the session at its word when the PR's head can't be read", async () => {
@@ -3650,6 +3716,7 @@ describe('QA specialism', () => {
     const playbook = new URL('../docs/specialisms/qa.md', import.meta.url);
     expect(read.mock.calls).toEqual([[playbook, 'utf8'], [playbook, 'utf8']]);
     expect(testerPrompt).toContain('QA playbook');
+    expect(testerPrompt).toContain('is not a QA fail');
     expect(testerPrompt).toContain('Project-specific QA brief');
     expect(coverPrompt).toContain('Edited QA playbook');
     expect(coverPrompt).toContain('covering for the QA lab');
