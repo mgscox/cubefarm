@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import type { RepoView } from '../../../shared/types';
 import { agentsOnRepo, useStore } from '../store';
+import { qaCounts } from '../qaCounts';
 import { AppMonitor } from './AppMonitor';
 import { Desk } from './Desk';
 import { drawSign } from './draw';
@@ -37,6 +38,10 @@ export function WallSign({
   );
 }
 
+// Made once, so the memoised desks see the same position every render.
+const DEV_DESKS = Array.from({ length: MAX_DESKS }, (_, slot): [number, number, number] => [deskPosition(slot).x, 0, deskPosition(slot).z]);
+const QA_DESKS = QA_LAB.stations.map((_, slot): [number, number, number] => [qaDeskPosition(slot).x, 0, qaDeskPosition(slot).z]);
+
 export function OfficeFloor({ repo }: { repo: RepoView }) {
   const allAgents = useStore((s) => s.agents);
   const agents = useMemo(() => agentsOnRepo(allAgents, repo.id), [allAgents, repo.id]);
@@ -45,8 +50,8 @@ export function OfficeFloor({ repo }: { repo: RepoView }) {
   const qaBySlot = useMemo(() => new Map(agents.filter((a) => a.role === 'qa').map((a) => [a.desk, a])), [agents]);
   const working = agents.filter((a) => a.status === 'working' || a.status === 'preparing').length;
   const qaRecords = useStore((s) => s.qa);
-  const inQa = Object.values(qaRecords).filter((q) => q.repoId === repo.id && q.status !== 'passed').length;
-  const ready = Object.values(qaRecords).filter((q) => q.repoId === repo.id && q.status === 'passed').length;
+  // Only records whose PR is still open count, as in the HUD.
+  const { inQa, readyToMerge: ready } = useMemo(() => qaCounts(Object.values(qaRecords), new Map([[repo.id, repo.pulls]])), [qaRecords, repo.id, repo.pulls]);
   const name = repo.fullName.split('/')[1] ?? repo.fullName;
   const rugColor = shade(repo.color, 0.24);
 
@@ -57,17 +62,15 @@ export function OfficeFloor({ repo }: { repo: RepoView }) {
         <Rug key={z} position={[0, 0.004, z + 0.35]} size={[24.4, 2.9]} color={rugColor} />
       ))}
 
-      {Array.from({ length: MAX_DESKS }, (_, slot) => {
-        const { x, z } = deskPosition(slot);
-        return <Desk key={slot} agent={devBySlot.get(slot) ?? null} accent={repo.color} repoId={repo.id} position={[x, 0, z]} />;
-      })}
+      {DEV_DESKS.map((position, slot) => (
+        <Desk key={slot} agent={devBySlot.get(slot) ?? null} accent={repo.color} repoId={repo.id} position={position} />
+      ))}
 
       {/* QA lab */}
       <Rug position={[QA_LAB.x - 0.4, 0.005, -2]} size={[3.4, 10.4]} color="#ffd8bf" />
-      {QA_LAB.stations.map((_, slot) => {
-        const { x, z } = qaDeskPosition(slot);
-        return <Desk key={`qa${slot}`} role="qa" rotationY={QA_ROTATION} agent={qaBySlot.get(slot) ?? null} accent={repo.color} repoId={repo.id} position={[x, 0, z]} />;
-      })}
+      {QA_DESKS.map((position, slot) => (
+        <Desk key={`qa${slot}`} role="qa" rotationY={QA_ROTATION} agent={qaBySlot.get(slot) ?? null} accent={repo.color} repoId={repo.id} position={position} />
+      ))}
       <WallSign
         position={[HALF_W - 0.03, 3.2, -2]}
         rotationY={-Math.PI / 2}

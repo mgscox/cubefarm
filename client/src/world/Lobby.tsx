@@ -19,6 +19,9 @@ import { Toys } from './toys';
 
 const ACCENT = '#ff8a5b';
 const CEO_ACCENT = '#9b5de5';
+// One array each, so the memoised desks skip re-renders.
+const CEO_DESK_AT: [number, number, number] = [CEO_DESK.x, 0, CEO_DESK.z];
+const RESEARCH_DESK_AT: [number, number, number] = [RESEARCH_DESK.x, 0, RESEARCH_DESK.z];
 
 function useOfficeStats() {
   const repos = useStore((s) => s.repos);
@@ -257,7 +260,7 @@ function ResearchCorner() {
   const next = info.queue.length ? `${info.queue[0].label}${info.queue.length > 1 ? ` (+${info.queue.length - 1})` : ''}` : 'nothing queued';
   return (
     <group>
-      {agent && <Desk agent={agent} accent={RESEARCH_ACCENT} repoId="" rotationY={QA_ROTATION} position={[RESEARCH_DESK.x, 0, RESEARCH_DESK.z]} />}
+      {agent && <Desk agent={agent} accent={RESEARCH_ACCENT} repoId="" rotationY={QA_ROTATION} position={RESEARCH_DESK_AT} />}
       <WallSign
         // Between the two east windows, which end at z 0.75 and 3.25.
         position={[HALF_W - 0.03, 2.3, 2]}
@@ -301,7 +304,7 @@ function CeoOffice() {
         draw={(ctx) => drawSign(ctx, 816, 120, [{ text: `CEO${ceo ? ` · ${ceo.name}` : ''}`, size: 52 }], CEO_ACCENT)}
         deps={[ceo?.name]}
       />
-      {ceo && <Desk agent={ceo} accent={CEO_ACCENT} repoId="" position={[CEO_DESK.x, 0, CEO_DESK.z]} />}
+      {ceo && <Desk agent={ceo} accent={CEO_ACCENT} repoId="" position={CEO_DESK_AT} />}
       <CeoBoard />
       <Plant position={[c.maxX - 0.7, 0, c.maxZ - 0.7]} scale={1.1} pot={CEO_ACCENT} />
       <Plant position={[c.minX + 0.6, 0, c.maxZ - 0.6]} scale={0.9} />
