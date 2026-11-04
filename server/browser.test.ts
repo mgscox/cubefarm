@@ -18,7 +18,8 @@ describe('Playwright MCP command', () => {
       const pkg = path.join(box, 'node_modules', '@playwright', 'mcp');
       fs.mkdirSync(pkg, { recursive: true });
       fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: '@playwright/mcp', exports: { './package.json': './package.json' } }));
-      expect(playwrightMcpCli(path.join(box, 'dist-server', 'boxOps.js'))).toBe(path.join(pkg, 'cli.js'));
+      fs.writeFileSync(path.join(pkg, 'cli.js'), '');
+      expect(fs.realpathSync(playwrightMcpCli(path.join(box, 'dist-server', 'boxOps.js')))).toBe(fs.realpathSync(path.join(pkg, 'cli.js')));
     } finally {
       fs.rmSync(box, { recursive: true, force: true, maxRetries: 5 });
     }
