@@ -249,12 +249,12 @@ describe('launchArgs', () => {
   });
 
   it.each([undefined, 'thread-1'])("keeps Codex's office browser separate from an inherited playwright server (resume %s)", (resumeId) => {
-    const browser = { command: 'npx', args: ['-y', '@playwright/mcp@latest', '--output-dir', 'browser output'] };
+    const browser = { command: 'node', args: ['installed mcp/cli.js', '--output-dir', 'browser output'] };
     const { args } = launchArgs('codex', ctx({ browser, resumeId }));
     const servers = args.filter((arg) => arg.startsWith('mcp_servers.'));
     // Codex merges server tables: command/args under the user's HTTP `playwright` would retain its URL.
     expect(servers).toEqual([
-      'mcp_servers.cubefarm_playwright={command="npx",args=["-y","@playwright/mcp@latest","--output-dir","browser output"]}',
+      'mcp_servers.cubefarm_playwright={command="node",args=["installed mcp/cli.js","--output-dir","browser output"]}',
     ]);
     expect(launchArgs('codex', ctx({ resumeId })).args.some((arg) => arg.startsWith('mcp_servers.'))).toBe(false);
   });
