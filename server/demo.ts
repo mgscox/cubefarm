@@ -46,11 +46,16 @@ const closedIssues = new Map<string, TrackedIssue>(); // `${fullName}#${n}` → 
 
 /** An open PR from someone's fork whose (bare) branch name is the given one, e.g. one of the office's desk branches. Returns its removal. */
 export function demoForkPull(fullName: string, headRefName: string): { pull: PullInfo; remove: () => void } {
+  return demoPull(fullName, headRefName, true);
+}
+
+/** An open PR on `headRefName`, from the repo itself or (`fork`) from someone's fork. Returns its removal. */
+export function demoPull(fullName: string, headRefName: string, fork: boolean): { pull: PullInfo; remove: () => void } {
   const repo = repos.get(fullName);
   if (!repo) throw new Error(`Unknown demo repo ${fullName}`);
   const number = repo.nextNumber++;
   const pull: PullInfo = {
-    number, title: 'Outside contribution', url: `https://github.com/${fullName}/pull/${number}`, headRefName, isCrossRepository: true, state: 'OPEN',
+    number, title: fork ? 'Outside contribution' : 'Desk PR', url: `https://github.com/${fullName}/pull/${number}`, headRefName, isCrossRepository: fork, state: 'OPEN',
     isDraft: false, mergeable: 'MERGEABLE', reviewDecision: null, closesIssues: [], createdAt: now(), mergedAt: null,
     additions: 3, deletions: 1, checks: 'passing', headSha: fakeSha(), mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
   };
@@ -893,7 +898,7 @@ export function createDemoBackend(): Backend {
       if (pr) pr.state = 'CLOSED';
     },
     prForBranch: async (fullName, branch) => {
-      const pr = repos.get(fullName)?.pulls.find((p) => p.headRefName === branch);
+      const pr = repos.get(fullName)?.pulls.find((p) => p.headRefName === branch && p.state === 'OPEN' && !p.isCrossRepository);
       return pr ? { number: pr.number, url: pr.url } : null;
     },
     branchAhead: async () => 0, // the fake sessions always open their PR

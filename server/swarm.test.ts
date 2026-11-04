@@ -10,7 +10,7 @@ import { handleHook, startCliSession } from './cliRunner.ts';
 import type { BoxConnection, CliHost } from './machine.ts';
 import { BOX_CLI_CHECK_MS } from './fleet.ts';
 import type { AgentTerminal } from './terminal.ts';
-import { createDemoBackend, demoApprovedProposal, demoForkPull } from './demo.ts';
+import { createDemoBackend, demoApprovedProposal, demoForkPull, demoPull } from './demo.ts';
 import { newPublication } from './publication.ts';
 import type { TrackedIssue } from './github.ts';
 import { HttpError, Swarm } from './swarm.ts';
@@ -29,7 +29,7 @@ import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRun
 type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => Promise<void>;
 type Repo = { noWorkEndings?: import('../shared/types.ts').NoWorkEnding[]; id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; parkedBranches?: ParkedBranch[]; preview: { command: null; env: object } };
 type Backend = ReturnType<typeof createDemoBackend>;
-type QaRec = QaView & { reviewId?: string; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
+type QaRec = QaView & { reviewId?: string; crossRepository?: boolean; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
 interface Internals {
   backend: Backend;
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[]; feedbackEvents: Record<string, true> };
@@ -103,14 +103,14 @@ afterEach(() => {
 
 describe('developer scores', () => {
   const pull: PullInfo = {
-    number: 13, title: 'Feature', url: '', headRefName: 'swarm/issue-66-ada', state: 'MERGED',
+    number: 13, title: 'Feature', url: '', headRefName: 'swarm/issue-66-ada', isCrossRepository: false, state: 'MERGED',
     isDraft: false, closesIssues: [], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'sha',
     reviewDecision: null, createdAt: '', mergedAt: '2026-11-04', additions: 1, deletions: 0,
     mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
   };
   const dev = () => s.state.agents[0];
   const qa = (): QaRec => ({
-    repoId: repo.id, prNumber: 13, reviewId: 'review-13', status: 'passed', round: 1, retests: 0, sessionFailures: 0,
+    repoId: repo.id, prNumber: 13, reviewId: 'review-13', crossRepository: false, status: 'passed', round: 1, retests: 0, sessionFailures: 0,
     testedSha: 'sha', passedSha: 'sha', devAgentId: 'a1', qaAgentId: null, summary: null,
     checks: [], commentUrl: null, mergeNote: null, updatedAt: 0,
   });
@@ -353,6 +353,46 @@ describe('developer scores', () => {
         s.reconcilePulls(repo, [{ ...listed, state: 'MERGED', mergedAt: '2026-11-04' }]);
         expect(eve.score).toBe(0);
       } finally {
+        fork.remove();
+      }
+    });
+
+    it.each(['OPEN', 'CLOSED'] as const)('shadow: a newer %s fork PR on the desk branch does not hide the desk PR', async (state) => {
+      vi.mocked(s.backend.prForBranch).mockRestore();
+      vi.mocked(s.backend.prDetails).mockRestore();
+      Object.assign(dev(), { prNumber: null }); // demo PR numbers run on across tests
+      const eve = claimant();
+      const own = demoPull(repo.fullName, String(eve.branch), false);
+      const fork = demoForkPull(repo.fullName, String(eve.branch));
+      fork.pull.state = state;
+      try {
+        vi.spyOn(swarm, 'message').mockResolvedValue(undefined as never);
+        await finish(eve, own.pull.number);
+        expect(eve.prNumber).toBe(own.pull.number);
+        expect(s.state.qa.find((q) => q.prNumber === own.pull.number)).toMatchObject({ devAgentId: eve.id, crossRepository: false });
+        s.clearTask(eve);
+        s.reconcilePulls(repo, [{ ...own.pull, state: 'MERGED', mergedAt: '2026-11-04' }]);
+        expect(eve.score).toBe(2);
+      } finally {
+        own.remove();
+        fork.remove();
+      }
+    });
+
+    it('shadow: a newer fork PR on a researcher branch does not hide the filed research', async () => {
+      vi.mocked(s.backend.prForBranch).mockRestore();
+      vi.mocked(s.backend.prDetails).mockRestore();
+      Object.assign(dev(), { prNumber: null });
+      const eve = claimant('researcher');
+      const own = demoPull(repo.fullName, String(eve.branch), false);
+      const fork = demoForkPull(repo.fullName, String(eve.branch));
+      try {
+        await s.recordResearchFinished(eve, { topic: 'Research brief' }, repo, { ok: true, text: '', errors: [], costUsd: 0, turns: 1 });
+        expect(eve.prNumber).toBe(own.pull.number);
+        expect(s.state.qa.find((q) => q.prNumber === own.pull.number)).toMatchObject({ devAgentId: eve.id, status: 'passed', crossRepository: false });
+        expect(s.state.qa.some((q) => q.prNumber === fork.pull.number)).toBe(false);
+      } finally {
+        own.remove();
         fork.remove();
       }
     });
@@ -3198,6 +3238,40 @@ describe('QA rounds', () => {
     expect(ada.score).toBe(-1);
     expect(replacement.score).toBe(3);
     expect(tester.score ?? 0).toBe(0);
+  });
+
+  it('fork: an office developer fixing a fork PR keeps their score through its QA failures and merge', async () => {
+    vi.mocked(s.backend.prDetails).mockRestore();
+    s.state.qa.length = 0;
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(ada, { score: 3, prNumber: null });
+    const fork = demoForkPull(repo.fullName, 'swarm/issue-99-outsider');
+    try {
+      const listed = (await s.backend.listPulls(repo.fullName)).pulls.find((p) => p.number === fork.pull.number)!;
+      s.repoRt.get(repo.id)!.pulls = [listed];
+      s.reconcilePulls(repo, [listed]);
+      const forkRec = s.state.qa.find((q) => q.prNumber === listed.number)!;
+      expect(forkRec).toMatchObject({ devAgentId: null, crossRepository: true });
+      const qaFailsFork = async () => {
+        Object.assign(tester, { status: 'working', task: 'qa', prNumber: listed.number });
+        Object.assign(forkRec, { status: 'testing', qaAgentId: tester.id, testedSha: fork.pull.headSha });
+        await s.onQaFinished(tester, repo, result(true, failReport));
+      };
+      await qaFailsFork();
+      expect(forkRec.status).toBe('failed');
+      expect(s.startPipelineWork(repo)).toBe(true);
+      expect(runFix).toHaveBeenCalledWith(ada, repo, forkRec);
+      Object.assign(forkRec, { status: 'fixing', devAgentId: ada.id }); // what prepareFix records
+      fork.pull.headSha = 'outsider-push';
+      Object.assign(forkRec, { round: forkRec.round + 1 });
+      await qaFailsFork();
+      expect(forkRec.status).toBe('failed');
+      expect(ada.score).toBe(3);
+      s.reconcilePulls(repo, [{ ...listed, state: 'MERGED', mergedAt: '2026-11-04' }]);
+      expect(ada.score).toBe(3);
+    } finally {
+      fork.remove();
+    }
   });
 
   it.each(['changed', 'closed', 'unavailable', 'incomplete', 'stale-session', 'human'] as const)('does not charge a %s QA result', async (reason) => {

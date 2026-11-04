@@ -170,6 +170,7 @@ interface HeldRetry {
 /** A pull request's trip through QA. */
 interface QaRecord extends QaView {
   reviewId: string; // distinguish QA cycles when a closed PR is reopened
+  crossRepository?: boolean; // from a fork: never scores an office developer (unknown on records saved before it existed)
   closed?: boolean; // Keep the security requirement if this PR is reopened.
   securityReview?: { reason: string; qaSha: string | null; approvedSha?: string; auditBaseSha?: string };
   issueNumber: number | null;
@@ -2132,6 +2133,7 @@ export class Swarm {
     }
     if (step.do !== 'merge') return false;
     const latest = await this.backend.prDetails(repo.fullName, pr.number);
+    rec.crossRepository ??= latest.isCrossRepository;
     if (this.state.officeHeld || hasLabel(latest.labels, NEEDS_HUMAN) || hasLabel(latest.labels, NEEDS_REVIEW)) return false;
     if ((rec.securityReview && !latest.baseSha) || this.holdForSecurityReview(repo, rec, latest)) return false;
     this.mergeNote(rec, 'merging…');
@@ -2363,8 +2365,8 @@ export class Swarm {
     for (const pr of pulls.filter((p) => p.state === 'MERGED')) {
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === pr.number);
       const owner = this.state.agents.find((a) => a.id === rec?.devAgentId && a.role === 'dev' && a.repoId === repo.id);
-      const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && a.prNumber === pr.number && a.branch === pr.headRefName);
-      this.recordFeedback({ kind: 'merged', repoId: repo.id, prNumber: pr.number, devAgentId: owner?.id ?? dev?.id ?? null });
+      const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && a.prNumber === pr.number && pr.isCrossRepository === false && a.branch === pr.headRefName);
+      this.recordFeedback({ kind: 'merged', repoId: repo.id, prNumber: pr.number, devAgentId: owner?.id ?? dev?.id ?? null, crossRepository: pr.isCrossRepository });
     }
     for (const a of this.state.agents) {
       if (a.repoId !== repo.id || (a.role !== 'dev' && a.role !== 'researcher') || a.prNumber == null || BUSY.includes(a.status) || a.status === 'idle') continue;
@@ -2395,12 +2397,15 @@ export class Swarm {
 
     // Every swarm PR goes through QA, including ones opened before QA existed or while the server was down.
     for (const pr of pulls) {
-      if (pr.state !== 'OPEN' || ((pr.isDraft || !pr.headRefName.startsWith('swarm/')) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW))) continue;
-      if (this.state.qa.some((q) => q.repoId === repo.id && q.prNumber === pr.number)) continue;
-      const dev = this.state.agents.find((a) => (a.role === 'dev' || a.role === 'researcher') && a.task !== 'qa' && (a.prNumber === pr.number || (!pr.isCrossRepository && a.branch === pr.headRefName)) && (a.repoId === repo.id || a.id === RESEARCHER_ID));
-      if (isResearchBranch(pr.headRefName) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) this.skipQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null, pr.headSha || null);
+      if (pr.state !== 'OPEN') continue;
+      const known = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === pr.number);
+      if (known) known.crossRepository ??= pr.isCrossRepository; // records saved before origins were kept
+      if ((pr.isDraft || !pr.headRefName.startsWith('swarm/')) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) continue;
+      if (known) continue;
+      const dev = this.state.agents.find((a) => (a.role === 'dev' || a.role === 'researcher') && a.task !== 'qa' && (a.prNumber === pr.number || (pr.isCrossRepository === false && a.branch === pr.headRefName)) && (a.repoId === repo.id || a.id === RESEARCHER_ID));
+      if (isResearchBranch(pr.headRefName) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) this.skipQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null, pr.headSha || null, pr.isCrossRepository);
       else {
-        const rec = this.queueQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null);
+        const rec = this.queueQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null, pr.isCrossRepository);
         this.holdForSecurityReview(repo, rec, pr);
       }
     }
@@ -2526,7 +2531,7 @@ export class Swarm {
       const checkSecurityReview = (current: PrDetails) => {
         const labeled = hasLabel(current.labels, READY_FOR_SECURITY_REVIEW);
         if (!rec && labeled && current.state === 'OPEN') {
-          rec = this.queueQa(repo, number, null, current.closesIssues[0] ?? null);
+          rec = this.queueQa(repo, number, null, current.closesIssues[0] ?? null, current.isCrossRepository);
         }
         const held = rec ? this.holdForSecurityReview(repo, rec, current) : labeled;
         if (held || (rec?.securityReview && !current.baseSha)) {
@@ -3314,6 +3319,7 @@ export class Swarm {
     // Every await below can outlive this task: the manager may clear it, assign another or send a follow-up meanwhile.
     const gone = () => !this.state.agents.includes(a) || this.officeUpdate.handedOver || this.agentRt.get(a.id)?.generation !== generation;
     let prKnown = true;
+    let crossRepository: boolean | undefined; // false once a.prNumber is the desk's verified own PR
     if (a.branch) {
       const pr = await this.openPullForBranch(repo, a.branch).catch(() => undefined);
       if (gone()) return;
@@ -3325,6 +3331,7 @@ export class Swarm {
       } else if (pr) {
         a.prNumber = pr.number;
         a.prUrl = pr.url;
+        crossRepository = false;
       }
     }
 
@@ -3387,13 +3394,14 @@ export class Swarm {
       if (a.role === 'dev' && failedEarly.status !== 'fixing' && (!failedEarly.devAgentId || failedEarly.devAgentId === a.id)) {
         this.setQa(failedEarly, { devAgentId: a.id, devSessionId: a.sessionId ?? failedEarly.devSessionId });
       }
+      failedEarly.crossRepository ??= crossRepository;
       this.appendLog(a, [{ kind: 'system', text: `📨 QA findings for PR #${a.prNumber} are retained for its fix.` }]);
     } else if (a.prNumber && a.role === 'researcher') {
-      this.skipQa(repo, a.prNumber, a, a.issueNumber, null);
+      this.skipQa(repo, a.prNumber, a, a.issueNumber, null, crossRepository);
       this.appendLog(a, [{ kind: 'system', text: `📚 Filed the research as PR #${a.prNumber}. Research skips QA.` }]);
       this.toast('success', `${a.name} filed research for #${a.issueNumber} as PR #${a.prNumber}`);
     } else if (a.prNumber) {
-      this.queueQa(repo, a.prNumber, a, a.issueNumber);
+      this.queueQa(repo, a.prNumber, a, a.issueNumber, crossRepository);
       this.appendLog(a, [{ kind: 'system', text: `📨 Handed PR #${a.prNumber} to QA.` }]);
       this.toast('success', `${a.name} opened PR #${a.prNumber} for #${a.issueNumber}; it's off to QA`);
     } else if (later) {
@@ -3516,9 +3524,11 @@ export class Swarm {
     return true;
   }
 
-  private queueQa(repo: PersistedRepo, prNumber: number, dev: PersistedAgent | null, issueNumber: number | null) {
+  /** `crossRepository`: the PR's origin, when known (see `QaRecord.crossRepository`). */
+  private queueQa(repo: PersistedRepo, prNumber: number, dev: PersistedAgent | null, issueNumber: number | null, crossRepository?: boolean) {
     let rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === prNumber);
     if (rec) {
+      rec.crossRepository ??= crossRepository;
       if (rec.status === 'testing') return rec;
       const owner = !rec.devAgentId && dev?.role === 'dev' ? dev : null;
       this.setQa(rec, {
@@ -3531,6 +3541,7 @@ export class Swarm {
         repoId: repo.id,
         prNumber,
         reviewId: crypto.randomUUID(),
+        crossRepository,
         status: 'queued',
         round: 1,
         devAgentId: dev?.id ?? null,
@@ -3566,9 +3577,9 @@ export class Swarm {
    * A research doc's PR: nothing to test, so it counts as passed and auto-merge takes it from there (the manager
    * merges it on floors without auto-merge). `sha`: the head it passes at, or null to take the head auto-merge sees.
    */
-  private skipQa(repo: PersistedRepo, prNumber: number, author: PersistedAgent | null, issueNumber: number | null, sha: string | null) {
+  private skipQa(repo: PersistedRepo, prNumber: number, author: PersistedAgent | null, issueNumber: number | null, sha: string | null, crossRepository?: boolean) {
     if (this.state.qa.some((q) => q.repoId === repo.id && q.prNumber === prNumber)) return;
-    this.queueQa(repo, prNumber, author, issueNumber);
+    this.queueQa(repo, prNumber, author, issueNumber, crossRepository);
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === prNumber)!;
     this.setQa(rec, { status: 'passed', summary: 'A research doc: QA skipped, there is nothing to test.', passedSha: sha, testedSha: sha });
   }
@@ -3581,7 +3592,7 @@ export class Swarm {
     if (!pr) throw new HttpError(404, `PR #${prNumber} is not open on ${repo.fullName}`);
     if (hasLabel(pr.labels, NEEDS_HUMAN)) throw new HttpError(409, `Remove ${NEEDS_HUMAN} from PR #${prNumber} before sending it to QA`);
     // a fork can reuse a desk's branch name: match by branch only for a PR confirmed to come from this repo
-    const sameRepo = await this.backend.prDetails(repo.fullName, prNumber).then((d) => d.isCrossRepository === false, () => false);
+    const crossRepository = await this.backend.prDetails(repo.fullName, prNumber).then((d) => d.isCrossRepository, () => undefined);
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === prNumber);
     if (rec?.status === 'testing' || rec?.status === 'fixing') throw new HttpError(409, `PR #${prNumber} is already ${rec.status}`);
     if (rec && (rec.status === 'needs-human' || rec.status === 'passed' || rec.status === 'failed')) {
@@ -3591,9 +3602,9 @@ export class Swarm {
       rec.sessionFailures = 0;
       rec.mergeNote = null;
     }
-    const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && (a.prNumber === prNumber || (sameRepo && a.branch === pr.headRefName)));
+    const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && (a.prNumber === prNumber || (crossRepository === false && a.branch === pr.headRefName)));
     if (rec) this.setQa(rec, { preparation: undefined });
-    this.queueQa(repo, prNumber, dev ?? null, pr.closesIssues[0] ?? null);
+    this.queueQa(repo, prNumber, dev ?? null, pr.closesIssues[0] ?? null, crossRepository);
     this.toast('info', `PR #${prNumber} is queued for QA`);
   }
 
@@ -3903,6 +3914,7 @@ export class Swarm {
         // Verify the send-back still applies after posting the report.
         const current = await this.backend.prDetails(repo.fullName, rec.prNumber).catch(() => null);
         if (gone()) return;
+        if (current) rec.crossRepository ??= current.isCrossRepository;
         if (!current || !rec.testedSha) {
           incomplete = true;
           report.summary = `Could not verify the reviewed PR revision. ${report.summary}`;
@@ -5639,7 +5651,7 @@ export class Swarm {
       const pr = own?.number ?? null;
       if (repo && pr) {
         Object.assign(a, { prNumber: pr, prUrl: where });
-        this.skipQa(repo, pr, a, null, null);
+        this.skipQa(repo, pr, a, null, null, false);
       }
       a.status = 'done';
       this.state.research.done = [...this.state.research.done, { topic: job.topic, where, at: Date.now() }].slice(-KEEP_RESEARCH_DOCS);

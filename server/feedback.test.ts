@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { developerFeedback, type FeedbackEvent } from './feedback.ts';
 
 const dev = { id: 'ada', repoId: 'floor-1', role: 'dev' as const, score: 0 };
-const merged: FeedbackEvent = { kind: 'merged', repoId: dev.repoId, prNumber: 13, devAgentId: dev.id };
+const merged: FeedbackEvent = { kind: 'merged', repoId: dev.repoId, prNumber: 13, devAgentId: dev.id, crossRepository: false };
 
 describe('developer feedback', () => {
   it('awards two for a merge and subtracts one for each distinct QA send-back', () => {
@@ -33,5 +33,10 @@ describe('developer feedback', () => {
     const first = developerFeedback(merged, dev, {})!;
     expect(developerFeedback({ ...merged, repoId: 'floor-2' }, { ...dev, repoId: 'floor-2' }, { [first.key]: true })?.score).toBe(2);
     expect(developerFeedback({ ...merged, devAgentId: 'replacement' }, { ...dev, id: 'replacement' }, { [first.key]: true })).toBeNull();
+  });
+
+  it.each([true, undefined])('scores nothing for a PR not confirmed to be from the floor repo (cross-repository: %s)', (crossRepository) => {
+    expect(developerFeedback({ ...merged, crossRepository }, dev, {})).toBeNull();
+    expect(developerFeedback({ ...merged, crossRepository, kind: 'qa-send-back', reviewId: 'review-1', round: 1 }, dev, {})).toBeNull();
   });
 });
