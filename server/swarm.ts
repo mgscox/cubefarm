@@ -169,6 +169,8 @@ interface HeldRetry {
 interface QaRecord extends QaView {
   closed?: boolean; // Keep the security requirement if this PR is reopened.
   securityReview?: { reason: string; qaSha: string | null; approvedSha?: string; auditBaseSha?: string };
+  securityLabel?: boolean; // the security label as a fresh sync last saw it: its removal waives a pending review
+  securityWaived?: boolean; // the manager removed the label: QA's own escalation doesn't request the review again
   issueNumber: number | null;
   devSessionId: string | null; // the dev's Claude Code session, resumed to fix QA findings
   fixInstructions: string | null;
@@ -2363,6 +2365,7 @@ export class Swarm {
       }
       if (pr?.state === 'OPEN') {
         const fresh = (this.repoRt.get(repo.id)?.fetchedAt ?? 0) >= q.updatedAt;
+        if (fresh && q.status !== 'testing') this.trackSecurityLabel(q, pr);
         this.holdForSecurityReview(repo, q, pr, fresh);
       }
     }
@@ -3459,6 +3462,27 @@ export class Swarm {
     }
   }
 
+  /** The manager removing the security label waives a review not yet approved for this head; adding it back requests one again. */
+  private trackSecurityLabel(rec: QaRecord, pr: Pick<PullInfo, 'headSha' | 'labels'>) {
+    const labeled = hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW);
+    const was = rec.securityLabel;
+    rec.securityLabel = labeled;
+    if (labeled) delete rec.securityWaived;
+    const review = rec.securityReview;
+    if (labeled || !was || !review || review.approvedSha === pr.headSha) return;
+    // Regular QA already passed this head: it was only waiting for the audit.
+    const passed = rec.status === 'queued' && review.qaSha === pr.headSha;
+    this.setQa(rec, {
+      securityReview: undefined,
+      securityWaived: true,
+      ...(passed ? { status: 'passed', passedSha: pr.headSha } : {}),
+      mergeNote: rec.mergeNote === 'waiting for detailed security review' ? null : rec.mergeNote,
+    });
+    const text = `Security review waived for PR #${rec.prNumber} (label removed).`;
+    console.log(text);
+    this.toast('info', text);
+  }
+
   private holdForSecurityReview(repo: PersistedRepo, rec: QaRecord, pr: Pick<PrDetails, 'headSha' | 'baseSha' | 'baseRefName' | 'labels'>, fresh = true): boolean {
     const labeled = hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW);
     const review = rec.securityReview;
@@ -3802,6 +3826,7 @@ export class Swarm {
     if (rec) {
       if (security && gone()) return;
       const pullLabels = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.labels;
+      if (rec.securityWaived) report.securityReviewReason = undefined;
       const securityReason = report.securityReviewReason || review?.reason ||
         (hasLabel(pullLabels, READY_FOR_SECURITY_REVIEW) ? 'Requested by the PR label.' : '');
       const escalate = !security && pass && !!securityReason;
@@ -3871,6 +3896,7 @@ export class Swarm {
         passedSha: pass && !escalate ? rec.testedSha : null,
         failedSha: pass || incomplete ? null : rec.testedSha,
         securityReview: security && pass && rec.testedSha ? { ...review, approvedSha: rec.testedSha } : rec.securityReview,
+        ...(security && pass ? { securityLabel: false } : {}), // the office removed it, not the manager
         mergeNote: escalate ? 'waiting for detailed security review' : incomplete ? report.summary : null,
         pendingSince: null,
         mergeRetryAt: null,

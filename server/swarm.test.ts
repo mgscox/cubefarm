@@ -3388,6 +3388,77 @@ describe('QA rounds', () => {
       expect(rec).toMatchObject({ status: 'failed', fixReason: 'base', fixInstructions: expect.stringContaining('origin/main') });
       expect(session).not.toHaveBeenCalled();
     });
+
+    describe('waived by removing the label', () => {
+      const waived = { type: 'toast', level: 'info', text: 'Security review waived for PR #13 (label removed).' };
+      const sync = (labels: string[], headSha = pull.headSha) => {
+        Object.assign(s.repoRt.get(repo.id)!, { fetchedAt: Date.now() });
+        s.reconcilePulls(repo, [{ ...pull, headSha, labels }]);
+      };
+      let events: Mock;
+      beforeEach(() => {
+        vi.spyOn(console, 'log').mockImplementation(() => {});
+        events = vi.spyOn(s, 'broadcast') as Mock;
+        Object.assign(rec, {
+          status: 'queued', testedSha: pull.headSha, passedSha: null, failedSha: null, mergeNote: 'waiting for detailed security review',
+          securityReview: { reason: 'Changed session authentication.', qaSha: pull.headSha },
+        });
+      });
+
+      it('stops holding an escalated, unapproved PR once its label is removed', async () => {
+        sync(['ready-for-review']);
+        expect(rec).toMatchObject({ status: 'queued', securityReview: { qaSha: pull.headSha } });
+        sync([]);
+        expect(rec).toMatchObject({ status: 'passed', passedSha: pull.headSha, mergeNote: null, securityWaived: true });
+        expect(rec).not.toHaveProperty('securityReview', expect.anything());
+        expect(events).toHaveBeenCalledWith(waived);
+        vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, labels: [], baseSha: 'base-1', body: '', isCrossRepository: false });
+        const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+        vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+        await swarm.mergePull(repo.id, 13);
+        expect(merge).toHaveBeenCalledOnce();
+      });
+
+      it("keeps a later QA pass's security reason from escalating it again", async () => {
+        sync(['ready-for-review']);
+        sync([]);
+        const tester = addAgent('q2', 'Marple', 'qa', 1);
+        Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+        Object.assign(rec, { status: 'testing', qaAgentId: 'q2', testedSha: 'sha-2', passedSha: null });
+        s.backend.prDetails = async () => ({ ...pull, headSha: 'sha-2', body: '', isCrossRepository: false });
+        const label = vi.spyOn(s.backend, 'setSecurityReviewLabel');
+        await s.onQaFinished(tester, repo, result(true, {
+          verdict: 'pass', summary: 'QA passed', checks: [], securityReviewReason: 'Changed session authentication.',
+        }));
+        expect(rec).toMatchObject({ status: 'passed', passedSha: 'sha-2', mergeNote: null });
+        expect(rec).not.toHaveProperty('securityReview', expect.anything());
+        expect(label).not.toHaveBeenCalled();
+      });
+
+      it('holds the PR again when the label is added back', () => {
+        sync(['ready-for-review']);
+        sync([]);
+        sync(['ready-for-review']);
+        expect(rec).toMatchObject({ status: 'queued', mergeNote: 'waiting for detailed security review', securityReview: { reason: 'Requested by the PR label.' } });
+        expect(rec).not.toHaveProperty('securityWaived');
+      });
+
+      it('leaves a review approved for the current head alone', () => {
+        const review = { reason: 'Changed session authentication.', qaSha: pull.headSha, approvedSha: pull.headSha, auditBaseSha: 'base-1' };
+        Object.assign(rec, { status: 'passed', passedSha: pull.headSha, mergeNote: null, securityReview: review, securityLabel: true });
+        sync([]);
+        expect(rec).toMatchObject({ status: 'passed', securityReview: review });
+        expect(events).not.toHaveBeenCalledWith(waived);
+        sync([], 'sha-2');
+        expect(rec).toMatchObject({ status: 'queued', securityReview: { reason: review.reason } });
+      });
+
+      it('does not mistake the label being absent all along for a waiver', () => {
+        sync([]);
+        expect(rec).toMatchObject({ status: 'queued', securityReview: { qaSha: pull.headSha } });
+        expect(events).not.toHaveBeenCalledWith(waived);
+      });
+    });
   });
 
   describe('a QA session that ends without a report', () => {
