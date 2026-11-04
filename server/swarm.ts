@@ -168,7 +168,7 @@ interface HeldRetry {
 /** A pull request's trip through QA. */
 interface QaRecord extends QaView {
   closed?: boolean; // Keep the security requirement if this PR is reopened.
-  securityReview?: { reason: string; qaSha: string | null; approvedSha?: string; auditBaseSha?: string; needsReconcile?: boolean };
+  securityReview?: { reason: string; qaSha: string | null; approvedSha?: string; auditBaseSha?: string };
   issueNumber: number | null;
   devSessionId: string | null; // the dev's Claude Code session, resumed to fix QA findings
   fixInstructions: string | null;
@@ -2383,7 +2383,7 @@ export class Swarm {
       if (rec.closed) return;
       Object.assign(rec, {
         closed: true, passedSha: null,
-        securityReview: { reason: review.reason, qaSha: null, needsReconcile: review.needsReconcile },
+        securityReview: { reason: review.reason, qaSha: null },
       });
     } else {
       this.state.qa = this.state.qa.filter((q) => q !== rec);
@@ -3441,7 +3441,7 @@ export class Swarm {
     const instructions = `The security review requires the latest base of this pull request. Fetch origin, reconcile the PR branch with origin/${base} (observed at ${pr.baseSha}), run the applicable checks, and push the updated PR branch. QA and security review will rerun.`;
     Object.assign(rec, {
       testedSha: pr.headSha, failedSha: pr.headSha, passedSha: null,
-      securityReview: { reason: review.reason, qaSha: null, needsReconcile: true },
+      securityReview: { reason: review.reason, qaSha: null },
     });
     this.sendBack(repo, rec, 'base', instructions, rec.mergeFixes >= MAX_MERGE_FIXES);
     if (review.approvedSha && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) {
@@ -3466,7 +3466,7 @@ export class Swarm {
       this.setQa(rec, {
         status: 'queued',
         passedSha: null,
-        securityReview: { reason: review?.reason ?? 'Requested by the PR label.', qaSha, needsReconcile: review?.needsReconcile },
+        securityReview: { reason: review?.reason ?? 'Requested by the PR label.', qaSha },
         mergeNote: 'waiting for detailed security review',
       });
       setTimeout(() => this.schedule(), 200);
@@ -3634,8 +3634,11 @@ export class Swarm {
       return;
     }
     if (rec.failedSha === pr.headSha) return this.skipUnchangedQa(a, rec, lastTester);
+    if (!rec.securityReview && hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) {
+      this.setQa(rec, { securityReview: { reason: 'Requested by the PR label.', qaSha: null } });
+    }
     const review = rec.securityReview;
-    if (review?.needsReconcile) {
+    if (review) {
       try {
         if (!pr.baseSha) throw new Error('The PR base commit is unavailable.');
         const reconciled = await this.backend.containsCommit(repo.fullName, pr.headSha, pr.baseSha);
@@ -3787,7 +3790,7 @@ export class Swarm {
         (hasLabel(pullLabels, READY_FOR_SECURITY_REVIEW) ? 'Requested by the PR label.' : '');
       const escalate = !security && pass && !!securityReason;
       if (escalate) {
-        this.setQa(rec, { securityReview: { reason: securityReason, qaSha: rec.testedSha, needsReconcile: review?.needsReconcile }, passedSha: null });
+        this.setQa(rec, { securityReview: { reason: securityReason, qaSha: rec.testedSha }, passedSha: null });
         if (!hasLabel(pullLabels, READY_FOR_SECURITY_REVIEW)) {
           await this.backend.setSecurityReviewLabel(repo.fullName, rec.prNumber, true).catch((err) => {
             this.appendLog(a, [{ kind: 'error', text: `Could not add the security review label: ${oneLine(err)}. The office will retry before starting the audit.` }]);

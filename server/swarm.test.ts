@@ -3307,13 +3307,18 @@ describe('QA rounds', () => {
       expect(rec).toMatchObject({ status: 'failed', fixReason: 'base', fixInstructions: expect.stringContaining('base-2') });
     });
 
-    it('sends an updated head back for reconciliation when it still lacks the current base', async () => {
+    it('sends the PR back when its head and base move together but the head lacks the current base', async () => {
       const tester = addAgent('q2', 'Marple', 'qa', 1);
-      const pr = { ...pull, baseSha: 'base-2', baseRefName: 'main', body: '', isCrossRepository: false };
+      const pr = { ...pull, headSha: 'sha-2', baseSha: 'base-2', baseRefName: 'main', body: '', isCrossRepository: false };
       vi.spyOn(s.backend, 'prDetails').mockResolvedValue(pr);
       const compare = vi.spyOn(s.backend, 'containsCommit').mockResolvedValue(false);
       const session = vi.spyOn(s, 'startAgentSession');
-      Object.assign(rec, { status: 'queued', securityReview: { reason: 'Changes authentication', qaSha: null, needsReconcile: true } });
+      Object.assign(rec, {
+        status: 'passed', testedSha: pull.headSha, passedSha: pull.headSha,
+        securityReview: { reason: 'Changes authentication', qaSha: pull.headSha, approvedSha: pull.headSha, auditBaseSha: 'base-1' },
+      });
+      s.reconcilePulls(repo, [pr]);
+      expect(rec.status).toBe('queued');
       await s.runQa(tester, repo, rec);
       expect(compare).toHaveBeenCalledExactlyOnceWith(repo.fullName, pr.headSha, pr.baseSha);
       expect(rec).toMatchObject({ status: 'failed', fixReason: 'base', fixInstructions: expect.stringContaining('origin/main') });
