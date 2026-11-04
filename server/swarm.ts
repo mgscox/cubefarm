@@ -448,6 +448,16 @@ const SECURITY_SCHEMA = {
 };
 const REQUIRED_AUDIT_CHECKS = ['Scoped audit coverage', 'validate-findings.cjs', 'validate-coverage-ledger.cjs'];
 
+function auditCheckProblems(checks: QaCheck[]): string[] {
+  const problems = checks.filter((c) => c.result !== 'pass').map((c) => `${c.name} (${c.result})`);
+  for (const name of REQUIRED_AUDIT_CHECKS) {
+    const matching = checks.filter((c) => c.name === name);
+    if (!matching.length) problems.push(`${name} (missing)`);
+    else if (!matching.some((c) => c.details.trim())) problems.push(`${name} (missing details)`);
+  }
+  return problems;
+}
+
 function parseReport(result: SessionResult, security = false): QaReport | null {
   let raw: unknown = result.structured;
   if (!raw && result.text) {
@@ -3787,10 +3797,10 @@ export class Swarm {
     }
 
     // Keep the desk busy until the report is recorded: uploads/comments can outlast a scheduler tick.
-    if (security && report.verdict === 'pass' && (report.checks.some((c) => c.result !== 'pass') ||
-      REQUIRED_AUDIT_CHECKS.some((name) => !report.checks.some((c) => c.name === name && c.details.trim())))) {
+    const auditProblems = security && report.verdict === 'pass' ? auditCheckProblems(report.checks) : [];
+    if (auditProblems.length) {
       report.verdict = 'incomplete';
-      report.summary = `Required audit checks were missing or did not pass. ${report.summary}`;
+      report.summary = `Required audit checks missing or not passing: ${auditProblems.join(', ')}. ${report.summary}`;
     }
     let pass = report.verdict === 'pass';
     let incomplete = report.verdict === 'incomplete';

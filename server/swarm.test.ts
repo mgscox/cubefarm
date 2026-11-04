@@ -3204,7 +3204,7 @@ describe('QA rounds', () => {
       expect(rec).toMatchObject({ status: 'queued', mergeNote: 'waiting for detailed security review' });
     });
 
-    it.each(['pass', 'fail', 'incomplete', 'missing checks', 'changed head', 'changed base', 'publication failed'] as const)('keeps merge eligibility tied to the specialist outcome: %s', async (outcome) => {
+    it.each(['pass', 'fail', 'incomplete', 'missing checks', 'skipped check', 'failed check', 'missing evidence', 'extra skipped check', 'changed head', 'changed base', 'publication failed'] as const)('keeps merge eligibility tied to the specialist outcome: %s', async (outcome) => {
       const tester = addAgent('q2', 'Marple', 'qa', 1);
       const pr = { ...pull, labels: [] as string[], baseSha: 'base-1', body: '', isCrossRepository: false };
       const details = vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pr }));
@@ -3233,13 +3233,29 @@ describe('QA rounds', () => {
       if (outcome === 'changed head') pr.headSha = 'sha-2';
       if (outcome === 'changed base') pr.baseSha = 'base-2';
       if (outcome === 'publication failed') comment.mockRejectedValueOnce(new Error('Unavailable'));
+      let checks = auditChecks;
+      if (outcome === 'missing checks') checks = auditChecks.slice(0, 1);
+      if (outcome === 'skipped check' || outcome === 'failed check') {
+        checks = auditChecks.map((c) => c.name === 'validate-findings.cjs'
+          ? { ...c, result: outcome === 'skipped check' ? 'skip' : 'fail', details: 'PASS' } : c);
+      }
+      if (outcome === 'missing evidence') checks = auditChecks.map((c) => c.name === 'validate-findings.cjs' ? { ...c, details: '  ' } : c);
+      if (outcome === 'extra skipped check') checks = [...auditChecks, { name: 'Additional audit check', result: 'skip', details: 'Not run' }];
       await s.onQaFinished(tester, repo, result(true, {
         verdict: outcome === 'incomplete' || outcome === 'fail' ? outcome : 'pass', summary: 'Audit report',
-        checks: outcome === 'missing checks' ? auditChecks.slice(0, 1) : auditChecks,
+        checks,
       }));
       if (outcome !== 'pass') {
         expect(label).toHaveBeenCalledTimes(1);
         expect(rec.status).toBe(outcome === 'changed head' ? 'queued' : outcome === 'fail' || outcome === 'changed base' ? 'failed' : 'needs-human');
+        if (outcome === 'skipped check') expect(rec).toMatchObject({
+          summary: 'Required audit checks missing or not passing: validate-findings.cjs (skip). Audit report',
+          mergeNote: 'Required audit checks missing or not passing: validate-findings.cjs (skip). Audit report',
+        });
+        if (outcome === 'missing checks') expect(rec.summary).toBe('Required audit checks missing or not passing: validate-findings.cjs (missing), validate-coverage-ledger.cjs (missing). Audit report');
+        if (outcome === 'failed check') expect(rec.summary).toContain('validate-findings.cjs (fail)');
+        if (outcome === 'missing evidence') expect(rec.summary).toContain('validate-findings.cjs (missing details)');
+        if (outcome === 'extra skipped check') expect(rec.summary).toContain('Additional audit check (skip)');
         if (outcome === 'changed base') expect(rec).toMatchObject({ fixReason: 'base', fixInstructions: expect.stringContaining('base-2') });
         await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('requires a passing security review');
         expect(merge).not.toHaveBeenCalled();
