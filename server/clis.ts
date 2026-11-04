@@ -476,7 +476,23 @@ export function readClaudeTurn(cwd: string, sessionId: string, home = os.homedir
 
 // ---------- prompts the office answers ----------
 
-const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|trust this folder|allow Codex to work in this folder/i;
+const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|^[ \t]*(?:Do you )?trust this folder\b|allow Codex to work in this folder/im;
+const HOOK_REVIEW_PROMPT = /Hooks need review/i;
+
+/** The sole selection below the latest question; partial or ambiguous menus need another screen redraw. */
+export function selectedOption(screen: string, question: RegExp): string | null {
+  const last = [...screen.matchAll(new RegExp(question.source, question.flags.replace('g', '') + 'g'))].at(-1);
+  if (!last) return null;
+  const below = screen.indexOf('\n', last.index + last[0].length);
+  if (below < 0) return null;
+  const markers = [...screen.slice(below + 1).matchAll(/^[ \t]*[❯›][ \t]*(?:\d+\.[ \t]*)?([^\n]*)$/gm)];
+  return markers.length === 1 ? markers[0][1].trim() || null : null;
+}
+
+/** Keep follow-up text out of a startup menu, even before its selection marker has been drawn. */
+export function startupQuestionOnScreen(screen: string): boolean {
+  return TRUST_PROMPT.test(screen) || HOOK_REVIEW_PROMPT.test(screen);
+}
 
 /**
  * The key that moves a CLI's folder-trust question toward trusting the office's own worktree: Enter when the
@@ -484,8 +500,7 @@ const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|o
  * question on screen.
  */
 export function trustKey(screen: string): 'enter' | 'down' | null {
-  if (!TRUST_PROMPT.test(screen)) return null;
-  const selected = screen.match(/^\s*[❯›]\s*(?:\d+\.\s*)?(.+)$/m)?.[1] ?? '';
+  const selected = selectedOption(screen, TRUST_PROMPT) ?? '';
   if (/^(yes|trust|continue|proceed)\b/i.test(selected.trim())) return 'enter';
   if (/^(no|exit|quit|cancel)\b/i.test(selected.trim())) return 'down';
   return null;
@@ -555,8 +570,8 @@ function screenWatch<T>(reason: (screen: string) => T | null, limitMs: number, n
  * manager's call (once, in /hooks): the office moves to "Continue without trusting" (Down) and takes it (Enter).
  */
 export function hookReviewKey(screen: string): 'enter' | 'down' | null {
-  if (!/Hooks need review/i.test(screen)) return null;
-  const selected = screen.match(/^\s*[❯›]\s*(?:\d+\.\s*)?(.+)$/m)?.[1] ?? '';
+  const selected = selectedOption(screen, HOOK_REVIEW_PROMPT);
+  if (!selected) return null;
   return /^continue without trusting/i.test(selected.trim()) ? 'enter' : 'down';
 }
 

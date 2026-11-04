@@ -5,7 +5,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, cliStartupFailed, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, cliStartupFailed, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, selectedOption, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
 
@@ -33,6 +33,28 @@ describe('unwrapCmdShim', () => {
   });
 });
 
+describe('selectedOption', () => {
+  const question = /Trust this folder\?/i;
+
+  it('reads the sole marker below the question, ignoring the earlier prompt', () => {
+    expect(selectedOption('❯ old prompt\nTrust this folder?\n› 1. Yes, continue\n  2. No, quit', question)).toBe('Yes, continue');
+  });
+
+  it.each(['❯ Yes\n› No', 'Yes\nNo', '❯ \n  Yes'])('waits for an unambiguous, nonempty selection (%s)', (menu) => {
+    expect(selectedOption(`Trust this folder?\n${menu}`, question)).toBeNull();
+  });
+
+  it('uses only the last occurrence of the question', () => {
+    expect(selectedOption('Trust this folder?\n❯ No\nTRUST THIS FOLDER?\n❯ Yes', question)).toBe('Yes');
+    expect(selectedOption('Trust this folder?\n❯ No\nTrust this folder?\n  Yes', question)).toBeNull();
+  });
+
+  it('requires a question and a selection on a later line', () => {
+    expect(selectedOption('❯ Yes', question)).toBeNull();
+    expect(selectedOption('Trust this folder? ❯ Yes', question)).toBeNull();
+  });
+});
+
 describe('trustKey', () => {
   it("moves Claude Code's trust question off its default \"No, exit\", then confirms \"Yes\"", () => {
     const question = (selected: 'no' | 'yes') =>
@@ -57,6 +79,16 @@ describe('trustKey', () => {
   it('leaves every other screen alone', () => {
     expect(trustKey('❯ Try "refactor <filepath>"')).toBeNull();
   });
+
+  it('ignores a stale prompt above the trust question', () => {
+    expect(trustKey('❯ No, keep working\nDo you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit')).toBe('enter');
+  });
+
+  it('uses the latest trust question and waits for a single selection', () => {
+    expect(trustKey('Do you trust this folder?\n❯ No\nDo you trust this folder?\n❯ Yes')).toBe('enter');
+    expect(trustKey('Do you trust this folder?\n❯ Yes\n› No')).toBeNull();
+    expect(trustKey('Do you trust this folder?\n  Yes\n  No')).toBeNull();
+  });
 });
 
 describe('hookReviewKey', () => {
@@ -67,6 +99,13 @@ describe('hookReviewKey', () => {
     expect(hookReviewKey(review(1))).toBe('down');
     expect(hookReviewKey(review(3))).toBe('enter');
     expect(hookReviewKey('› Ask Codex to do anything')).toBeNull();
+  });
+
+  it('ignores earlier prompts and waits for a single selection under the latest question', () => {
+    expect(hookReviewKey(`› old prompt\n${review(3)}`)).toBe('enter');
+    expect(hookReviewKey(`${review(1)}\n${review(3)}`)).toBe('enter');
+    expect(hookReviewKey('Hooks need review\n› Review hooks\n❯ Trust all')).toBeNull();
+    expect(hookReviewKey('Hooks need review\n  Review hooks')).toBeNull();
   });
 });
 

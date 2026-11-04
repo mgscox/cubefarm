@@ -94,6 +94,84 @@ describe('startCliSession on a host', () => {
   const errors = (cb: SessionCallbacks) => vi.mocked(cb.log).mock.calls.flat(2).filter((e) => e.kind === 'error').map((e) => e.text);
   const turn = (t: Partial<ClaudeTurn>): ClaudeTurn => ({ bytes: 100, ended: false, mark: '', text: '', ...t });
 
+  const startupMenus = [
+    { cli: 'claude' as const, question: 'Do you trust this folder?', no: '❯ No, exit\n  Yes, I trust this folder', yes: '  No, exit\n❯ Yes, I trust this folder' },
+    { cli: 'codex' as const, question: 'Hooks need review', no: '› 1. Review hooks\n  3. Continue without trusting', yes: '  1. Review hooks\n› 3. Continue without trusting' },
+  ];
+
+  it.each(startupMenus)('holds a follow-up while $question is showing, including an incomplete menu', async ({ cli, question, no, yes }) => {
+    let screen = '❯';
+    const first = claude(() => screen, () => null, { cli, keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(0); // Codex unarchives its thread before starting.
+    first.hook({ hook_event_name: cli === 'claude' ? 'Stop' : 'TurnComplete', session_id: 'sess-1', input: 'Fix #12', last_assistant_message: 'Done' });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(first.cb.finished).toHaveBeenCalled();
+    screen = `❯ older prompt\n${question}`;
+    pty.write.mockClear();
+    const next = first.again({ cli, prompt: 'Follow up', keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pty.write).not.toHaveBeenCalled();
+    screen += `\n${no}`;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pty.write).toHaveBeenLastCalledWith('\x1b[B');
+    screen = `${question}\n${yes}`;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pty.write).toHaveBeenLastCalledWith('\r');
+    pty.write.mockClear();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pty.write).not.toHaveBeenCalled();
+    screen = '❯';
+    await vi.advanceTimersByTimeAsync(1150);
+    expect(pty.write.mock.calls).toEqual([['\x1b[200~Follow up\x1b[201~'], ['\r']]);
+    next.session.stop();
+    pty.write.mockClear();
+    screen = `${question}\n${yes}`;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(pty.write).not.toHaveBeenCalled();
+  });
+
+  it.each(startupMenus)('answers $question in a CLI re-adopted after restart without sending a prompt', async ({ cli, question, yes }) => {
+    const meta = { agentId: 'ada', cli, token: 'restart-menu', dir: 'sessions/t', busy: true, resumeId: 'sess-1' };
+    const term = { ...terminal(), screen: () => `❯ old prompt\n${question}\n${yes}` } as unknown as AgentTerminal;
+    const h = { ...host(vi.fn()), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+    await reconnectClis(() => term, h);
+    pty.write.mockClear();
+    const session = startCliSession({ ...opts, cli, terminal: term, reattach: true, resumeSessionId: 'sess-1' }, callbacks(), h);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pty.write.mock.calls).toEqual([['\r']]);
+    session.stop();
+  });
+
+  it('keeps a queued follow-up alive during the preceding turn\'s finish grace', async () => {
+    let screen = '❯';
+    const first = claude(() => screen, () => null, { keepAlive: true });
+    first.hook({ hook_event_name: 'Stop', last_assistant_message: 'Done' });
+    screen = 'Do you trust this folder?';
+    pty.write.mockClear();
+    first.session.send('Follow up');
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(first.cb.finished).not.toHaveBeenCalled();
+    expect(pty.write).not.toHaveBeenCalled();
+    screen = '❯';
+    await vi.advanceTimersByTimeAsync(1150);
+    expect(pty.write.mock.calls).toEqual([['\x1b[200~Follow up\x1b[201~'], ['\r']]);
+    first.session.stop();
+  });
+
+  it('sends queued follow-ups in order when another arrives just after the question disappears', async () => {
+    let screen = 'Do you trust this folder?';
+    const first = claude(() => screen, () => null);
+    pty.write.mockClear();
+    first.session.send('First');
+    screen = '❯';
+    first.session.send('Second');
+    await vi.advanceTimersByTimeAsync(2150);
+    expect(pty.write.mock.calls).toEqual([
+      ['\x1b[200~First\x1b[201~'], ['\r'], ['\x1b[200~Second\x1b[201~'], ['\r'],
+    ]);
+    first.session.stop();
+  });
+
   it.each(['hook', 'key'])('gives a Codex refusal another quiet interval after a %s', async (activity) => {
     const { cb, term, hook } = claude(() => "ⓘ This content can't be shown\n› Ask Codex to do anything", () => null, { cli: 'codex' });
     await vi.advanceTimersByTimeAsync(STUCK_MS - 30_000);
