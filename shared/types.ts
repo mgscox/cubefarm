@@ -45,6 +45,8 @@ export interface PullInfo {
   labels?: string[];
   url: string;
   headRefName: string;
+  /** From a fork: its bare branch name may match one of the office's desk branches. */
+  isCrossRepository?: boolean;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   isDraft: boolean;
   mergeable: string; // MERGEABLE | CONFLICTING | UNKNOWN

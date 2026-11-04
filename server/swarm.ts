@@ -2397,7 +2397,7 @@ export class Swarm {
     for (const pr of pulls) {
       if (pr.state !== 'OPEN' || ((pr.isDraft || !pr.headRefName.startsWith('swarm/')) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW))) continue;
       if (this.state.qa.some((q) => q.repoId === repo.id && q.prNumber === pr.number)) continue;
-      const dev = this.state.agents.find((a) => (a.role === 'dev' || a.role === 'researcher') && a.task !== 'qa' && (a.prNumber === pr.number || a.branch === pr.headRefName) && (a.repoId === repo.id || a.id === RESEARCHER_ID));
+      const dev = this.state.agents.find((a) => (a.role === 'dev' || a.role === 'researcher') && a.task !== 'qa' && (a.prNumber === pr.number || (!pr.isCrossRepository && a.branch === pr.headRefName)) && (a.repoId === repo.id || a.id === RESEARCHER_ID));
       if (isResearchBranch(pr.headRefName) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) this.skipQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null, pr.headSha || null);
       else {
         const rec = this.queueQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null);

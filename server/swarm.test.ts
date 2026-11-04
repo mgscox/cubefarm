@@ -341,7 +341,24 @@ describe('developer scores', () => {
       }
     });
 
+    it('fork: the periodic refresh queues a cross-repository PR on a same-named branch with no owner', async () => {
+      Object.assign(dev(), { prNumber: null }); // demo PR numbers run on across tests
+      const eve = claimant();
+      const fork = demoForkPull(repo.fullName, String(eve.branch));
+      try {
+        const { pulls } = await s.backend.listPulls(repo.fullName);
+        const listed = pulls.find((p) => p.number === fork.pull.number)!;
+        s.reconcilePulls(repo, [listed]);
+        expect(s.state.qa.find((q) => q.prNumber === listed.number)).toMatchObject({ devAgentId: null });
+        s.reconcilePulls(repo, [{ ...listed, state: 'MERGED', mergedAt: '2026-11-04' }]);
+        expect(eve.score).toBe(0);
+      } finally {
+        fork.remove();
+      }
+    });
+
     it.each([true, false])('send to QA credits a desk by branch name only for a same-repo PR (fork: %s)', async (fromFork) => {
+      Object.assign(dev(), { prNumber: null }); // demo PR numbers run on across tests
       const eve = claimant();
       const fork = demoForkPull(repo.fullName, String(eve.branch));
       try {
