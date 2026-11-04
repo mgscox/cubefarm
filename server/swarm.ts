@@ -2362,8 +2362,9 @@ export class Swarm {
   private reconcilePulls(repo: PersistedRepo, pulls: PullInfo[]) {
     for (const pr of pulls.filter((p) => p.state === 'MERGED')) {
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === pr.number);
-      const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && a.prNumber === pr.number);
-      this.recordFeedback({ kind: 'merged', repoId: repo.id, prNumber: pr.number, devAgentId: rec ? rec.devAgentId : dev?.id ?? null });
+      const owner = this.state.agents.find((a) => a.id === rec?.devAgentId && a.role === 'dev' && a.repoId === repo.id);
+      const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && a.prNumber === pr.number && a.branch === pr.headRefName);
+      this.recordFeedback({ kind: 'merged', repoId: repo.id, prNumber: pr.number, devAgentId: owner?.id ?? dev?.id ?? null });
     }
     for (const a of this.state.agents) {
       if (a.repoId !== repo.id || (a.role !== 'dev' && a.role !== 'researcher') || a.prNumber == null || BUSY.includes(a.status) || a.status === 'idle') continue;
@@ -3300,24 +3301,28 @@ export class Swarm {
     this.toast('error', `${a.name} hit a problem on ${what}: ${a.lastError.slice(0, 120)}`);
   }
 
+  /** Session text can cite any PR; only an open PR on the office-issued branch establishes ownership. */
+  private async openPullForBranch(repo: PersistedRepo, branch: string): Promise<PrDetails | null> {
+    const pr = await this.backend.prForBranch(repo.fullName, branch);
+    if (!pr) return null;
+    const details = await this.backend.prDetails(repo.fullName, pr.number);
+    return details.state === 'OPEN' && details.headRefName === branch ? details : null;
+  }
+
   /** `released`: the clean-up of the desk the session just left, which a session started on that desk must wait for. */
   private async onIssueFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, released: Promise<void>, generation: number | undefined) {
     // Every await below can outlive this task: the manager may clear it, assign another or send a follow-up meanwhile.
     const gone = () => !this.state.agents.includes(a) || this.officeUpdate.handedOver || this.agentRt.get(a.id)?.generation !== generation;
     let prKnown = true;
-    const escaped = repo.fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const m = result.text.match(new RegExp(`https://github\\.com/${escaped}/pull/(\\d+)`, 'i'));
-    if (m) {
-      a.prNumber = Number(m[1]);
-      a.prUrl = m[0];
-    } else if (a.branch) {
-      const pr = await this.backend.prForBranch(repo.fullName, a.branch).catch(() => undefined);
+    if (a.branch) {
+      const pr = await this.openPullForBranch(repo, a.branch).catch(() => undefined);
       if (gone()) return;
+      a.prNumber = null;
+      a.prUrl = null;
       if (pr === undefined) {
         prKnown = false;
-        this.appendLog(a, [{ kind: 'error', text: 'PR lookup unavailable; no-work detection skipped.' }]);
-      }
-      if (pr) {
+        this.appendLog(a, [{ kind: 'error', text: 'PR lookup unavailable; session PR claim not trusted.' }]);
+      } else if (pr) {
         a.prNumber = pr.number;
         a.prUrl = pr.url;
       }
@@ -3379,7 +3384,7 @@ export class Swarm {
     this.appendLog(a, [{ kind: 'done', text: `✔ Finished in ${this.minutes(a)}m · ${a.turns} turns${a.prNumber ? ` · PR #${a.prNumber}` : ' · no PR found'}` }]);
     const failedEarly = a.prNumber ? this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber && ['failed', 'needs-human', 'fixing'].includes(q.status)) : undefined;
     if (failedEarly) {
-      if (failedEarly.status !== 'fixing' && (!failedEarly.devAgentId || failedEarly.devAgentId === a.id)) {
+      if (a.role === 'dev' && failedEarly.status !== 'fixing' && (!failedEarly.devAgentId || failedEarly.devAgentId === a.id)) {
         this.setQa(failedEarly, { devAgentId: a.id, devSessionId: a.sessionId ?? failedEarly.devSessionId });
       }
       this.appendLog(a, [{ kind: 'system', text: `📨 QA findings for PR #${a.prNumber} are retained for its fix.` }]);
@@ -3515,7 +3520,12 @@ export class Swarm {
     let rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === prNumber);
     if (rec) {
       if (rec.status === 'testing') return rec;
-      this.setQa(rec, { status: 'queued', devAgentId: dev?.id ?? rec.devAgentId, devSessionId: dev?.sessionId ?? rec.devSessionId });
+      const owner = !rec.devAgentId && dev?.role === 'dev' ? dev : null;
+      this.setQa(rec, {
+        status: 'queued',
+        devAgentId: rec.devAgentId ?? owner?.id ?? null,
+        devSessionId: owner || dev?.id === rec.devAgentId ? dev?.sessionId ?? rec.devSessionId : rec.devSessionId,
+      });
     } else {
       rec = {
         repoId: repo.id,
@@ -5622,8 +5632,9 @@ export class Swarm {
       this.postMessage('office', `⚠️ ${a.name} hit a problem researching "${job.topic}": ${a.lastError.slice(0, 240)}`);
     } else {
       let where = researchFiledAt(result.text, { fullName: repo?.fullName, folder: RESEARCH_DIR });
-      if (repo && a.branch && !where.startsWith('https://')) where = (await this.backend.prForBranch(repo.fullName, a.branch).catch(() => null))?.url ?? where;
-      const pr = repo && where.startsWith('https://') ? Number(where.split('/').pop()) : null;
+      const own = repo && a.branch ? await this.openPullForBranch(repo, a.branch).catch(() => null) : null;
+      if (own) where = own.url;
+      const pr = own?.number ?? null;
       if (repo && pr) {
         Object.assign(a, { prNumber: pr, prUrl: where });
         this.skipQa(repo, pr, a, null, null);

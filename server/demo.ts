@@ -878,7 +878,10 @@ export function createDemoBackend(): Backend {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
       if (pr) pr.state = 'CLOSED';
     },
-    prForBranch: async () => null,
+    prForBranch: async (fullName, branch) => {
+      const pr = repos.get(fullName)?.pulls.find((p) => p.headRefName === branch);
+      return pr ? { number: pr.number, url: pr.url } : null;
+    },
     branchAhead: async () => 0, // the fake sessions always open their PR
     containsCommit: async () => true,
     prDetails: async (fullName, number) => {

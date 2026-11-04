@@ -44,10 +44,12 @@ interface Internals {
   officeTools(): OfficeTools;
   startPipelineWork(repo: Repo): boolean;
   advanceMerge(repo: Repo, rec: QaRec, pull: PullInfo): Promise<boolean>;
+  queueQa(repo: Repo, prNumber: number, dev: unknown, issueNumber: number | null): QaRec;
   runQa(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   runFix(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   recordFinished(agent: unknown, repo: Repo, result: SessionResult, generation: undefined, session: undefined): Promise<void>;
   onQaFinished(agent: unknown, repo: Repo, result: SessionResult, released?: Promise<void>): Promise<void>;
+  recordResearchFinished(agent: unknown, job: unknown, repo: Repo, result: SessionResult): Promise<void>;
   onIssueFinished(agent: unknown, repo: Repo, result: SessionResult, released: Promise<void>, generation: number | undefined): Promise<void>;
   onFixFinished(agent: unknown, repo: Repo, result: SessionResult): Promise<void>;
   postMessage(from: string, text: string): void;
@@ -155,7 +157,7 @@ describe('developer scores', () => {
   });
 
   it.each(['CLOSED', 'MERGED'] as const)('handles %s desk reconciliation without rewarding testers or other roles', (state) => {
-    Object.assign(dev(), { prNumber: 13, task: 'issue', status: 'done' });
+    Object.assign(dev(), { prNumber: 13, task: 'issue', status: 'done', branch: pull.headRefName });
     s.reconcilePulls(repo, [{ ...pull, state }]);
     expect(dev().score).toBe(state === 'MERGED' ? 2 : 0);
     expect(dev().prNumber).toBeNull();
@@ -184,6 +186,143 @@ describe('developer scores', () => {
     setIssues(issue(66, ['swarm:server']));
     expect(s.startIssueWork(repo)).toBe(true);
     expect(runTask).toHaveBeenCalledWith(higher, repo, expect.objectContaining({ number: 66 }), undefined);
+  });
+
+  describe('PR attribution', () => {
+    const url = (number: number) => `https://github.com/${repo.fullName}/pull/${number}`;
+    const details = (pr: PullInfo) => ({ ...pr, url: url(pr.number), body: '', isCrossRepository: false });
+    const finish = (agent: Record<string, unknown>, number: number) => s.onIssueFinished(agent, repo,
+      { ok: true, text: url(number), errors: [], costUsd: 0, turns: 1 }, Promise.resolve(), undefined);
+    const claimant = (role: 'dev' | 'researcher' = 'dev') => {
+      const hired = swarm.hireAgent(repo.id, { name: 'Eve', role });
+      return Object.assign(s.state.agents.find((a) => a.id === hired.id)!, {
+        status: 'working', task: 'issue', issueNumber: 67, branch: 'swarm/issue-67-eve',
+      });
+    };
+    beforeEach(() => {
+      Object.assign(repo, { defaultBranch: 'main' });
+      Object.assign(dev(), { status: 'done', task: 'issue', prNumber: 13, branch: pull.headRefName });
+      vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+      vi.spyOn(s.backend, 'prForBranch').mockResolvedValue(null);
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue(details({ ...pull, state: 'OPEN' }));
+    });
+
+    it('steal: a teammate PR URL cannot re-point QA or take its merge reward', async () => {
+      const rec = { ...qa(), status: 'queued' as const };
+      s.state.qa.push(rec);
+      const eve = claimant();
+      await finish(eve, 13);
+      expect(eve.prNumber).toBeNull();
+      expect(rec.devAgentId).toBe('a1');
+      s.reconcilePulls(repo, [pull]);
+      expect(dev().score).toBe(2);
+      expect(eve.score).toBe(0);
+    });
+
+    it.each(['MERGED', 'CLOSED'] as const)('farm: an already %s PR cannot mint a crediting record, even on the issued branch', async (state) => {
+      s.state.qa.push(qa());
+      const eve = claimant();
+      vi.mocked(s.backend.prForBranch).mockResolvedValue({ number: 3, url: url(3) });
+      vi.mocked(s.backend.prDetails).mockResolvedValue(details({ ...pull, number: 3, state, headRefName: String(eve.branch) }));
+      await finish(eve, 3);
+      expect(eve.prNumber).toBeNull();
+      expect(s.state.qa.some((q) => q.prNumber === 3)).toBe(false);
+      await (s as unknown as { pruneUnlistedQa(repo: Repo, pulls: PullInfo[]): Promise<void> }).pruneUnlistedQa(repo, [{ ...pull, state: 'OPEN' }]);
+      s.reconcilePulls(repo, [pull]);
+      expect(dev().score).toBe(2);
+      expect(eve.score).toBe(0);
+    });
+
+    it('deny: a researcher cannot fill an unknown author and suppress the actual author reward', async () => {
+      const rec = { ...qa(), devAgentId: null, status: 'failed' as const };
+      s.state.qa.push(rec);
+      const eve = claimant('researcher');
+      await finish(eve, 13);
+      expect(eve.prNumber).toBeNull();
+      expect(rec.devAgentId).toBeNull();
+      s.reconcilePulls(repo, [pull]);
+      expect(dev().prNumber).toBeNull();
+      expect(dev().score).toBe(2);
+      expect(eve.score).toBe(0);
+      s.reconcilePulls(repo, [pull]);
+      expect(dev().score).toBe(2);
+    });
+
+    it('researcher-first: a foreign report URL cannot claim QA before the author finishes', async () => {
+      const eve = claimant('researcher');
+      Object.assign(dev(), { status: 'working', prNumber: null });
+      await s.recordResearchFinished(eve, { topic: 'Research brief' }, repo,
+        { ok: true, text: url(13), errors: [], costUsd: 0, turns: 1 });
+      expect(eve.prNumber).toBeNull();
+      expect(s.state.qa).toEqual([]);
+      vi.mocked(s.backend.prForBranch).mockResolvedValue({ number: 13, url: url(13) });
+      await finish(dev(), 13);
+      expect(s.state.qa[0]).toMatchObject({ prNumber: 13, devAgentId: 'a1' });
+      s.clearTask(dev());
+      s.reconcilePulls(repo, [pull]);
+      expect(dev().score).toBe(2);
+      expect(eve.score).toBe(0);
+    });
+
+    it('still files research from its verified branch when the report cites another PR', async () => {
+      const eve = claimant('researcher');
+      vi.mocked(s.backend.prForBranch).mockResolvedValue({ number: 14, url: url(14) });
+      vi.mocked(s.backend.prDetails).mockResolvedValue(details({ ...pull, number: 14, state: 'OPEN', headRefName: String(eve.branch) }));
+      await s.recordResearchFinished(eve, { topic: 'Research brief' }, repo,
+        { ok: true, text: url(13), errors: [], costUsd: 0, turns: 1 });
+      expect(eve.prNumber).toBe(14);
+      expect(s.state.qa[0]).toMatchObject({ prNumber: 14, devAgentId: eve.id, status: 'passed' });
+    });
+
+    it('does not attach a legacy researcher desk to an author-less failed record', async () => {
+      const rec = { ...qa(), devAgentId: null, status: 'failed' as const };
+      s.state.qa.push(rec);
+      const eve = claimant('researcher');
+      Object.assign(eve, { branch: null, prNumber: 13 });
+      await finish(eve, 13);
+      expect(rec.devAgentId).toBeNull();
+      s.reconcilePulls(repo, [pull]);
+      expect(dev().score).toBe(2);
+      expect(eve.score).toBe(0);
+    });
+
+    it.each(['queued', 'passed', 'failed', 'needs-human', 'fixing', 'testing'] as const)('queueQa preserves another developer attribution in status %s', (status) => {
+      const rec = { ...qa(), status };
+      s.state.qa.push(rec);
+      s.queueQa(repo, 13, claimant(), 67);
+      expect(rec.devAgentId).toBe('a1');
+    });
+
+    it('queueQa leaves an unknown developer unset when a researcher adopts it', () => {
+      const rec = { ...qa(), status: 'queued' as const, devAgentId: null };
+      s.state.qa.push(rec);
+      s.queueQa(repo, 13, claimant('researcher'), 67);
+      expect(rec.devAgentId).toBeNull();
+    });
+
+    it('uses the open PR on the issued branch even when the message cites another PR', async () => {
+      Object.assign(dev(), { status: 'working', prNumber: null });
+      vi.mocked(s.backend.prForBranch).mockResolvedValue({ number: 13, url: url(13) });
+      await finish(dev(), 3);
+      expect(dev().prNumber).toBe(13);
+      expect(s.state.qa[0]).toMatchObject({ prNumber: 13, devAgentId: 'a1' });
+      s.reconcilePulls(repo, [pull]);
+      expect(dev().score).toBe(2);
+    });
+
+    it.each(['unavailable', 'details unavailable', 'wrong branch'] as const)('does not trust a session PR claim when verification is %s', async (failure) => {
+      Object.assign(dev(), { status: 'working', prNumber: null });
+      vi.mocked(s.backend.prForBranch).mockResolvedValue({ number: 13, url: url(13) });
+      if (failure === 'unavailable') vi.mocked(s.backend.prForBranch).mockRejectedValue(new Error('offline'));
+      else if (failure === 'details unavailable') vi.mocked(s.backend.prDetails).mockRejectedValue(new Error('offline'));
+      else vi.mocked(s.backend.prDetails).mockResolvedValue(details({ ...pull, state: 'OPEN', headRefName: 'another-branch' }));
+      vi.spyOn(swarm, 'message').mockResolvedValue(undefined as never);
+      await finish(dev(), 13);
+      expect(dev().prNumber).toBeNull();
+      expect(s.state.qa).toEqual([]);
+      s.reconcilePulls(repo, [pull]);
+      expect(dev().score).toBe(0);
+    });
   });
 
   it.each([false, true])('loads scores and event identities across restart (legacy: %s)', async (legacy) => {
@@ -4007,6 +4146,8 @@ describe('manual office closure', () => {
   });
 
   it('records developer results and queues QA, waiting for cleanup and disk before reporting safe', async () => {
+    vi.spyOn(s.backend, 'prForBranch').mockResolvedValue({ number: 13, url: 'https://github.com/demo-co/pixel-todo/pull/13' });
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ number: 13, url: 'https://github.com/demo-co/pixel-todo/pull/13', state: 'OPEN', headRefName: 'swarm/issue-66-ada' } as never);
     await swarm.assign('a1', 66);
     await drain();
     await swarm.closeOffice();
