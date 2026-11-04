@@ -134,7 +134,8 @@ export function StatsProbe({ paused }: { paused: boolean }) {
     // gl.info holds the previous frame's totals (shadow passes included) until this frame renders.
     const { calls, triangles } = gl.info.render;
     const fps = (a.frames * 1000) / elapsed;
-    readoutEl.textContent = `${Math.round(fps)} fps · ${(elapsed / a.frames).toFixed(1)} ms · ${calls} calls · ${fmt(triangles)} tris · dpr ${gl.getPixelRatio().toFixed(2)}`;
+    // Geometries on the GPU: should come back down after leaving a floor, or something isn't freeing its buffers.
+    readoutEl.textContent = `${Math.round(fps)} fps · ${(elapsed / a.frames).toFixed(1)} ms · ${calls} calls · ${fmt(triangles)} tris · ${gl.info.memory.geometries} geo · dpr ${gl.getPixelRatio().toFixed(2)}`;
     a.start = now;
     a.frames = 0;
   });
