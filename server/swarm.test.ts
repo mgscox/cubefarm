@@ -3752,6 +3752,7 @@ describe('fixes across office restarts', () => {
     const fixing = s.runFix(dev, repo, rec);
     await Promise.resolve();
     expect(dev).toMatchObject({ status: 'preparing', task: 'fix', sessionId: null });
+    await vi.waitFor(() => expect(prepared).toBeTypeOf('function')); // after the open-PR check
     prepared('/fake-desk');
     await fixing;
     expect(start.mock.calls[0][5]).toBe('dev-session');
@@ -4918,5 +4919,111 @@ describe('approved Idea blockers', () => {
     expect(ready()).toEqual([60]);
     await swarm.assign('a1', 61);
     expect(runTask.mock.calls[0][2].number).toBe(61);
+  });
+});
+
+describe('closed work', () => {
+  type Closing = Omit<Internals, 'agentRt'> & {
+    stopClosedWork(repo: Repo, issues: IssueInfo[] | null, pulls: PullInfo[]): Promise<void>;
+    agentRt: Map<string, { log: { text: string }[]; session?: { stop(): void } | null }>;
+  };
+  let c: Closing;
+  let stop: Mock;
+  const closedPull = (number: number, state: PullInfo['state'] = 'CLOSED') => ({ number, state } as PullInfo);
+  const tracked = (number: number, state: 'OPEN' | 'CLOSED', labels: string[] = []): TrackedIssue => ({ repo: 'demo-co/pixel-todo', number, url: '', title: '', body: '', labels, state });
+  const rec = (patch: Partial<QaRec> = {}) => ({
+    repoId: repo.id, prNumber: 12, status: 'testing', round: 1, sessionFailures: 0, devAgentId: null, qaAgentId: 'a1',
+    summary: null, checks: [], commentUrl: null, mergeNote: null, updatedAt: 0, ...patch,
+  }) as QaRec;
+
+  beforeEach(() => {
+    c = s as unknown as Closing;
+    stop = vi.fn();
+    c.agentRt.get('a1')!.session = { stop };
+    Object.assign(s.state.agents[0], { status: 'working', task: 'issue', issueNumber: 7, branch: 'swarm/issue-7-ada', prNumber: null });
+  });
+  const log = () => c.agentRt.get('a1')!.log.map((e) => e.text).join('\n');
+
+  it('stops a busy developer whose issue closed and clears the desk', async () => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+    const messages = vi.spyOn(s, 'postMessage');
+    await c.stopClosedWork(repo, [issue(8)], []);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null, issueNumber: null, branch: null });
+    expect(log()).toContain('Stopped: issue #7 was closed');
+    expect(messages).toHaveBeenCalledWith('office', expect.stringContaining('Stopped Ada'));
+  });
+
+  it.each([['still open past the listing cap', tracked(7, 'OPEN')], ['held for publication', tracked(7, 'CLOSED', ['held-for-publication'])]])('leaves an issue %s', async (_, read) => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue(read);
+    await c.stopClosedWork(repo, [], []);
+    expect(stop).not.toHaveBeenCalled();
+    expect(s.state.agents[0]).toMatchObject({ status: 'working', issueNumber: 7 });
+  });
+
+  it('stops QA on a PR closed unmerged, keeping a record that holds a security review', async () => {
+    Object.assign(s.state.agents[0], { task: 'qa', prNumber: 12 });
+    const reviewed = rec({ securityReview: { reason: 'Auth', qaSha: 'sha' } } as Partial<QaRec>);
+    s.state.qa.push(reviewed, rec({ prNumber: 14, qaAgentId: 'q2' }));
+    await c.stopClosedWork(repo, null, [closedPull(12)]);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(s.state.qa[0]).toMatchObject({ prNumber: 12, closed: true, status: 'queued', qaAgentId: null, securityReview: { qaSha: null } });
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
+  });
+
+  it('drops a fixing record without a security review', async () => {
+    Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+    s.state.qa.push(rec({ status: 'fixing', devAgentId: 'a1', qaAgentId: null }));
+    await c.stopClosedWork(repo, null, [closedPull(12)]);
+    expect(s.state.qa).toEqual([]);
+  });
+
+  it('leaves CEO-parked and merged PRs alone', async () => {
+    Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+    repo.parkedBranches = [{ issueNumber: 7, prNumber: 12, branch: 'swarm/issue-7-ada' }];
+    await c.stopClosedWork(repo, null, [closedPull(12)]);
+    repo.parkedBranches = [];
+    await c.stopClosedWork(repo, [], [closedPull(12, 'MERGED')]);
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  describe('before a desk is prepared', () => {
+    const actual = () => new Swarm(s.backend) as unknown as Internals;
+    beforeEach(() => {
+      Object.assign(repo, { defaultBranch: 'main', links: [] });
+      c.agentRt.get('a1')!.session = null;
+    });
+
+    it('refuses a closed issue and logs why', async () => {
+      vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+      const prepare = vi.spyOn(s, 'prepare');
+      s.repoRt.get(repo.id)!.issues = [issue(7)];
+      Object.assign(s.state.agents[0], { status: 'preparing' });
+      await actual().runTask.call(s, s.state.agents[0], repo, issue(7));
+      expect(prepare).not.toHaveBeenCalled();
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
+      expect(s.repoRt.get(repo.id)!.issues).toEqual([]);
+      expect(log()).toContain('Not starting: issue #7 is closed');
+    });
+
+    it('goes ahead when the issue cannot be read', async () => {
+      vi.spyOn(s.backend, 'readIssue').mockRejectedValue(new Error('offline'));
+      const prepare = vi.spyOn(s, 'prepare').mockResolvedValue('');
+      Object.assign(s.state.agents[0], { status: 'preparing' });
+      await actual().runTask.call(s, s.state.agents[0], repo, issue(7));
+      expect(prepare).toHaveBeenCalledOnce();
+    });
+
+    it('refuses a fix for a closed PR and drops its record', async () => {
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ state: 'CLOSED' } as Awaited<ReturnType<Backend['prDetails']>>);
+      const prepare = vi.spyOn(s, 'prepare');
+      const record = rec({ status: 'failed', devAgentId: 'a1', qaAgentId: null });
+      s.state.qa.push(record);
+      await s.runFix(s.state.agents[0], repo, record);
+      expect(prepare).not.toHaveBeenCalled();
+      expect(s.state.qa).toEqual([]);
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
+      expect(log()).toContain('Not starting: PR #12 is closed');
+    });
   });
 });
