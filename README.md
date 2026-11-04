@@ -88,7 +88,7 @@ npx cubefarm
 
 On another device, open `http://<office-machine-LAN-IP>:4317` (use your `--port` or `SWARM_PORT` if different). The local browser still opens localhost; `0.0.0.0` is a bind address, not a browser URL. Unset `SWARM_HOST` to return to loopback only.
 
-Reachable clients can use the manager API and agent terminals without a manager login. Enable this only on a trusted LAN; authentication, TLS and public hosting are not provided by this setting. Floor-app previews remain a separate, local surface. For a checkout and development access, see [Contributing](CONTRIBUTING.md#trusted-lan-access).
+Reachable clients can use the manager API and agent terminals without a manager login. Enable this only on a trusted LAN; authentication, TLS and public hosting are not provided by this setting. Floor-app previews remain a separate, local surface. The office's websockets only accept pages opened from the office's own address (localhost, or with `SWARM_HOST` set, the machine's LAN addresses or hostname), so other websites can't reach the terminals through your browser. For a checkout and development access, see [Contributing](CONTRIBUTING.md#trusted-lan-access).
 
 ## Updating
 
