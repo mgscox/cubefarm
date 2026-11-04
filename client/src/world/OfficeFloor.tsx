@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import type { RepoView } from '../../../shared/types';
 import { agentsOnRepo, useStore } from '../store';
 import { qaCounts } from '../qaCounts';
@@ -43,15 +44,19 @@ const DEV_DESKS = Array.from({ length: MAX_DESKS }, (_, slot): [number, number, 
 const QA_DESKS = QA_LAB.stations.map((_, slot): [number, number, number] => [qaDeskPosition(slot).x, 0, qaDeskPosition(slot).z]);
 
 export function OfficeFloor({ repo }: { repo: RepoView }) {
-  const allAgents = useStore((s) => s.agents);
-  const agents = useMemo(() => agentsOnRepo(allAgents, repo.id), [allAgents, repo.id]);
+  // Shallow: another floor's agent changing leaves this floor's list (and the whole room) alone.
+  const agents = useStore(useShallow((s) => agentsOnRepo(s.agents, repo.id)));
   // Researchers sit at developer desks.
   const devBySlot = useMemo(() => new Map(agents.filter((a) => a.role === 'dev' || a.role === 'researcher').map((a) => [a.desk, a])), [agents]);
   const qaBySlot = useMemo(() => new Map(agents.filter((a) => a.role === 'qa').map((a) => [a.desk, a])), [agents]);
   const working = agents.filter((a) => a.status === 'working' || a.status === 'preparing').length;
-  const qaRecords = useStore((s) => s.qa);
   // Only records whose PR is still open count, as in the HUD.
-  const { inQa, readyToMerge: ready } = useMemo(() => qaCounts(Object.values(qaRecords), new Map([[repo.id, repo.pulls]])), [qaRecords, repo.id, repo.pulls]);
+  const [inQa, ready] = useStore(
+    useShallow((s) => {
+      const c = qaCounts(Object.values(s.qa), new Map([[repo.id, repo.pulls]]));
+      return [c.inQa, c.readyToMerge];
+    }),
+  );
   const name = repo.fullName.split('/')[1] ?? repo.fullName;
   const rugColor = shade(repo.color, 0.24);
 

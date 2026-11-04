@@ -171,36 +171,43 @@ function VacantMonitor({ accent, qa }: { accent: string; qa: boolean }) {
   );
 }
 
-function Keyboard() {
-  const tex = useCanvasTexture(
-    512,
-    176,
-    (ctx) => {
-      ctx.fillStyle = '#d7dbe3';
-      ctx.fillRect(0, 0, 512, 176);
-      const rows = [14, 13, 12, 11];
-      rows.forEach((n, r) => {
-        const kw = (496 - (n - 1) * 5) / n;
-        for (let i = 0; i < n; i++) {
-          ctx.fillStyle = r === 0 && (i === 0 || i === n - 1) ? '#ffb4a2' : '#ffffff';
-          ctx.beginPath();
-          ctx.roundRect(8 + i * (kw + 5), 8 + r * 34, kw, 28, 6);
-          ctx.fill();
-        }
-      });
-      ctx.fillStyle = '#ffffff';
+// Every keyboard is the same picture: painted once, on one material all the desks share.
+let keyboardMat: THREE.MeshToonMaterial | null = null;
+function keyboardMaterial() {
+  if (keyboardMat) return keyboardMat;
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 176;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#d7dbe3';
+  ctx.fillRect(0, 0, 512, 176);
+  const rows = [14, 13, 12, 11];
+  rows.forEach((n, r) => {
+    const kw = (496 - (n - 1) * 5) / n;
+    for (let i = 0; i < n; i++) {
+      ctx.fillStyle = r === 0 && (i === 0 || i === n - 1) ? '#ffb4a2' : '#ffffff';
       ctx.beginPath();
-      ctx.roundRect(130, 144, 252, 26, 6);
+      ctx.roundRect(8 + i * (kw + 5), 8 + r * 34, kw, 28, 6);
       ctx.fill();
-    },
-    [],
-  );
+    }
+  });
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.roundRect(130, 144, 252, 26, 6);
+  ctx.fill();
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  keyboardMat = new THREE.MeshToonMaterial({ map: tex });
+  return keyboardMat;
+}
+
+function Keyboard() {
   return (
     <group position={[0, 0.77, 0.27]}>
       <Box size={[0.52, 0.03, 0.18]} position={[0, 0.015, 0]} color="#c3c8d3" outline />
-      <mesh position={[0, 0.031, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh position={[0, 0.031, 0]} rotation={[-Math.PI / 2, 0, 0]} material={keyboardMaterial()}>
         <planeGeometry args={[0.5, 0.17]} />
-        <meshToonMaterial map={tex} />
       </mesh>
       {/* mouse + pad */}
       <mesh position={[0.46, 0.002, 0.02]} rotation={[-Math.PI / 2, 0, 0]} material={toon('#3d4152')}>
