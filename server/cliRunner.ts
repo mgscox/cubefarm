@@ -181,7 +181,7 @@ const exitOf = (p: Pty) =>
     setTimeout(resolve, 5000);
   });
 
-/** Close a CLI for good. A Codex thread is archived once its CLI is gone (see codexThread). */
+/** Close a CLI for good; settles once it has exited. A Codex thread is archived after that (see codexThread). */
 function endLive(live: LiveCli): Promise<void> {
   if (lives.get(live.term) !== live) return Promise.resolve();
   lives.delete(live.term);
@@ -189,12 +189,13 @@ function endLive(live: LiveCli): Promise<void> {
   routes.delete(live.token);
   live.term.releaseIdle = null;
   live.term.bind(null);
-  const gone = live.proc ? exitOf(live.proc) : undefined;
+  const gone = live.proc ? exitOf(live.proc) : Promise.resolve();
   live.proc?.kill();
   live.proc = null;
   live.term.note(`── ${cliLabel(live.cli)} session ended ──`);
   live.host.removeDir(live.dir);
-  return live.cli === 'codex' && live.resumeId ? live.host.codexThread('archive', live.resumeId, gone) : Promise.resolve();
+  if (live.cli === 'codex' && live.resumeId) void live.host.codexThread('archive', live.resumeId, gone).catch(() => undefined);
+  return gone;
 }
 
 /** What the keeper holds with a CLI's terminal, so the office can pick it up again after a restart. */

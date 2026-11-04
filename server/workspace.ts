@@ -298,15 +298,30 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
     // the agent left running, a browser) still has its working directory inside, and reuse keeps
     // node_modules warm between tasks.
     if (await exists(path.join(wt, '.git'))) {
-      try {
+      const reuse = async () => {
         await git(local ? ['checkout', '--force', '-B', local, ref] : ['checkout', '--force', '--detach', ref], { cwd: wt });
         await git(['reset', '--hard', ref], { cwd: wt });
         // Untracked leftovers from the last task go; ignored files (node_modules, build caches) stay.
         await git(['clean', '-fd'], { cwd: wt }).catch(() => undefined);
+      };
+      try {
+        try {
+          await reuse();
+        } catch (err) {
+          // A git killed mid-command (a closed CLI, a crash) leaves index.lock behind, and every git after it fails.
+          const lock = await staleDeskLock(main, wt);
+          if (!lock) throw err;
+          await fs.rm(lock, { force: true });
+          note?.(`Removed a stale git lock left in the desk (${lock}).`);
+          await reuse();
+        }
         return wt;
-      } catch {
+      } catch (err) {
         operationSignal()?.throwIfAborted();
-        // fall through and rebuild the worktree from scratch
+        // Rebuild the worktree from scratch, but say why: the rebuild can fail in its own way.
+        const why = `Couldn't reuse the desk in place, so it's rebuilt: ${(err as Error).message.split(/\r?\n/)[0].slice(0, 240)}`;
+        console.warn(`${wt}: ${why}`);
+        note?.(why);
       }
     }
 
@@ -325,6 +340,31 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
     await git(['worktree', 'add', ...(local ? ['-B', local] : ['--detach']), wt, ref], { cwd: main });
     return wt;
   });
+}
+
+/** A git lock file this old was left by a git that died: nothing still running holds it. */
+export const STALE_LOCK_MS = 10 * 60_000;
+
+export const isStaleLock = (mtimeMs: number, now: number) => now - mtimeMs > STALE_LOCK_MS;
+
+/**
+ * The index.lock in a desk's worktree gitdir, but only when that gitdir is the repo's own `<common>/worktrees/<desk>`:
+ * a desk whose .git file points anywhere else never gets a file removed. Pass real paths.
+ */
+export function deskLockPath(gitdir: string, commonDir: string, desk: string, platform: NodeJS.Platform = process.platform): string | null {
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  const own = p.join(commonDir, 'worktrees', p.basename(desk));
+  return samePath(gitdir, own, platform) ? p.join(own, 'index.lock') : null;
+}
+
+/** The desk's index.lock when it is stale and inside the repo's own worktrees folder, else null. */
+async function staleDeskLock(main: string, wt: string): Promise<string | null> {
+  const ref = (await fs.readFile(path.join(wt, '.git'), 'utf8').catch(() => '')).match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
+  const common = await git(['rev-parse', '--git-common-dir'], { cwd: main }).catch(() => '');
+  if (!ref || !common) return null;
+  const lock = deskLockPath(await realPath(path.resolve(wt, ref)), await realPath(path.resolve(main, common)), wt);
+  const stat = lock ? await fs.lstat(lock).catch(() => null) : null;
+  return stat?.isFile() && isStaleLock(stat.mtimeMs, Date.now()) ? lock : null;
 }
 
 /** A path with symlinks, junctions and Windows short names resolved, or the path as given when it can't be. */

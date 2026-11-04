@@ -40,8 +40,8 @@ export class AgentTerminal {
   dirty = false;
   /** Includes CLI output that has not produced a structured agent log or session id yet. */
   lastOutputAt = 0;
-  /** Closes a CLI left waiting at its prompt after its task (set by the runtime that left it there). */
-  releaseIdle: (() => void) | null = null;
+  /** Closes a CLI left waiting at its prompt after its task, settling once it has exited (set by the runtime that left it there). */
+  releaseIdle: (() => Promise<void>) | null = null;
   /** Something the manager typed at that waiting prompt: the office takes it on as a follow-up (true) or refuses. */
   onIdlePrompt: ((text: string) => boolean) | null = null;
   /** Keys a viewer typed, after they went to the CLI (the runtime watches for Esc interrupting a turn). */
