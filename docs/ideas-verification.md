@@ -2,7 +2,7 @@
 
 Issue #149 connects the research, planning, review, decision, publication and dispatch slices. Research and all subsequent agent phases use the existing research session slot, office closure and usage pacing. Two different agents review the same saved pair; neither receives the other's verdict. Reviews can run consecutively while keeping their inputs independent.
 
-The approval card stores the complete displayed graph, including Tracking Parents, specialties, reused issues and blocker keys. Approval goes directly to the held-first publisher. The persisted approval and publication identities survive retries and restarts. Existing slice demo buttons remain available for testing those slices independently; they are not needed for the connected path.
+The approval card stores the complete displayed graph, including Tracking Parents, specialties, reused issues and blocker keys. Approval goes directly to the held-first publisher. The persisted approval and publication identities survive retries and restarts. Existing slice demo buttons remain available for testing those slices independently; close the demo office while exercising them so the automatic worker cannot claim the same Idea. They are not needed for the connected path.
 
 ## Stateful emulation and demo
 
@@ -50,7 +50,7 @@ This hosted drill is separate from the publisher's reciprocal body links and per
 - `npm run typecheck`: passed.
 - `npm test`: 90 files passed; 1,525 tests passed, two skipped and one existing todo.
 - `npm run build` and `node scripts/smoke-package.mjs`: passed.
-- Browser suite: 30 of 32 passed on the full run. The LAN case hit a proxy 407; the MCP settings case hit a missing build file during a concurrent rebuild. A seven-test rerun of both failures and the affected research/Ideas paths passed with the LAN IP added to this process’s `NO_PROXY`/`no_proxy` and no concurrent build. All 32 scenarios therefore have passing evidence across the two runs.
+- Initial local evidence on `9585d53`: 30 of 32 passed, followed by seven targeted passes after resolving a LAN proxy 407 and a concurrent-build collision in MCP settings. Those passes did not establish a reliable full-suite result: [CI run 41741986921](https://github.com/mgscox/cubefarm/actions/runs/41741986921) on that same head failed the fixture-driven Issue Plan test (31 passed, one failed). The test now closes and drains the demo office, restores any source issues completed by earlier tests before recording its write baseline, checks that automatic research/proposals did not run for the fixture Idea, and restores the previous office state in `finally`.
 - Independent standards and specification re-reviews found no remaining actionable issues.
 
 ## Limits
