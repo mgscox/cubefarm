@@ -3605,7 +3605,7 @@ export class Swarm {
       `Checking out PR #${rec.prNumber}…`,
     );
 
-    const generation = this.agentRt.get(a.id)?.generation;
+    let generation = this.agentRt.get(a.id)?.generation;
     const gone = () => this.agentRt.get(a.id)?.generation !== generation || a.status === 'stopped';
     let pr: PrDetails;
     let issue: { title: string; body: string } | null = null;
@@ -3715,8 +3715,11 @@ export class Swarm {
       }
       const rt = this.agentRt.get(a.id);
       if (rt) rt.qaResume = { cwd, systemAppend };
-      await this.startAgentSession(a, repo, cwd, prompt, systemAppend, undefined, security ? SECURITY_SCHEMA : QA_SCHEMA);
+      const starting = this.startAgentSession(a, repo, cwd, prompt, systemAppend, undefined, security ? SECURITY_SCHEMA : QA_SCHEMA);
+      generation = this.agentRt.get(a.id)?.generation;
+      await starting;
     } catch (err) {
+      if (gone() || !this.state.qa.includes(rec) || rec.status !== 'testing' || rec.qaAgentId !== a.id) return;
       a.status = 'error';
       a.endedAt = Date.now();
       a.lastError = (err as Error).message;

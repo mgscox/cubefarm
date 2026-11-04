@@ -3322,6 +3322,32 @@ describe('QA rounds', () => {
       expect(session).not.toHaveBeenCalled();
     });
 
+    it('ignores a canceled checkout error after another QA desk takes ownership', async () => {
+      const tester = addAgent('q2', 'Marple', 'qa', 1);
+      const replacement = addAgent('q3', 'Poirot', 'qa', 2);
+      const pr = { ...pull, labels: ['ready-for-review'], baseSha: 'base-1', body: '', isCrossRepository: false };
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue(pr);
+      vi.spyOn(s, 'prepare').mockResolvedValue('/fake-desk');
+      let rejectHead!: (error: Error) => void;
+      const headCheck = vi.spyOn(s.backend, 'deskHead')
+        .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectHead = reject; }))
+        .mockResolvedValue(pr.headSha);
+      vi.spyOn(s, 'startAgentSession').mockImplementation((agent) => {
+        Object.assign(agent as object, { status: 'working' });
+      });
+      rec.status = 'queued';
+      const first = s.runQa(tester, repo, rec);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(headCheck).toHaveBeenCalledOnce();
+      s.clearTask(tester);
+      rec.status = 'queued';
+      await s.runQa(replacement, repo, rec);
+      rejectHead(new Error('Canceled desk lookup'));
+      await first;
+      expect(rec).toMatchObject({ status: 'testing', qaAgentId: 'q3' });
+      expect(replacement.status).toBe('working');
+    });
+
     it('sends the PR back when its head and base move together but the head lacks the current base', async () => {
       const tester = addAgent('q2', 'Marple', 'qa', 1);
       const pr = { ...pull, headSha: 'sha-2', baseSha: 'base-2', baseRefName: 'main', body: '', isCrossRepository: false };
