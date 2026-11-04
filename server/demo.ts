@@ -880,6 +880,7 @@ export function createDemoBackend(): Backend {
     },
     prForBranch: async () => null,
     branchAhead: async () => 0, // the fake sessions always open their PR
+    containsCommit: async () => true,
     prDetails: async (fullName, number) => {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
       if (!pr) throw new Error(`Unknown PR #${number}`);

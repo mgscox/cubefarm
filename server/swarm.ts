@@ -2129,9 +2129,9 @@ export class Swarm {
     let error = '';
     for (const method of ['squash', 'merge', 'rebase'] as const) {
       if (this.state.officeHeld) break;
-      if (method !== 'squash' && rec.securityReview) {
+      if (method !== 'squash') {
         const current = await this.backend.prDetails(repo.fullName, pr.number);
-        if (this.state.officeHeld || !current.baseSha || hasLabel(current.labels, NEEDS_HUMAN) ||
+        if (this.state.officeHeld || (rec.securityReview && !current.baseSha) || hasLabel(current.labels, NEEDS_HUMAN) ||
           hasLabel(current.labels, NEEDS_REVIEW) || this.holdForSecurityReview(repo, rec, current)) return false;
       }
       try {
@@ -3638,10 +3638,9 @@ export class Swarm {
     if (review?.needsReconcile) {
       try {
         if (!pr.baseSha) throw new Error('The PR base commit is unavailable.');
-        // Compare in reverse: the current base must have no commits that are missing from the PR head.
-        const behind = await this.backend.branchAhead(repo.fullName, pr.headSha, pr.baseSha);
+        const reconciled = await this.backend.containsCommit(repo.fullName, pr.headSha, pr.baseSha);
         if (gone()) return;
-        if (behind > 0) {
+        if (!reconciled) {
           this.sendBackForSecurityBase(repo, rec, pr);
           this.clearTask(a);
           return;

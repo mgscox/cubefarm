@@ -562,13 +562,22 @@ export async function prForBranch(fullName: string, branch: string): Promise<{ n
   return list[0] ?? null;
 }
 
+async function compareAhead(fullName: string, left: string, right: string, api: RestQuery): Promise<number> {
+  const result = await api(['api', `repos/${fullName}/compare/${encodeURIComponent(left)}...${encodeURIComponent(right)}?per_page=1`]) as { ahead_by?: number } | null;
+  const ahead = result?.ahead_by;
+  if (typeof ahead !== 'number' || !Number.isInteger(ahead) || ahead < 0) throw new Error('Branch comparison unavailable');
+  return ahead;
+}
+
+/** A commit is contained only when GitHub confirms the reverse comparison has no missing commits. */
+export async function containsCommit(fullName: string, headSha: string, requiredSha: string, api: RestQuery = ghJson): Promise<boolean> {
+  return await compareAhead(fullName, headSha, requiredSha, api) === 0;
+}
+
 /** Pushed commits ahead of base; zero also covers a verified absent remote branch. Unknown reads throw. */
 export async function branchAhead(fullName: string, base: string, branch: string, api: RestQuery = ghJson): Promise<number> {
   try {
-    const result = await api(['api', `repos/${fullName}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?per_page=1`]) as { ahead_by?: number } | null;
-    const ahead = result?.ahead_by;
-    if (typeof ahead !== 'number' || !Number.isInteger(ahead) || ahead < 0) throw new Error('Branch comparison unavailable');
-    return ahead;
+    return await compareAhead(fullName, base, branch, api);
   } catch (error) {
     if (!(error instanceof CommandError) || !/\bHTTP 404\b/.test(error.stderr)) throw error;
     // A comparison 404 can mean a missing base or inaccessible repo. Only a successful refs read proves absence.

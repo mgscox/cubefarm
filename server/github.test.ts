@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
-import { branchAhead, findIssuesByMarker, isCheckAccessError, listPulls, readIssue, readTwice } from './github.ts';
+import { branchAhead, containsCommit, findIssuesByMarker, isCheckAccessError, listPulls, readIssue, readTwice } from './github.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { mergeStep } from './mergeGate.ts';
 
@@ -21,6 +21,15 @@ const run = (status = 'completed', conclusion: string | null = 'success') => ({ 
 const rest = (runs = [run()], statuses: { context: string; state: string; target_url: string | null }[] = []) => vi.fn<Api>(async (args) =>
   args[1].includes('/actions/runs?') ? { workflow_runs: runs, total_count: runs.length } : { statuses, total_count: statuses.length });
 afterEach(() => vi.useRealTimers());
+
+describe('audited base ancestry', () => {
+  it('fails closed when GitHub cannot compare exact commits', async () => {
+    const unavailable = new CommandError('Compare failed', 'HTTP 404', 1);
+    const api = vi.fn().mockRejectedValueOnce(unavailable).mockResolvedValue([]);
+    await expect(containsCommit('demo/repo', 'head-sha', 'base-sha', api)).rejects.toBe(unavailable);
+    expect(api).toHaveBeenCalledExactlyOnceWith(['api', 'repos/demo/repo/compare/head-sha...base-sha?per_page=1']);
+  });
+});
 
 describe('board read retries', () => {
   it('returns a successful first read without retrying', async () => {

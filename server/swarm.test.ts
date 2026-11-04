@@ -3277,6 +3277,19 @@ describe('QA rounds', () => {
       expect(merge).not.toHaveBeenCalled();
     });
 
+    it('honors a new security label between fallback attempts on an ordinary PR', async () => {
+      const pr = { ...pull, labels: [] as string[], baseSha: 'base-1', body: '', isCrossRepository: false };
+      vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pr }));
+      const merge = vi.spyOn(s.backend, 'mergePull').mockImplementation(async () => {
+        pr.labels = ['ready-for-review'];
+        throw new Error('Squash merge is not allowed');
+      });
+      Object.assign(rec, { status: 'passed', testedSha: pr.headSha, passedSha: pr.headSha });
+      expect(await s.advanceMerge(repo, rec, pull)).toBe(false);
+      expect(merge).toHaveBeenCalledExactlyOnceWith(repo.fullName, pr.number, 'squash', pr.headSha);
+      expect(rec).toMatchObject({ status: 'queued', mergeNote: 'waiting for detailed security review' });
+    });
+
     it('rechecks the base before a fallback merge method and sends the PR back when it moved', async () => {
       const pr = { ...pull, labels: [], baseSha: 'base-1', body: '', isCrossRepository: false };
       vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pr }));
@@ -3298,7 +3311,7 @@ describe('QA rounds', () => {
       const tester = addAgent('q2', 'Marple', 'qa', 1);
       const pr = { ...pull, baseSha: 'base-2', baseRefName: 'main', body: '', isCrossRepository: false };
       vi.spyOn(s.backend, 'prDetails').mockResolvedValue(pr);
-      const compare = vi.spyOn(s.backend, 'branchAhead').mockResolvedValue(1);
+      const compare = vi.spyOn(s.backend, 'containsCommit').mockResolvedValue(false);
       const session = vi.spyOn(s, 'startAgentSession');
       Object.assign(rec, { status: 'queued', securityReview: { reason: 'Changes authentication', qaSha: null, needsReconcile: true } });
       await s.runQa(tester, repo, rec);
