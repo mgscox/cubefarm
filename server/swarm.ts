@@ -17,7 +17,7 @@ import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, readConfigEnv, SCHEDULER_INTE
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type MergePrRequest, type OfficeTools, type ParkPrRequest, type ResearchRequest, type StartIssueRequest } from './ceo.ts';
 import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
-import { issueHolder, duplicateIssueSessions } from './issueClaims.ts';
+import { issueHolder, duplicateIssueSessions, issueTaken } from './issueClaims.ts';
 import { orphanedQa } from './qaOwnership.ts';
 import { startTimeouts, stuckStarting } from './sessionStart.ts';
 import { withOperation } from './operation.ts';
@@ -46,7 +46,7 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
 import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
@@ -550,6 +550,7 @@ export class Swarm {
       proposeHire: (a) => this.proposeHire(a),
       proposeLetGo: (a) => this.proposeLetGo(a),
       fileIssue: (a) => this.fileIssue(a),
+      closeIssue: (a) => this.closeIssue(a),
       routeIssue: (a) => this.routeIssue(a),
       startIssue: (a) => this.startIssue(a),
       rerunQa: (a) => this.rerunQa(a),
@@ -2169,6 +2170,7 @@ export class Swarm {
       return this.mergeNote(rec, `merge blocked: ${error}`);
     }
     this.toast('success', `🔀 Merged PR #${pr.number} into ${repo.defaultBranch}: ${pr.title}`);
+    await this.closeResolvedIssues(repo, pr.number, latest.closesIssues);
     return true;
   }
 
@@ -2532,6 +2534,7 @@ export class Swarm {
       if (approval) await this.backend.mergePull(repo.fullName, number, method, headSha);
       else if (rec?.securityReview) await this.backend.mergePull(repo.fullName, number, method, pr.headSha);
       else await this.backend.mergePull(repo.fullName, number, method);
+      await this.closeResolvedIssues(repo, number, pr.closesIssues);
       if (approval) rt.parking = false; // The normal refresh reconciles merged agents and removes QA.
       this.toast('success', `Merged PR #${number} into ${repo.defaultBranch}`);
       await this.syncRepo(repo.id);
@@ -2547,6 +2550,21 @@ export class Swarm {
     if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
     await this.backend.closePull(repo.fullName, number);
     await this.syncRepo(repo.id);
+  }
+
+  /** Closing failures must not turn a successful merge into a failed merge attempt. */
+  private async closeResolvedIssues(repo: PersistedRepo, prNumber: number, issues: number[]) {
+    const rt = this.repoRt.get(repo.id)!;
+    rt.pulls = rt.pulls.map((p) => p.number === prNumber ? { ...p, state: 'MERGED', mergedAt: new Date().toISOString() } : p);
+    for (const number of new Set(issues)) {
+      try {
+        await this.backend.closeIssue(repo.fullName, number, 'completed', `Completed by PR #${prNumber}.\n\n${AGENT_COMMENT_MARKER}`);
+        rt.issues = rt.issues.filter((i) => i.number !== number);
+      } catch (err) {
+        this.postMessage('office', `PR #${prNumber} merged on ${repo.fullName}, but closing issue #${number} failed: ${oneLine(err)}. Close it as completed on GitHub.`);
+      }
+    }
+    this.emitRepo(repo);
   }
 
   // ---------- agents ----------
@@ -2818,9 +2836,7 @@ export class Swarm {
   }
 
   private issueTaken(repo: PersistedRepo, n: number) {
-    if (this.state.agents.some((a) => a.repoId === repo.id && (a.role === 'dev' || a.role === 'researcher') && a.task !== 'qa' && a.issueNumber === n && (a.heldRetry || (a.status !== 'idle' && a.status !== 'error')))) return true;
-    const pulls = this.repoRt.get(repo.id)?.pulls ?? [];
-    return pulls.some((p) => p.state === 'OPEN' && (p.closesIssues.includes(n) || p.headRefName.startsWith(`swarm/issue-${n}-`) || p.headRefName.startsWith(`${RESEARCH_BRANCH}${n}-`)));
+    return issueTaken(this.state.agents, repo.id, n, this.repoRt.get(repo.id)?.pulls ?? [], Date.now());
   }
 
   private ensureSlot() {
@@ -6017,6 +6033,23 @@ export class Swarm {
     const n = await this.backend.createIssue(repo.fullName, title, body, labels);
     this.ceoIssues.record(repo.id);
     return `Filed #${n}${x.ready_for_human ? ' for a person' : ''} on floor ${repo.floor}: ${title}${slug ? ` (routed to ${slug})` : ''}.`;
+  }
+
+  private async closeIssue(x: { floor: number; number: number; reason: string }) {
+    const repo = this.floorRepo(x.floor);
+    const reason = x.reason.trim();
+    if (!reason || reason.length > 1000) throw new Error('Give a short closing reason (1–1000 characters).');
+    const issue = await this.backend.readIssue(repo.fullName, x.number);
+    if (!issue) throw new Error(`Unknown issue #${x.number} on floor ${repo.floor}. Check company_status for open issues.`);
+    if (issue.state === 'CLOSED') throw new Error(`Issue #${x.number} is already closed. Check company_status for open issues.`);
+    const { pulls } = await this.backend.listPulls(repo.fullName);
+    const pr = pulls.find((p) => p.state === 'OPEN' && p.closesIssues.includes(x.number));
+    if (pr) throw new Error(`Open PR #${pr.number} closes #${x.number}. Merge or park that PR first.`);
+    await this.backend.closeIssue(repo.fullName, x.number, 'not planned', `${reason}\n\n${AGENT_COMMENT_MARKER}`);
+    const rt = this.repoRt.get(repo.id)!;
+    rt.issues = rt.issues.filter((i) => i.number !== x.number);
+    this.emitRepo(repo);
+    return `Closed #${x.number} on floor ${repo.floor} as not planned: ${reason}`;
   }
 
   /** Explicit manager instruction through the CEO, pinned to the last QA head. */

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
-import { branchAhead, containsCommit, findIssuesByMarker, isCheckAccessError, listPulls, readIssue, readTwice } from './github.ts';
+import { branchAhead, closeIssue, containsCommit, ensureLabel, findIssuesByMarker, isCheckAccessError, listPulls, readIssue, readTwice } from './github.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { mergeStep } from './mergeGate.ts';
 
@@ -21,6 +21,30 @@ const run = (status = 'completed', conclusion: string | null = 'success') => ({ 
 const rest = (runs = [run()], statuses: { context: string; state: string; target_url: string | null }[] = []) => vi.fn<Api>(async (args) =>
   args[1].includes('/actions/runs?') ? { workflow_runs: runs, total_count: runs.length } : { statuses, total_count: statuses.length });
 afterEach(() => vi.useRealTimers());
+
+describe('issue writes', () => {
+  it('closes with the requested reason and literal comment', async () => {
+    const command = vi.fn().mockResolvedValue('');
+    await closeIssue('demo/repo', 66, 'not planned', 'Superseded by #67\n\n<!-- cubefarm:agent -->', command);
+    expect(command).toHaveBeenCalledExactlyOnceWith(['issue', 'close', '66', '-R', 'demo/repo', '--reason', 'not planned', '--comment', 'Superseded by #67\n\n<!-- cubefarm:agent -->']);
+  });
+
+  it('preserves existing labels and remembers successful creation', async () => {
+    const command = vi.fn().mockRejectedValue(error('label "swarm:server" already exists'));
+    await ensureLabel('demo/labels', 'swarm:server', command);
+    await ensureLabel('demo/labels', 'swarm:server', command);
+    expect(command).toHaveBeenCalledOnce();
+    expect(command.mock.calls[0][0]).toEqual(['label', 'create', 'swarm:server', '-R', 'demo/labels', '--color', 'c77dff', '--description', 'cubefarm: routed to this specialty']);
+  });
+
+  it('retries label creation after other failures', async () => {
+    const denied = error('HTTP 403');
+    const command = vi.fn().mockRejectedValueOnce(denied).mockResolvedValue('');
+    await expect(ensureLabel('demo/labels-denied', 'swarm:server', command)).rejects.toBe(denied);
+    await ensureLabel('demo/labels-denied', 'swarm:server', command);
+    expect(command).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe('audited base ancestry', () => {
   it('fails closed when GitHub cannot compare exact commits', async () => {
