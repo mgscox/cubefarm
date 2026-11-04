@@ -15,6 +15,7 @@ import type { ReconnectedCli } from './cliRunner.ts';
 import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, readConfigEnv, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, VERSION, WORKSPACE_ROOT } from './config.ts';
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type MergePrRequest, type OfficeTools, type ParkPrRequest, type ResearchRequest, type StartIssueRequest } from './ceo.ts';
+import { developerFeedback, type FeedbackEvent } from './feedback.ts';
 import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
 import { issueHolder, duplicateIssueSessions } from './issueClaims.ts';
@@ -145,6 +146,7 @@ interface PersistedAgent {
   startedAt: number | null;
   endedAt: number | null;
   costUsd: number;
+  score: number;
   turns: number;
   sessionId: string | null;
   sessionCli: AgentCli | null; // the CLI whose session sessionId is: only it can resume it
@@ -167,6 +169,7 @@ interface HeldRetry {
 
 /** A pull request's trip through QA. */
 interface QaRecord extends QaView {
+  reviewId: string; // distinguish QA cycles when a closed PR is reopened
   closed?: boolean; // Keep the security requirement if this PR is reopened.
   securityReview?: { reason: string; qaSha: string | null; approvedSha?: string; auditBaseSha?: string };
   issueNumber: number | null;
@@ -212,6 +215,7 @@ interface Persisted {
   settings: SwarmSettings;
   repos: PersistedRepo[];
   agents: PersistedAgent[];
+  feedbackEvents: Record<string, true>;
   qa: QaRecord[];
   requests: HireRequestView[];
   ceo: CeoState;
@@ -504,6 +508,7 @@ export class Swarm {
     },
     repos: [],
     agents: [],
+    feedbackEvents: {},
     qa: [],
     requests: [],
     ceo: { queue: [], job: null, lastReviewAt: null, lastFingerprint: null },
@@ -651,6 +656,7 @@ export class Swarm {
         })),
         agents: (loaded.agents ?? []).map((a) => ({
           ...a,
+          score: a.score ?? 0,
           effort: a.effort ?? '',
           role: a.role ?? 'dev',
           title: a.title ?? '',
@@ -664,8 +670,10 @@ export class Swarm {
           box: typeof a.box === 'string' ? a.box : null,
           deskBox: typeof a.deskBox === 'string' ? a.deskBox : '',
         })),
+        feedbackEvents: loaded.feedbackEvents ?? {},
         qa: (loaded.qa ?? []).map((q) => ({
           ...q,
+          reviewId: q.reviewId ?? crypto.randomUUID(),
           testedSha: q.testedSha ?? null,
           passedSha: q.passedSha ?? null,
           failedSha: q.failedSha ?? null,
@@ -935,6 +943,7 @@ export class Swarm {
       startedAt: a.startedAt,
       endedAt: a.endedAt,
       costUsd: a.costUsd,
+      score: a.score ?? 0,
       turns: a.turns,
       browserUrl: rt.browserUrl,
       hasScreenshot: !!rt.screenshot,
@@ -2156,6 +2165,7 @@ export class Swarm {
       }
       return this.mergeNote(rec, `merge blocked: ${error}`);
     }
+    this.recordFeedback({ kind: 'merged', ...rec });
     this.toast('success', `🔀 Merged PR #${pr.number} into ${repo.defaultBranch}: ${pr.title}`);
     return true;
   }
@@ -2338,8 +2348,23 @@ export class Swarm {
     void this.advanceMerges(repo);
   }
 
+  private recordFeedback(event: FeedbackEvent) {
+    const dev = this.state.agents.find((a) => a.id === event.devAgentId);
+    const change = developerFeedback(event, dev, this.state.feedbackEvents);
+    if (!change || !dev) return;
+    dev.score = change.score;
+    this.state.feedbackEvents[change.key] = true;
+    this.emitAgent(dev);
+    this.save();
+  }
+
   /** Keep agents and QA records in step with what happened to PRs on GitHub. */
   private reconcilePulls(repo: PersistedRepo, pulls: PullInfo[]) {
+    for (const pr of pulls.filter((p) => p.state === 'MERGED')) {
+      const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === pr.number);
+      const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && a.prNumber === pr.number);
+      this.recordFeedback({ kind: 'merged', repoId: repo.id, prNumber: pr.number, devAgentId: rec ? rec.devAgentId : dev?.id ?? null });
+    }
     for (const a of this.state.agents) {
       if (a.repoId !== repo.id || (a.role !== 'dev' && a.role !== 'researcher') || a.prNumber == null || BUSY.includes(a.status) || a.status === 'idle') continue;
       const pr = pulls.find((p) => p.number === a.prNumber);
@@ -2358,7 +2383,7 @@ export class Swarm {
         this.closeQaRecord(q, pr.state);
       }
       if (pr?.state === 'OPEN' && q.closed) {
-        this.setQa(q, { closed: false, status: 'queued', mergeNote: 'QA and security review required after reopening' });
+        this.setQa(q, { closed: false, reviewId: crypto.randomUUID(), status: 'queued', mergeNote: 'QA and security review required after reopening' });
         setTimeout(() => this.schedule(), 200);
       }
       if (pr?.state === 'OPEN') {
@@ -2382,6 +2407,7 @@ export class Swarm {
   }
 
   private closeQaRecord(rec: QaRecord, state: 'CLOSED' | 'MERGED') {
+    if (state === 'MERGED') this.recordFeedback({ kind: 'merged', ...rec });
     const review = rec.securityReview;
     if (state === 'CLOSED' && review) {
       if (rec.closed) return;
@@ -2590,6 +2616,7 @@ export class Swarm {
       startedAt: null,
       endedAt: null,
       costUsd: 0,
+      score: 0,
       turns: 0,
       sessionId: null,
       sessionCli: null,
@@ -3493,6 +3520,7 @@ export class Swarm {
       rec = {
         repoId: repo.id,
         prNumber,
+        reviewId: crypto.randomUUID(),
         status: 'queued',
         round: 1,
         devAgentId: dev?.id ?? null,
@@ -3859,7 +3887,28 @@ export class Swarm {
         }
       }
       const qaRounds = rec.round - rec.retests; // rounds QA itself asked for
+      if (!pass && !incomplete && qaRounds < MAX_QA_ROUNDS) {
+        // Verify the send-back still applies after posting the report.
+        const current = await this.backend.prDetails(repo.fullName, rec.prNumber).catch(() => null);
+        if (gone()) return;
+        if (!current || !rec.testedSha) {
+          incomplete = true;
+          report.summary = `Could not verify the reviewed PR revision. ${report.summary}`;
+        } else if (current.state !== 'OPEN') {
+          this.closeQaRecord(rec, current.state);
+          this.clearTask(a);
+          this.save();
+          return;
+        } else if (security && !isCurrentAudit(current)) {
+          return handBackStaleAudit(current);
+        } else if (current.headSha !== rec.testedSha) {
+          this.setQa(rec, { status: 'queued', round: rec.round + 1, retests: rec.retests + 1, passedSha: null, mergeNote: 'PR changed during QA; checking the current revision' });
+          this.clearTask(a);
+          return;
+        }
+      }
       const nextStatus = escalate ? 'queued' : pass ? 'passed' : incomplete || qaRounds >= MAX_QA_ROUNDS ? 'needs-human' : 'failed';
+      if (nextStatus === 'failed') this.recordFeedback({ kind: 'qa-send-back', ...rec });
       this.setQa(rec, {
         status: nextStatus,
         summary: report.summary,
@@ -3883,7 +3932,7 @@ export class Swarm {
         pass ? 'success' : 'error',
         pass
           ? `✅ ${a.name} passed PR #${rec.prNumber}: ${nextAfterQa}`
-          : incomplete ? `⚠️ Security review of PR #${rec.prNumber} is incomplete; merge remains held.`
+          : incomplete ? `⚠️ ${label} of PR #${rec.prNumber} is incomplete; merge remains held.`
           : nextStatus === 'needs-human'
             ? `❌ PR #${rec.prNumber} failed QA ${qaRounds} times and needs a human`
             : `❌ ${a.name} failed PR #${rec.prNumber}; sending it back to the developer`,
@@ -4183,8 +4232,8 @@ export class Swarm {
   }
 
   /**
-   * The free developer to put on a job: one it `suits` first, then whoever is least needed elsewhere (fewest ready
-   * issues in their specialty, then the least open work in it), so specialists stay free for their own lane.
+   * The free developer to put on a job: highest score, then one it `suits`, then fewest ready
+   * issues in their specialty, then the least open work in it, then desk order.
    */
   private pickDev(repo: PersistedRepo, devs: PersistedAgent[], suits: (a: PersistedAgent) => boolean) {
     if (devs.length <= 1) return devs[0];
@@ -4244,8 +4293,8 @@ export class Swarm {
    * Restart explicit requests on manual floors, or give a free developer the next auto-assigned backlog issue.
    * Returns true if work started.
    * Issues that say "Depends on #N" wait until #N is closed; the rest go in readyIssues() order. A swarm:<specialty>
-   * label is a preference, not a lock: a free specialist gets first pick, and otherwise the issue goes to whichever
-   * free developer is least needed elsewhere, so nobody sits idle while there is work that can start.
+   * label is a preference, not a lock: the highest-scoring free developer gets first pick; ties prefer a specialist
+   * and then whoever is least needed elsewhere.
    */
   private startIssueWork(repo: PersistedRepo): boolean {
     if (this.state.officeHeld) return false;
@@ -4693,6 +4742,7 @@ export class Swarm {
         startedAt: null,
         endedAt: null,
         costUsd: 0,
+        score: 0,
         turns: 0,
         sessionId: null,
         sessionCli: null,
@@ -5112,6 +5162,7 @@ export class Swarm {
         startedAt: null,
         endedAt: null,
         costUsd: 0,
+        score: 0,
         turns: 0,
         sessionId: null,
         sessionCli: null,

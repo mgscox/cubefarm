@@ -311,6 +311,7 @@ export interface AgentView {
   startedAt: number | null;
   endedAt: number | null;
   costUsd: number;
+  score: number; // developer feedback: +2 per merged PR, -1 per QA send-back
   turns: number;
   browserUrl: string | null;
   hasScreenshot: boolean;

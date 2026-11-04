@@ -378,6 +378,14 @@ describe('planStartIssue', () => {
     expect(pickDeveloper([dev, other], () => false, [], [])?.id).toBe('bob');
   });
 
+  it('prefers score over specialty and workload, keeping the existing order on ties', () => {
+    const experienced = { ...other, score: 4 };
+    expect(planStartIssue(request, { ...context, available: [dev, experienced] }).agent.id).toBe('bob');
+    expect(pickDeveloper([experienced, { ...dev, score: 4 }], (a) => a.id === 'ada', [], [])?.id).toBe('ada');
+    expect(pickDeveloper([{ ...dev, score: -1 }, other], (a) => a.id === 'ada', [], [])?.id).toBe('bob');
+    expect(pickDeveloper([], () => true, [], [])).toBeUndefined();
+  });
+
   it('gives research issues only to researchers, and researchers only research issues', () => {
     const darwin = { ...dev, id: 'darwin', name: 'Darwin', role: 'researcher' as const, specialty: 'research', desk: 2 };
     const research = { ...context, issues: [{ number: 4, title: 'Compare apps', body: '', labels: ['swarm:research'] }], agents: [other, dev, darwin], available: [other, dev, darwin] };

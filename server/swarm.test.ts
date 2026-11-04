@@ -29,10 +29,11 @@ import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRun
 type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => Promise<void>;
 type Repo = { noWorkEndings?: import('../shared/types.ts').NoWorkEnding[]; id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; parkedBranches?: ParkedBranch[]; preview: { command: null; env: object } };
 type Backend = ReturnType<typeof createDemoBackend>;
-type QaRec = QaView & { issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
+type QaRec = QaView & { reviewId?: string; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
 interface Internals {
   backend: Backend;
-  state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[] };
+  state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[]; feedbackEvents: Record<string, true> };
+  writeState(): Promise<void>;
   repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string; issuesFetchedAt?: number }>;
   agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null; shots?: unknown[]; qaResume?: unknown }>;
   issueFailures: Map<string, number>;
@@ -84,7 +85,7 @@ beforeEach(() => {
   vi.spyOn(s, 'schedule').mockImplementation(() => {});
   repo = { id: 'r1', fullName: 'demo-co/pixel-todo', floor: 1, autoAssign: true, requestedStarts: [], preview: { command: null, env: {} } };
   s.state.repos.push(repo);
-  s.state.agents.push({ id: 'a1', name: 'Ada', repoId: repo.id, role: 'dev', specialty: '', status: 'idle', task: null, issueNumber: null, desk: 0, endedAt: null });
+  s.state.agents.push({ id: 'a1', name: 'Ada', repoId: repo.id, role: 'dev', specialty: '', score: 0, status: 'idle', task: null, issueNumber: null, desk: 0, endedAt: null });
   s.agentRt.set('a1', { log: [], pending: [], terminal: null });
   s.state.agents.push({ id: CEO_ID, name: 'Joi', repoId: '', role: 'ceo', status: 'idle' });
   s.repoRt.set(repo.id, { issues: [], pulls: [] });
@@ -96,6 +97,139 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('developer scores', () => {
+  const pull: PullInfo = {
+    number: 13, title: 'Feature', url: '', headRefName: 'swarm/issue-66-ada', state: 'MERGED',
+    isDraft: false, closesIssues: [], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'sha',
+    reviewDecision: null, createdAt: '', mergedAt: '2026-11-04', additions: 1, deletions: 0,
+    mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+  };
+  const dev = () => s.state.agents[0];
+  const qa = (): QaRec => ({
+    repoId: repo.id, prNumber: 13, reviewId: 'review-13', status: 'passed', round: 1, retests: 0, sessionFailures: 0,
+    testedSha: 'sha', passedSha: 'sha', devAgentId: 'a1', qaAgentId: null, summary: null,
+    checks: [], commentUrl: null, mergeNote: null, updatedAt: 0,
+  });
+
+  it('initializes hires at zero and retains scores through clearing a desk', () => {
+    const hired = swarm.hireAgent(repo.id, { name: 'Barbara' });
+    expect(hired.score).toBe(0);
+    dev().score = 7;
+    swarm.resetAgent('a1');
+    s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
+    expect(swarm.snapshot().agents.find((a) => a.id === 'a1')?.score).toBe(7);
+  });
+
+  it('rewards the recorded owner after their desk is cleared, once across repeated refreshes', () => {
+    s.state.qa.push(qa());
+    Object.assign(dev(), { prNumber: null, task: null, score: -1 });
+    const tester = swarm.hireAgent(repo.id, { name: 'Barbara' });
+    Object.assign(s.state.agents.find((a) => a.id === tester.id)!, { prNumber: 13, task: 'qa', status: 'done' });
+    const events = vi.spyOn(s, 'broadcast');
+    s.reconcilePulls(repo, [pull]);
+    s.reconcilePulls(repo, [pull]);
+    expect(dev().score).toBe(1);
+    expect(s.state.agents.find((a) => a.id === tester.id)?.score).toBe(0);
+    expect(s.state.qa).toEqual([]);
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'agent', agent: expect.objectContaining({ id: 'a1', score: 1 }) }));
+  });
+
+  it('rewards an office merge immediately and does not reward its later refresh again', async () => {
+    const rec = qa();
+    s.state.qa.push(rec);
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, state: 'OPEN', body: '', isCrossRepository: false });
+    vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+    expect(await s.advanceMerge(repo, rec, { ...pull, state: 'OPEN' })).toBe(true);
+    expect(dev().score).toBe(2);
+    s.reconcilePulls(repo, [pull]);
+    expect(dev().score).toBe(2);
+  });
+
+  it('rewards a merge found by pruning PRs outside the recent listing', async () => {
+    s.state.qa.push(qa());
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, body: '', isCrossRepository: false });
+    await (s as unknown as { pruneUnlistedQa(repo: Repo, pulls: PullInfo[]): Promise<void> }).pruneUnlistedQa(repo, []);
+    expect(dev().score).toBe(2);
+  });
+
+  it.each(['CLOSED', 'MERGED'] as const)('handles %s desk reconciliation without rewarding testers or other roles', (state) => {
+    Object.assign(dev(), { prNumber: 13, task: 'issue', status: 'done' });
+    s.reconcilePulls(repo, [{ ...pull, state }]);
+    expect(dev().score).toBe(state === 'MERGED' ? 2 : 0);
+    expect(dev().prNumber).toBeNull();
+    s.reconcilePulls(repo, [{ ...pull, state }]);
+    expect(dev().score).toBe(state === 'MERGED' ? 2 : 0);
+  });
+
+  it.each([
+    { status: 'working' }, { status: 'preparing' }, { status: 'stopped' },
+    { startupFailed: true }, { status: 'error', endedAt: Date.now() },
+    { heldRetry: { issueNumber: 67, ahead: 1, why: 'retry' } }, { repoId: 'elsewhere' },
+  ])('skips an unavailable higher-scoring developer: %j', (unavailable) => {
+    const higher = { ...dev(), id: 'a2', name: 'Barbara', score: 10, desk: 1, ...unavailable };
+    s.state.agents.push(higher);
+    s.agentRt.set('a2', { log: [], pending: [], terminal: null });
+    setIssues(issue(66));
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(runTask).toHaveBeenCalledWith(dev(), repo, issue(66), undefined);
+  });
+
+  it('chooses the highest score ahead of specialty', () => {
+    dev().specialty = 'server';
+    const higher = { ...dev(), id: 'a2', name: 'Barbara', specialty: '', score: 2, desk: 1 };
+    s.state.agents.push(higher);
+    s.agentRt.set('a2', { log: [], pending: [], terminal: null });
+    setIssues(issue(66, ['swarm:server']));
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(runTask).toHaveBeenCalledWith(higher, repo, expect.objectContaining({ number: 66 }), undefined);
+  });
+
+  it.each([false, true])('loads scores and event identities across restart (legacy: %s)', async (legacy) => {
+    dev().score = 4;
+    const tester = swarm.hireAgent(repo.id, { name: 'Grace', role: 'qa' });
+    const testerRecord = s.state.agents.find((a) => a.id === tester.id)!;
+    Object.assign(testerRecord, { task: 'qa', status: 'working', prNumber: 13 });
+    const rec = { ...qa(), status: 'testing' as const, qaAgentId: tester.id };
+    s.state.qa.push(rec);
+    const failure: SessionResult = { ok: true, text: '', errors: [], costUsd: 0, turns: 1, structured: {
+      verdict: 'fail', summary: 'Broken', checks: [{ name: 'Feature', result: 'fail', details: 'Broken' }],
+    } };
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, state: 'OPEN', body: '', isCrossRepository: false });
+    await s.onQaFinished(testerRecord, repo, failure);
+    expect(dev().score).toBe(3);
+    s.reconcilePulls(repo, [pull]);
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+    vi.spyOn(fs, 'rename').mockResolvedValue();
+    await s.writeState();
+    const persisted = JSON.parse(String(write.mock.calls.at(-1)![1]));
+    if (legacy) {
+      delete persisted.agents[0].score;
+      delete persisted.feedbackEvents;
+    }
+    // No floors: startup exercises migration without onboarding or scheduling work.
+    persisted.repos = [];
+    const fresh = new Swarm(createDemoBackend());
+    const restored = fresh as unknown as Internals;
+    restored.backend.demo = false;
+    vi.spyOn(restored, 'save').mockImplementation(() => {});
+    vi.spyOn(fs, 'readFile').mockResolvedValueOnce(JSON.stringify(persisted));
+    await fresh.init();
+    expect(fresh.snapshot().agents.find((a) => a.id === 'a1')?.score).toBe(legacy ? 0 : 5);
+    if (!legacy) {
+      const replay = { ...rec, status: 'testing' as const };
+      restored.state.qa.push(replay);
+      const restoredTester = restored.state.agents.find((a) => a.id === tester.id)!;
+      Object.assign(restoredTester, { task: 'qa', status: 'working', prNumber: 13 });
+      vi.spyOn(restored.backend, 'prDetails').mockResolvedValue({ ...pull, state: 'OPEN', body: '', isCrossRepository: false });
+      await restored.onQaFinished(restoredTester, repo, failure);
+      restored.reconcilePulls(repo, [pull]);
+      expect(restored.state.agents[0].score).toBe(5);
+    }
+    await fresh.shutdown();
+  });
 });
 
 describe('exclusive issue sessions', () => {
@@ -1520,7 +1654,7 @@ describe('CEO send_back_to_dev', () => {
     expect(s.state.qa[0]).toMatchObject({ status: 'queued', round: 4, retests: 3 });
     const tester = { id: 'q1', name: 'Grace', repoId: repo.id, role: 'qa', task: 'qa', status: 'working', prNumber: 13 };
     s.state.agents.push(tester);
-    Object.assign(s.state.qa[0], { status: 'testing', qaAgentId: tester.id });
+    Object.assign(s.state.qa[0], { status: 'testing', qaAgentId: tester.id, testedSha: (await s.backend.prDetails(repo.fullName, 13)).headSha });
     s.agentRt.set('q1', { log: [], pending: [], terminal: null, shots: [] });
     s.backend.commentPull = vi.fn(async () => 'comment');
     await s.onQaFinished(tester, repo, { ok: true, text: '', errors: [], costUsd: 0, turns: 0, structured: {
@@ -2638,8 +2772,9 @@ describe('QA rounds', () => {
     ada = s.state.agents[0];
     s.agentRt.get('a1')!.shots = [];
     s.repoRt.get(repo.id)!.pulls = [pull];
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, body: '', isCrossRepository: false });
     rec = {
-      repoId: repo.id, prNumber: 13, status: 'failed', round: 2, sessionFailures: 0, retests: 0, testedSha: 'sha-0', failedSha: 'sha-0', fixCrashes: [],
+      repoId: repo.id, prNumber: 13, reviewId: 'review-13', status: 'failed', round: 2, sessionFailures: 0, retests: 0, testedSha: 'sha-0', failedSha: 'sha-0', fixCrashes: [],
       devAgentId: 'a1', qaAgentId: 'q1', summary: 'Broken', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0,
     };
     s.state.qa.push(rec);
@@ -2862,6 +2997,81 @@ describe('QA rounds', () => {
     rec.testedSha = 'sha-1';
     await s.onQaFinished(tester, repo, result(true, failReport));
   };
+  it('charges each completed QA send-back to its responsible developer once per round', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    const replacement = addAgent('a2', 'Barbara', 'dev', 1);
+    Object.assign(ada, { score: 0 });
+    Object.assign(replacement, { score: 4 });
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, body: '', isCrossRepository: false });
+    await qaFails(tester);
+    expect(ada.score).toBe(-1);
+    await qaFails(tester); // duplicated callback / same persisted round
+    expect(ada.score).toBe(-1);
+    Object.assign(rec, { round: 3, retests: 1, devAgentId: 'a2' });
+    await qaFails(tester);
+    expect(ada.score).toBe(-1);
+    expect(replacement.score).toBe(3);
+    expect(tester.score ?? 0).toBe(0);
+  });
+
+  it.each(['changed', 'closed', 'unavailable', 'incomplete', 'stale-session', 'human'] as const)('does not charge a %s QA result', async (reason) => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    ada.score = 0;
+    const details = vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, body: '', isCrossRepository: false });
+    if (reason === 'changed') details.mockResolvedValue({ ...pull, headSha: 'new-sha', body: '', isCrossRepository: false });
+    if (reason === 'closed') details.mockResolvedValue({ ...pull, state: 'CLOSED', body: '', isCrossRepository: false });
+    if (reason === 'unavailable') details.mockRejectedValue(new Error('offline'));
+    if (reason === 'human') rec.round = 3;
+    if (reason === 'stale-session') {
+      vi.spyOn(s.backend, 'commentPull').mockImplementation(async () => { s.clearTask(tester); return ''; });
+    }
+    if (reason === 'incomplete') {
+      Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+      rec.status = 'testing';
+      await s.onQaFinished(tester, repo, result(false));
+    } else await qaFails(tester);
+    if (reason === 'changed') expect(rec.status).toBe('queued');
+    if (reason === 'unavailable') expect(rec.status).toBe('needs-human');
+    expect(ada.score).toBe(0);
+  });
+
+  it('does not charge a failed security audit when its base moves during report posting', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(rec, { securityReview: { reason: 'Authentication', qaSha: 'sha-1', auditBaseSha: 'base-1' } });
+    const pr = { ...pull, body: '', isCrossRepository: false, baseSha: 'base-1' };
+    vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pr }));
+    vi.spyOn(s.backend, 'commentPull').mockImplementation(async () => { pr.baseSha = 'base-2'; return 'comment'; });
+    await qaFails(tester);
+    expect(rec).toMatchObject({ status: 'failed', fixReason: 'base' });
+    expect(ada.score).toBe(0);
+  });
+
+  it('counts a fresh QA send-back after a retained security record closes and reopens', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(rec, { securityReview: { reason: 'Authentication', qaSha: null } });
+    const reviewId = rec.reviewId;
+    await qaFails(tester);
+    expect(ada.score).toBe(-1);
+    s.reconcilePulls(repo, [{ ...pull, state: 'CLOSED' }]);
+    s.reconcilePulls(repo, [{ ...pull, headSha: 'sha-2' }]);
+    expect(rec.reviewId).not.toBe(reviewId);
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, headSha: 'sha-2', body: '', isCrossRepository: false });
+    Object.assign(rec, { status: 'testing', testedSha: 'sha-2' });
+    Object.assign(tester, { task: 'qa', status: 'working', prNumber: 13 });
+    await s.onQaFinished(tester, repo, result(true, failReport));
+    expect(ada.score).toBe(-2);
+  });
+
+  it('does not charge skipped unchanged QA', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    ada.score = 0;
+    rec.failedSha = pull.headSha;
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, body: '', isCrossRepository: false });
+    await s.runQa(tester, repo, rec);
+    expect(rec.status).toBe('failed');
+    expect(ada.score).toBe(0);
+  });
+
   const fixCrashes = (dev: Record<string, unknown>) => {
     Object.assign(dev, { status: 'working', task: 'fix', prNumber: 13 });
     rec.status = 'fixing';
