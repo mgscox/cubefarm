@@ -65,6 +65,8 @@ export interface SessionResult {
   interrupted?: boolean;
   /** The CLI crashed before a turn or conversation, within 15 seconds of launch. */
   startupFailed?: boolean;
+  /** Reconnected to a CLI but could not determine its outcome. */
+  recoveryFailed?: boolean;
 }
 
 export interface SessionCallbacks {

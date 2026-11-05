@@ -2511,7 +2511,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
   const ada = () => s.state.agents[0];
   const cut = { ok: false, text: '', errors: ['Codex was stopped (SIGTERM) before finishing.'], costUsd: 0, turns: 0 };
   /** The office follows a session, and the CLI behind it ends with this result. */
-  const end = async (result: typeof cut) => {
+  const end = async (result: SessionResult) => {
     const n = sessions.length;
     sessions[n - 1].cb.finished(result);
     await vi.waitFor(() => expect(ada().status).not.toBe('working'), { timeout: 500 }).catch(() => undefined);
@@ -2537,13 +2537,13 @@ describe('a developer session that ends without a PR after pushing commits', () 
   });
 
 
-  it.each(['issue', 'qa', 'fix'])('surfaces an unreadable restarted %s result without retrying or advancing the PR', async (task) => {
-    const error = 'Codex finished while the office restarted; result not collected (transcript unavailable).';
+  it.each(['issue', 'qa', 'fix'])('surfaces an unreadable reconnected %s result without retrying or advancing the PR', async (task) => {
+    const error = "Codex's session could not be recovered: no completion signal or readable transcript was available after reconnecting.";
     Object.assign(ada(), { task, prNumber: task === 'issue' ? null : 13 });
     const rec = { repoId: repo.id, prNumber: 13, status: task === 'qa' ? 'testing' : 'fixing', qaAgentId: 'a1', summary: '', checks: [], round: 1 } as unknown as QaRec;
     if (task !== 'issue') s.state.qa.push(rec);
     const before = sessions.length;
-    expect(await end({ ...cut, errors: [error] })).toBe(false);
+    expect(await end({ ...cut, errors: [error], recoveryFailed: true })).toBe(false);
     expect(sessions).toHaveLength(before);
     expect(ada()).toMatchObject({ status: 'stopped', lastError: error });
     if (task !== 'issue') expect(rec).toMatchObject({ status: 'needs-human', summary: error, qaAgentId: null });
