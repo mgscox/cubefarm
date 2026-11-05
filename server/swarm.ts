@@ -20,6 +20,8 @@ import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
 import { issueHolder, duplicateIssueSessions, issueTaken } from './issueClaims.ts';
 import { orphanedQa } from './qaOwnership.ts';
+import { closedWork, closedWorkText, issueClosed, restartClosedWork, type ClosedWork } from './closedWork.ts';
+import { silentSession } from './watchdog.ts';
 import { startTimeouts, stuckStarting } from './sessionStart.ts';
 import { withOperation } from './operation.ts';
 import { QA_RESUME_PROMPT, qaRetry } from './qaRetry.ts';
@@ -48,11 +50,11 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isPrototypeIssue, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, PROTOTYPE_BRANCH, prototypeIssueNumber, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
 import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
-import { isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchFiledAt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
+import { COMPANY_RESEARCH_DOCS, isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
 import type {
   AgentBoot,
   AgentCli,
@@ -106,6 +108,7 @@ interface PersistedRepo {
   color: string;
   autoAssign: boolean;
   requestedStarts: RequestedStart[];
+  sessionRemedies?: RepoView['sessionRemedies'];
   parkedBranches: ParkedBranch[];
   noWorkEndings: NoWorkEnding[];
   autoMerge: boolean; // PRs merge themselves once QA passes and GitHub's checks are green
@@ -151,7 +154,7 @@ interface PersistedAgent {
   turns: number;
   sessionId: string | null;
   sessionCli: AgentCli | null; // the CLI whose session sessionId is: only it can resume it
-  /** The one more session an issue that ended without a PR gets, held over Claude's usage pause: see holdRetry. */
+  /** A completion or silent-session retry, held over usage pauses and office closure. */
   heldRetry?: HeldRetry | null;
   issueStartHead?: string | null;
   lastError: string | null;
@@ -166,6 +169,7 @@ interface HeldRetry {
   issueNumber: number | null;
   ahead: number;
   why: string;
+  resume?: boolean;
 }
 
 /** A pull request's trip through QA. */
@@ -265,6 +269,7 @@ interface AgentRuntime {
   qaResume?: { cwd: string; systemAppend: string } | null; // the QA run's one resume for a missing report, until used
   deskMoved?: boolean; // the task's desk had to move off a removed box: its conversation can't be resumed
   boot?: AgentBoot | null; // a new CLI the office hasn't heard from (see SessionCallbacks.boot)
+  activityAt?: number;
 }
 
 interface RepoRuntime {
@@ -327,7 +332,7 @@ const MAX_DESKS: Record<AgentRole, number> = { dev: 12, qa: 3, ceo: 1, researche
 // A floor's researchers sit at developer desks: the two share the floor's desk slots.
 const deskPool = (role: AgentRole) => (role === 'researcher' ? 'dev' : role);
 const ROLE_TITLE: Record<AgentRole, string> = { dev: 'Developer', qa: 'QA tester', ceo: 'CEO', researcher: 'Researcher' };
-function readSpecialism(name: 'developer' | 'qa' | 'security') {
+function readSpecialism(name: 'developer' | 'prototype' | 'qa' | 'security') {
   try {
     return syncFs.readFileSync(new URL(`../docs/specialisms/${name}.md`, import.meta.url), 'utf8').trim();
   } catch (err) {
@@ -346,8 +351,9 @@ const CEO_NAME = 'Morgan';
 // The CEO's own folder: its notes about the company live here. Repos are read through their clones.
 const CEO_DIR = path.join(HOME_DIR, 'ceo');
 const RESEARCHER_NAME = 'Hypatia';
-// The company's research: one Markdown doc per topic, in a local git repository the CEO reads.
-const RESEARCH_DIR = path.join(HOME_DIR, 'research');
+// Older research records may still point at the previous local archive.
+const LEGACY_RESEARCH_DIR = path.join(HOME_DIR, 'research');
+const IDEA_RESEARCH_DIR = path.join(HOME_DIR, 'idea-research');
 const KEEP_RESEARCH_DOCS = 12;
 const MAX_RESEARCH_QUEUE = 8;
 /** At the office's start, how long a box gets to say which CLIs it kept running before the office carries on without it. */
@@ -755,7 +761,7 @@ export class Swarm {
     const back: ReconnectedCli[] = await this.backend
       .reconnectClis((id) => {
         const a = this.state.agents.find((x) => x.id === id);
-        return a && a.role !== 'ceo' && a.id !== RESEARCHER_ID && a.id !== this.state.research.job?.agentId ? this.terminalFor(a) : null;
+        return a && !a.deskBox && a.role !== 'ceo' && a.id !== RESEARCHER_ID && a.id !== this.state.research.job?.agentId ? this.terminalFor(a) : null;
       })
       .catch((err) => {
         console.warn('could not reconnect to the terminal keeper', err);
@@ -780,7 +786,7 @@ export class Swarm {
     }
     for (const c of back) if (c.busy && !carryOn.some((a) => a.id === c.agentId)) this.agentRt.get(c.agentId)?.terminal?.releaseIdle?.();
     for (const r of this.state.repos) this.repoRt.set(r.id, { issues: [], pulls: [], lastSync: null, syncing: false, cloneStatus: 'pending', lastMergedAt: null, folderSync: null, merging: false });
-    for (const a of carryOn) this.reattachSession(a);
+    await Promise.all(carryOn.map((a) => this.reattachSession(a)));
     this.backend.hooksReady();
     for (const c of this.boxConns.values()) c.hooksReady();
 
@@ -814,7 +820,7 @@ export class Swarm {
     for (const p of this.state.proposals) this.handOffDecision(p); // decisions persisted before a restart carry on
 
     for (const r of this.state.repos) void this.cloneRepo(r.id);
-    await this.backend.prepareResearchFolder(RESEARCH_DIR).catch((err) => console.warn('could not set up the research folder', err));
+    void this.refreshCompanyResearch();
     await Promise.all(this.state.repos.map((r) => this.syncRepo(r.id)));
     // Anything still alive in a desk (or a preview) is left over from before the restart, except around the CLIs that
     // kept running through it: their dev servers and commands are theirs.
@@ -832,6 +838,7 @@ export class Swarm {
     const updated = await this.backend.office.takeLastUpdate().catch(() => null);
     if (updated) await this.reportUpdate(updated);
     setInterval(() => this.state.repos.forEach((r, i) => setTimeout(() => void this.syncRepo(r.id), i * 1500)), SYNC_INTERVAL_MS);
+    setInterval(() => void this.refreshCompanyResearch(), SYNC_INTERVAL_MS);
     setInterval(() => this.schedule(), SCHEDULER_INTERVAL_MS);
     this.scheduling = true;
     setInterval(() => void this.saveTerminals(), TERMINAL_SAVE_MS);
@@ -905,6 +912,7 @@ export class Swarm {
       color: r.color,
       autoAssign: r.autoAssign,
       requestedStarts: r.requestedStarts,
+      sessionRemedies: r.sessionRemedies,
       parkedBranches: r.parkedBranches ?? [],
       noWorkEndings: r.noWorkEndings ?? [],
       autoMerge: r.autoMerge,
@@ -1515,11 +1523,11 @@ export class Swarm {
   }
 
   /** A box answered after the office started: agents whose CLI kept working there are followed again; other busy CLIs close. */
-  private boxBack(id: string, back: ReconnectedCli[]) {
+  private async boxBack(id: string, back: ReconnectedCli[]) {
     for (const c of back) {
       const a = this.state.agents.find((x) => x.id === c.agentId);
       const follow = !!a && a.status === 'stopped' && a.deskBox === id && !this.agentRt.get(a.id)?.session && followKeptCli({ ...a, status: 'working' }, c);
-      if (follow) this.reattachSession(a);
+      if (follow) await this.reattachSession(a);
       else if (c.busy) this.agentRt.get(c.agentId)?.terminal?.releaseIdle?.();
     }
     this.boxConns.get(id)?.hooksReady();
@@ -1844,11 +1852,15 @@ export class Swarm {
     a.lastError = error;
     session?.stop();
     rt.terminal?.releaseIdle?.();
+    const idle = rt.terminal?.closing;
     // Cleanup is bounded independently; a silent box must never hold a freed agent's slot.
     const cleanup = new AbortController();
     const timer = setTimeout(() => cleanup.abort(new Error('Desk cleanup timed out')), startTimeouts().preparing);
     timer.unref();
-    void withOperation(cleanup.signal, () => machine.releaseDesk(repo.fullName, slug, this.port(a)))
+    void withOperation(cleanup.signal, async () => {
+      await idle;
+      await machine.releaseDesk(repo.fullName, slug, this.port(a));
+    })
       .catch(() => undefined).finally(() => clearTimeout(timer));
     this.emitAgent(a);
     this.save();
@@ -2358,6 +2370,7 @@ export class Swarm {
       const pulls = pullResult.value.pulls;
       rt.fetchedAt = started;
       this.reconcilePulls(repo, pulls);
+      await this.stopClosedWork(repo, issues.status === 'fulfilled' ? issues.value : null, pulls);
       await this.pruneUnlistedQa(repo, pulls);
       // Something was merged since the last look (by the office or anyone else): bring the folder up to date.
       const newest = pulls.reduce<string | null>((m, p) => (p.mergedAt && (!m || p.mergedAt > m) ? p.mergedAt : m), null);
@@ -2427,7 +2440,7 @@ export class Swarm {
       if (pr.state !== 'OPEN') continue;
       const known = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === pr.number);
       if (known) known.crossRepository ??= pr.isCrossRepository; // records saved before origins were kept
-      if ((pr.isDraft || !pr.headRefName.startsWith('swarm/')) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) continue;
+      if (prototypeIssueNumber(pr.headRefName) || ((pr.isDraft || !pr.headRefName.startsWith('swarm/')) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW))) continue;
       if (known) continue;
       const dev = this.state.agents.find((a) => (a.role === 'dev' || a.role === 'researcher') && a.task !== 'qa' && (a.prNumber === pr.number || (pr.isCrossRepository === false && a.branch === pr.headRefName)) && (a.repoId === repo.id || a.id === RESEARCHER_ID));
       if (isResearchBranch(pr.headRefName) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) this.skipQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null, pr.headSha || null, pr.isCrossRepository);
@@ -2454,6 +2467,72 @@ export class Swarm {
     this.broadcast({ type: 'qaRemoved', repoId: rec.repoId, prNumber: rec.prNumber });
   }
 
+  /** Check authoritative work state before following a kept CLI or resuming its conversation. */
+  private async closedOnRestart(a: PersistedAgent, repo: PersistedRepo) {
+    const rt = this.agentRt.get(a.id)!;
+    const generation = rt.generation;
+    const [prState, issue] = await Promise.all([
+      a.prNumber == null ? null : this.backend.prDetails(repo.fullName, a.prNumber).then((p) => p.state, () => null),
+      a.task !== 'issue' || a.issueNumber == null ? null : this.backend.readIssue(repo.fullName, a.issueNumber).catch(() => null),
+    ]);
+    if (!this.state.agents.includes(a) || rt.generation !== generation) return true;
+    const work = restartClosedWork(a, { prState, issue });
+    if (!work) return false;
+    const text = work.kind === 'pr' && prState === 'MERGED' ? `PR #${work.number} was merged` : closedWorkText(work);
+    this.endClosedWork(a, repo, work, `■ Not resuming: ${text}. Ready for new work.`, prState === 'MERGED' ? 'MERGED' : 'CLOSED');
+    const floor = this.repoRt.get(repo.id);
+    if (floor && work.kind === 'issue') floor.issues = floor.issues.filter((i) => i.number !== work.number);
+    if (floor && work.kind === 'pr') floor.pulls = floor.pulls.map((p) => p.number === work.number ? { ...p, state: prState! } : p);
+    this.emitRepo(repo);
+    return true;
+  }
+
+  /** Stop busy sessions whose issue closed or whose PR closed unmerged. A missing issue or PR is read back first. */
+  private async stopClosedWork(repo: PersistedRepo, issues: IssueInfo[] | null, pulls: PullInfo[]) {
+    const floor = {
+      pulls,
+      openIssues: issues && new Set(issues.map((i) => i.number)),
+      parkedPrs: new Set((repo.parkedBranches ?? []).map((p) => p.prNumber)),
+    };
+    for (const a of this.state.agents.filter((x) => x.repoId === repo.id)) {
+      let work = closedWork(a, floor);
+      if (!work) continue;
+      const generation = this.agentRt.get(a.id)?.generation;
+      if (work.kind === 'pr' && !pulls.some((p) => p.number === work!.number)) {
+        // Unlisted: read it, then ask again with it listed, so an open PR still lets a closed issue stop an issue task.
+        const state = await this.backend.prDetails(repo.fullName, work.number).then((d) => d.state, () => null);
+        if (!state) continue;
+        work = closedWork(a, { ...floor, pulls: [...pulls, { number: work.number, state }] });
+        if (!work) continue;
+      }
+      if (work.kind === 'issue' && !issueClosed(await this.backend.readIssue(repo.fullName, work.number).catch(() => null))) continue;
+      if (!this.state.agents.includes(a) || this.agentRt.get(a.id)?.generation !== generation) continue; // moved on meanwhile
+      this.endClosedWork(a, repo, work, `■ Stopped: ${closedWorkText(work)}. Ready for new work.`);
+      this.postMessage('office', `■ Stopped ${a.name} on ${repo.fullName}: ${closedWorkText(work)}.`);
+    }
+  }
+
+  /** End an agent's task on closed work: its session, its desk and the QA record it was testing or fixing. */
+  private endClosedWork(a: PersistedAgent, repo: PersistedRepo, work: ClosedWork, log: string, prState: 'CLOSED' | 'MERGED' = 'CLOSED') {
+    const rt = this.agentRt.get(a.id);
+    const session = rt?.session;
+    if (rt) rt.session = null;
+    const rec = work.kind === 'pr' && this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === work.number && !q.closed &&
+      ((q.status === 'testing' && q.qaAgentId === a.id) || (q.status === 'fixing' && q.devAgentId === a.id)));
+    if (rec) {
+      // A kept record (it holds a security review) must not look in progress, or it would read as orphaned QA.
+      Object.assign(rec, { status: 'queued', qaAgentId: null });
+      this.closeQaRecord(rec, prState);
+    }
+    this.appendLog(a, [{ kind: 'system', text: log }]);
+    this.clearTask(a); // revokes the session's callbacks and any desk preparation in flight
+    a.sessionId = null;
+    this.state.deferredResumes = this.state.deferredResumes.filter((id) => id !== a.id);
+    session?.stop();
+    rt?.terminal?.releaseIdle?.();
+    this.save();
+  }
+
   /**
    * The sync only lists open and recently merged PRs, so a record whose PR merged or closed a while ago never shows up
    * finished there. Ask GitHub about each one; a failed lookup keeps the record for the next sync. The first sync after
@@ -2472,6 +2551,14 @@ export class Swarm {
       removed = true;
     });
     if (removed) this.save();
+  }
+
+  /** Demo only: close an issue on the fake GitHub as if someone did it there, then sync to show its session stopping. */
+  async closeDemoIssue(repoId: string, number: number) {
+    if (!this.backend.demo) throw new HttpError(404, 'Closing issues this way is only available in the demo office');
+    const repo = this.repo(repoId);
+    await this.backend.closeIssue(repo.fullName, number, 'not planned', 'Closed in the demo.').catch((err) => { throw new HttpError(404, (err as Error).message); });
+    await this.syncRepo(repo.id);
   }
 
   async createIssue(repoId: string, title: string, body: string, assignTo?: string, specialty?: string) {
@@ -2554,6 +2641,7 @@ export class Swarm {
     if (approval) rt.parking = true;
     try {
       const pr = await this.backend.prDetails(repo.fullName, number);
+      if (prototypeIssueNumber(pr.headRefName)) throw new HttpError(409, 'Approve the prototype for implementation from the Blocked board.');
       let rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number);
       const checkSecurityReview = (current: PrDetails) => {
         const labeled = hasLabel(current.labels, READY_FOR_SECURITY_REVIEW);
@@ -2751,6 +2839,7 @@ export class Swarm {
     this.abandonIdeaResearch(a);
     this.agentRt.get(id)?.session?.stop();
     this.agentRt.get(id)?.terminal?.releaseIdle?.();
+    const idle = this.agentRt.get(id)?.terminal?.closing;
     this.agentRt.get(id)?.terminal?.dispose();
     void removeScreens(id);
     void fs.rm(terminalFile(id), { force: true }).catch(() => undefined);
@@ -2763,8 +2852,8 @@ export class Swarm {
     if (repo) {
       const slug = this.agentSlug(a);
       const machine = this.machineFor(a);
-      void machine
-        .releaseDesk(repo.fullName, slug, this.port(a))
+      void Promise.resolve(idle)
+        .then(() => machine.releaseDesk(repo.fullName, slug, this.port(a)))
         .then(() => machine.removeDesk(repo.fullName, slug))
         .catch(() => undefined);
     }
@@ -2795,9 +2884,14 @@ export class Swarm {
   }
 
   /** An agent whose CLI kept working through the office's restart: the office follows its session again. */
-  private reattachSession(a: PersistedAgent) {
+  private async reattachSession(a: PersistedAgent) {
     const repo = this.state.repos.find((r) => r.id === a.repoId);
     if (!repo) return;
+    const place = this.place(a, 'within');
+    if ('wait' in place || place.fellBack) {
+      a.status = 'stopped';
+      return;
+    }
     a.status = 'working';
     this.repairDuplicateIssues();
     if (a.status !== 'working') return;
@@ -2805,7 +2899,7 @@ export class Swarm {
     const starting = this.startAgentSession(a, repo, this.machineFor(a).deskDir(repo.fullName, this.agentSlug(a)), '', '', a.sessionId ?? undefined, undefined, 'reattach');
     const rt = this.agentRt.get(a.id);
     const generation = rt?.generation;
-    void starting.catch((err) => {
+    await starting.catch((err) => {
       if (!this.state.agents.includes(a) || rt?.generation !== generation) return;
       this.nextGeneration(a);
       const session = rt?.session;
@@ -2881,7 +2975,9 @@ export class Swarm {
   }
 
   private issueTaken(repo: PersistedRepo, n: number) {
-    return issueTaken(this.state.agents, repo.id, n, this.repoRt.get(repo.id)?.pulls ?? [], Date.now());
+    const rt = this.repoRt.get(repo.id);
+    const prototype = rt?.issues.some((issue) => issue.number === n && isPrototypeIssue(issue.labels)) ?? false;
+    return issueTaken(this.state.agents, repo.id, n, rt?.pulls ?? [], Date.now(), prototype);
   }
 
   private ensureSlot() {
@@ -2899,7 +2995,7 @@ export class Swarm {
     return this.assignIssue(agentId, issueNumber, note, true);
   }
 
-  private async assignIssue(agentId: string, issueNumber: number, note: string | undefined, explicit: boolean) {
+  private async assignIssue(agentId: string, issueNumber: number, note: string | undefined, explicit: boolean, revision?: PullInfo) {
     this.ensureOfficeOpen();
     const a = this.agent(agentId);
     this.checkDesk(a);
@@ -2913,6 +3009,10 @@ export class Swarm {
     const issue = this.repoRt.get(repo.id)?.issues.find((i) => i.number === issueNumber);
     if (!issue) throw new HttpError(404, `Issue #${issueNumber} is not open on ${repo.fullName}`);
     if (a.role === 'researcher' && !isResearchIssue(issue.labels)) throw new HttpError(409, `${a.name} is a researcher: they take swarm:${RESEARCH} issues. Label #${issueNumber} swarm:${RESEARCH} or give it to a developer.`);
+    const prototype = a.role === 'dev' && isPrototypeIssue(issue.labels);
+    if (prototype && !revision && this.repoRt.get(repo.id)?.pulls.some((p) => p.state === 'OPEN' && prototypeIssueNumber(p.headRefName) === issueNumber)) {
+      throw new HttpError(409, 'Review the prototype on the Blocked board or send it back with feedback.');
+    }
     if (forHuman(issue.labels)) {
       throw new HttpError(409, `#${issueNumber} is labelled ${READY_FOR_HUMAN}: an agent can't complete it. Remove the label to hand it to a developer.`);
     }
@@ -2943,11 +3043,12 @@ export class Swarm {
       this.appendLog(a, [{ kind: 'system', text: `⏸ #${issueNumber} waits: ${this.waitReason(where)}.` }]);
       return { ...this.agentView(a, false), warning: `waiting: ${this.waitReason(where)}` };
     }
-    const branch = a.role === 'researcher' ? researchIssueBranch(issue.number, slugify(a.name)) : `swarm/issue-${issue.number}-${slugify(a.name)}`;
+    const branch = revision?.headRefName ?? (prototype ? `${PROTOTYPE_BRANCH}${issue.number}-${slugify(a.name)}`
+      : a.role === 'researcher' ? researchIssueBranch(issue.number, slugify(a.name)) : `swarm/issue-${issue.number}-${slugify(a.name)}`);
     this.beginTask(
       a,
-      { task: 'issue', issueNumber: issue.number, issueTitle: issue.title, branch, prNumber: null, prUrl: null, sessionId: null },
-      `Issue #${issue.number}: ${issue.title}`,
+      { task: 'issue', issueNumber: issue.number, issueTitle: issue.title, branch, prNumber: revision?.number ?? null, prUrl: revision?.url ?? null, sessionId: null },
+      `${prototype ? 'Prototype' : 'Issue'} #${issue.number}: ${issue.title}`,
       `Preparing worktree on ${branch}…`,
     );
     void this.runTask(a, repo, issue, note);
@@ -3031,6 +3132,17 @@ export class Swarm {
 
   private buildSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, fixing?: { pr: number; headRef: string }) {
     if (a.role === 'researcher' && !fixing) return this.researcherSystemAppend(a, { kind: 'floor', repo: repo.fullName, defaultBranch: repo.defaultBranch, summary: repo.summary, mission: repo.mission, cwd, branch, autoMerge: repo.autoMerge });
+    if (!fixing && prototypeIssueNumber(branch)) {
+      return [
+        `You are ${a.name}, a Prototype Developer on ${repo.fullName}. Work in ${cwd} on ${branch}. Answer the question with a disposable experiment.`,
+        a.brief ? `Your job description: ${a.brief}` : '',
+        readSpecialism('prototype'),
+        a.prNumber ? `Update draft PR #${a.prNumber} and its evidence in response to the manager's feedback. Push with git push origin HEAD:${branch}.` :
+          `Push with git push -u origin ${branch}. Open with gh pr create --draft --base ${repo.defaultBranch} --head ${branch}.`,
+        'Keep the prototype draft. Do not mark it ready, merge it, or publish or deploy the experiment. Leave the implementation decision to the manager.',
+        ONE_TURN,
+      ].filter(Boolean).join('\n');
+    }
     const specialism = a.role === 'dev' ? readSpecialism('developer') : '';
     const linked = this.linkedRepos(repo).map((r) => `- ${r.fullName}: read-only reference clone at ${this.machineFor(a).mainDir(r.fullName)}`);
     const push = fixing ? `git push origin HEAD:${fixing.headRef}` : `git push -u origin ${branch}`;
@@ -3110,16 +3222,29 @@ export class Swarm {
         if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') await this.cloneRepo(repo.id);
         if (gone()) return null;
         // A fix round for the PR's own author stays on the desk with their conversation; anything else is a new task.
-        const where = this.place(a, job?.task === 'fix' && job.author === a.id ? 'within' : 'new');
+        const within = job?.task === 'fix' && job.author === a.id;
+        const where = this.place(a, within ? 'within' : 'new');
         if ('wait' in where) throw new Error(`Waiting: ${this.waitReason(where)}.`);
         if (where.fellBack) this.appendLog(a, [{ kind: 'system', text: `ℹ ${this.boxName(where.fellBack)} was removed: this task runs on the office's machine.` }]);
         const rt = this.agentRt.get(a.id);
-        if (rt) rt.deskMoved = where.box !== a.deskBox;
-        if (where.box !== a.deskBox) {
+        const moved = where.box !== a.deskBox;
+        if (rt) rt.deskMoved = moved;
+        if (moved) {
           a.deskBox = where.box;
           this.emitAgent(a);
         }
         if (where.box) this.appendLog(a, [{ kind: 'system', text: `🖥 Working on ${this.boxName(where.box)}.` }]);
+        // The CLI waiting at their prompt has the desk as its working directory, and Windows can't reset a folder a
+        // process is in: close it and wait for it, and for any CLI already closing there, to exit. Only the author's
+        // fix round that resumes that CLI's own conversation (prepareFix) picks it up again.
+        const term = rt?.terminal;
+        if (term?.releaseIdle) {
+          const resume = within && !moved ? job.rec.devSessionId ?? undefined : undefined;
+          const how = resume ? this.sessionRuntime(a, resume) : null;
+          await term.releaseIdle(how?.resumeSessionId ? { cli: how.cli, resumeSessionId: how.resumeSessionId, host: this.machineFor(a).cliHost } : undefined);
+        }
+        await term?.closing;
+        if (gone()) return null;
         await this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
         if (gone()) return null;
         const cwd = await this.machineFor(a).prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch, (text) => { if (!gone()) this.appendLog(a, [{ kind: 'system', text }]); });
@@ -3173,11 +3298,13 @@ export class Swarm {
   private async prepareTask(a: PersistedAgent, repo: PersistedRepo, issue: IssueInfo, note?: string) {
     const research = a.role === 'researcher';
     const branch = a.branch!;
-    const cwd = await this.prepare(a, repo, {}, branch);
+    if (await this.closedBeforeStart(a, repo, { kind: 'issue', number: issue.number })) return;
+    const prototype = prototypeIssueNumber(branch);
+    const cwd = await this.prepare(a, repo, prototype && a.prNumber ? { pr: a.prNumber } : {}, branch);
     if (!cwd) return;
 
     const prompt = [
-      `Please ${research ? 'research' : 'resolve'} GitHub issue #${issue.number}: ${issue.title}`,
+      `Please ${research ? 'research' : prototype ? 'prototype' : 'resolve'} GitHub issue #${issue.number}: ${issue.title}`,
       `URL: ${issue.url}`,
       issue.labels.length ? `Labels: ${issue.labels.join(', ')}` : '',
       '',
@@ -3189,6 +3316,29 @@ export class Swarm {
       .join('\n');
 
     await this.startAgentSession(a, repo, cwd, prompt, this.buildSystemAppend(a, repo, cwd, branch));
+  }
+
+  /**
+   * Re-read the work just before its desk is prepared: it may have closed since the last sync. Returns true when the
+   * caller must not go on: the work is closed (the task is cleared), or the agent was removed or moved on to another
+   * task while GitHub answered. A failed read lets the work go ahead.
+   */
+  private async closedBeforeStart(a: PersistedAgent, repo: PersistedRepo, work: ClosedWork) {
+    const generation = this.agentRt.get(a.id)?.generation;
+    const state = await (work.kind === 'issue'
+      ? this.backend.readIssue(repo.fullName, work.number).then((i) => (issueClosed(i) ? 'CLOSED' : 'OPEN'))
+      : this.backend.prDetails(repo.fullName, work.number).then((d) => d.state)
+    ).catch(() => 'OPEN' as const);
+    if (!this.state.agents.includes(a) || a.status !== 'preparing' || this.agentRt.get(a.id)?.generation !== generation) return true;
+    if (state === 'OPEN') return false;
+    // Until the next sync, the scheduler must not hand the same closed work out again.
+    const rt = this.repoRt.get(repo.id);
+    if (rt && work.kind === 'issue') rt.issues = rt.issues.filter((i) => i.number !== work.number);
+    if (rt && work.kind === 'pr') rt.pulls = rt.pulls.map((p) => (p.number === work.number ? { ...p, state } : p));
+    const text = work.kind === 'issue' ? `issue #${work.number} is closed` : `PR #${work.number} is ${state === 'MERGED' ? 'merged' : 'closed'}`;
+    this.endClosedWork(a, repo, work, `⏹ Not starting: ${text}.`, state);
+    this.emitRepo(repo);
+    return true;
   }
 
   private async startAgentSession(
@@ -3215,6 +3365,31 @@ export class Swarm {
     this.watchStart(a, job);
     const how = this.sessionRuntime(a, resumeSessionId);
     this.emitAgent(a);
+    // A typed prompt's hook needs synchronous admission; restart and programmatic resumes can await these reads.
+    if (mode === 'reattach' || (resumeSessionId && mode !== 'typed')) {
+      if (await this.closedOnRestart(a, repo)) return;
+      let exists: boolean;
+      try {
+        exists = await withOperation(rt.startWatch!.controller.signal, () => this.machineFor(a).deskExists(repo.fullName, this.agentSlug(a)));
+      } catch (err) {
+        if (!this.state.agents.includes(a) || rt.generation !== generation) return;
+        a.status = 'stopped';
+        a.lastError = `Could not check the desk on its machine: ${oneLine(err)}`;
+        this.emitAgent(a);
+        this.save();
+        throw err;
+      }
+      if (!this.state.agents.includes(a) || rt.generation !== generation || a.status !== 'working') return;
+      if (!exists) {
+        this.appendLog(a, [{ kind: 'system', text: '↺ The desk is missing on its machine. Back to the queue.' }]);
+        rt.terminal?.releaseIdle?.();
+        this.deferPrepared(a, repo);
+        return;
+      }
+      if (rt.terminal?.closing) await withOperation(rt.startWatch!.controller.signal, () => rt.terminal!.closing!);
+      if (!this.state.agents.includes(a) || rt.generation !== generation || a.status !== 'working') return;
+      if (mode !== 'reattach' && this.state.officeHeld) return this.deferPrepared(a, repo);
+    }
     if (a.task === 'issue' && mode !== 'reattach') {
       rt.starting = generation;
       a.issueStartHead = null;
@@ -3227,6 +3402,7 @@ export class Swarm {
       this.save();
     }
     let session: SessionHandle | undefined; // undefined while startSession runs, should a runner finish synchronously
+    rt.activityAt = Date.now();
     session = rt.session = this.machineFor(a).startSession(
       {
         cwd,
@@ -3235,7 +3411,7 @@ export class Swarm {
         model: this.modelFor(a, how.cli),
         effort: a.effort || this.state.settings.defaultEffort,
         browserTesting: repo.browserTesting,
-        additionalDirectories: [...this.linkedRepos(repo).map((r) => this.machineFor(a).mainDir(r.fullName)), ...(a.role === 'researcher' ? [RESEARCH_DIR] : [])],
+        additionalDirectories: [...this.linkedRepos(repo).map((r) => this.machineFor(a).mainDir(r.fullName)), ...(a.role === 'researcher' && this.companyResearchCheckout ? [this.companyResearchCheckout] : [])],
         role: a.task === 'qa' ? 'qa' : a.role, // a developer covering QA works under QA's rules
         outputSchema,
         // A developer's CLI stays at its prompt afterwards, for the manager and for follow-ups; QA's closes.
@@ -3247,7 +3423,12 @@ export class Swarm {
         ...how,
       },
       {
-        log: (entries) => { if (rt.generation === generation) this.appendLog(a, entries); },
+        activity: () => { if (rt.generation === generation) rt.activityAt = Date.now(); },
+        log: (entries) => {
+          if (rt.generation !== generation) return;
+          if (entries.length) rt.activityAt = Date.now();
+          this.appendLog(a, entries);
+        },
         tool: (name) => {
           if (rt.generation !== generation) return;
           if (rt.currentTool === name) return;
@@ -3327,6 +3508,7 @@ export class Swarm {
       else if (a.task === 'fix' && rec?.devAgentId === a.id) this.setQa(rec, { status: 'failed' });
     } else if (a.task === 'qa') await this.onQaFinished(a, repo, result, released);
     else if (a.task === 'fix') await this.onFixFinished(a, repo, result);
+    else if (a.branch && prototypeIssueNumber(a.branch)) await this.finishPrototype(a, repo, result, generation);
     else await this.onIssueFinished(a, repo, result, released, generation);
 
     await released;
@@ -3334,6 +3516,94 @@ export class Swarm {
     this.save();
     void this.syncRepo(repo.id);
     setTimeout(() => this.schedule(), 500);
+  }
+
+  private async finishPrototype(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, generation: number | undefined) {
+    if (a.status === 'stopped') return;
+    this.cancelRequestedStart(a);
+    const { pulls } = result.ok ? await this.backend.listPulls(repo.fullName).catch(() => ({ pulls: [] })) : { pulls: [] };
+    if (this.agentRt.get(a.id)?.generation !== generation || (a.status as AgentStatus) === 'stopped') return;
+    const draft = pulls.find((p) => p.headRefName === a.branch && p.state === 'OPEN' && p.isDraft);
+    if (!draft) {
+      this.issueFailed(repo, a.issueNumber);
+      this.fail(a, result.ok ? { ...result, errors: ['Could not verify an open draft prototype PR on the assigned branch.'] } : result, 'prototype');
+      return;
+    }
+    Object.assign(a, { status: 'done', prNumber: draft.number, prUrl: draft.url });
+    this.appendLog(a, [{ kind: 'done', text: `Prototype PR #${draft.number} awaits your approval on the Blocked board.` }]);
+    this.postMessage('office', `${a.name}'s prototype for #${a.issueNumber} on ${repo.fullName} is ready to review: ${draft.url}`);
+  }
+
+  private prototypeReview(repoId: string, prNumber: number, head: string) {
+    const repo = this.repo(repoId);
+    const rt = this.repoRt.get(repoId)!;
+    const pr = rt.pulls.find((p) => p.number === prNumber && p.state === 'OPEN' && p.isDraft);
+    const number = pr && prototypeIssueNumber(pr.headRefName);
+    const issue = number && rt.issues.find((i) => i.number === number && isPrototypeIssue(i.labels));
+    if (!pr || !issue) throw new HttpError(409, 'This prototype is no longer awaiting a decision.');
+    if (!head || head !== pr.headSha) throw new HttpError(409, 'The prototype changed. Review the latest revision first.');
+    if (rt.parking || this.state.agents.some((a) => a.repoId === repoId && a.issueNumber === issue.number && BUSY.includes(a.status))) {
+      throw new HttpError(409, 'Wait for the prototype update to finish first.');
+    }
+    return { repo, pr, issue };
+  }
+
+  private approvingPrototypes = new Set<string>();
+
+  async revisePrototype(repoId: string, prNumber: number, head: string, feedback: string) {
+    if (!feedback.trim()) throw new HttpError(400, 'Add feedback for the developer.');
+    if (this.approvingPrototypes.has(`${repoId}/${prNumber}`)) throw new HttpError(409, 'Approval is in progress.');
+    const { repo, pr, issue } = this.prototypeReview(repoId, prNumber, head);
+    const free = this.available(repo, 'dev');
+    const developer = free.find((a) => a.branch === pr.headRefName) ?? this.pickDev(repo, free, (a) => a.specialty === 'prototype');
+    if (!developer) throw new HttpError(409, 'No developer is available to update the prototype. Try again when a desk is free.');
+    return this.assignIssue(developer.id, issue.number, feedback.trim(), true, pr);
+  }
+
+  async approvePrototype(repoId: string, prNumber: number, head: string, title: string, body: string) {
+    if (!title.trim() || !body.trim()) throw new HttpError(400, 'Describe the implementation and how to check it.');
+    const { repo, pr, issue } = this.prototypeReview(repoId, prNumber, head);
+    const key = `${repoId}/${prNumber}`;
+    if (this.approvingPrototypes.has(key)) throw new HttpError(409, 'Approval is in progress.');
+    this.approvingPrototypes.add(key);
+    try {
+      const [details, source] = await Promise.all([this.backend.prDetails(repo.fullName, prNumber), this.backend.readIssue(repo.fullName, issue.number)]);
+      this.prototypeReview(repoId, prNumber, head);
+      if (details.state !== 'OPEN' || !details.isDraft || details.closesIssues.includes(issue.number) || details.headSha !== head || details.headRefName !== pr.headRefName || !source || source.state !== 'OPEN' || !isPrototypeIssue(source.labels)) {
+        throw new HttpError(409, 'The prototype changed. Sync the board and review it again.');
+      }
+      for (const heading of ['Question and scope', 'How to run and review', 'Screenshots', 'Findings and limitations']) {
+        const section = details.body.split(/^##\s+/m).find((part) => part.startsWith(heading + '\n') || part.startsWith(heading + '\r\n'));
+        if (!section?.slice(heading.length).trim()) throw new HttpError(409, `Ask the developer to add the “${heading}” section to the prototype PR first.`);
+        if (heading === 'Screenshots' && !/!\[[^\]]*\]\(\S|<img\s|https:\/\/github\.com\/user-attachments\/assets\//i.test(section)) {
+          throw new HttpError(409, 'Ask the developer to attach screenshots to the prototype PR first.');
+        }
+      }
+      const approvedBody = `${body.trim()}\n\nApproved prototype: ${pr.url} (reviewed commit \`${head}\`).`;
+      await this.backend.editIssue(repo.fullName, issue.number, {
+        title: title.trim(),
+        body: approvedBody,
+        removeLabels: source.labels.filter((label) => label.toLowerCase() === 'swarm:prototype'),
+      });
+      // An approved issue can be picked up on the next scheduler pass, including on the same desk.
+      for (const a of this.state.agents.filter((a) => a.repoId === repoId && a.issueNumber === issue.number && a.branch && prototypeIssueNumber(a.branch))) {
+        this.clearTask(a);
+        this.emitAgent(a);
+      }
+      await this.syncRepo(repoId).catch((error) => console.warn('prototype approved; board refresh will retry', error));
+      const cached = this.repoRt.get(repoId)?.issues.find((candidate) => candidate.number === issue.number);
+      if (cached && isPrototypeIssue(cached.labels)) {
+        Object.assign(cached, {
+          title: title.trim(),
+          body: approvedBody,
+          labels: cached.labels.filter((label) => label.toLowerCase() !== 'swarm:prototype'),
+        });
+        this.emitRepo(repo);
+      }
+      this.toast('success', `Prototype approved. #${issue.number} is now an implementation issue.`);
+    } finally {
+      this.approvingPrototypes.delete(key);
+    }
   }
 
   private minutes(a: PersistedAgent) {
@@ -3492,7 +3762,18 @@ export class Swarm {
       }
       if (this.slotsFull()) return;
       a.heldRetry = null;
-      if (held.ahead > 0) this.finishPushedWork(a, repo, held.why, held.ahead);
+      if (held.resume) {
+        const starting = this.message(a.id, `The office ended your silent session. Check your worktree and continue the task; ${held.why}.`);
+        const generation = this.agentRt.get(a.id)?.generation;
+        void starting.catch((err) => {
+          if (!this.state.agents.includes(a) || this.agentRt.get(a.id)?.generation !== generation) return;
+          console.warn(`could not retry ${a.name}`, err);
+          a.status = 'stopped';
+          a.heldRetry = held;
+          this.emitAgent(a);
+          this.save();
+        });
+      } else if (held.ahead > 0) this.finishPushedWork(a, repo, held.why, held.ahead);
       else this.noPullRequest(a, repo, 0);
     }
   }
@@ -3654,6 +3935,7 @@ export class Swarm {
     if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
     const pr = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === prNumber && p.state === 'OPEN');
     if (!pr) throw new HttpError(404, `PR #${prNumber} is not open on ${repo.fullName}`);
+    if (prototypeIssueNumber(pr.headRefName)) throw new HttpError(409, 'Prototype drafts are reviewed from the Blocked board.');
     if (hasLabel(pr.labels, NEEDS_HUMAN)) throw new HttpError(409, `Remove ${NEEDS_HUMAN} from PR #${prNumber} before sending it to QA`);
     // a fork can reuse a desk's branch name: match by branch only for a PR confirmed to come from this repo
     const crossRepository = await this.backend.prDetails(repo.fullName, prNumber).then((d) => d.isCrossRepository, () => undefined);
@@ -4123,6 +4405,7 @@ export class Swarm {
     );
     this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
     const generation = this.agentRt.get(dev.id)?.generation;
+    if (await this.closedBeforeStart(dev, repo, { kind: 'pr', number: rec.prNumber })) return;
     const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, headRef, { rec, task: 'fix', author });
     if (this.agentRt.get(dev.id)?.generation !== generation) return;
     if (!cwd) {
@@ -4313,6 +4596,47 @@ export class Swarm {
   }
 
   private scheduleOffset = 0;
+
+  /** Only active floor tasks: startup has its own deadlines, and lobby jobs have their own queues. */
+  private watchSilentSessions() {
+    if (this.officeUpdate.handedOver) return;
+    const now = Date.now();
+    for (const a of this.state.agents) {
+      const rt = this.agentRt.get(a.id)!;
+      const repo = this.state.repos.find((r) => r.id === a.repoId);
+      if (!repo || !rt || a.status !== 'working' || !rt.session) continue;
+      // Offline boxes may still be working. Wait for their hooks and terminal replay after reconnecting.
+      if (a.deskBox && this.boxConns.get(a.deskBox)?.state().status !== 'online') continue;
+      const key = a.task === 'issue' && a.issueNumber != null ? `issue:${a.issueNumber}` : a.prNumber != null ? `pr:${a.prNumber}` : null;
+      if (!key) continue;
+      const remedies = repo.sessionRemedies?.[key] ?? {};
+      const action = silentSession(now, Math.max(rt.activityAt ?? a.startedAt ?? now, rt.terminal?.lastOutputAt ?? 0), remedies);
+      if (!action) continue;
+      repo.sessionRemedies ??= {};
+      repo.sessionRemedies[key] = { ...remedies, [action === 'nudge' ? 'nudgeAt' : 'requeueAt']: now };
+      if (action === 'nudge') {
+        const text = 'The office has heard no session activity for 20 minutes. Check your task and continue, or report what is blocking you.';
+        this.appendLog(a, [{ kind: 'system', text: `⏱ ${text}` }]);
+        rt.session.send(text);
+      } else {
+        const session = rt.session;
+        this.nextGeneration(a); // Late completion and hook callbacks cannot change the requeued task.
+        rt.session = null;
+        rt.currentTool = null;
+        a.status = 'stopped';
+        a.endedAt = now;
+        this.appendLog(a, [{ kind: 'system', text: '↺ Still silent ten minutes after the office nudge. Ending this session and requeuing its work.' }]);
+        session.stop();
+        rt.terminal?.releaseIdle?.();
+        if (a.task === 'issue' && !a.prNumber && a.sessionId && a.branch) {
+          a.heldRetry = { issueNumber: a.issueNumber, ahead: 0, why: `finish issue #${a.issueNumber} and open its PR`, resume: true };
+          this.emitAgent(a);
+        } else this.deferPrepared(a, repo);
+      }
+      this.emitRepo(repo);
+      this.save();
+    }
+  }
   private issueFailures = new Map<string, number>(); // `${repoId}#${issue}` → failed sessions on it
   private blockerReadings = new Map<string, BlockerReading>(); // blockerKey → latest read of an approved prerequisite
   private nudged = new Set<string>(); // `${repoId}#${issue}`: its developer was asked once to finish the missing PR
@@ -4510,6 +4834,7 @@ export class Swarm {
   private schedule() {
     for (const p of this.state.proposals) if (p.prd.recordId && p.decision?.publication?.status === 'queued') this.handOffDecision(p);
     for (const a of this.state.agents) if (a.repoId && this.startStall(a)) this.failedStart(a);
+    this.watchSilentSessions();
     this.repairDuplicateIssues();
     this.reconcileOrphanedQa();
     this.syncBoxes();
@@ -4986,7 +5311,7 @@ export class Swarm {
           company: s.companyName,
           manager: s.managerName,
           notesFile: path.join(CEO_DIR, 'NOTES.md'),
-          researchFolder: RESEARCH_DIR,
+          researchFolder: this.companyResearchLocation(),
           sessionLimit: s.sessionLimit,
           teamCap: s.teamCap,
           hiring: s.hiring,
@@ -4994,7 +5319,7 @@ export class Swarm {
         model: a.model || CEO_MODEL,
         effort: a.effort || CEO_EFFORT,
         browserTesting: false,
-        additionalDirectories: [...this.readyClones(), RESEARCH_DIR],
+        additionalDirectories: this.researchContextDirs(),
         role: 'ceo',
         office: this.officeTools(),
         ...how,
@@ -5233,6 +5558,57 @@ export class Swarm {
 
   // ---------- the lobby researcher ----------
 
+  private companyResearchCheckout: string | null = null;
+  private refreshingCompanyResearch = false;
+
+  private companyResearchRepo() {
+    const owner = this.backend.demo ? 'demo-manager' : this.user;
+    return owner ? `${owner}/cubebase` : null;
+  }
+
+  private companyResearchLocation() {
+    return this.companyResearchCheckout ?? `${this.companyResearchRepo() ?? 'cubebase'}/${COMPANY_RESEARCH_DOCS}/`;
+  }
+
+  private researchContextDirs() {
+    return [...this.readyClones(), ...(this.companyResearchCheckout ? [this.companyResearchCheckout] : [])];
+  }
+
+  private async refreshCompanyResearch() {
+    const fullName = this.companyResearchRepo();
+    if (!fullName || this.refreshingCompanyResearch) return;
+    this.refreshingCompanyResearch = true;
+    try {
+      const meta = await this.backend.repoMeta(fullName);
+      const repo = this.state.repos.find((r) => r.fullName.toLowerCase() === fullName.toLowerCase());
+      if (!repo) {
+        const sync = await this.backend.syncMain(meta.nameWithOwner, meta.defaultBranch, { touch: true });
+        if (!sync) await this.backend.ensureClone(meta.nameWithOwner);
+      } else if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') {
+        return;
+      }
+      const dir = path.join(this.backend.mainDir(meta.nameWithOwner), COMPANY_RESEARCH_DOCS);
+      this.companyResearchCheckout = this.backend.demo || syncFs.existsSync(dir) ? dir : null;
+    } catch {
+      // A missing Cubebase checkout must not stop floor or Idea research, or the CEO.
+    } finally {
+      this.refreshingCompanyResearch = false;
+    }
+  }
+
+  private recentResearch() {
+    const repo = this.companyResearchRepo();
+    return this.state.research.done.map((doc) => {
+      const relative = path.relative(LEGACY_RESEARCH_DIR, doc.where);
+      if (!repo || !this.companyResearchCheckout || !path.isAbsolute(doc.where) || relative.startsWith('..') || path.isAbsolute(relative)) return doc;
+      const dir = `https://github.com/${repo}`;
+      const where = relative
+        ? `${dir}/blob/HEAD/${COMPANY_RESEARCH_DOCS}/${relative.split(path.sep).map(encodeURIComponent).join('/')}`
+        : `${dir}/tree/HEAD/${COMPANY_RESEARCH_DOCS}`;
+      return { ...doc, where };
+    });
+  }
+
   private researcher() {
     return this.state.agents.find((a) => a.id === RESEARCHER_ID)!;
   }
@@ -5303,7 +5679,7 @@ export class Swarm {
   private researchInfo(): ResearchInfo {
     const r = this.state.research;
     const view = (j: ResearchJob) => ({ label: researchJobLabel(j, this.state.repos.find((x) => x.id === j.repoId) ?? null) });
-    return { queue: r.queue.map(view), job: r.job ? view(r.job) : null, done: r.done };
+    return { queue: r.queue.map(view), job: r.job ? view(r.job) : null, done: this.recentResearch() };
   }
 
   private emitResearch() {
@@ -5312,7 +5688,7 @@ export class Swarm {
 
   private researcherSystemAppend(a: PersistedAgent, place: ResearchPlace) {
     const s = this.state.settings;
-    return researcherSystemPrompt({ name: a.name, title: a.title, brief: a.brief, company: s.companyName, today: new Date().toISOString().slice(0, 10), companyFolder: RESEARCH_DIR, place });
+    return researcherSystemPrompt({ name: a.name, title: a.title, brief: a.brief, company: s.companyName, today: new Date().toISOString().slice(0, 10), companyFolder: this.companyResearchLocation(), place });
   }
 
   /** Queue a brief for the lobby researcher. Returns how many are waiting. */
@@ -5358,7 +5734,7 @@ export class Swarm {
     const a = this.researcher();
     const waiting = this.enqueueResearch({ topic, brief: String(x.brief ?? '').trim().slice(0, 3000), requestedBy: 'ceo', at: Date.now(), ...(repo && { repoId: repo.id }) });
     this.appendLog(a, [{ kind: 'system', text: `📋 Brief from ${this.ceo().name}: ${topic}` }]);
-    const where = repo ? `floor ${repo.floor}'s ${repo.fullName} under docs/research/, by pull request` : `the company research folder (${RESEARCH_DIR})`;
+    const where = repo ? `floor ${repo.floor}'s ${repo.fullName} under docs/research/, by pull request` : `${this.companyResearchRepo() ?? 'cubebase'} under ${COMPANY_RESEARCH_DOCS}/, by pull request`;
     return `Queued for ${a.name} (${waiting} waiting). The doc goes into ${where}; company_status lists research filed recently.`;
   }
 
@@ -5429,7 +5805,7 @@ export class Swarm {
         if (!job.ideaPhase) idea.status = 'researching';
         idea.research ??= { leadAgentId: RESEARCHER_ID, questions: [], requests: [] };
       });
-      await this.backend.prepareResearchFolder(RESEARCH_DIR);
+      await this.backend.prepareResearchFolder(IDEA_RESEARCH_DIR);
       if (this.officeUpdate.handedOver || this.agentRt.get(a.id) !== rt ||
         rt.generation !== generation || this.state.research.job !== job) return;
       if (a.status === 'stopped') throw new Error('Research was stopped; retry when ready');
@@ -5469,7 +5845,7 @@ export class Swarm {
         idea,
         // A linked Idea continues an archived one: its records are context for this research.
         records: this.state.ideaRecords.filter((r) => r.ideaId === idea.id || r.ideaId === idea.linkedFrom),
-        earlierResearch: this.state.research.done,
+        earlierResearch: this.recentResearch(),
         floors: this.state.repos.map((r) => ({ id: r.id, summary: r.summary, mission: r.mission, path: this.backend.mainDir(r.fullName) })),
         specialists: specialists.map((s) => ({ id: s.id, repoId: s.repoId, title: s.title, specialty: s.specialty })),
         request: idea.research!.requests.find((r) => r.id === job.requestId) ?? null,
@@ -5477,9 +5853,9 @@ export class Swarm {
       a.status = 'working';
       this.emitAgent(a);
       rt.session = this.backend.startSession({
-        cwd: RESEARCH_DIR, prompt: JSON.stringify(context), systemAppend: job.ideaPhase ? IDEA_WORK_PROMPT : IDEA_RESEARCH_PROMPT,
+        cwd: IDEA_RESEARCH_DIR, prompt: JSON.stringify(context), systemAppend: job.ideaPhase ? IDEA_WORK_PROMPT : IDEA_RESEARCH_PROMPT,
         outputSchema: job.ideaPhase ? workSchema(job.ideaPhase) : IDEA_RESEARCH_SCHEMA, model: this.modelFor(a, 'claude'), effort: a.effort || this.state.settings.defaultEffort,
-        browserTesting: false, additionalDirectories: this.readyClones(), role: 'researcher', ...this.sessionRuntime({ ...a, role: 'researcher' }),
+        browserTesting: false, additionalDirectories: this.researchContextDirs(), role: 'researcher', ...this.sessionRuntime({ ...a, role: 'researcher' }),
       }, {
         log: (entries) => { if (rt.generation === generation) this.appendLog(a, entries); },
         tool: (tool) => { if (rt.generation === generation) { rt.currentTool = tool; this.emitAgent(a); } },
@@ -5641,7 +6017,8 @@ export class Swarm {
     const rt = this.agentRt.get(a.id)!;
     const r = this.state.research;
     const label = researchJobLabel(job, repo);
-    const branch = repo ? researchDocBranch(job) : null;
+    const branch = researchDocBranch(job);
+    const fullName = repo?.fullName ?? this.companyResearchRepo();
     r.job = job;
     this.nextGeneration(a);
     Object.assign(a, { status: 'preparing' as AgentStatus, task: null, issueNumber: null, issueTitle: label, branch, prNumber: null, prUrl: null, startedAt: Date.now(), endedAt: null, costUsd: 0, turns: 0, lastError: null });
@@ -5649,14 +6026,35 @@ export class Swarm {
       { kind: 'system', text: '' },
       { kind: 'system', text: `━━━ ${label} ━━━` },
       ...(job.brief !== job.topic ? [{ kind: 'manager' as const, text: `▶ ${job.requestedBy === 'ceo' ? this.ceo().name : 'Manager'}: ${job.brief}` }] : []),
-      { kind: 'system', text: branch ? `Preparing a worktree on ${branch}…` : 'Opening the company research folder…' },
+      { kind: 'system', text: `Preparing a worktree on ${branch}…` },
     ]);
     this.emitAgent(a);
     this.emitResearch();
     this.save();
-    await this.backend.prepareResearchFolder(RESEARCH_DIR).catch((err) => console.warn('could not set up the research folder', err));
-    const cwd = repo && branch ? await this.prepare(a, repo, {}, branch) : a.status === 'preparing' ? RESEARCH_DIR : null;
-    if (!cwd || this.state.officeHeld) {
+    let cwd: string | null = null;
+    let defaultBranch = repo?.defaultBranch ?? '';
+    const preparing = () => a.status === 'preparing' && r.job === job;
+    try {
+      if (!fullName) throw new Error('Sign in to GitHub to file research in cubebase.');
+      if (repo) {
+        cwd = await this.prepare(a, repo, {}, branch);
+      } else {
+        const meta = await this.backend.repoMeta(fullName);
+        defaultBranch = meta.defaultBranch;
+        await this.backend.ensureClone(fullName);
+        if (preparing()) cwd = await this.backend.prepareDesk(fullName, { defaultBranch }, this.agentSlug(a), branch);
+      }
+    } catch (err) {
+      if (preparing()) {
+        a.status = 'error';
+        a.endedAt = Date.now();
+        a.lastError = `Could not prepare ${fullName ?? 'cubebase'}: ${(err as Error).message}`;
+        this.appendLog(a, [{ kind: 'error', text: a.lastError }]);
+        this.emitAgent(a);
+      }
+    }
+    if (!preparing()) cwd = null;
+    if (!cwd || !fullName || this.state.officeHeld) {
       // stopped or failed while preparing (prepare() logged why), or the office closed meanwhile
       if (cwd) {
         r.queue.unshift(job);
@@ -5672,9 +6070,10 @@ export class Swarm {
     const how = this.sessionRuntime(a);
     a.status = 'working';
     this.emitAgent(a);
-    const place: ResearchPlace = repo && branch
-      ? { kind: 'floor', repo: repo.fullName, defaultBranch: repo.defaultBranch, summary: repo.summary, mission: repo.mission, cwd, branch, autoMerge: repo.autoMerge }
-      : { kind: 'company', folder: RESEARCH_DIR };
+    const checkout = { repo: fullName, defaultBranch, cwd, branch };
+    const place: ResearchPlace = repo
+      ? { ...checkout, kind: 'floor', summary: repo.summary, mission: repo.mission, autoMerge: repo.autoMerge }
+      : { ...checkout, kind: 'company', autoMerge: false };
     rt.session = this.machineFor(a).startSession(
       {
         cwd,
@@ -5683,7 +6082,7 @@ export class Swarm {
         model: this.modelFor(a, how.cli),
         effort: a.effort || s.defaultEffort,
         browserTesting: false,
-        additionalDirectories: repo ? [RESEARCH_DIR] : this.readyClones(),
+        additionalDirectories: repo ? (this.companyResearchCheckout ? [this.companyResearchCheckout] : []) : this.readyClones(),
         role: 'researcher',
         ...how,
       },
@@ -5703,12 +6102,12 @@ export class Swarm {
         limited: (at) => this.pauseForLimit(at),
         usageWarning: (info) => this.paceForWarning(info),
         boot: (state) => this.setBoot(a, rt, state),
-        finished: (result) => void this.trackOfficeActivity(a.id, () => this.recordResearchFinished(a, job, repo, result)),
+        finished: (result) => void this.trackOfficeActivity(a.id, () => this.recordResearchFinished(a, job, repo, fullName, result)),
       },
     );
   }
 
-  private async recordResearchFinished(a: PersistedAgent, job: ResearchJob, repo: PersistedRepo | null, result: SessionResult) {
+  private async recordResearchFinished(a: PersistedAgent, job: ResearchJob, repo: PersistedRepo | null, fullName: string, result: SessionResult) {
     const rt = this.agentRt.get(a.id);
     if (!rt || this.officeUpdate.handedOver) return;
     rt.session = null;
@@ -5716,24 +6115,26 @@ export class Swarm {
     a.endedAt = Date.now();
     a.costUsd += result.costUsd;
     a.turns += result.turns;
-    this.state.research.job = null;
     if (result.interrupted) this.interrupted(a);
-    if (repo) await this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
+    await this.machineFor(a).releaseDesk(fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
+    // Session text can cite any PR: only the open PR on this desk's own branch counts.
+    const own = a.status !== 'stopped' && result.ok && a.branch
+      ? await (repo ? this.openPullForBranch(repo, a.branch) : this.backend.prForBranch(fullName, a.branch)).catch(() => null)
+      : null;
+    this.state.research.job = null;
     if (a.status === 'stopped') {
       // the manager already logged the stop
-    } else if (!result.ok) {
+    } else if (!result.ok || (!repo && !own)) {
       a.status = 'error';
-      a.lastError = result.errors.join('; ') || 'Session failed';
+      a.lastError = result.ok ? `No pull request was found on ${a.branch} in ${fullName}.` : result.errors.join('; ') || 'Session failed';
       this.appendLog(a, [{ kind: 'error', text: `✗ ${a.lastError}` }]);
       this.postMessage('office', `⚠️ ${a.name} hit a problem researching "${job.topic}": ${a.lastError.slice(0, 240)}`);
     } else {
-      let where = researchFiledAt(result.text, { fullName: repo?.fullName, folder: RESEARCH_DIR });
-      const own = repo && a.branch ? await this.openPullForBranch(repo, a.branch).catch(() => null) : null;
-      if (own) where = own.url;
+      const where = own?.url ?? fullName;
       const pr = own?.number ?? null;
-      if (repo && pr) {
-        Object.assign(a, { prNumber: pr, prUrl: where });
-        this.skipQa(repo, pr, a, null, null, false);
+      if (own) {
+        Object.assign(a, { prNumber: own.number, prUrl: own.url });
+        if (repo) this.skipQa(repo, own.number, a, null, null, false);
       }
       a.status = 'done';
       this.state.research.done = [...this.state.research.done, { topic: job.topic, where, at: Date.now() }].slice(-KEEP_RESEARCH_DOCS);
@@ -5978,9 +6379,9 @@ export class Swarm {
         },
         research: {
           ...(lobby && { lobbyResearcher: { id: lobby.id, name: lobby.name, status: lobby.status, ...(doing(lobby) && { doing: doing(lobby) }) } }),
-          companyFolder: RESEARCH_DIR,
+          companyFolder: this.companyResearchLocation(),
           queue: this.state.research.queue.map((j) => researchJobLabel(j, this.state.repos.find((x) => x.id === j.repoId) ?? null)),
-          filedRecently: this.state.research.done.slice(full ? 0 : -6).map((d) => ({ topic: d.topic, where: d.where, at: new Date(d.at).toISOString().slice(0, 10) })),
+          filedRecently: this.recentResearch().slice(full ? 0 : -6).map((d) => ({ topic: d.topic, where: d.where, at: new Date(d.at).toISOString().slice(0, 10) })),
         },
         ...(!full && { shortened: 'QA briefs, previews, job descriptions and long reasons are left out: pass floor or verbose for them.' }),
         floors,

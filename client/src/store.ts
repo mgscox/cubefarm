@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { CEO_ID, type IdeaView, type IssuePlanView, type IdeaReviewCycleView, type IdeaRecordView, type ProposalView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type PublicationView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { appendPhoneMessage } from '../../shared/phone';
-import { hasLabel, issueBlockers, issueReadinessReason, issueWorkNote, NEEDS_HUMAN, NEEDS_REVIEW } from '../../shared/issues';
+import { hasLabel, isPrototypeIssue, prototypeIssueNumber, issueBlockers, issueReadinessReason, issueWorkNote, NEEDS_HUMAN, NEEDS_REVIEW } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
 
 export type Agent = Omit<AgentView, 'log'>;
@@ -10,7 +10,7 @@ export type Agent = Omit<AgentView, 'log'>;
 export const isPublication = (p: PublicationView | null | undefined): p is PublicationView =>
   !!p && typeof p.proposalId === 'string' && Array.isArray(p.issues) && Array.isArray(p.snapshot?.issues);
 
-export type PhoneTab = 'chat' | 'hires' | 'company' | 'games';
+export type PhoneTab = 'chat' | 'hires' | 'company' | 'games' | 'settings';
 
 export type Overlay =
   | { kind: 'terminal'; agentId: string }
@@ -477,6 +477,7 @@ export interface KanbanCard {
   prNumber?: number;
   qa?: QaView;
   needsHumanLabel?: boolean;
+  prototype?: { issueNumber: number; head: string };
 }
 
 export interface KanbanColumns {
@@ -502,7 +503,7 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
   const issuesByNumber = new Map(repo.issues.map((issue) => [issue.number, issue]));
   for (const a of devs) {
     if (a.issueNumber == null || a.task !== 'issue' || a.status === 'idle') continue;
-    if (a.prNumber != null && openPulls.some((p) => p.number === a.prNumber)) continue;
+    if (a.prNumber != null && openPulls.some((p) => p.number === a.prNumber) && !(a.branch && prototypeIssueNumber(a.branch) && isBusy(a))) continue;
     if (hasLabel(issuesByNumber.get(a.issueNumber)?.labels, NEEDS_HUMAN)) continue;
     const note =
       a.status === 'preparing' ? 'setting up' : a.status === 'working' ? 'working' : a.status === 'error' ? 'needs help' : a.status === 'stopped' ? 'stopped' : 'finished · no PR';
@@ -519,11 +520,24 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
   const qa: KanbanCard[] = [];
   const review: KanbanCard[] = [];
   const ready: KanbanCard[] = [];
+  const prototyped = new Set<number>();
   for (const p of openPulls) {
     const rec = qaRecords[qaKey(repo.id, p.number)];
     const dev = (rec?.devAgentId ? byId.get(rec.devAgentId) : undefined) ?? authorOf(p.number, p.headRefName);
     const tester = rec?.qaAgentId ? byId.get(rec.qaAgentId) : undefined;
     const base = { key: `pr-${p.number}`, number: p.number, prNumber: p.number, title: p.title, url: p.url, qa: rec };
+    const prototype = prototypeIssueNumber(p.headRefName);
+    if (prototype) {
+      const issue = issuesByNumber.get(prototype);
+      if (issue && isPrototypeIssue(issue.labels)) {
+        prototyped.add(prototype);
+        if (!progress.some((card) => card.number === prototype && card.agent && isBusy(card.agent))) {
+          blocked.push({ ...base, qa: undefined, agent: dev, note: p.isDraft ? 'Awaiting prototype approval' : 'Reopen as a draft to review', tone: 'warn',
+            ...(p.isDraft && { prototype: { issueNumber: prototype, head: p.headSha } }) });
+        }
+      }
+      continue;
+    }
     const humanLabel = hasLabel(p.labels, NEEDS_HUMAN);
     if (humanLabel || rec?.status === 'needs-human') {
       blocked.push({
@@ -578,7 +592,7 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
     });
   }
 
-  const claimed = new Set<number>([...progress.map((c) => c.number), ...openPulls.flatMap((p) => p.closesIssues)]);
+  const claimed = new Set<number>([...progress.map((c) => c.number), ...prototyped, ...openPulls.filter((p) => !prototypeIssueNumber(p.headRefName)).flatMap((p) => p.closesIssues)]);
   const open = new Set(repo.issues.map((i) => i.number));
   const backlog: KanbanCard[] = [];
   const todo: KanbanCard[] = [];

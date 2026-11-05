@@ -16,6 +16,12 @@ describe('retaining explicit starts', () => {
     expect(retainRequestedStarts([request], [{ ...issue, labels: ['Ready-For-Human'] }], [])).toEqual([]);
   });
 
+  it('drops a fulfilled prototype request without blocking the later implementation request', () => {
+    const pull = { state: 'OPEN', closesIssues: [], headRefName: 'prototype/issue-66-ada' } as unknown as PullInfo;
+    expect(retainRequestedStarts([request], [{ ...issue, labels: ['swarm:prototype'] }], [pull])).toEqual([]);
+    expect(retainRequestedStarts([request], [issue], [pull])).toEqual([request]);
+  });
+
   it.each(['OPEN', 'CLOSED', 'MERGED'] as const)('drops an issue with a %s PR, by closing reference or swarm branch', (state) => {
     const pull = { state, closesIssues: [66], headRefName: 'feature' } as PullInfo;
     expect(retainRequestedStarts([request], [issue], [pull])).toEqual([]);

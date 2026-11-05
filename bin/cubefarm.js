@@ -8,6 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { claudeEnv } from './claudeAuth.js';
+import { browserUrl, localAddress, localUrl, officeHost } from './officeNetwork.js';
 
 const MIN_NODE = 22;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -108,13 +110,6 @@ function claudeBinary() {
   return null;
 }
 
-// Like the agents: no API keys or settings inherited from a Claude Code session this was started from.
-function claudeEnv() {
-  const env = {};
-  for (const [k, v] of Object.entries(process.env)) if (!/^(ANTHROPIC_|CLAUDE)/i.test(k) || k === 'CLAUDE_CONFIG_DIR') env[k] = v;
-  return env;
-}
-
 // ---------- checks ----------
 
 const sh = (cmd, cmdArgs, env) => spawnSync(cmd, cmdArgs, { encoding: 'utf8', windowsHide: true, timeout: 30_000, env });
@@ -150,6 +145,15 @@ function checks() {
   // Agents test in a browser through Playwright, which drives Google Chrome by default.
   const chrome = chromePaths().some((p) => fs.existsSync(p));
   out.push({ name: 'Chrome', ok: chrome, detail: chrome ? 'for browser testing' : 'not found', fix: 'install Google Chrome so agents can test in a browser' });
+  try {
+    // The agents' browser tools are the pinned playwright package's own MCP server (server/browser.ts).
+    const file = createRequire(import.meta.url).resolve('playwright/package.json');
+    const mcp = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const result = sh(process.execPath, [path.join(path.dirname(file), 'cli.js'), 'mcp', '--help']);
+    out.push({ name: 'Browser MCP', ok: result.status === 0, detail: `Playwright ${mcp.version}`, fix: 'reinstall cubefarm: the Playwright MCP command failed' });
+  } catch {
+    out.push({ name: 'Browser MCP', ok: false, fix: 'reinstall cubefarm: Playwright MCP is missing or unreadable' });
+  }
   return out;
 }
 
@@ -166,9 +170,9 @@ const printCheck = (c) => console.log(`  ${c.ok ? green('✓') : red('✗')} ${c
 
 // ---------- helpers ----------
 
-function portOpen(port) {
+function portOpen(port, host) {
   return new Promise((resolve) => {
-    const socket = net.connect({ port, host: '127.0.0.1' });
+    const socket = net.connect({ port, host });
     const done = (open) => {
       socket.destroy();
       resolve(open);
@@ -240,7 +244,7 @@ if (command === 'login') {
   const claude = claudeBinary();
   if (!claude) fail(`Claude Code for ${process.platform}-${process.arch} is missing. Reinstall cubefarm.`);
   console.log('\n  Signing in to Claude. Your agents use this login and your subscription.\n');
-  const res = spawnSync(claude, ['auth', 'login'], { stdio: 'inherit', env: claudeEnv() });
+  const res = spawnSync(claude, ['auth', 'login'], { stdio: 'inherit', env: claudeEnv(process.env, { login: true }) });
   process.exit(res.status ?? 1);
 }
 
@@ -248,12 +252,20 @@ if (command !== 'start') fail(`Unknown command "${command}". Run npx cubefarm --
 
 const port = Number(values.port ?? process.env.SWARM_PORT ?? 4317);
 if (!Number.isInteger(port) || port < 0 || port > 65535) fail(`"${values.port ?? process.env.SWARM_PORT}" isn't a port number.`);
-const url = `http://localhost:${port}`;
+let host;
+try {
+  host = officeHost();
+} catch (err) {
+  fail(err.message);
+}
+// An office bound to one address isn't on 127.0.0.1: probe and open it where it listens.
+const probeHost = localAddress(host);
+const url = browserUrl(host, port);
 const demo = values.demo || process.env.SWARM_DEMO === '1' || process.env.SWARM_DEMO === 'true';
 
 // A second office on the same state would resume every agent's session a second time.
-if (port !== 0 && (await portOpen(port))) {
-  if (!(await isOffice(`http://127.0.0.1:${port}`))) fail(`Something else is using port ${port}. Start cubefarm on another one: npx cubefarm --port 4400`);
+if (port !== 0 && (await portOpen(port, probeHost))) {
+  if (!(await isOffice(localUrl(host, port)))) fail(`Something else is using port ${port}. Start cubefarm on another one: npx cubefarm --port 4400`);
   console.log(`\n  cubefarm is already running: ${url}\n`);
   if (!values['no-open']) openBrowser(url);
   process.exit(0);
@@ -279,7 +291,7 @@ process.setSourceMapsEnabled(true);
 await import(pathToFileURL(entry).href);
 
 if (!values['no-open'] && port !== 0) {
-  for (let i = 0; i < 100 && !(await portOpen(port)); i++) await new Promise((r) => setTimeout(r, 200));
+  for (let i = 0; i < 100 && !(await portOpen(port, probeHost)); i++) await new Promise((r) => setTimeout(r, 200));
   openBrowser(url);
 }
 void checkForUpdate();

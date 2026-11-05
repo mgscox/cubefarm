@@ -455,12 +455,14 @@ export function connectBox(opts: BoxOptions): BoxConnection {
     removeDesk: (fullName, slug) => link.call('removeDesk', fullName, slug),
     releaseDesk: (fullName, slug, port) => link.call('releaseDesk', fullName, slug, port),
     deskHead: (fullName, slug) => link.call('deskHead', fullName, slug),
+    deskExists: (fullName, slug) => link.call('deskExists', fullName, slug),
     deskAhead: (fullName, slug, base) => link.call('deskAhead', fullName, slug, base),
     startSession(o, cb): SessionHandle {
       if (o.terminal) return startCliSession(o, cb, link);
       setTimeout(() => cb.finished({ ok: false, text: '', errors: [`${opts.box.name} runs agents in terminals only: switch the office's runtime to terminals.`], costUsd: 0, turns: 0 }), 0);
       return { send: () => undefined, stop: () => undefined };
     },
+    cliHost: link,
     terminals: true,
     detectClis: () => link.call<CliView[]>('detectClis'),
   };

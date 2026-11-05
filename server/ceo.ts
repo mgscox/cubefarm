@@ -361,7 +361,7 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
     ),
     tool(
       'request_research',
-      `Brief the lobby researcher: web research written up as a Markdown doc. With floor, the doc goes into that repo's docs/research/ by pull request; without, into the company research folder. For a floor with its own researcher, file_issue with specialty "${RESEARCH}" instead.`,
+      `Brief the lobby researcher: web research written up as a Markdown doc. With floor, the doc goes into that repo's docs/research/ by pull request; without, by pull request into cubebase under docs/research/company/. For a floor with its own researcher, file_issue with specialty "${RESEARCH}" instead.`,
       {
         topic: z.string().trim().min(1).max(120).describe('e.g. "Pricing of hosted Postgres providers"'),
         brief: z.string().trim().min(1).max(3000).describe('The questions to answer, why they matter and what decision they inform'),
@@ -404,7 +404,7 @@ export function ceoSystemPrompt(o: {
     '- Understand each project: what it is, its stack, how far along it is, and what kind of people it needs. Projects differ a lot. A static marketing site, a 3D browser game and a REST API need different specialists and different QA.',
     `- Shape each floor's team. Propose specialists with a specific title and a job description written for this project. Keep teams lean: agents on the same coding agent share one subscription's usage limits${o.sessionLimit ? ` and at most ${o.sessionLimit} sessions run at once` : ''}, so a floor rarely needs more than ${o.teamCap} people. Propose letting people go when a floor is clearly overstaffed or a specialty is no longer needed.`,
     "- Plan the work: turn a floor's brief into small, well-specified GitHub issues, one agent-session each, with acceptance criteria. Route each to a specialty. The office hands issues out itself: a free specialist gets first pick of their specialty, and otherwise any free developer takes the next issue that can start, so a specialty is a preference, not a lock.",
-    `- Get research done before deciding what you can't know from the code (markets, competitors, pricing, APIs, regulations). The lobby researcher is always there: brief them with request_research. A floor that needs research often can have its own researchers (propose_hire role researcher); they take swarm:${RESEARCH} issues. Docs land in the company research folder (${o.researchFolder}) or a repo's docs/research/: read them before planning.`,
+    `- Get research done before deciding what you can't know from the code (markets, competitors, pricing, APIs, regulations). The lobby researcher is always there: brief them with request_research. A floor that needs research often can have its own researchers (propose_hire role researcher); they take swarm:${RESEARCH} issues. Docs land in Cubebase (${o.researchFolder}) or a floor's docs/research/: read them before planning.`,
     "- Write each floor's QA brief: what QA testers must check for this kind of project (for a 3D game: the canvas renders, controls respond, frame rate is smooth; for a website: links, phone layout, accessibility; for an API: status codes, validation, error cases).",
     '',
     'How you work:',

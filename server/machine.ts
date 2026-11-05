@@ -18,6 +18,8 @@ export interface Machine {
   /** A floor's checkout as this machine sees it (linked repos are read-only references in the agent's session). */
   mainDir(fullName: string): string;
   deskDir(fullName: string, agentSlug: string): string;
+  /** Whether this machine still has the task's worktree. Never inspect a box path on the office's disk. */
+  deskExists(fullName: string, agentSlug: string): Promise<boolean>;
   prepareDesk(fullName: string, base: DeskBase, agentSlug: string, branch: string, note?: (text: string) => void): Promise<string>;
   removeDesk(fullName: string, agentSlug: string): Promise<void>;
   /** Stop processes an agent left running (dev servers on its port, anything started in its desk). */
@@ -28,6 +30,8 @@ export interface Machine {
   deskAhead(fullName: string, agentSlug: string, base: string): Promise<number>;
   /** An agent session: the real CLI in the agent's terminal when opts.terminal is set, else an Agent SDK session. */
   startSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle;
+  /** Where startSession runs its terminal CLIs (unset: none run here). */
+  cliHost?: CliHost;
   /** Terminals can run here (the native pseudo-terminal module loaded). */
   terminals: boolean;
   /** The coding-agent CLIs installed here. */

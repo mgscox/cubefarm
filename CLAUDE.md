@@ -45,7 +45,7 @@ When Chrome or Playwright gets a proxy error, blank page, or timeout loading a l
 | `npm run typecheck` | `tsc --noEmit` over client, server, shared, the `.ts` in scripts and the configs |
 | `npm test` | Vitest, once (`npm run test:watch` to re-run on edits) |
 | `npm run build` | typecheck, `vite build` to `dist/`, then the server bundled into `dist-server/` (`scripts/build-server.mjs`) |
-| `npm run test:e2e` | Playwright (`e2e/`, `playwright.config.ts`): builds, boots a demo office on `E2E_PORT` (default 4399; set it to your reserved port) with a temp `SWARM_HOME`, and smoke-tests it in headless Chromium |
+| `npm run test:e2e` | Playwright (`e2e/`, `playwright.config.ts`): builds (`E2E_SKIP_BUILD=1` reuses `dist/`), boots a demo office on `E2E_PORT` (default 4399; set it to your reserved port) with a temp `SWARM_HOME`, and smoke-tests it headless in a local Google Chrome, else Playwright's Chromium (always in CI) |
 | `node scripts/smoke-package.mjs` | after a build: packs the npm package, installs it into a temp folder and boots its demo |
 | `node --import tsx server/index.ts --demo` | a demo office (see SAFETY for the env it needs) |
 
@@ -88,7 +88,7 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
   `/ws/term` viewers, and keystrokes/resizes to the running CLI.
 - `ceo.ts`: the CEO's office MCP tools (`createOfficeTools`, zod-validated), `ceoSystemPrompt`, `ceoJobPrompt`.
 - `research.ts`: researchers' prompts, branches and briefs. The lobby researcher (always present) takes briefs into
-  the company research folder (`<SWARM_HOME>/research`, local git) or a floor's `docs/research/`; floor researchers take
+  the signed-in GitHub account's `cubebase` repo under `docs/research/company/` or a floor's `docs/research/` by pull request; floor researchers take
   `swarm:research` issues. Research PRs skip QA.
 - `issuePlan.ts`: an Idea's Issue Plan drafted from a PRD revision: pure checks, reuse of open issues, cycle rejection.
   `planFixture.ts` is the demo's PRD and draft (`POST /api/ideas/:id/plans/demo`, demo only).

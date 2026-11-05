@@ -3,7 +3,8 @@ import path from 'node:path';
 import xtermHeadless from '@xterm/headless';
 import xtermSerialize from '@xterm/addon-serialize';
 import type { WebSocket } from 'ws';
-import type { TermClientMessage, TermServerMessage } from '../shared/types.ts';
+import type { AgentCli, TermClientMessage, TermServerMessage } from '../shared/types.ts';
+import type { CliHost } from './machine.ts';
 
 // An agent's terminal: a headless xterm that mirrors everything its CLI printed, so a browser that opens it late (or
 // reconnects) gets the same screen and scrollback, plus the viewers watching it live. The CLI itself is bound as the
@@ -33,6 +34,14 @@ const clamp = (n: unknown, lo: number, hi: number, dflt: number) => {
   return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : dflt;
 };
 
+/** The session about to start in a terminal, as far as picking up the CLI waiting there goes. */
+export interface NextSession {
+  cli?: AgentCli;
+  resumeSessionId?: string;
+  /** The machine it runs on. */
+  host?: CliHost;
+}
+
 export class AgentTerminal {
   cols = TERM_COLS;
   rows = TERM_ROWS;
@@ -40,8 +49,13 @@ export class AgentTerminal {
   dirty = false;
   /** Includes CLI output that has not produced a structured agent log or session id yet. */
   lastOutputAt = 0;
-  /** Closes a CLI left waiting at its prompt after its task (set by the runtime that left it there). */
-  releaseIdle: (() => void) | null = null;
+  /**
+   * Closes a CLI left waiting at its prompt after its task, settling once it has exited (set by the runtime that left
+   * it there). Given the session about to start, it leaves open a CLI that session picks up again.
+   */
+  releaseIdle: ((next?: NextSession) => Promise<void>) | null = null;
+  /** Settles once every CLI closed in this terminal has exited; null while none is closing (set by the runtime). */
+  closing: Promise<void> | null = null;
   /** Something the manager typed at that waiting prompt: the office takes it on as a follow-up (true) or refuses. */
   onIdlePrompt: ((text: string) => boolean) | null = null;
   /** Keys a viewer typed, after they went to the CLI (the runtime watches for Esc interrupting a turn). */
@@ -76,7 +90,9 @@ export class AgentTerminal {
 
   /** A dim line from the office itself, e.g. between sessions. */
   note(text: string) {
+    const outputAt = this.lastOutputAt;
     this.write(`\r\n\x1b[2m${text}\x1b[0m\r\n`);
+    this.lastOutputAt = outputAt; // Office notes are not evidence that the CLI is working.
   }
 
   get live() {

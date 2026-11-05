@@ -1,4 +1,5 @@
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
+import { test } from './isolatedDemo';
 import type { WorldSnapshot } from '../shared/types';
 
 test('research an unhinted Idea, answer its blocker and inspect the same saved PRD revision after reload', async ({ page, request, baseURL }, testInfo) => {

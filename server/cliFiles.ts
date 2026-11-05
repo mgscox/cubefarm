@@ -1,8 +1,10 @@
+import { claudeEnv } from '../bin/claudeAuth.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { HOME_DIR } from './config.ts';
 import { projectEnv } from './projectEnv.ts';
+import { playwrightMcpCommand } from './browser.ts';
 import { cliLabel, cliSearchLocations, CODEX_HOOK_SOURCE, commandFor, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE } from './clis.ts';
 import { newScreenshots } from './agentRunner.ts';
 import type { CliPlan } from './machine.ts';
@@ -38,12 +40,6 @@ function writeHelpers() {
 /** A command line for Claude Code's shell (Git Bash on Windows): forward slashes, quoted. */
 const shellArg = (p: string) => `"${p.replaceAll('\\', '/')}"`;
 
-/** The browser for a session. Its snapshots and unnamed screenshots go to the session's folder, not the worktree. */
-function playwrightServer(outputDir: string) {
-  const args = ['-y', '@playwright/mcp@latest', '--headless', '--isolated', '--output-dir', outputDir, '--init-script', path.join(import.meta.dirname, 'browser-init.js')];
-  return process.platform === 'win32' ? { command: 'cmd', args: ['/c', 'npx', ...args] } : { command: 'npx', args };
-}
-
 /** A CLI ready to start: its session folder, its prompt as given, and what to spawn. */
 export interface CliLaunch {
   dir: string;
@@ -65,7 +61,7 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
 
   const hookUrl = `${hooks.url}/api/hooks/${plan.token}`;
   const dir = path.join(SESSIONS_DIR, plan.token);
-  const browser = plan.browserTesting ? playwrightServer(path.join(dir, 'browser')) : null;
+  const browser = plan.browserTesting ? playwrightMcpCommand(path.join(dir, 'browser')) : null;
   let prompt = plan.prompt;
   let repoSkills: string | undefined;
   let files: { settings: string; mcp: string | null; system: string };
@@ -116,9 +112,8 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
   // Each agent must be a clean instance on the account its CLI is logged into: no API keys (they would switch Claude
   // Code's billing to the API) and nothing inherited from a Claude Code session the office itself was started from.
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(projectEnv(process.env))) {
+  for (const [k, v] of Object.entries(claudeEnv(projectEnv(process.env), { login: plan.cli !== 'claude' }))) {
     if (v === undefined) continue;
-    if (/^(ANTHROPIC_|CLAUDE)/i.test(k) && k !== 'CLAUDE_CONFIG_DIR') continue;
     if (/^(NO_COLOR|FORCE_COLOR|TERM_PROGRAM|TERM_PROGRAM_VERSION|CODEX_THREAD_ID|OPENCODE_CONFIG_CONTENT)$/i.test(k)) continue;
     env[k] = v;
   }

@@ -89,3 +89,27 @@ describe.each(['npm_config_allow_scripts', 'NPM_CONFIG_ALLOW_SCRIPTS', 'Npm_Conf
     }
   });
 });
+
+it('preserves subscription auth for SDK and CLI while stripping key, proxy and parent session overrides', () => {
+  vi.stubEnv('CLAUDE_CODE_OAUTH_TOKEN', 'dummy-subscription-token');
+  vi.stubEnv('CLAUDE_CONFIG_DIR', '/dummy/config');
+  for (const key of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDECODE']) vi.stubEnv(key, 'dummy-forbidden');
+  const sdk = startSession(opts, callbacks);
+  const terminal = { cols: 120, rows: 32, note: vi.fn(), bind: vi.fn() } as unknown as AgentTerminal;
+  const cli = startCliSession({ ...opts, cli: 'claude', terminal }, callbacks);
+  try {
+    for (const env of [vi.mocked(query).mock.calls[0][0].options?.env, vi.mocked(spawnPty).mock.calls[0][2].env]) {
+      expect(env?.CLAUDE_CODE_OAUTH_TOKEN === 'dummy-subscription-token').toBe(true);
+      expect(env?.CLAUDE_CONFIG_DIR).toBe('/dummy/config');
+      expect(Object.entries(env!).some(([key, value]) => /^(ANTHROPIC_|CLAUDE)/i.test(key) && !['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR', 'CLAUDE_AGENT_SDK_CLIENT_APP'].includes(key) && value !== undefined)).toBe(false);
+    }
+  } finally { sdk.stop(); cli.stop(); }
+});
+
+it.each(['codex', 'opencode'] as const)('does not hand the Claude subscription token to %s', (cli) => {
+  vi.stubEnv('CLAUDE_CODE_OAUTH_TOKEN', 'dummy-claude-only');
+  const terminal = { cols: 120, rows: 32, note: vi.fn(), bind: vi.fn() } as unknown as AgentTerminal;
+  const session = startCliSession({ ...opts, cli, terminal }, callbacks);
+  try { expect(vi.mocked(spawnPty).mock.calls[0][2].env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined(); }
+  finally { session.stop(); }
+});

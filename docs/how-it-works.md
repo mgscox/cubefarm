@@ -45,10 +45,16 @@ You can message an agent at any time. While they're working, the message is inje
 - QA testers use the same model and effort settings as everyone else. Their instructions tell them not to push, comment on, review, merge or edit PRs or issues: the office posts their report for them.
 - QA is automatic for every PR from a `swarm/` branch, whether or not auto-assign is on, except research docs (`swarm/research-` branches): there's nothing to test, so they count as passed and merge like any other PR once GitHub's checks are green.
 
+## Prototypes
+
+Choose **Prototype** when filing an issue, or label a GitHub issue `swarm:prototype`. Set a developer's specialty to `prototype` to give them first pick of this work. The desk uses the Prototype Developer playbook and the bundled Pocock prototype skill.
+
+The experiment stays on its own branch. Its draft PR appears in **Blocked** with **Preview**, **Send back…**, and **Approve for implementation…**. The PR must explain the question, how to run and review the experiment, what it showed, and what remains uncertain, with screenshots of the important states. Send back provides feedback on the same draft. Approval records the reviewed commit, replaces the issue's prototype brief with the implementation scope and acceptance criteria, and releases the issue to regular scheduling. Implementation gets its own branch and PR and follows the normal QA workflow.
+
 ## Researchers
 
 - Researchers do web research (Claude Code's WebSearch and WebFetch) and write it up as Markdown docs: the question, the answer first, findings, recommendations, open questions and numbered sources. They always run Claude Code, and they never change code.
-- **The lobby researcher** is always there, at the desk by the lobby's east windows, and works for the whole company from a queue of briefs: the CEO's `request_research` tool, or yours (press `E` at their desk; the first line of a brief is its topic). Company research is committed to `~/.cubefarm/research/`, a local git repository with no remote, which the CEO reads. A brief for a floor goes into that repo's `docs/research/` by pull request instead.
+- **The lobby researcher** is always there, at the desk by the lobby's east windows, and works for the whole company from a queue of briefs: the CEO's `request_research` tool, or yours (press `E` at their desk; the first line of a brief is its topic). Company research goes by pull request into `docs/research/company/` in the signed-in GitHub account's `cubebase` repository, which the CEO reads. Create a private `cubebase` repository with an initial commit to enable company briefs. The manager can merge these pull requests in GitHub. A brief for a floor goes into that repo's `docs/research/` by pull request instead.
 - **Floor researchers** sit at free developer desks (they share the floor's 12 desks with developers). Hire them in the manager's console → Team, or the CEO proposes them. They take issues labelled `swarm:research`, and nothing else; developers never get those issues automatically. Their docs go into `docs/research/` by pull request, which closes the issue.
 - New research waits while Claude's usage is pacing or paused, like new issues.
 
@@ -98,7 +104,7 @@ Agents can do anything your own coding agent in a terminal can. Run the office w
 - `~/.cubefarm/sessions/<token>/`: a running CLI session's settings, MCP config and instructions (removed when it ends); `~/.cubefarm/bin/`: the small scripts the CLIs call back to the office with
 - `~/.cubefarm/workspaces/<owner>__<repo>/main`: a clone of each repo
 - `~/.cubefarm/workspaces/<owner>__<repo>/desks/<agent>`: one worktree per agent
-- `~/.cubefarm/research/`: the company's research docs, committed by the lobby researcher
+- `~/.cubefarm/idea-research/`: the local working directory for Idea research sessions. Company research reports live in Cubebase.
 
 Workspaces live outside this project on purpose: agents working in them never pick up this project's `CLAUDE.md`.
 

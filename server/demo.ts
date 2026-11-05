@@ -11,7 +11,7 @@ import { updateFailure } from './fleet.ts';
 import type { ApprovedSnapshot, IdeaView, IdeaRecordView, CliView, GhRepoSummary, IssueInfo, PullInfo, MachineSample, MachineTelemetry } from '../shared/types.ts';
 import type { TrackedIssue } from './github.ts';
 import { monitorResources } from './machineHealth.ts';
-import { dependencyUrls, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
+import { dependencyUrls, prototypeIssueNumber, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
 import type { LocalFolder } from './workspace.ts';
 import { HOME_DIR } from './config.ts';
 import { CommandError } from './exec.ts';
@@ -39,6 +39,7 @@ function issue(n: number, title: string, body: string, fullName: string, labels:
 const tracked = (fullName: string, i: IssueInfo): TrackedIssue => ({ repo: fullName, number: i.number, url: i.url, title: i.title, body: i.body, labels: [...i.labels], state: 'OPEN', stateReason: null });
 
 const repos = new Map<string, FakeRepo>();
+const COMPANY_REPO = 'demo-manager/cubebase';
 /** Repos made in the demo (new projects, published folders): empty, so no package.json for the preview to fall back on. */
 const bareRepos = new Set<string>();
 const mergedSinceSync = new Map<string, number>(); // merges the fake project folder hasn't pulled yet
@@ -246,11 +247,11 @@ function qaScript(cb: SessionCallbacks, pr: number, title: string, round: number
   ];
 }
 
-function researchScript(topic: string, doc: string, floor: boolean): Step[] {
+function researchScript(topic: string, dir: string, doc: string): Step[] {
   const q = topic.length > 50 ? `${topic.slice(0, 49)}…` : topic;
   return [
     [{ kind: 'text', text: `● Researching "${q}". First, what we already know.` }],
-    [{ kind: 'tool', tool: 'Glob', text: `⏺ Glob ${floor ? 'docs/research/*.md' : '*.md'}` }, { kind: 'result', text: '  ⎿ Found 2 files' }],
+    [{ kind: 'tool', tool: 'Glob', text: `⏺ Glob ${dir}/*.md` }, { kind: 'result', text: '  ⎿ Found 2 files' }],
     [{ kind: 'tool', tool: 'WebSearch', text: `⏺ Web Search("${q} ${new Date().getFullYear()}")` }, { kind: 'result', text: '  ⎿ Did 1 search in 2s' }],
     [{ kind: 'tool', tool: 'WebFetch', text: '⏺ Fetch(https://example.com/guide)' }, { kind: 'result', text: '  ⎿ Received 48.2KB (200 OK)' }],
     [{ kind: 'thinking', text: '✻ Thinking…' }],
@@ -258,9 +259,9 @@ function researchScript(topic: string, doc: string, floor: boolean): Step[] {
     [{ kind: 'tool', tool: 'WebFetch', text: '⏺ Fetch(https://example.org/review)' }, { kind: 'result', text: '  ⎿ Received 31.7KB (200 OK)' }],
     [{ kind: 'text', text: '● Three independent sources agree on the main point; one disagrees on pricing. Writing it up with both.' }],
     [{ kind: 'tool', tool: 'Write', text: `⏺ Write ${doc}` }, { kind: 'result', text: '  ⎿ Wrote 86 lines' }],
-    [{ kind: 'tool', tool: 'Edit', text: `⏺ Edit ${floor ? 'docs/research/README.md' : 'README.md'}` }, { kind: 'result', text: '  ⎿ Updated' }],
+    [{ kind: 'tool', tool: 'Edit', text: `⏺ Edit ${dir}/README.md` }, { kind: 'result', text: '  ⎿ Updated' }],
     [{ kind: 'tool', tool: 'Bash', text: `⏺ $ git add -A && git commit -m "Research: ${q}"` }, { kind: 'result', text: '  ⎿ 2 files changed, 87 insertions(+)' }],
-    ...(floor ? [[{ kind: 'tool' as const, tool: 'Bash', text: '⏺ $ git push -u origin HEAD && gh pr create' }]] : []),
+    [{ kind: 'tool', tool: 'Bash', text: '⏺ $ git push -u origin HEAD && gh pr create' }],
   ];
 }
 
@@ -347,7 +348,8 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
   if (opts.outputSchema && 'action' in (opts.outputSchema.properties as object ?? {})) return fakeIdeaSession(opts, cb);
   const timers: NodeJS.Timeout[] = [];
   let stopped = false;
-  const kind = opts.role === 'qa' ? 'qa' : /FAILED|taking over pull request|git push origin HEAD:/.test(opts.prompt) ? 'fix' : opts.role === 'researcher' ? 'research' : 'issue';
+  const prototypeBranch = opts.systemAppend.match(/ on (prototype\/issue-\S+)\. Answer the question/)?.[1];
+  const kind = prototypeBranch ? 'issue' : opts.role === 'qa' ? 'qa' : /FAILED|taking over pull request|git push origin HEAD:/.test(opts.prompt) ? 'fix' : opts.role === 'researcher' ? 'research' : 'issue';
   const prMatch = opts.prompt.match(/pull request #(\d+)(?::\s*(.+))?/);
   const issueMatch = opts.prompt.match(/#(\d+):\s*(.+)/);
   const number = Number((kind === 'issue' ? issueMatch?.[1] : prMatch?.[1]) ?? 0);
@@ -361,12 +363,18 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
     { kind: 'system', text: `✻ Claude Code (demo) · ${opts.model} · ${opts.effort} effort` },
     { kind: 'system', text: `  cwd ${opts.cwd}` },
   ];
-  // Research: an issue on a floor, or a brief (fullName '' = for the company research folder).
+  // Research: an issue on a floor, or a brief filed by pull request.
   const topic = (issueMatch?.[2] ?? opts.prompt.match(/Topic: (.+)/)?.[1] ?? 'the brief').trim();
   const docName = `${new Date().toISOString().slice(0, 10)}-${topic.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)}.md`;
-  const doc = fullName ? `docs/research/${docName}` : path.join(opts.cwd, docName);
-  const body = security ? [[{ kind: 'text' as const, text: '● Checking the changed trust boundaries and validating the simulated audit reports.' }]]
-    : kind === 'qa' ? qaScript(cb, number, title, round) : kind === 'fix' ? fixScript(number, pushes) : kind === 'research' ? researchScript(topic, doc, !!fullName) : devScript(opts, cb, number, title);
+  const dir = fullName === COMPANY_REPO ? 'docs/research/company' : 'docs/research';
+  const doc = `${dir}/${docName}`;
+  const body: Step[] = prototypeBranch ? [
+    [{ kind: 'text', text: '● Testing the question with a small demo and sample data.' }],
+    [{ kind: 'tool', tool: 'Write', text: '⏺ Write prototype walkthrough and findings' }],
+    () => cb.screenshot(Buffer.from(screenshotSvg(title, 'Demo prototype', 200)), 'image/svg+xml'),
+    [{ kind: 'text', text: '● Updating the draft PR with the walkthrough and screenshot for the manager.' }],
+  ] : security ? [[{ kind: 'text' as const, text: '● Checking the changed trust boundaries and validating the simulated audit reports.' }]]
+    : kind === 'qa' ? qaScript(cb, number, title, round) : kind === 'fix' ? fixScript(number, pushes) : kind === 'research' ? researchScript(topic, dir, doc) : devScript(opts, cb, number, title);
   const script = [header, ...body];
 
   const finish = () => {
@@ -434,10 +442,7 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
       const branch = opts.systemAppend.match(/Your branch: (\S+)/)?.[1];
       const answer = `Three of four sources agree on the main point, so I recommend following them; the doc compares all four, with links, and lists what is still open.`;
       if (!repo || !branch) {
-        // the company research folder is real, so the CEO can read what the demo filed
-        void fs.writeFile(doc, `# ${topic}\n\n_Demo research: no web was searched._\n\n## Summary\n\n${answer}\n`).catch(() => undefined);
-        cb.log([{ kind: 'text', text: `● ${answer}` }]);
-        cb.finished({ ok: true, text: `${answer}\n${doc}`, costUsd, turns, errors: [] });
+        cb.finished({ ok: false, text: '', costUsd, turns, errors: ['No research worktree'] });
         return;
       }
       const n = repo.nextNumber++;
@@ -470,18 +475,24 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
     const repo = repos.get(fullName);
     let url = '';
     if (repo && number) {
+      const existing = prototypeBranch && repo.pulls.find((p) => p.state === 'OPEN' && p.headRefName === prototypeBranch);
+      if (existing) {
+        existing.headSha = fakeSha();
+        cb.finished({ ok: true, text: existing.url, costUsd, turns, errors: [] });
+        return;
+      }
       const n = repo.nextNumber++;
       url = `https://github.com/${fullName}/pull/${n}`;
       repo.pulls.unshift({
         number: n,
         title,
         url,
-        headRefName: `swarm/issue-${number}-${path.basename(opts.cwd).replace(/-[0-9a-f]{4}$/, '')}`,
+        headRefName: prototypeBranch ?? `swarm/issue-${number}-${path.basename(opts.cwd).replace(/-[0-9a-f]{4}$/, '')}`,
         state: 'OPEN',
-        isDraft: false,
+        isDraft: !!prototypeBranch,
         mergeable: 'MERGEABLE',
         reviewDecision: null,
-        closesIssues: [number],
+        closesIssues: prototypeBranch ? [] : [number],
         createdAt: now(),
         mergedAt: null,
         additions: 40 + ((number * 13) % 200),
@@ -492,8 +503,12 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
         failedChecks: [],
         pendingChecks: [],
       });
-      runChecks(repo.pulls[0]);
+      if (!prototypeBranch) runChecks(repo.pulls[0]);
       cb.log([{ kind: 'result', text: `  ⎿ ${url}` }]);
+    }
+    if (prototypeBranch) {
+      cb.finished({ ok: true, text: url, costUsd, turns, errors: [] });
+      return;
     }
     cb.log([{ kind: 'text', text: `● Opened ${url || 'the pull request'}. It closes #${number} and includes tests.` }]);
     cb.finished({ ok: true, text: url, costUsd, turns, errors: [] });
@@ -634,7 +649,7 @@ const demoResources = (profile = ''): MachineSample => ({
  * One starting with "old" too, but its cubefarm predates --update: the first try fails, as if the manager then updated
  * it by hand, so Look again moves it.
  */
-function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
+function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'deskExists' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
   let status: 'connecting' | 'online' | 'offline' = 'connecting';
   let running = 0;
   let telemetry: MachineTelemetry | null = null;
@@ -746,6 +761,9 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
 }
 
 export function createDemoBackend(): Backend {
+  if (!repos.has(COMPANY_REPO)) {
+    repos.set(COMPANY_REPO, { fullName: COMPANY_REPO, description: 'Company research', issues: [], pulls: [], nextNumber: 1 });
+  }
   // Tie each fake session back to its repo via the desk directory name.
   const deskRepo = new Map<string, string>();
   const deskBranches = new Map<string, string | null>();
@@ -754,6 +772,7 @@ export function createDemoBackend(): Backend {
   const desks = (root: string) => ({
     mainDir: (fullName: string) => `${root}/${fullName}/main`,
     deskDir: (fullName: string, slug: string) => `${root}/${fullName}/desks/${slug}`,
+    deskExists: async (fullName: string, slug: string) => deskRepo.has(`${root}/${fullName}/desks/${slug}`),
     prepareDesk: async (fullName: string, base: { pr?: number }, slug: string, branch: string, note?: (text: string) => void) => {
       await new Promise((r) => setTimeout(r, 900));
       const dir = `${root}/${fullName}/desks/${slug}`;
@@ -801,7 +820,7 @@ export function createDemoBackend(): Backend {
     resources: async () => demoResources(),
     user: async () => 'demo-manager',
     listMyRepos: async (): Promise<GhRepoSummary[]> =>
-      [...repos.values()].map((r) => ({ nameWithOwner: r.fullName, description: r.description, visibility: 'PUBLIC', updatedAt: now() })),
+      [...repos.values()].filter((r) => r.fullName !== COMPANY_REPO).map((r) => ({ nameWithOwner: r.fullName, description: r.description, visibility: 'PUBLIC', updatedAt: now() })),
     repoMeta: async (fullName) => {
       const r = repos.get(fullName);
       if (!r) throw new Error(`Unknown demo repo ${fullName}`);
@@ -923,7 +942,10 @@ export function createDemoBackend(): Backend {
         number,
         title: pr.title,
         labels: pr.labels ?? [],
-        body: `Implements the change.\n\nCloses #${pr.closesIssues[0] ?? '?'}`,
+        isDraft: pr.isDraft,
+        body: prototypeIssueNumber(pr.headRefName)
+          ? '## Question and scope\nDemo prototype.\n\n## How to run and review\nOpen Preview and try the example.\n\n## Screenshots\n![Demo screenshot](https://example.invalid/demo.png)\n\n## Findings and limitations\nIllustrative fixture only.'
+          : `Implements the change.\n\nCloses #${pr.closesIssues[0] ?? '?'}`,
         url: pr.url,
         headRefName: pr.headRefName,
         headSha: pr.headSha,

@@ -33,7 +33,7 @@ await fs.writeFile(gitConfig, '[user]\n\tname = Sync Test\n\temail = sync-test@e
 process.env.GIT_CONFIG_GLOBAL = gitConfig;
 
 const { git, run } = await import('./exec.ts');
-const { branchHolder, deskDir, leftoversInDesk, mainDir, parseWorktrees, prepareDesk, realPath, repoDir, samePath, setLocalPath, syncMain: sync } =
+const { branchHolder, deskDir, deskLockPath, isStaleLock, leftoversInDesk, mainDir, parseWorktrees, prepareDesk, realPath, repoDir, samePath, setLocalPath, STALE_LOCK_MS, syncMain: sync } =
   await import('./workspace.ts');
 // Most tests only care about the status line.
 const syncMain = async (...args: Parameters<typeof sync>) => (await sync(...args))?.status ?? null;
@@ -336,6 +336,96 @@ describe('prepareDesk', { timeout: 60_000 }, () => {
     expect(await prepareDesk(r.fullName, { defaultBranch: 'main' }, slug, branch, (note) => notes.push(note))).toBe(wt);
     expect(notes).toEqual([]);
     expect(await git(['branch', '--show-current'], { cwd: wt })).toBe(branch);
+  });
+});
+
+describe('stale desk locks', { timeout: 60_000 }, () => {
+  /** A file whose modification time is `minutes` ago. */
+  async function aged(file: string, minutes: number) {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, '');
+    const at = new Date(Date.now() - minutes * 60_000);
+    await fs.utimes(file, at, at);
+  }
+  const gitdirOf = async (desk: string) => path.resolve(desk, (await fs.readFile(path.join(desk, '.git'), 'utf8')).replace('gitdir:', '').trim());
+
+  it('counts a lock as stale only after 10 minutes', () => {
+    const now = 1_000_000_000;
+    expect(STALE_LOCK_MS).toBe(10 * 60_000);
+    expect(isStaleLock(now - 60_000, now)).toBe(false);
+    expect(isStaleLock(now - STALE_LOCK_MS, now)).toBe(false);
+    expect(isStaleLock(now - STALE_LOCK_MS - 1, now)).toBe(true);
+    expect(isStaleLock(now + 60_000, now)).toBe(false);
+  });
+
+  it("only names a lock inside the repo's own worktrees/<desk> folder", () => {
+    const common = '/home/me/project/.git';
+    const desk = '/home/me/.cubefarm/workspaces/o__r/desks/ada-01df';
+    expect(deskLockPath('/home/me/project/.git/worktrees/ada-01df', common, desk, 'linux')).toBe('/home/me/project/.git/worktrees/ada-01df/index.lock');
+    expect(deskLockPath('/home/me/project/.git/worktrees/ada-01df/', common, desk, 'linux')).toBe('/home/me/project/.git/worktrees/ada-01df/index.lock');
+    // Another desk's worktree, the repo's own index, other repos and paths that climb out are never touched.
+    expect(deskLockPath('/home/me/project/.git/worktrees/ken-cfe2', common, desk, 'linux')).toBeNull();
+    expect(deskLockPath('/home/me/project/.git', common, desk, 'linux')).toBeNull();
+    expect(deskLockPath('/home/me/other/.git/worktrees/ada-01df', common, desk, 'linux')).toBeNull();
+    expect(deskLockPath('/home/me/project/.git/worktrees/ada-01df/../../..', common, desk, 'linux')).toBeNull();
+    expect(deskLockPath('/home/me/project/.git/worktrees/ada-01df/nested', common, desk, 'linux')).toBeNull();
+    expect(deskLockPath('/tmp/ada-01df', common, desk, 'linux')).toBeNull();
+    // Windows: case-insensitive, either slash.
+    expect(deskLockPath('c:/Users/Me/Project/.GIT/worktrees/ada-01df', 'C:\\Users\\me\\project\\.git', 'D:\\desks\\ada-01df', 'win32')).toBe('C:\\Users\\me\\project\\.git\\worktrees\\ada-01df\\index.lock');
+    expect(deskLockPath('C:\\Users\\me\\other\\.git\\worktrees\\ada-01df', 'C:\\Users\\me\\project\\.git', 'D:\\desks\\ada-01df', 'win32')).toBeNull();
+  });
+
+  it('clears a stale index.lock and reuses the desk in place, keeping ignored files', async () => {
+    const r = await makeRepos();
+    const desk = await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'tim-1a2b', 'swarm/issue-108-tim');
+    await fs.appendFile(path.join(r.dir, '.git', 'info', 'exclude'), '\nnode_modules/\n');
+    await fs.mkdir(path.join(desk, 'node_modules', 'left-pad'), { recursive: true });
+    await fs.writeFile(path.join(desk, 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1;\n');
+    const lock = path.join(await gitdirOf(desk), 'index.lock');
+    await aged(lock, 20);
+    const notes: string[] = [];
+    expect(await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'tim-1a2b', 'swarm/issue-109-tim', (t) => notes.push(t))).toBe(desk);
+    expect(await git(['branch', '--show-current'], { cwd: desk })).toBe('swarm/issue-109-tim');
+    expect(await fs.readFile(path.join(desk, 'node_modules', 'left-pad', 'index.js'), 'utf8')).toBe('module.exports = 1;\n');
+    await expect(fs.access(lock)).rejects.toThrow();
+    expect(notes).toEqual([expect.stringMatching(/^Removed a stale git lock left in the desk/)]);
+  });
+
+  it('leaves a recent index.lock alone and says why the desk could not be reused', async () => {
+    const r = await makeRepos();
+    const desk = await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'ada-01df', 'swarm/issue-108-ada');
+    await aged(path.join(await gitdirOf(desk), 'index.lock'), 1);
+    const notes: string[] = [];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'ada-01df', 'swarm/issue-109-ada', (t) => notes.push(t))).toBe(desk);
+      expect(notes).toEqual([expect.stringMatching(/^Couldn't reuse the desk in place, so it's rebuilt: .*index\.lock/)]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("Couldn't reuse the desk in place"));
+    } finally {
+      warn.mockRestore();
+    }
+    expect(await git(['branch', '--show-current'], { cwd: desk })).toBe('swarm/issue-109-ada');
+  });
+
+  it("never removes a stale lock outside the desk's own worktree folder", async () => {
+    const r = await makeRepos();
+    const desk = await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'eve-77aa', 'swarm/issue-108-eve');
+    // The desk's .git points somewhere else that happens to hold an old index.lock.
+    const elsewhere = path.join(ROOT, `elsewhere ${seq}`, 'eve-77aa');
+    const outside = path.join(elsewhere, 'index.lock');
+    await aged(outside, 20);
+    await fs.rm(path.join(desk, '.git'));
+    await fs.writeFile(path.join(desk, '.git'), `gitdir: ${elsewhere}\n`);
+    const notes: string[] = [];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'eve-77aa', 'swarm/issue-109-eve', (t) => notes.push(t))).toBe(desk);
+    } finally {
+      warn.mockRestore();
+    }
+    await expect(fs.access(outside)).resolves.toBeUndefined();
+    expect(notes).toEqual([expect.stringMatching(/^Couldn't reuse the desk in place/)]);
+    expect(await git(['branch', '--show-current'], { cwd: desk })).toBe('swarm/issue-109-eve');
   });
 });
 

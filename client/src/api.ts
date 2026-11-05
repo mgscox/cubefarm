@@ -1,7 +1,7 @@
 import { useStore } from './store';
 import type { IdeaInput, IdeaReviewCycleView, IdeaView, IssuePlanView, ProposalDecisionInput, ProposalView, AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
 
-import type { ManagerMcpSettingsPatch, ManagerMcpSettingsView } from '../../shared/types';
+import type { ClaudeAuthenticationView, ManagerMcpSettingsPatch, ManagerMcpSettingsView } from '../../shared/types';
 
 async function call<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -71,6 +71,10 @@ export const api = {
     call<{ number: number }>('POST', `${r(repoId)}/issues`, { title, body, assignTo, specialty }),
   planFloor: (repoId: string, mission?: string) => call('POST', `${r(repoId)}/plan`, { mission }),
   onboardFloor: (repoId: string) => call('POST', `${r(repoId)}/onboard`),
+  approvePrototype: (repoId: string, n: number, head: string, title: string, body: string) =>
+    call('POST', `${r(repoId)}/pulls/${n}/prototype/approve`, { head, title, body }),
+  revisePrototype: (repoId: string, n: number, head: string, feedback: string) =>
+    call('POST', `${r(repoId)}/pulls/${n}/prototype/revise`, { head, feedback }),
   mergePull: (repoId: string, n: number, method: 'squash' | 'merge' | 'rebase' = 'squash') => call('POST', `${r(repoId)}/pulls/${n}/merge`, { method }),
   closePull: (repoId: string, n: number) => call('POST', `${r(repoId)}/pulls/${n}/close`),
   sendToQa: (repoId: string, n: number) => call('POST', `${r(repoId)}/pulls/${n}/qa`),
@@ -111,3 +115,14 @@ export const api = {
   retryPublication: (proposalId: string) => call('POST', `/api/publications/${encodeURIComponent(proposalId)}/retry`),
   demoPublication: (fault: '' | 'lost-create' | 'refused' | 'cross-floor' | 'cross-floor-refused' | 'blocked') => call('POST', '/api/publications/demo', { fault }),
 };
+
+/** Credential requests stay out of toasts, general settings and the shared store. */
+export async function claudeAuthentication(action: 'status' | 'start' | 'cancel' | 'complete' | 'code', body: { flowId?: string; token?: string; code?: string; mode?: ClaudeAuthenticationView['mode'] } = {}): Promise<ClaudeAuthenticationView> {
+  const response = await fetch(`/api/settings/claude/${action}`, {
+    method: 'POST', credentials: 'same-origin', cache: 'no-store',
+    headers: { 'Content-Type': 'application/json', 'X-CubeFarm-Claude-Auth': '1' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error('Claude authentication action could not be completed.');
+  return response.json();
+}

@@ -177,8 +177,7 @@ Node 24, git, `gh auth login` (agents push from the box), and each CLI signed in
 what's missing in the box's card, like `cubefarm doctor`. Sign-ins can be done from the office: the agent's terminal
 is streamed, and the existing "needs you to sign in" nudge already points the manager there.
 
-Limits: floors pointed at a local-only folder (`setLocalPath`) and the research folder have no remote the box can
-clone, so their agents stay on the office. The Agent SDK runtime stays local; boxes are terminal-runtime only.
+Limits: floors pointed at a local-only folder (`setLocalPath`) have no remote the box can clone. The CEO and researchers run on the office machine. The Agent SDK runtime stays local; boxes are terminal-runtime only.
 Pacing (`pacing.ts`) is per CLI account; boxes signed into other accounts should get their own pacing state.
 
 ### 6. UI

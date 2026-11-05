@@ -64,6 +64,7 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
     removeDesk: (fullName, slug) => workspace.removeDesk(str(fullName), str(slug)),
     releaseDesk: (fullName, slug, port) => workspace.releaseDesk(str(fullName), str(slug), Number(port), { pids: ctx.pids(), markers: [SESSIONS_DIR, BIN_DIR] }),
     deskHead: (fullName, slug) => workspace.deskHead(str(fullName), str(slug)),
+    deskExists: (fullName, slug) => workspace.deskExists(str(fullName), str(slug)),
     deskAhead: (fullName, slug, base) => workspace.deskAhead(str(fullName), str(slug), str(base)),
     prepare(plan) {
       const now = Date.now();

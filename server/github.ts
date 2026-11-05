@@ -619,6 +619,7 @@ export interface PrDetails {
   headSha: string;
   baseSha?: string;
   baseRefName?: string;
+  isDraft?: boolean;
   isCrossRepository: boolean;
   closesIssues: number[];
   state: 'OPEN' | 'CLOSED' | 'MERGED';
@@ -637,12 +638,13 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     headRefOid: string;
     baseRefOid: string;
     baseRefName: string;
+    isDraft: boolean;
     isCrossRepository: boolean;
     closingIssuesReferences: { number: number }[] | null;
     state: PrDetails['state'];
     mergeable: string;
     mergeStateStatus: string;
-  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,labels,body,url,headRefName,headRefOid,baseRefOid,baseRefName,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
+  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,labels,body,url,headRefName,headRefOid,baseRefOid,baseRefName,isDraft,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
   return {
     number: raw.number,
     title: raw.title,
@@ -653,6 +655,7 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     headSha: raw.headRefOid,
     baseSha: raw.baseRefOid,
     baseRefName: raw.baseRefName,
+    isDraft: raw.isDraft,
     isCrossRepository: raw.isCrossRepository,
     closesIssues: (raw.closingIssuesReferences ?? []).map((r) => r.number),
     state: raw.state,

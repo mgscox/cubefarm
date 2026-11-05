@@ -1,3 +1,4 @@
+import { claudeEnv } from '../bin/claudeAuth.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,7 @@ import type { AgentTerminal } from './terminal.ts';
 import { CROSS_TURN_TOOLS } from './clis.ts';
 import { VERSION } from './config.ts';
 import { projectEnv } from './projectEnv.ts';
+import { playwrightMcpCommand } from './browser.ts';
 import { ACTIVE_REPO_SKILLS, writeSessionSkills } from './repoSkills.ts';
 
 // One Claude Code instance (via the Claude Agent SDK) working one issue in its own git worktree.
@@ -66,6 +68,8 @@ export interface SessionResult {
 }
 
 export interface SessionCallbacks {
+  /** Real session activity, including hooks forwarded from a box that do not produce a log entry. */
+  activity?(): void;
   log(entries: LogEntry[]): void;
   tool(name: string | null): void;
   /** The session to resume next time; null: there's none to resume (the next session starts a new one). */
@@ -330,20 +334,17 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
   input.push(opts.prompt);
 
   // Each agent must be a clean Claude Code instance on the subscription Claude Code is logged into.
-  // Drop API keys (they would switch billing to the API) and any CLAUDE_* / ANTHROPIC_* variables
+  // Drop API keys (they would switch billing to the API) and other CLAUDE_* / ANTHROPIC_* variables
   // inherited from a parent Claude Code session (base URL proxies, session sockets, effort overrides…).
   const env: Record<string, string | undefined> = {};
-  for (const [k, v] of Object.entries(projectEnv(process.env))) {
-    if (/^(ANTHROPIC_|CLAUDE)/i.test(k) && k !== 'CLAUDE_CONFIG_DIR') continue;
+  for (const [k, v] of Object.entries(claudeEnv(projectEnv(process.env)))) {
     env[k] = v;
   }
   env.CLAUDE_AGENT_SDK_CLIENT_APP = `cubefarm/${VERSION}`;
 
   const mcpServers: Options['mcpServers'] = {};
   if (opts.browserTesting) {
-    // browser-init.js keeps pages from taking the real mouse with pointer lock (headless Chrome does on Windows).
-    const args = ['-y', '@playwright/mcp@latest', '--headless', '--isolated', '--init-script', path.join(import.meta.dirname, 'browser-init.js')];
-    mcpServers.playwright = process.platform === 'win32' ? { command: 'cmd', args: ['/c', 'npx', ...args] } : { command: 'npx', args };
+    mcpServers.playwright = playwrightMcpCommand();
   }
   if (opts.office) mcpServers.office = opts.office.server;
   // The CEO reads repositories and acts through the office tools; it never runs commands.
@@ -391,6 +392,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
   };
 
   const handle = (msg: SDKMessage) => {
+    cb.activity?.();
     clearTimeout(emptyTurn);
     if (done && msg.type === 'assistant' && !stopped) {
       // The office already treated this session as finished and no longer follows it.

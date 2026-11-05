@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { planCli, type CliHost } from './machine.ts';
 import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
 import { STUCK_MS, type ClaudeTurn } from './clis.ts';
-import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
+import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
 import type { SessionCallbacks, SessionOptions } from './agentRunner.ts';
 import type { AgentTerminal } from './terminal.ts';
 
@@ -37,7 +37,7 @@ describe('planCli', () => {
 
 describe('startCliSession on a host', () => {
   const callbacks = (): SessionCallbacks => ({
-    log: vi.fn(), tool: vi.fn(), sessionId: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), finished: vi.fn(),
+    activity: vi.fn(), log: vi.fn(), tool: vi.fn(), sessionId: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), finished: vi.fn(),
   });
   const terminal = () => ({ cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), screen: () => '' }) as unknown as AgentTerminal;
   const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
@@ -91,8 +91,189 @@ describe('startCliSession on a host', () => {
     };
     return { cb, session, again, term, hook: (body: Record<string, unknown>) => handleHook(token, body) };
   };
+
+  it('counts hooks forwarded by a host even when they produce no log, excluding periodic status lines', () => {
+    const c = claude(() => '', () => null);
+    c.hook({ hook_event_name: 'SessionStart' });
+    const before = vi.mocked(c.cb.activity!).mock.calls.length;
+    c.hook({ hook_event_name: 'StatusLine' });
+    expect(c.cb.activity).toHaveBeenCalledTimes(before);
+    c.hook({ hook_event_name: 'PostToolUse', tool_name: 'TodoWrite', tool_response: '' });
+    expect(c.cb.activity).toHaveBeenCalledTimes(before + 1);
+    c.session.stop();
+  });
   const errors = (cb: SessionCallbacks) => vi.mocked(cb.log).mock.calls.flat(2).filter((e) => e.kind === 'error').map((e) => e.text);
   const turn = (t: Partial<ClaudeTurn>): ClaudeTurn => ({ bytes: 100, ended: false, mark: '', text: '', ...t });
+
+  const startupMenus = [
+    { cli: 'claude' as const, question: 'Do you trust this folder?', no: '❯ No, exit\n  Yes, I trust this folder', yes: '  No, exit\n❯ Yes, I trust this folder' },
+    { cli: 'codex' as const, question: 'Hooks need review', no: '› 1. Review hooks\n  3. Continue without trusting', yes: '  1. Review hooks\n› 3. Continue without trusting' },
+  ];
+
+  it.each(startupMenus)('holds a follow-up while $question is showing, including an incomplete menu', async ({ cli, question, no, yes }) => {
+    let screen = '❯';
+    const first = claude(() => screen, () => null, { cli, keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(0); // Codex unarchives its thread before starting.
+    first.hook({ hook_event_name: cli === 'claude' ? 'Stop' : 'TurnComplete', session_id: 'sess-1', input: 'Fix #12', last_assistant_message: 'Done' });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(first.cb.finished).toHaveBeenCalled();
+    screen = `❯ older prompt\n${question}`;
+    pty.write.mockClear();
+    const next = first.again({ cli, prompt: 'Follow up', keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pty.write).not.toHaveBeenCalled();
+    screen += `\n${no}`;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pty.write).toHaveBeenLastCalledWith('\x1b[B');
+    screen = `${question}\n${yes}`;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pty.write).toHaveBeenLastCalledWith('\r');
+    pty.write.mockClear();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pty.write).not.toHaveBeenCalled();
+    screen = '❯';
+    await vi.advanceTimersByTimeAsync(1150);
+    expect(pty.write.mock.calls).toEqual([['\x1b[200~Follow up\x1b[201~'], ['\r']]);
+    next.session.stop();
+    pty.write.mockClear();
+    screen = `${question}\n${yes}`;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(pty.write).not.toHaveBeenCalled();
+  });
+
+  it.each(startupMenus)('answers $question in a CLI re-adopted after restart without sending a prompt', async ({ cli, question, yes }) => {
+    const meta = { agentId: 'ada', cli, token: 'restart-menu', dir: 'sessions/t', busy: true, resumeId: 'sess-1' };
+    const term = { ...terminal(), screen: () => `❯ old prompt\n${question}\n${yes}` } as unknown as AgentTerminal;
+    const h = { ...host(vi.fn()), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+    await reconnectClis(() => term, h);
+    pty.write.mockClear();
+    const session = startCliSession({ ...opts, cli, terminal: term, reattach: true, resumeSessionId: 'sess-1' }, callbacks(), h);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(pty.write.mock.calls).toEqual([['\r']]);
+    session.stop();
+  });
+
+  it('keeps a queued follow-up alive during the preceding turn\'s finish grace', async () => {
+    let screen = '❯';
+    const first = claude(() => screen, () => null, { keepAlive: true });
+    first.hook({ hook_event_name: 'Stop', last_assistant_message: 'Done' });
+    screen = 'Do you trust this folder?';
+    pty.write.mockClear();
+    first.session.send('Follow up');
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(first.cb.finished).not.toHaveBeenCalled();
+    expect(pty.write).not.toHaveBeenCalled();
+    screen = '❯';
+    await vi.advanceTimersByTimeAsync(1150);
+    expect(pty.write.mock.calls).toEqual([['\x1b[200~Follow up\x1b[201~'], ['\r']]);
+    first.session.stop();
+  });
+
+  it.each([
+    '● I fixed the "Do you trust the files in this folder?" screen handling.',
+    'const HOOK_REVIEW_PROMPT = /Hooks need review/i;',
+    '● Updated the Quick safety check handling.',
+  ])('sends a follow-up at an idle prompt below earlier output: %s', async (output) => {
+    const screen = `${output}\n\n────\n❯ \n────`;
+    const first = claude(() => screen, () => null, { keepAlive: true, resumeSessionId: 'sess-1' });
+    first.hook({ hook_event_name: 'Stop', last_assistant_message: 'Done' });
+    await vi.advanceTimersByTimeAsync(3000);
+    pty.write.mockClear();
+    const next = first.again({ prompt: 'Follow up', keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(150);
+    expect(pty.write.mock.calls).toEqual([['\x1b[200~Follow up\x1b[201~'], ['\r']]);
+    next.session.stop();
+  });
+
+  it.each([OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE])('sends an OpenCode follow-up at once when earlier output quotes a startup question (%#)', async (idle) => {
+    const first = claude(() => `  ● Updated the Quick safety check handling in server/clis.ts.\n${idle}`, () => null, { cli: 'opencode' });
+    pty.write.mockClear();
+    first.session.send('Follow up');
+    await vi.advanceTimersByTimeAsync(150);
+    const writes = [['\x1b[200~Follow up\x1b[201~'], ['\r']];
+    expect(pty.write.mock.calls).toEqual(writes);
+    await vi.advanceTimersByTimeAsync(121_000);
+    expect(pty.write.mock.calls).toEqual(writes);
+    expect(errors(first.cb)).not.toContain('OpenCode is still showing a startup question after 2 minutes; follow-up was not sent.');
+    first.session.stop();
+  });
+
+  it('reports and ends a follow-up held by an unchanged startup question past its deadline', async () => {
+    const first = claude(() => 'Hooks need review', () => null, { keepAlive: true });
+    pty.write.mockClear();
+    first.session.send('Follow up');
+    await vi.advanceTimersByTimeAsync(121_000);
+    expect(pty.write).not.toHaveBeenCalled();
+    expect(errors(first.cb)).toContain('Claude Code is still showing a startup question after 2 minutes; follow-up was not sent.');
+    expect(first.cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: ['Claude Code is still showing a startup question after 2 minutes; follow-up was not sent.'] }));
+    await vi.advanceTimersByTimeAsync(STUCK_MS);
+    expect(first.cb.finished).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves an idle Codex prompt alone when earlier output quotes the hook-review question', async () => {
+    const first = claude(() => 'const pattern = /Hooks need review/i;\n› Ask Codex to do anything', () => null, { cli: 'codex' });
+    pty.write.mockClear();
+    first.session.send('Follow up');
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(pty.write.mock.calls).toEqual([['\x1b[200~Follow up\x1b[201~'], ['\r']]);
+    first.session.stop();
+  });
+
+  it.each([
+    { cli: 'claude' as const, output: '● I fixed the "Do you trust the files in this folder?" screen handling.', draft: 'run the tests' },
+    { cli: 'claude' as const, output: 'const pattern = /Hooks need review/i;', draft: 'run the tests' },
+    { cli: 'claude' as const, output: '● I fixed the "Do you trust the files in this folder?" screen handling.', draft: 'continue with the next issue' },
+    { cli: 'claude' as const, output: '● Updated Quick safety check.', draft: '1. Yes, continue' },
+    { cli: 'codex' as const, output: 'const pattern = /Hooks need review/i;', draft: 'Ask a follow-up question' },
+    { cli: 'claude' as const, output: '● Done', draft: 'Explain Hooks need review' },
+    { cli: 'codex' as const, output: '● Done', draft: 'Explain Quick safety check' },
+    { cli: 'codex' as const, output: '● Done', draft: 'Explain Do you trust the files in this folder?' },
+  ])('sends a follow-up without menu keys at a $cli input containing "$draft"', async ({ cli, output, draft }) => {
+    let screen = '';
+    const first = claude(() => screen, () => null, { cli, keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(0);
+    first.hook({ hook_event_name: cli === 'claude' ? 'Stop' : 'TurnComplete', session_id: 'sess-1', input: 'Fix #12', last_assistant_message: 'Done' });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(first.cb.finished).toHaveBeenCalled();
+    screen = cli === 'claude' ? `${output}\n\n────\n❯ ${draft}\n────` : `${output}\n› ${draft}`;
+    pty.write.mockClear();
+    const next = first.again({ cli, prompt: 'Follow up', keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(150);
+    const writes = [['\x1b[200~Follow up\x1b[201~'], ['\r']];
+    expect(pty.write.mock.calls).toEqual(writes);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write.mock.calls).toEqual(writes);
+    expect(next.cb.finished).not.toHaveBeenCalled();
+    next.session.stop();
+  });
+
+  it('gives a follow-up queued late in startup its own full hold window', async () => {
+    let screen = '❯';
+    const first = claude(() => screen, () => null);
+    await vi.advanceTimersByTimeAsync(119_000);
+    screen = 'Hooks need review';
+    pty.write.mockClear();
+    first.session.send('Follow up');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(first.cb.finished).not.toHaveBeenCalled();
+    expect(pty.write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(118_000);
+    expect(first.cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: ['Claude Code is still showing a startup question after 2 minutes; follow-up was not sent.'] }));
+  });
+
+  it('sends queued follow-ups in order when another arrives just after the question disappears', async () => {
+    let screen = 'Do you trust this folder?';
+    const first = claude(() => screen, () => null);
+    pty.write.mockClear();
+    first.session.send('First');
+    screen = '❯';
+    first.session.send('Second');
+    await vi.advanceTimersByTimeAsync(2150);
+    expect(pty.write.mock.calls).toEqual([
+      ['\x1b[200~First\x1b[201~'], ['\r'], ['\x1b[200~Second\x1b[201~'], ['\r'],
+    ]);
+    first.session.stop();
+  });
 
   it.each(['hook', 'key'])('gives a Codex refusal another quiet interval after a %s', async (activity) => {
     const { cb, term, hook } = claude(() => "ⓘ This content can't be shown\n› Ask Codex to do anything", () => null, { cli: 'codex' });

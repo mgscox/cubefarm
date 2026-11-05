@@ -2,6 +2,7 @@
 // and boots the office in demo mode (no GitHub, no Claude). Run `npm run build` first.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { tsImport } from 'tsx/esm/api';
@@ -27,6 +28,21 @@ try {
   console.log(`cubefarm --version: ${version}`);
 
   const installed = path.join(tmp, 'node_modules', 'cubefarm');
+  const fromInstall = createRequire(path.join(installed, 'package.json'));
+  const mcpPackage = fromInstall.resolve('playwright/package.json');
+  const mcpRelative = path.relative(fs.realpathSync(path.join(tmp, 'node_modules')), fs.realpathSync(mcpPackage));
+  if (mcpRelative === '..' || mcpRelative.startsWith(`..${path.sep}`) || path.isAbsolute(mcpRelative)) {
+    throw new Error('Playwright MCP resolved outside the packed install');
+  }
+  const mcp = JSON.parse(fs.readFileSync(mcpPackage, 'utf8'));
+  const pinnedMcp = JSON.parse(fs.readFileSync(path.join(installed, 'package.json'), 'utf8')).dependencies.playwright;
+  const browser = spawnSync(process.execPath, [path.join(path.dirname(mcpPackage), 'cli.js'), 'mcp', '--help'], {
+    cwd: tmp, encoding: 'utf8', windowsHide: true, timeout: 30_000,
+  });
+  if (mcp.version !== pinnedMcp || browser.status !== 0 || !browser.stdout.includes('--init-script')) {
+    throw new Error(`packed Playwright MCP failed (${pinnedMcp}): ${browser.error ?? browser.stderr ?? browser.stdout}`);
+  }
+  console.log(`packed Playwright MCP verified: playwright ${mcp.version}`);
   const packed = readRepoSkills(installed, version);
   const expected = ACTIVE_REPO_SKILLS.files;
   if (packed.files.length !== expected.length || packed.files.some((file, i) =>
@@ -35,7 +51,7 @@ try {
   }
   console.log(`repo skills verified: ${packed.skills.length}`);
 
-  for (const name of ['developer.md', 'qa.md']) {
+  for (const name of ['developer.md', 'prototype.md', 'qa.md']) {
     const specialism = path.join('docs', 'specialisms', name);
     if (!fs.readFileSync(path.join(installed, specialism)).equals(fs.readFileSync(path.join(root, specialism)))) {
       throw new Error(`npm package specialism differs from the checkout: ${name}`);

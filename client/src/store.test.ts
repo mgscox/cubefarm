@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useStore, type Agent } from './store';
+import type { RepoView } from '../../shared/types';
+import { kanbanFor, useStore, type Agent } from './store';
 
 // Audio is a browser boundary; these tests exercise incoming office events in Node.
 vi.mock('./ui/sfx', () => ({ cue: vi.fn(), chirp: vi.fn() }));
@@ -99,5 +100,28 @@ describe('Proposal state', () => {
     apply({ type: 'proposal', proposal: { ...proposal, decision: { action: 'approve', at: 2, publication: { status: 'queued', at: 2 } } } });
     apply({ type: 'proposal', proposal: { ...proposal, id: 'p2' } });
     expect(useStore.getState().proposals.map((p) => [p.id, p.decision?.action])).toEqual([['p1', 'approve'], ['p2', undefined]]);
+  });
+});
+
+
+describe('prototype Kanban', () => {
+  it('shows a single approval card, moves revisions to In progress, and shows approved work in To do', () => {
+    const issue = { number: 66, labels: ['swarm:prototype'], title: 'Try filters' };
+    const pull = { number: 12, title: 'Prototype', headRefName: 'prototype/issue-66-ada', headSha: 'reviewed', state: 'OPEN', isDraft: true, closesIssues: [] };
+    const repo = { id: 'r1', issues: [issue], pulls: [pull] } as unknown as RepoView;
+    const waiting = kanbanFor(repo, [], {});
+    expect(waiting.blocked).toEqual([expect.objectContaining({ prototype: { issueNumber: 66, head: 'reviewed' } })]);
+    expect(waiting.todo).toEqual([]);
+    expect(waiting.qa).toEqual([]);
+
+    const developer = { ...agent, task: 'issue', issueNumber: 66, branch: pull.headRefName, prNumber: pull.number } as Agent;
+    const revising = kanbanFor(repo, [developer], {});
+    expect(revising.progress.map((card) => card.number)).toEqual([66]);
+    expect(revising.blocked).toEqual([]);
+
+    const approved = kanbanFor({ ...repo, issues: [{ ...repo.issues[0], labels: [] }] }, [], {});
+    expect(approved.todo.map((card) => card.number)).toEqual([66]);
+    expect(approved.blocked).toEqual([]);
+    expect(approved.qa).toEqual([]);
   });
 });

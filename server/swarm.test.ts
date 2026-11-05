@@ -2,11 +2,11 @@ import syncFs from 'node:fs';
 import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { CommandError, ghJson, run } from './exec.ts';
-import { branchAhead, listIssues } from './github.ts';
+import { branchAhead, listIssues, listPulls } from './github.ts';
 import { LOST_CONVERSATION, STUCK_MS } from './clis.ts';
 import { opencodeTurn } from './opencodeTranscript.ts';
 import { OPENCODE_IDLE_WITH_USAGE } from './fixtures/opencodeScreens.ts';
-import { handleHook, startCliSession } from './cliRunner.ts';
+import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
 import type { BoxConnection, CliHost } from './machine.ts';
 import { BOX_CLI_CHECK_MS } from './fleet.ts';
 import type { AgentTerminal } from './terminal.ts';
@@ -50,7 +50,7 @@ interface Internals {
   runFix(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   recordFinished(agent: unknown, repo: Repo, result: SessionResult, generation: undefined, session: undefined): Promise<void>;
   onQaFinished(agent: unknown, repo: Repo, result: SessionResult, released?: Promise<void>): Promise<void>;
-  recordResearchFinished(agent: unknown, job: unknown, repo: Repo, result: SessionResult): Promise<void>;
+  recordResearchFinished(agent: unknown, job: unknown, repo: Repo, fullName: string, result: SessionResult): Promise<void>;
   onIssueFinished(agent: unknown, repo: Repo, result: SessionResult, released: Promise<void>, generation: number | undefined): Promise<void>;
   onFixFinished(agent: unknown, repo: Repo, result: SessionResult): Promise<void>;
   postMessage(from: string, text: string): void;
@@ -86,6 +86,8 @@ beforeEach(() => {
   s = swarm as unknown as Internals;
   vi.spyOn(s, 'save').mockImplementation(() => {});
   vi.spyOn(s, 'schedule').mockImplementation(() => {});
+  // These tests inject synthetic desks without preparing the demo backend's in-memory worktrees.
+  vi.spyOn(s.backend, 'deskExists').mockResolvedValue(true);
   repo = { id: 'r1', fullName: 'demo-co/pixel-todo', floor: 1, autoAssign: true, requestedStarts: [], preview: { command: null, env: {} } };
   s.state.repos.push(repo);
   s.state.agents.push({ id: 'a1', name: 'Ada', repoId: repo.id, role: 'dev', specialty: '', score: 0, status: 'idle', task: null, issueNumber: null, desk: 0, endedAt: null });
@@ -252,7 +254,7 @@ describe('developer scores', () => {
     it('researcher-first: a foreign report URL cannot claim QA before the author finishes', async () => {
       const eve = claimant('researcher');
       Object.assign(dev(), { status: 'working', prNumber: null });
-      await s.recordResearchFinished(eve, { topic: 'Research brief' }, repo,
+      await s.recordResearchFinished(eve, { topic: 'Research brief' }, repo, repo.fullName,
         { ok: true, text: url(13), errors: [], costUsd: 0, turns: 1 });
       expect(eve.prNumber).toBeNull();
       expect(s.state.qa).toEqual([]);
@@ -269,7 +271,7 @@ describe('developer scores', () => {
       const eve = claimant('researcher');
       vi.mocked(s.backend.prForBranch).mockResolvedValue({ number: 14, url: url(14) });
       vi.mocked(s.backend.prDetails).mockResolvedValue(details({ ...pull, number: 14, state: 'OPEN', headRefName: String(eve.branch) }));
-      await s.recordResearchFinished(eve, { topic: 'Research brief' }, repo,
+      await s.recordResearchFinished(eve, { topic: 'Research brief' }, repo, repo.fullName,
         { ok: true, text: url(13), errors: [], costUsd: 0, turns: 1 });
       expect(eve.prNumber).toBe(14);
       expect(s.state.qa[0]).toMatchObject({ prNumber: 14, devAgentId: eve.id, status: 'passed' });
@@ -388,7 +390,7 @@ describe('developer scores', () => {
       const own = demoPull(repo.fullName, String(eve.branch), false);
       const fork = demoForkPull(repo.fullName, String(eve.branch));
       try {
-        await s.recordResearchFinished(eve, { topic: 'Research brief' }, repo, { ok: true, text: '', errors: [], costUsd: 0, turns: 1 });
+        await s.recordResearchFinished(eve, { topic: 'Research brief' }, repo, repo.fullName, { ok: true, text: '', errors: [], costUsd: 0, turns: 1 });
         expect(eve.prNumber).toBe(own.pull.number);
         expect(s.state.qa.find((q) => q.prNumber === own.pull.number)).toMatchObject({ devAgentId: eve.id, status: 'passed', crossRepository: false });
         expect(s.state.qa.some((q) => q.prNumber === fork.pull.number)).toBe(false);
@@ -721,13 +723,15 @@ describe('exclusive issue sessions', () => {
 
   it('does not let a stale reconnect rejection stop a replacement task', async () => {
     Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped' });
-    starts.mockImplementationOnce(() => { throw new Error('Runner unavailable'); });
+    let read!: (issue: TrackedIssue | null) => void;
+    vi.spyOn(s.backend, 'readIssue').mockImplementationOnce(() => new Promise((resolve) => { read = resolve; }));
     (s as unknown as { reattachSession(a: unknown): void }).reattachSession(other());
     s.clearTask(other());
     await swarm.assign('a2', 67);
+    read(null);
     await flush();
     expect(other()).toMatchObject({ status: 'working', issueNumber: 67, lastError: null });
-    expect(starts).toHaveBeenCalledTimes(2);
+    expect(starts).toHaveBeenCalledOnce();
   });
 
   it.each([true, false])('repairs duplicate sessions, preferring a linked PR then the older start (PR: %s)', async (linkedPr) => {
@@ -772,6 +776,92 @@ describe('PR fixes with an occupied author branch', () => {
     Object.assign(dev, { sessionId: 'fix-session', status: 'stopped' });
     await swarm.message('a1', 'Continue fixing');
     expect(start.mock.calls[1][4]).toContain(`git push origin HEAD:${headRef}`);
+  });
+});
+
+describe('desk reset and the CLI waiting at the prompt', () => {
+  let rec: QaRec;
+  let steps: string[];
+  const agent = () => s.state.agents[0];
+  const host = (pty: unknown): CliHost => ({
+    prepare: vi.fn(), recoverTurn: () => null, hasFile: () => false, claudeTurn: () => null, newShots: () => [], savedShot: () => null,
+    codexThread: async () => undefined, removeDir: vi.fn(), reconnect: async () => [], adopt: () => pty as never,
+    discard: vi.fn(), hooksReady: vi.fn(), leave: vi.fn(), protect: () => ({ pids: [], markers: [] }),
+  });
+
+  /** A Claude CLI waiting at a1's prompt in conversation `resumeId`, on the office's machine; it exits only on exit(). */
+  async function waiting(resumeId: string) {
+    const exits: ((code: number) => void)[] = [];
+    const pty = {
+      pid: 7, write: vi.fn(), resize: vi.fn(), setMeta: vi.fn(), onData: vi.fn(),
+      kill: vi.fn(() => steps.push('kill')), onExit: vi.fn((fn: (code: number) => void) => exits.push(fn)),
+    };
+    const h = { ...host(pty), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta: { agentId: 'a1', cli: 'claude', token: `t-${resumeId}`, dir: 'sessions/t', resumeId, busy: false } }] };
+    const term = { cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), write: vi.fn(), screen: () => '❯', releaseIdle: null, closing: null } as unknown as AgentTerminal;
+    await reconnectClis(() => term, h);
+    Object.assign(s.agentRt.get('a1')!, { terminal: term });
+    Object.assign(s.backend, { terminals: true, cliHost: h });
+    return { term, pty, exit: () => (steps.push('exited'), exits.forEach((fn) => fn(0))) };
+  }
+
+  beforeEach(() => {
+    steps = [];
+    Object.assign(repo, { links: [], defaultBranch: 'main' });
+    Object.assign(agent(), { model: '', effort: '', cli: 'claude', deskBox: '' });
+    (s as unknown as { state: { settings: { runtime: string } } }).state.settings.runtime = 'terminal';
+    Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready', pulls: [{ number: 204, headRefName: 'swarm/issue-9-ada', headSha: 'sha-1', closesIssues: [] } as unknown as PullInfo] });
+    rec = { repoId: repo.id, prNumber: 204, devAgentId: 'a1', devSessionId: 'conv-a', qaAgentId: 'q1', sessionFailures: 0, round: 1,
+      status: 'failed', summary: 'Fix it', checks: [], fixCrashes: [] } as unknown as QaRec;
+    s.state.qa.push(rec);
+    vi.spyOn(s.backend, 'releaseDesk').mockImplementation(async () => void steps.push('releaseDesk'));
+    vi.spyOn(s.backend, 'prepareDesk').mockImplementation(async () => (steps.push('prepareDesk'), 'demo-worktree'));
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ number: 204, state: 'OPEN', headSha: 'sha-1', closesIssues: [], body: '', title: 'Fix it', url: '' } as never);
+    vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+  });
+
+  it('waits for a CLI that Clear desk closed before new work resets the desk', async () => {
+    const cli = await waiting('conv-a');
+    swarm.resetAgent('a1');
+    expect(cli.term.releaseIdle).toBeNull(); // nothing left to close: only the pending exit tells
+    const task = s.runQa(agent(), repo, rec);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(steps).toEqual(['kill']);
+    cli.exit();
+    await task;
+    expect(steps).toEqual(['kill', 'exited', 'releaseDesk', 'prepareDesk']);
+    expect(cli.term.closing).toBeNull();
+  });
+
+  it("closes an author's waiting CLI on another conversation, and waits for it, before their fix round resets the desk", async () => {
+    const cli = await waiting('conv-b');
+    const task = s.runFix(agent(), repo, rec);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(steps).toEqual(['kill']);
+    cli.exit();
+    await task;
+    expect(steps).toEqual(['kill', 'exited', 'releaseDesk', 'prepareDesk']);
+  });
+
+  it("keeps the author's waiting CLI open for the fix round that resumes its conversation", async () => {
+    const cli = await waiting('conv-a');
+    const task = s.runFix(agent(), repo, rec);
+    await vi.advanceTimersByTimeAsync(1000);
+    await task;
+    expect(steps).toEqual(['releaseDesk', 'prepareDesk']);
+    expect(cli.pty.kill).not.toHaveBeenCalled();
+    expect(cli.term.releaseIdle).toEqual(expect.any(Function));
+    expect(vi.mocked(s.startAgentSession).mock.calls[0][5]).toBe('conv-a');
+  });
+
+  it('closes the same conversation when the fix round would start it on another machine', async () => {
+    const cli = await waiting('conv-a');
+    Object.assign(s.backend, { cliHost: host({}) });
+    const task = s.runFix(agent(), repo, rec);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(steps).toEqual(['kill']);
+    cli.exit();
+    await task;
+    expect(steps).toEqual(['kill', 'exited', 'releaseDesk', 'prepareDesk']);
   });
 });
 
@@ -1787,6 +1877,7 @@ describe('CEO park_pr', () => {
     vi.spyOn(s, 'beginTask').mockImplementation(() => {});
     vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
     const session = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    Object.assign(s.state.agents[0], { status: 'preparing' }); // what the mocked beginTask would set
     // Restore the real implementation replaced by the scheduling fixture.
     const actual = new Swarm(s.backend) as unknown as Internals;
     await actual.runTask.call(s, s.state.agents[0], restored, issue(67));
@@ -4222,6 +4313,7 @@ describe('fixes across office restarts', () => {
     const fixing = s.runFix(dev, repo, rec);
     await Promise.resolve();
     expect(dev).toMatchObject({ status: 'preparing', task: 'fix', sessionId: null });
+    await vi.waitFor(() => expect(prepared).toBeTypeOf('function')); // after the open-PR check
     prepared('/fake-desk');
     await fixing;
     expect(start.mock.calls[0][5]).toBe('dev-session');
@@ -4268,6 +4360,81 @@ describe('developer specialism', () => {
   });
 });
 
+describe('prototype review', () => {
+  const prototypeIssue = issue(66, ['swarm:prototype']);
+  const draft = {
+    number: 12, title: 'Prototype: filters', url: 'https://github.com/demo-co/pixel-todo/pull/12',
+    headRefName: 'prototype/issue-66-ada', headSha: 'prototype-sha', state: 'OPEN', isDraft: true,
+    closesIssues: [], checks: 'none', mergeable: 'MERGEABLE', reviewDecision: null, createdAt: '', mergedAt: null,
+    additions: 1, deletions: 0, mergeState: 'DRAFT', failedChecks: [], pendingChecks: [],
+  } satisfies PullInfo;
+  const evidence = '## Question and scope\nCan people find a report?\n## How to run and review\nOpen the preview.\n## Screenshots\n![The filter panel](https://example.invalid/filter.png)\n## Findings and limitations\nUses sample data.';
+  beforeEach(() => {
+    Object.assign(repo, { links: [], defaultBranch: 'main' });
+    setIssues({ ...prototypeIssue, labels: [...prototypeIssue.labels] });
+  });
+
+  it('finishes a prototype with a review link and never queues production QA', async () => {
+    const dev = s.state.agents[0];
+    await swarm.assign('a1', 66);
+    expect(dev.branch).toBe(draft.headRefName);
+    vi.spyOn(s.backend, 'listPulls').mockResolvedValue({ pulls: [draft] });
+    vi.spyOn(swarm, 'syncRepo').mockResolvedValue(undefined as never);
+    const generation = (s.agentRt.get('a1') as { generation?: undefined }).generation;
+    await s.recordFinished(dev, repo, { ok: true, text: draft.url, errors: [], costUsd: 0, turns: 1 }, generation, undefined);
+    s.reconcilePulls(repo, [draft]);
+    expect(dev).toMatchObject({ status: 'done', prNumber: draft.number, prUrl: draft.url });
+    expect(s.state.qa).toEqual([]);
+  });
+
+  it('revises the same draft with the manager’s feedback', async () => {
+    s.repoRt.get(repo.id)!.pulls = [draft];
+    await expect(swarm.assign('a1', 66)).rejects.toThrow('Blocked board');
+    await swarm.revisePrototype(repo.id, draft.number, draft.headSha, 'Make the floor filter visible');
+    expect(runTask).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ branch: draft.headRefName, prNumber: draft.number }),
+      repo, prototypeIssue, 'Make the floor filter visible',
+    );
+    await expect(swarm.approvePrototype(repo.id, draft.number, draft.headSha, 'Build filters', 'Show all floors.')).rejects.toThrow('update to finish');
+  });
+
+  it('keeps a successful approval visible when the subsequent board refresh fails', async () => {
+    s.repoRt.get(repo.id)!.pulls = [draft];
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ ...prototypeIssue, repo: repo.fullName, state: 'OPEN' });
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({
+      ...draft, body: evidence, isCrossRepository: false,
+    } as unknown as Awaited<ReturnType<Backend['prDetails']>>);
+    vi.spyOn(s.backend, 'editIssue').mockResolvedValue();
+    vi.spyOn(swarm, 'syncRepo').mockRejectedValue(new Error('offline'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(swarm.approvePrototype(repo.id, draft.number, draft.headSha, 'Build filters', 'Show all floors.')).resolves.toBeUndefined();
+    expect(s.repoRt.get(repo.id)!.issues[0]).toMatchObject({ title: 'Build filters', labels: [] });
+    expect(ready()).toEqual([66]);
+  });
+
+  it('holds approval for missing screenshots and releases the source issue for regular implementation once approved', async () => {
+    s.repoRt.get(repo.id)!.pulls = [draft];
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ ...prototypeIssue, repo: repo.fullName, state: 'OPEN' });
+    const details = { ...draft, body: evidence, isCrossRepository: false } as unknown as Awaited<ReturnType<Backend['prDetails']>>;
+    const prDetails = vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...details, body: evidence.replace('![The filter panel](https://example.invalid/filter.png)', 'Screenshot not taken') });
+    const edit = vi.spyOn(s.backend, 'editIssue').mockImplementation(async (_repo, _n, patch) => {
+      setIssues({ ...prototypeIssue, title: patch.title!, body: patch.body!, labels: [] });
+    });
+    vi.spyOn(swarm, 'syncRepo').mockResolvedValue(undefined as never);
+    const approve = () => swarm.approvePrototype(repo.id, draft.number, draft.headSha, 'Build filters', 'Show all floors.');
+    await expect(approve()).rejects.toThrow('attach screenshots');
+    expect(edit).not.toHaveBeenCalled();
+    prDetails.mockResolvedValue(details);
+    await approve();
+    expect(edit).toHaveBeenCalledExactlyOnceWith(repo.fullName, 66, expect.objectContaining({
+      title: 'Build filters', body: expect.stringContaining(draft.headSha), removeLabels: ['swarm:prototype'],
+    }));
+    expect(ready()).toEqual([66]);
+    await swarm.assign('a1', 66);
+    expect(s.state.agents[0].branch).toBe('swarm/issue-66-ada');
+  });
+});
+
 describe('QA specialism', () => {
   it('rereads the QA playbook for both the tester and a developer covering QA', () => {
     const read = vi.spyOn(syncFs, 'readFileSync').mockReturnValueOnce('QA playbook').mockReturnValueOnce('Edited QA playbook');
@@ -4302,7 +4469,7 @@ describe('the line about turns ending', () => {
       p.buildSystemAppend(a, repo, '/desk', 'fix/13', { pr: 13, headRef: 'swarm/13' }),
       p.buildQaSystemAppend(a, repo, '/desk', 'qa/pr-13-ada', pr),
       ceoSystemPrompt({ name: 'Joi', company: 'Acme', manager: 'Sam', notesFile: '/notes.md', researchFolder: '/research', sessionLimit: 4, teamCap: 5, hiring: 'approve' }),
-      researcherSystemPrompt({ name: 'Hypatia', title: '', brief: '', company: 'Acme', today: '2026-10-15', companyFolder: '/research', place: { kind: 'company', folder: '/research' } }),
+      researcherSystemPrompt({ name: 'Hypatia', title: '', brief: '', company: 'Acme', today: '2026-10-15', companyFolder: '/research', place: { kind: 'company', repo: 'demo-manager/cubebase', defaultBranch: 'main', cwd: '/research', branch: 'swarm/research-doc-test', autoMerge: false } }),
     ];
     for (const prompt of prompts) expect(prompt.split(ONE_TURN)).toHaveLength(2);
   });
@@ -4888,13 +5055,16 @@ describe('researchers', () => {
     expect(await s.officeTools().call('request_research', { topic: 'todo app pricing', brief: 'again' })).toContain('already on Hypatia');
     expect(JSON.parse(s.companyStatus()).research.queue).toEqual(['Researching "Todo app pricing"']);
 
-    vi.spyOn(s.backend, 'prepareResearchFolder').mockResolvedValue(); // no disk
     const start = vi.spyOn(s.backend, 'startSession');
     r().startResearchWork();
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({ role: 'researcher', prompt: expect.stringContaining('company research folder') }), expect.anything());
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      role: 'researcher',
+      cwd: expect.stringContaining('/demo-manager/cubebase/desks/'),
+      prompt: expect.stringContaining('docs/research/company/ by pull request'),
+    }), expect.anything());
     await vi.advanceTimersByTimeAsync(120_000);
-    expect(r().state.research.done).toEqual([expect.objectContaining({ topic: 'Todo app pricing', where: expect.stringMatching(/todo-app-pricing\.md$/) })]);
+    expect(r().state.research.done).toEqual([expect.objectContaining({ topic: 'Todo app pricing', where: expect.stringMatching(/^https:\/\/github\.com\/demo-manager\/cubebase\/pull\/\d+$/) })]);
     expect(lobby.status).toBe('done');
   });
 });
@@ -5390,5 +5560,386 @@ describe('approved Idea blockers', () => {
     expect(ready()).toEqual([60]);
     await swarm.assign('a1', 61);
     expect(runTask.mock.calls[0][2].number).toBe(61);
+  });
+});
+
+describe('closed work', () => {
+  type Closing = Omit<Internals, 'agentRt'> & {
+    stopClosedWork(repo: Repo, issues: IssueInfo[] | null, pulls: PullInfo[]): Promise<void>;
+    agentRt: Map<string, { log: { text: string }[]; session?: { stop(): void } | null }>;
+  };
+  let c: Closing;
+  let stop: Mock;
+  const closedPull = (number: number, state: PullInfo['state'] = 'CLOSED') => ({ number, state } as PullInfo);
+  const tracked = (number: number, state: 'OPEN' | 'CLOSED', labels: string[] = []): TrackedIssue => ({ repo: 'demo-co/pixel-todo', number, url: '', title: '', body: '', labels, state });
+  const rec = (patch: Partial<QaRec> = {}) => ({
+    repoId: repo.id, prNumber: 12, status: 'testing', round: 1, sessionFailures: 0, devAgentId: null, qaAgentId: 'a1',
+    summary: null, checks: [], commentUrl: null, mergeNote: null, updatedAt: 0, ...patch,
+  }) as QaRec;
+
+  beforeEach(() => {
+    c = s as unknown as Closing;
+    stop = vi.fn();
+    c.agentRt.get('a1')!.session = { stop };
+    Object.assign(s.state.agents[0], { status: 'working', task: 'issue', issueNumber: 7, branch: 'swarm/issue-7-ada', prNumber: null });
+  });
+  const log = () => c.agentRt.get('a1')!.log.map((e) => e.text).join('\n');
+
+  it('stops a busy developer whose issue closed and clears the desk', async () => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+    const messages = vi.spyOn(s, 'postMessage');
+    await c.stopClosedWork(repo, [issue(8)], []);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null, issueNumber: null, branch: null });
+    expect(log()).toContain('Stopped: issue #7 was closed');
+    expect(messages).toHaveBeenCalledWith('office', expect.stringContaining('Stopped Ada'));
+  });
+
+  it.each([['still open past the listing cap', tracked(7, 'OPEN')], ['held for publication', tracked(7, 'CLOSED', ['held-for-publication'])]])('leaves an issue %s', async (_, read) => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue(read);
+    await c.stopClosedWork(repo, [], []);
+    expect(stop).not.toHaveBeenCalled();
+    expect(s.state.agents[0]).toMatchObject({ status: 'working', issueNumber: 7 });
+  });
+
+  it('stops QA on a PR closed unmerged, keeping a record that holds a security review', async () => {
+    Object.assign(s.state.agents[0], { task: 'qa', prNumber: 12 });
+    const reviewed = rec({ securityReview: { reason: 'Auth', qaSha: 'sha' } } as Partial<QaRec>);
+    s.state.qa.push(reviewed, rec({ prNumber: 14, qaAgentId: 'q2' }));
+    await c.stopClosedWork(repo, null, [closedPull(12)]);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(s.state.qa[0]).toMatchObject({ prNumber: 12, closed: true, status: 'queued', qaAgentId: null, securityReview: { qaSha: null } });
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
+  });
+
+  it('drops a fixing record without a security review', async () => {
+    Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+    s.state.qa.push(rec({ status: 'fixing', devAgentId: 'a1', qaAgentId: null }));
+    await c.stopClosedWork(repo, null, [closedPull(12)]);
+    expect(s.state.qa).toEqual([]);
+  });
+
+  it('leaves CEO-parked and merged PRs alone', async () => {
+    Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+    repo.parkedBranches = [{ issueNumber: 7, prNumber: 12, branch: 'swarm/issue-7-ada' }];
+    await c.stopClosedWork(repo, null, [closedPull(12)]);
+    repo.parkedBranches = [];
+    await c.stopClosedWork(repo, [], [closedPull(12, 'MERGED')]);
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  describe('on a sync, for a PR the open and merged lists leave out', () => {
+    let prState: PullInfo['state'] | Error;
+    // The production listPulls over gh's answers: open PRs and the newest merged ones, never a closed one.
+    const raw = (number: number, state: 'OPEN' | 'MERGED') => ({
+      number, title: '', url: '', headRefName: `feature/${number}`, headRefOid: 'sha', state, isDraft: false, mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN', reviewDecision: null, labels: [], closingIssuesReferences: [], createdAt: '',
+      mergedAt: state === 'MERGED' ? '2026-11-01' : null, additions: 0, deletions: 0, statusCheckRollup: [],
+    });
+    beforeEach(() => {
+      Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
+      Object.assign(s.repoRt.get(repo.id)!, { lastMergedAt: '2026-11-01' });
+      vi.spyOn(s.backend, 'listIssues').mockResolvedValue([]);
+      vi.spyOn(s.backend, 'listPulls').mockImplementation((name) => listPulls(name, async (args) => [raw(args.includes('open') ? 13 : 9, args.includes('open') ? 'OPEN' : 'MERGED')]));
+      prState = 'CLOSED';
+      vi.spyOn(s.backend, 'prDetails').mockImplementation(async (_name, number) => {
+        if (prState instanceof Error) throw prState;
+        return { number, state: prState } as Awaited<ReturnType<Backend['prDetails']>>;
+      });
+    });
+
+    it('confirms a QA session\'s PR closed, stops it and keeps the record that holds a security review', async () => {
+      Object.assign(s.state.agents[0], { task: 'qa', prNumber: 12 });
+      s.state.qa.push(rec({ securityReview: { reason: 'Auth', qaSha: 'sha' } } as Partial<QaRec>));
+      await swarm.syncRepo(repo.id);
+      expect(s.backend.prDetails).toHaveBeenCalledWith(repo.fullName, 12);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null, prNumber: null });
+      expect(s.state.qa.find((q) => q.prNumber === 12)).toMatchObject({ closed: true, status: 'queued', qaAgentId: null, securityReview: { qaSha: null } });
+      expect(log()).toContain('Stopped: PR #12 was closed without merging');
+    });
+
+    it('confirms a fix session\'s PR closed, stops it and drops its record', async () => {
+      Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+      s.state.qa.push(rec({ status: 'fixing', devAgentId: 'a1', qaAgentId: null }));
+      await swarm.syncRepo(repo.id);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
+      expect(s.state.qa.some((q) => q.prNumber === 12)).toBe(false);
+    });
+
+    it.each([['open', 'OPEN'], ['merged', 'MERGED'], ['unreadable', new Error('HTTP 502')]] as const)('leaves the session on a PR that is %s', async (_, state) => {
+      prState = state;
+      Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+      s.state.qa.push(rec({ status: 'fixing', devAgentId: 'a1', qaAgentId: null }));
+      await swarm.syncRepo(repo.id);
+      expect(stop).not.toHaveBeenCalled();
+      expect(s.state.agents[0]).toMatchObject({ status: 'working', task: 'fix', prNumber: 12 });
+      expect(s.state.qa[0]).toMatchObject({ prNumber: 12, status: 'fixing' });
+    });
+
+    it('clears a resumed issue before starting when its PR closed unmerged, though the issue is still open', async () => {
+      const session = { send: vi.fn(), stop: vi.fn() };
+      const starts = vi.spyOn(s.backend, 'startSession').mockReturnValue(session);
+      vi.spyOn(s.backend, 'deskHead').mockResolvedValue('base');
+      vi.mocked(s.backend.listIssues).mockResolvedValue([issue(7)]);
+      c.agentRt.get('a1')!.session = null;
+      Object.assign(s.state.agents[0], { status: 'done', task: 'issue', prNumber: 12, sessionId: 'dev-session', model: '', effort: '', cli: '' });
+      await swarm.message('a1', 'Carry on');
+      expect(starts).not.toHaveBeenCalled();
+      expect(s.backend.prDetails).toHaveBeenCalledWith(repo.fullName, 12);
+      expect(session.stop).not.toHaveBeenCalled();
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null, issueNumber: null, prNumber: null });
+      expect(log()).toContain('Not resuming: PR #12 was closed without merging');
+    });
+
+    it('still stops an issue task on a closed issue when its unlisted PR reads back open', async () => {
+      prState = 'OPEN';
+      vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+      Object.assign(s.state.agents[0], { prNumber: 12 });
+      await swarm.syncRepo(repo.id);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(log()).toContain('Stopped: issue #7 was closed');
+    });
+
+    it.each([['merged', 'MERGED'], ['unreadable', new Error('HTTP 502')]] as const)('leaves an issue task on a %s unlisted PR, even with its issue closed', async (_, state) => {
+      prState = state;
+      const read = vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+      Object.assign(s.state.agents[0], { prNumber: 12 });
+      await swarm.syncRepo(repo.id);
+      expect(read).not.toHaveBeenCalledWith(repo.fullName, 7);
+      expect(stop).not.toHaveBeenCalled();
+      expect(s.state.agents[0]).toMatchObject({ status: 'working', task: 'issue', issueNumber: 7 });
+    });
+
+    it('leaves a CEO-parked PR alone without reading it', async () => {
+      Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+      repo.parkedBranches = [{ issueNumber: 7, prNumber: 12, branch: 'swarm/issue-7-ada' }];
+      await swarm.syncRepo(repo.id);
+      expect(s.backend.prDetails).not.toHaveBeenCalledWith(repo.fullName, 12);
+      expect(stop).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('before a desk is prepared', () => {
+    const actual = () => new Swarm(s.backend) as unknown as Internals;
+    beforeEach(() => {
+      Object.assign(repo, { defaultBranch: 'main', links: [] });
+      c.agentRt.get('a1')!.session = null;
+    });
+
+    it('refuses a closed issue and logs why', async () => {
+      vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+      const prepare = vi.spyOn(s, 'prepare');
+      s.repoRt.get(repo.id)!.issues = [issue(7)];
+      Object.assign(s.state.agents[0], { status: 'preparing' });
+      await actual().runTask.call(s, s.state.agents[0], repo, issue(7));
+      expect(prepare).not.toHaveBeenCalled();
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
+      expect(s.repoRt.get(repo.id)!.issues).toEqual([]);
+      expect(log()).toContain('Not starting: issue #7 is closed');
+    });
+
+    it('goes ahead when the issue cannot be read', async () => {
+      vi.spyOn(s.backend, 'readIssue').mockRejectedValue(new Error('offline'));
+      const prepare = vi.spyOn(s, 'prepare').mockResolvedValue('');
+      Object.assign(s.state.agents[0], { status: 'preparing' });
+      await actual().runTask.call(s, s.state.agents[0], repo, issue(7));
+      expect(prepare).toHaveBeenCalledOnce();
+    });
+
+    it.each(['OPEN', 'CLOSED'] as const)('drops a start whose task was replaced while issue #7 read back %s', async (state) => {
+      let answer!: (issue: TrackedIssue) => void;
+      vi.spyOn(s.backend, 'readIssue').mockReturnValue(new Promise((resolve) => (answer = resolve)));
+      const prepare = vi.spyOn(s, 'prepare').mockResolvedValue('/desk');
+      const start = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+      const a = s.state.agents[0];
+      Object.assign(a, { status: 'preparing' });
+      const run = actual().runTask.call(s, a, repo, issue(7));
+      s.clearTask(a);
+      s.beginTask(a, { task: 'issue', issueNumber: 8, issueTitle: 'Issue 8', branch: 'swarm/issue-8-ada', prNumber: null }, 'Issue #8', 'Preparing');
+      answer(tracked(7, state));
+      await run;
+      expect(prepare).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
+      expect(a).toMatchObject({ status: 'preparing', task: 'issue', issueNumber: 8, branch: 'swarm/issue-8-ada' });
+      expect(log()).not.toContain('Not starting');
+    });
+
+    it('drops a start for an agent removed while its PR was read', async () => {
+      let answer!: (details: Awaited<ReturnType<Backend['prDetails']>>) => void;
+      vi.spyOn(s.backend, 'prDetails').mockReturnValue(new Promise((resolve) => (answer = resolve)));
+      const prepare = vi.spyOn(s, 'prepare').mockResolvedValue('/desk');
+      const record = rec({ status: 'failed', devAgentId: 'a1', qaAgentId: null });
+      s.state.qa.push(record);
+      const a = s.state.agents[0];
+      const run = s.runFix(a, repo, record);
+      await vi.waitFor(() => expect(s.backend.prDetails).toHaveBeenCalled());
+      s.state.agents = s.state.agents.filter((x) => x !== a);
+      answer({ state: 'OPEN' } as Awaited<ReturnType<Backend['prDetails']>>);
+      await run;
+      expect(prepare).not.toHaveBeenCalled();
+    });
+
+    it('refuses a fix for a closed PR and drops its record', async () => {
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ state: 'CLOSED' } as Awaited<ReturnType<Backend['prDetails']>>);
+      const prepare = vi.spyOn(s, 'prepare');
+      const record = rec({ status: 'failed', devAgentId: 'a1', qaAgentId: null });
+      s.state.qa.push(record);
+      await s.runFix(s.state.agents[0], repo, record);
+      expect(prepare).not.toHaveBeenCalled();
+      expect(s.state.qa).toEqual([]);
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
+      expect(log()).toContain('Not starting: PR #12 is closed');
+    });
+  });
+});
+
+describe('silent session recovery', () => {
+  type Recovery = Internals & { watchSilentSessions(): void; reattachSession(a: unknown): Promise<void> };
+  let recovery: Recovery;
+  let cb: SessionCallbacks;
+  let send: Mock;
+  let stop: Mock;
+  const dev = () => s.state.agents[0];
+  const minutes = (n: number) => vi.setSystemTime(Date.now() + n * 60_000);
+
+  beforeEach(async () => {
+    recovery = s as Recovery;
+    s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
+    Object.assign(repo, { defaultBranch: 'main', links: [] });
+    Object.assign(dev(), { model: '', effort: '', cli: '', costUsd: 0, turns: 0 });
+    s.runTask = (Swarm.prototype as unknown as Pick<Internals, 'runTask'>).runTask;
+    vi.spyOn(s, 'prepare').mockResolvedValue('/fake-desk');
+    vi.spyOn(s.backend, 'deskHead').mockResolvedValue('base');
+    send = vi.fn();
+    stop = vi.fn();
+    vi.spyOn(s.backend, 'startSession').mockImplementation((_opts, callbacks) => {
+      cb = callbacks;
+      return { send, stop };
+    });
+    setIssues(issue(66));
+    await swarm.assign('a1', 66);
+    await vi.advanceTimersByTimeAsync(0);
+    cb.sessionId('running-thread');
+  });
+
+  it('nudges once, then holds a retry with its conversation and ignores late completions', () => {
+    minutes(20);
+    recovery.watchSilentSessions();
+    recovery.watchSilentSessions();
+    expect(send).toHaveBeenCalledOnce();
+    minutes(10);
+    recovery.watchSilentSessions();
+    recovery.watchSilentSessions();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(dev()).toMatchObject({ status: 'stopped', sessionId: 'running-thread', branch: 'swarm/issue-66-ada', heldRetry: { issueNumber: 66, resume: true } });
+    expect(swarm.snapshot().repos[0].sessionRemedies?.['issue:66'].requeueAt).toBe(Date.now());
+    cb.finished({ ok: true, text: '', costUsd: 0, turns: 0, errors: [] });
+    expect(dev().status).toBe('stopped');
+  });
+
+  it.each(['hook', 'log', 'terminal'] as const)('recent %s activity postpones the nudge', (source) => {
+    minutes(19);
+    if (source === 'hook') cb.activity!();
+    if (source === 'log') cb.log([{ kind: 'tool', text: 'Working' }]);
+    if (source === 'terminal') Object.assign(s.agentRt.get('a1')!, { terminal: { lastOutputAt: Date.now() } });
+    minutes(1);
+    recovery.watchSilentSessions();
+    expect(send).not.toHaveBeenCalled();
+    minutes(19);
+    recovery.watchSilentSessions();
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('requeues an issue without a conversation through requested starts even with auto assignment disabled', () => {
+    dev().sessionId = null;
+    repo.autoAssign = false;
+    minutes(20);
+    recovery.watchSilentSessions();
+    minutes(10);
+    recovery.watchSilentSessions();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(dev()).toMatchObject({ status: 'idle', task: null });
+    expect(repo.requestedStarts).toEqual([{ issueNumber: 66, preferredAgentId: 'a1', restartPending: true }]);
+  });
+
+  it.each(['CLOSED', 'MERGED'] as const)('clears a kept CLI on a %s PR before attaching to it', async (state) => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    Object.assign(dev(), { status: 'stopped', prNumber: 12 });
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ state } as Awaited<ReturnType<Backend['prDetails']>>);
+    vi.mocked(s.backend.startSession).mockClear();
+    await recovery.reattachSession(dev());
+    expect(s.backend.startSession).not.toHaveBeenCalled();
+    expect(dev()).toMatchObject({ status: 'idle', task: null, sessionId: null });
+  });
+
+  it('clears an issue closed during downtime before resuming it', async () => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    dev().status = 'stopped';
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ repo: repo.fullName, ...issue(66), state: 'CLOSED' });
+    vi.mocked(s.backend.startSession).mockClear();
+    await swarm.message('a1', 'Resume after restart');
+    expect(s.backend.startSession).not.toHaveBeenCalled();
+    expect(dev()).toMatchObject({ status: 'idle', task: null });
+  });
+
+  it('checks a box desk on its machine and reattaches there without local restoration', async () => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    Object.assign(dev(), { status: 'stopped', deskBox: 'box-1' });
+    const deskExists = vi.fn(async () => true);
+    const startSession = vi.fn((_opts: SessionOptions, callbacks: SessionCallbacks) => {
+      cb = callbacks;
+      return { send, stop };
+    });
+    const machine = { ...s.backend, deskExists, startSession };
+    const boxes = s as unknown as { boxConns: Map<string, unknown>; state: { boxes: { id: string }[] } };
+    boxes.state.boxes.push({ id: 'box-1' });
+    boxes.boxConns.set('box-1', { machine, state: () => ({ status: 'online', clis: [{ id: 'claude', installed: true }] }) });
+    vi.mocked(s.backend.startSession).mockClear();
+    vi.mocked(s.backend.deskExists).mockClear();
+    const prepare = vi.spyOn(s.backend, 'prepareDesk');
+    await recovery.reattachSession(dev());
+    expect(deskExists).toHaveBeenCalledOnce();
+    expect(startSession).toHaveBeenCalledWith(expect.objectContaining({ reattach: true }), expect.anything());
+    expect(s.backend.deskExists).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(s.backend.startSession).not.toHaveBeenCalled();
+    minutes(20);
+    cb.activity!();
+    recovery.watchSilentSessions();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('requeues a missing desk instead of resuming a conversation there', async () => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    dev().status = 'stopped';
+    vi.mocked(s.backend.deskExists).mockResolvedValue(false);
+    vi.mocked(s.backend.startSession).mockClear();
+    await swarm.message('a1', 'Resume after restart');
+    expect(s.backend.startSession).not.toHaveBeenCalled();
+    expect(dev()).toMatchObject({ status: 'idle', task: null });
+    expect(repo.requestedStarts).toEqual([{ issueNumber: 66, preferredAgentId: 'a1', restartPending: true }]);
+  });
+
+  it('admits a typed fix follow-up synchronously so its CLI does not reject the prompt', () => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    Object.assign(dev(), { status: 'done', task: 'fix', prNumber: 12 });
+    const terminal = (s as unknown as { terminalFor(a: unknown): AgentTerminal }).terminalFor(dev());
+    const read = vi.spyOn(s.backend, 'prDetails');
+    expect(terminal.onIdlePrompt!('Please finish this fix')).toBe(true);
+    expect(s.backend.startSession).toHaveBeenLastCalledWith(expect.objectContaining({ typed: true }), expect.anything());
+    expect(read).not.toHaveBeenCalled();
+    terminal.dispose();
+  });
+
+  it('keeps recovery details after a desk check fails instead of leaving a phantom worker', async () => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    dev().status = 'stopped';
+    vi.mocked(s.backend.deskExists).mockRejectedValue(new Error('box disconnected'));
+    vi.mocked(s.backend.startSession).mockClear();
+    await expect(swarm.message('a1', 'Resume after restart')).rejects.toThrow('box disconnected');
+    expect(dev()).toMatchObject({ status: 'stopped', task: 'issue', sessionId: 'running-thread', issueNumber: 66 });
+    expect(s.backend.startSession).not.toHaveBeenCalled();
   });
 });

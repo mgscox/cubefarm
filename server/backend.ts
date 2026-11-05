@@ -3,6 +3,7 @@ import * as workspace from './workspace.ts';
 import { startSession } from './agentRunner.ts';
 import { hooksReady, officeProcesses, reconnectClis, releaseClis, startCliSession, terminalsAvailable, type ReconnectedCli } from './cliRunner.ts';
 import { detectClis } from './clis.ts';
+import { localCliHost } from './localCliHost.ts';
 import { realPreviews, type PreviewBackend } from './previewRunner.ts';
 import { realOffice, type OfficeHost } from './officeUpdate.ts';
 import { connectBox } from './boxLink.ts';
@@ -56,7 +57,7 @@ export interface Backend extends Machine {
   inspectFolder(dir: string): Promise<workspace.LocalFolder>;
   publishFolder(dir: string, opts: { name: string; visibility: 'private' | 'public'; owner?: string; description?: string }): Promise<string>;
   createProject(root: string, name: string, opts: { visibility: 'private' | 'public'; owner?: string; description?: string }): Promise<{ fullName: string; path: string }>;
-  /** The company's research folder: created and put under git (no remote) on first use. */
+  /** Local workspace for Idea research sessions, created on first use. */
   prepareResearchFolder(dir: string): Promise<void>;
   /** The office started: the CLIs its terminal keeper kept running through a restart, back in their agents' terminals. */
   reconnectClis(terminalFor: (agentId: string) => AgentTerminal | null): Promise<ReconnectedCli[]>;
@@ -98,6 +99,7 @@ export const realBackend: Backend = {
   containsCommit: github.containsCommit,
   deskAhead: workspace.deskAhead,
   deskHead: workspace.deskHead,
+  deskExists: workspace.deskExists,
   prDetails: github.prDetails,
   issueDetails: github.issueDetails,
   commentPull: github.commentPull,
@@ -116,6 +118,7 @@ export const realBackend: Backend = {
   prepareResearchFolder: workspace.ensureLocalRepo,
   releaseDesk: (fullName, agentSlug, port) => workspace.releaseDesk(fullName, agentSlug, port, officeProcesses()),
   startSession: (opts, cb) => (opts.terminal ? startCliSession(opts, cb) : startSession(opts, cb)),
+  cliHost: localCliHost,
   terminals: terminalsAvailable,
   reconnectClis: (terminalFor) => (terminalsAvailable ? reconnectClis(terminalFor) : Promise.resolve([])),
   hooksReady,

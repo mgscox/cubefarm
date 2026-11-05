@@ -1,11 +1,12 @@
+import { ClaudeAuthentication, claudeAuthRouter } from './claudeAuth.ts';
 import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
-import { DEMO, HOST, PORT, STATE_FILE, WORKSPACE_ROOT, readConfigEnv } from './config.ts';
-import { bindMessage } from '../bin/officeNetwork.js';
+import { DEMO, HOME_DIR, HOST, PORT, STATE_FILE, WORKSPACE_ROOT, readConfigEnv } from './config.ts';
+import { bindMessage, browserUrl, localUrl } from '../bin/officeNetwork.js';
 import { realBackend } from './backend.ts';
 import { handleHook, handleMcp, setOfficeUrl } from './cliRunner.ts';
 import { createDemoBackend } from './demo.ts';
@@ -16,7 +17,7 @@ import { HttpError, Swarm } from './swarm.ts';
 
 const swarm = new Swarm(DEMO ? createDemoBackend() : realBackend);
 // Sessions the office picks back up while it starts need the address their CLIs call back on before it listens.
-if (PORT) setOfficeUrl(`http://127.0.0.1:${PORT}`);
+if (PORT) setOfficeUrl(localUrl(HOST, PORT));
 await swarm.init();
 
 const app = express();
@@ -31,6 +32,11 @@ app.post('/api/mcp/:token', express.json({ limit: '4mb' }), (req, res, next) => 
 app.all('/api/mcp/:token', (_req, res) => void res.status(405).set('Allow', 'POST').end());
 app.use('/mcp', mcpSettings ? managerMcpRouter(swarm, mcpSettings) : (_req, res) => { res.sendStatus(404); });
 app.use('/api/settings/mcp', managerMcpSettingsRouter(mcpSettings));
+const claudeAuthentication = new ClaudeAuthentication({
+  home: HOME_DIR, env: process.env, demo: DEMO,
+  origin: process.env.CUBEFARM_AUTH_ORIGIN, proxyAddress: process.env.CUBEFARM_AUTH_PROXY_ADDRESS,
+});
+app.use('/api/settings/claude', claudeAuthRouter(claudeAuthentication));
 app.use(express.json({ limit: '1mb' }));
 
 type Handler = (req: Request, res: Response) => Promise<unknown> | unknown;
@@ -113,6 +119,7 @@ app.post(
     number: await swarm.createIssue(repoId(req), str(req.body.title), str(req.body.body), str(req.body.assignTo) || undefined, str(req.body.specialty) || undefined),
   })),
 );
+app.post('/api/repos/:repo/issues/:number/close/demo', route((req) => swarm.closeDemoIssue(repoId(req), num(req.params.number))));
 app.post('/api/repos/:repo/plan', route((req) => swarm.planFloor(repoId(req), typeof req.body?.mission === 'string' ? req.body.mission : undefined)));
 app.post('/api/repos/:repo/onboard', route((req) => swarm.onboardFloor(repoId(req))));
 // The floor's app, for the preview monitor
@@ -125,6 +132,10 @@ app.post(
   }),
 );
 app.delete('/api/repos/:repo/preview', route((req) => swarm.stopPreview(repoId(req))));
+app.post('/api/repos/:repo/pulls/:n/prototype/approve', route((req) =>
+  swarm.approvePrototype(repoId(req), num(req.params.n), str(req.body.head), str(req.body.title), str(req.body.body))));
+app.post('/api/repos/:repo/pulls/:n/prototype/revise', route((req) =>
+  swarm.revisePrototype(repoId(req), num(req.params.n), str(req.body.head), str(req.body.feedback))));
 app.post('/api/repos/:repo/pulls/:n/merge', route((req) => swarm.mergePull(repoId(req), num(req.params.n), req.body?.method ?? 'squash')));
 app.post('/api/repos/:repo/pulls/:n/close', route((req) => swarm.closePull(repoId(req), num(req.params.n))));
 app.post('/api/repos/:repo/pulls/:n/qa', route((req) => swarm.sendToQa(repoId(req), num(req.params.n))));
@@ -218,8 +229,8 @@ server.on('upgrade', (req, socket, head) => {
 
 server.listen(PORT, HOST, () => {
   const port = (server.address() as AddressInfo).port;
-  setOfficeUrl(`http://127.0.0.1:${port}`);
-  console.log(`\n  🏢 cubefarm on http://localhost:${port}${DEMO ? '  (DEMO MODE: fake GitHub + fake agents)' : ''}`);
+  setOfficeUrl(localUrl(HOST, port));
+  console.log(`\n  🏢 cubefarm on ${browserUrl(HOST, port)}${DEMO ? '  (DEMO MODE: fake GitHub + fake agents)' : ''}`);
   console.log(`     ${bindMessage(HOST, port)}`);
   console.log(`     state: ${STATE_FILE}`);
   console.log(`     workspaces: ${WORKSPACE_ROOT}\n`);
@@ -233,8 +244,7 @@ const shutdown = (signal: string) => {
   closing = true;
   console.log(`\n  ${signal}: stopping floor previews…`);
   const force = setTimeout(() => process.exit(0), 15_000);
-  void swarm
-    .shutdown(signal === 'restart')
+  void Promise.all([claudeAuthentication.close(), swarm.shutdown(signal === 'restart')])
     .catch((err) => console.error(err))
     .finally(() => {
       clearTimeout(force);
