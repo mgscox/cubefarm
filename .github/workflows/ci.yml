@@ -70,6 +70,7 @@ jobs:
           check-latest: true
       - run: npm ci
       - run: npx playwright install chromium
+        timeout-minutes: 5
 
       # playwright.config.ts builds the app and boots a demo office on a test port with a temp SWARM_HOME.
       - run: npm run test:e2e
