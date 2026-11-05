@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PUBLICATION_HOLD } from '../shared/issues.ts';
-import { closedWork, issueClosed, type FloorWork } from './closedWork.ts';
+import { closedWork, issueClosed, restartClosedWork, type FloorWork } from './closedWork.ts';
 
 describe('closed work', () => {
   const dev = { id: 'd1', role: 'dev' as const, task: 'issue' as const, status: 'working' as const, issueNumber: 7, prNumber: null };
@@ -47,4 +47,24 @@ describe('issueClosed', () => {
   it('keeps an open one', () => expect(issueClosed({ state: 'OPEN', labels: [] })).toBe(false));
   it('leaves an Ideas issue held for publication', () => expect(issueClosed({ state: 'CLOSED', labels: [PUBLICATION_HOLD] })).toBe(false));
   it('does not guess about an issue it could not find', () => expect(issueClosed(null)).toBe(false));
+});
+
+describe('closed work at restart', () => {
+  const a = { task: 'issue' as const, issueNumber: 7, prNumber: 12 };
+  it.each(['CLOSED', 'MERGED'] as const)('clears a %s PR, including a kept CLI', (state) => {
+    expect(restartClosedWork(a, { prState: state, issue: { state: 'OPEN', labels: [] } })).toEqual({ kind: 'pr', number: 12 });
+  });
+  it('clears an issue closed during downtime even when its PR is still open', () => {
+    expect(restartClosedWork(a, { prState: 'OPEN', issue: { state: 'CLOSED', labels: [] } })).toEqual({ kind: 'issue', number: 7 });
+  });
+  it('keeps open, unknown and publication-held work', () => {
+    expect(restartClosedWork(a, { prState: 'OPEN', issue: { state: 'OPEN', labels: [] } })).toBeNull();
+    expect(restartClosedWork(a, { prState: null, issue: null })).toBeNull();
+    expect(restartClosedWork(a, { prState: null, issue: { state: 'CLOSED', labels: [PUBLICATION_HOLD] } })).toBeNull();
+  });
+  it('does not cancel QA or fixes because the linked issue closed', () => {
+    for (const task of ['qa', 'fix'] as const) {
+      expect(restartClosedWork({ ...a, task }, { prState: 'OPEN', issue: { state: 'CLOSED', labels: [] } })).toBeNull();
+    }
+  });
 });

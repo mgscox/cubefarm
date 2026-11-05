@@ -37,7 +37,7 @@ describe('planCli', () => {
 
 describe('startCliSession on a host', () => {
   const callbacks = (): SessionCallbacks => ({
-    log: vi.fn(), tool: vi.fn(), sessionId: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), finished: vi.fn(),
+    activity: vi.fn(), log: vi.fn(), tool: vi.fn(), sessionId: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), finished: vi.fn(),
   });
   const terminal = () => ({ cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), screen: () => '' }) as unknown as AgentTerminal;
   const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
@@ -91,6 +91,17 @@ describe('startCliSession on a host', () => {
     };
     return { cb, session, again, term, hook: (body: Record<string, unknown>) => handleHook(token, body) };
   };
+
+  it('counts hooks forwarded by a host even when they produce no log, excluding periodic status lines', () => {
+    const c = claude(() => '', () => null);
+    c.hook({ hook_event_name: 'SessionStart' });
+    const before = vi.mocked(c.cb.activity!).mock.calls.length;
+    c.hook({ hook_event_name: 'StatusLine' });
+    expect(c.cb.activity).toHaveBeenCalledTimes(before);
+    c.hook({ hook_event_name: 'PostToolUse', tool_name: 'TodoWrite', tool_response: '' });
+    expect(c.cb.activity).toHaveBeenCalledTimes(before + 1);
+    c.session.stop();
+  });
   const errors = (cb: SessionCallbacks) => vi.mocked(cb.log).mock.calls.flat(2).filter((e) => e.kind === 'error').map((e) => e.text);
   const turn = (t: Partial<ClaudeTurn>): ClaudeTurn => ({ bytes: 100, ended: false, mark: '', text: '', ...t });
 

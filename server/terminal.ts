@@ -90,7 +90,9 @@ export class AgentTerminal {
 
   /** A dim line from the office itself, e.g. between sessions. */
   note(text: string) {
+    const outputAt = this.lastOutputAt;
     this.write(`\r\n\x1b[2m${text}\x1b[0m\r\n`);
+    this.lastOutputAt = outputAt; // Office notes are not evidence that the CLI is working.
   }
 
   get live() {
