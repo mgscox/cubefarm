@@ -150,6 +150,15 @@ function checks() {
   // Agents test in a browser through Playwright, which drives Google Chrome by default.
   const chrome = chromePaths().some((p) => fs.existsSync(p));
   out.push({ name: 'Chrome', ok: chrome, detail: chrome ? 'for browser testing' : 'not found', fix: 'install Google Chrome so agents can test in a browser' });
+  try {
+    // The agents' browser tools are the pinned playwright package's own MCP server (server/browser.ts).
+    const file = createRequire(import.meta.url).resolve('playwright/package.json');
+    const mcp = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const result = sh(process.execPath, [path.join(path.dirname(file), 'cli.js'), 'mcp', '--help']);
+    out.push({ name: 'Browser MCP', ok: result.status === 0, detail: `Playwright ${mcp.version}`, fix: 'reinstall cubefarm: the Playwright MCP command failed' });
+  } catch {
+    out.push({ name: 'Browser MCP', ok: false, fix: 'reinstall cubefarm: Playwright MCP is missing or unreadable' });
+  }
   return out;
 }
 

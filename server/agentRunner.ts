@@ -10,6 +10,7 @@ import type { AgentTerminal } from './terminal.ts';
 import { CROSS_TURN_TOOLS } from './clis.ts';
 import { VERSION } from './config.ts';
 import { projectEnv } from './projectEnv.ts';
+import { playwrightMcpCommand } from './browser.ts';
 import { ACTIVE_REPO_SKILLS, writeSessionSkills } from './repoSkills.ts';
 
 // One Claude Code instance (via the Claude Agent SDK) working one issue in its own git worktree.
@@ -343,9 +344,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
 
   const mcpServers: Options['mcpServers'] = {};
   if (opts.browserTesting) {
-    // browser-init.js keeps pages from taking the real mouse with pointer lock (headless Chrome does on Windows).
-    const args = ['-y', '@playwright/mcp@latest', '--headless', '--isolated', '--init-script', path.join(import.meta.dirname, 'browser-init.js')];
-    mcpServers.playwright = process.platform === 'win32' ? { command: 'cmd', args: ['/c', 'npx', ...args] } : { command: 'npx', args };
+    mcpServers.playwright = playwrightMcpCommand();
   }
   if (opts.office) mcpServers.office = opts.office.server;
   // The CEO reads repositories and acts through the office tools; it never runs commands.
