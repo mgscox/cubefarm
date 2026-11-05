@@ -64,7 +64,8 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 'lts/*'
+          # Playwright's bundled ZIP extractor stalls on Node 26; keep browser setup on Node 24.
+          node-version: '24'
           check-latest: true
       - run: npm ci
       - run: npx playwright install chromium
