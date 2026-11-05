@@ -1771,6 +1771,14 @@ input.inline:focus {
   width: auto;
   padding: 4px 6px;
 }
+.team-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.team-name input {
+  width: 120px;
+}
 .field {
   display: flex;
   flex-direction: column;

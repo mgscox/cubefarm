@@ -3,6 +3,7 @@ import { api } from '../api';
 import { isBusy, kanbanFor, agentsOnRepo, useStore } from '../store';
 import { confirmDialog } from './Confirm';
 import { LiveTerminal } from './LiveTerminal';
+import { FeedbackScore } from './FeedbackScore';
 import { effectiveModel } from '../../../shared/models';
 import { isResearchIssue } from '../../../shared/issues';
 import { Markdown } from './Markdown';
@@ -98,6 +99,7 @@ export function TerminalView({ agentId }: { agentId: string }) {
             {agent.name[0]}
           </span>
           <span>{agent.name}</span>
+          <FeedbackScore agent={agent} />
           <span className="chip" title={agent.brief || undefined}>
             {isQa ? '🔍' : isResearcher ? '📚' : '💻'} {agent.title || (isQa ? 'QA tester' : isResearcher ? 'Researcher' : 'Developer')}
             {agent.specialty ? ` · 🎯 ${agent.specialty}` : ''}

@@ -18,6 +18,7 @@ import { Resume } from './Phone';
 import { ProjectPicker } from './ProjectPicker';
 import { PublicationsCard } from './Publications';
 import { StatusPill } from './TerminalView';
+import { FeedbackScore } from './FeedbackScore';
 import { RepoRefreshStatus } from './RepoRefreshStatus';
 import { ManagerMcpSettings } from './ManagerMcpSettings';
 
@@ -472,11 +473,14 @@ function TeamTab() {
                       <span className="dot" style={{ background: a.color }} />
                     </td>
                     <td>
-                      <input
-                        className="inline"
-                        defaultValue={a.name}
-                        onBlur={(e) => e.target.value.trim() && e.target.value !== a.name && void attempt(() => api.updateAgent(a.id, { name: e.target.value }))}
-                      />
+                      <div className="team-name">
+                        <input
+                          className="inline"
+                          defaultValue={a.name}
+                          onBlur={(e) => e.target.value.trim() && e.target.value !== a.name && void attempt(() => api.updateAgent(a.id, { name: e.target.value }))}
+                        />
+                        <FeedbackScore agent={a} />
+                      </div>
                     </td>
                     <td className="nowrap">
                       <span className="chip" title={a.hiredBy === 'ceo' ? 'Hired on the CEO\'s proposal' : undefined}>
