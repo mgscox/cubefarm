@@ -72,6 +72,7 @@ describe('jobLabel', () => {
 describe('office tools', () => {
   const connect = async (startIssue: OfficeHandlers['startIssue'] = async () => 'started', rerunQa: OfficeHandlers['rerunQa'] = async () => 'queued', sendBackToDev: OfficeHandlers['sendBackToDev'] = async () => 'sent back', parkPr: OfficeHandlers['parkPr'] = async () => 'parked', mergePr: OfficeHandlers['mergePr'] = async () => 'merged', fileIssue: OfficeHandlers['fileIssue'] = async () => 'filed') => {
     const floors: unknown[] = [];
+    const connections: unknown[] = [];
     const office = createOfficeTools({
       companyStatus: () => '{}',
       agentDetail: () => '{}',
@@ -85,6 +86,7 @@ describe('office tools', () => {
         return `closed #${a.number}: ${a.reason}`;
       },
       routeIssue: async () => '',
+      connectFloor: async (a) => (connections.push(a), 'connected'),
       startIssue,
       rerunQa,
       sendBackToDev,
@@ -96,13 +98,25 @@ describe('office tools', () => {
     await office.server.instance.connect(serverSide);
     const client = new Client({ name: 'test', version: '1.0.0' });
     await client.connect(clientSide);
-    return { client, floors };
+    return { client, floors, connections };
   };
 
   it('lists every tool the CEO relies on', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'close_issue', 'company_status', 'file_issue', 'merge_pr', 'park_pr', 'propose_hire', 'propose_let_go', 'request_research', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'close_issue', 'company_status', 'connect_floor', 'file_issue', 'merge_pr', 'park_pr', 'propose_hire', 'propose_let_go', 'request_research', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+    expect(tools.find((t) => t.name === 'connect_floor')?.description).toContain('Use ONLY when the manager explicitly asks for a repo to be added; report afterwards. Never on your own initiative.');
+  });
+
+  it('validates floor connection inputs and passes optional automation settings', async () => {
+    const { client, connections } = await connect();
+    const args = { repo: 'demo-co/weather-api', auto_assign: true, auto_merge: false, reason: 'Add our weather service' };
+    expect(await client.callTool({ name: 'connect_floor', arguments: { ...args, repo: ` ${args.repo} `, reason: ` ${args.reason} ` } })).toMatchObject({ content: [{ text: 'connected' }] });
+    expect(await client.callTool({ name: 'connect_floor', arguments: { repo: args.repo, reason: args.reason } })).toMatchObject({ content: [{ text: 'connected' }] });
+    for (const invalid of [{ reason: args.reason }, { repo: args.repo }, { ...args, reason: ' ' }, { ...args, reason: 'x'.repeat(1001) }, { ...args, auto_assign: 'yes' }, { ...args, auto_merge: 0 }]) {
+      expect(await client.callTool({ name: 'connect_floor', arguments: invalid })).toMatchObject({ isError: true });
+    }
+    expect(connections).toEqual([args, { repo: args.repo, reason: args.reason }]);
   });
 
   it('validates closing arguments and reports the blocking PR', async () => {

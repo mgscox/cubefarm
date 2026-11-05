@@ -1155,6 +1155,68 @@ describe('explicit issue starts across office restarts', () => {
   });
 });
 
+describe('CEO connect_floor', () => {
+  beforeEach(() => s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null }));
+
+  it('creates a floor with the requested settings and reports its clone path and status', async () => {
+    const events = vi.spyOn(s, 'broadcast');
+    const output = await s.officeTools().call('connect_floor', {
+      repo: 'demo-co/weather-api', auto_assign: true, auto_merge: false, reason: 'Add weather-api with auto-assign on and auto-merge off',
+    });
+    const floor = swarm.snapshot().repos.find((r) => r.fullName === 'demo-co/weather-api')!;
+    expect(floor).toMatchObject({ floor: 2, autoAssign: true, autoMerge: false });
+    expect(output).toContain('floor 2');
+    expect(output).toContain(floor.checkoutPath);
+    expect(output).toContain('clone: cloning');
+    expect(output).toContain('sync: pending');
+    expect(events).toHaveBeenCalledWith({ type: 'repo', repo: expect.objectContaining({ floor: 2, autoAssign: true, autoMerge: false }) });
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'message', message: expect.objectContaining({ text: expect.stringContaining('Add weather-api with auto-assign on and auto-merge off') }) }));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(swarm.snapshot().repos.find((r) => r.floor === 2)).toMatchObject({ cloneStatus: 'ready', lastSync: expect.any(Number) });
+  });
+
+  it('keeps the console defaults when automation options are omitted', async () => {
+    await s.officeTools().call('connect_floor', { repo: 'demo-co/weather-api', reason: 'Add weather-api' });
+    expect(swarm.snapshot().repos.find((r) => r.floor === 2)).toMatchObject({ autoAssign: false, autoMerge: true });
+    await vi.advanceTimersByTimeAsync(1000);
+  });
+
+  it('returns the existing floor number without changing its settings, regardless of casing', async () => {
+    const before = swarm.snapshot().repos;
+    const meta = vi.spyOn(s.backend, 'repoMeta');
+    expect(await s.officeTools().call('connect_floor', {
+      repo: 'Demo-Co/Pixel-Todo', auto_assign: false, auto_merge: false, reason: 'Add pixel-todo',
+    })).toContain('Refused: Demo-Co/Pixel-Todo is already floor 1; settings unchanged.');
+    expect(swarm.snapshot().repos).toEqual(before);
+    expect(meta).not.toHaveBeenCalled();
+  });
+
+  it.each(['weather-api', 'owner/repo/extra', 'https://github.com/owner/repo', '../repo', 'owner/..', 'owner/repo name', '-owner/repo'])('refuses malformed repo %s before contacting GitHub', async (name) => {
+    const meta = vi.spyOn(s.backend, 'repoMeta');
+    expect(await s.officeTools().call('connect_floor', { repo: name, reason: 'Add this repo' })).toBe('Refused: Give a GitHub repo as owner/name.');
+    expect(swarm.snapshot().repos).toHaveLength(1);
+    expect(meta).not.toHaveBeenCalled();
+  });
+
+  it('reports GitHub access errors without creating a floor', async () => {
+    vi.spyOn(s.backend, 'repoMeta').mockRejectedValue(new Error('gh: HTTP 404 repository not found or inaccessible'));
+    expect(await s.officeTools().call('connect_floor', { repo: 'demo-co/private', reason: 'Add our private repo' })).toBe('Refused: gh: HTTP 404 repository not found or inaccessible');
+    expect(swarm.snapshot().repos).toHaveLength(1);
+  });
+
+  it('lets the demo CEO connect a floor from a manager message', async () => {
+    const finished = vi.fn();
+    const handle = s.backend.startSession({
+      role: 'ceo', cwd: '', prompt: 'Manager asks:\nAdd demo-co/weather-api as a new floor with auto-assign on and auto-merge off',
+      systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools(),
+    }, { log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: expect.stringContaining('connected as floor 2') }));
+    expect(swarm.snapshot().repos.find((r) => r.floor === 2)).toMatchObject({ autoAssign: true, autoMerge: false, cloneStatus: 'ready' });
+    handle.stop();
+  });
+});
+
 describe('CEO rerun_qa', () => {
   const rerun = (args = { floor: 1, number: 13 }) => s.officeTools().call('rerun_qa', args);
   const pull = (state: PullInfo['state'] = 'OPEN'): PullInfo => ({

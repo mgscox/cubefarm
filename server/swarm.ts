@@ -204,6 +204,7 @@ type PrepJob = { rec: QaRecord; task: 'qa' } | { rec: QaRecord; task: 'fix'; aut
 interface FloorOptions {
   mission?: string; // brief for the CEO to plan from
   autoAssign?: boolean; // free developers pick up backlog issues as soon as they're filed
+  autoMerge?: boolean;
 }
 
 interface CeoState {
@@ -567,6 +568,7 @@ export class Swarm {
       fileIssue: (a) => this.fileIssue(a),
       closeIssue: (a) => this.closeIssue(a),
       routeIssue: (a) => this.routeIssue(a),
+      connectFloor: (a) => this.connectFloor(a),
       startIssue: (a) => this.startIssue(a),
       rerunQa: (a) => this.rerunQa(a),
       sendBackToDev: (a) => this.sendBackToDev(a),
@@ -1933,7 +1935,7 @@ export class Swarm {
       requestedStarts: [],
       parkedBranches: [],
       noWorkEndings: [],
-      autoMerge: true,
+      autoMerge: opts.autoMerge ?? true,
       browserTesting: true,
       links: [],
       localPath: folder,
@@ -6566,6 +6568,20 @@ export class Swarm {
     const repo = this.floorRepo(x.floor);
     await this.mergePull(repo.id, x.number, 'squash', { reason });
     return `Merged PR #${x.number} on floor ${repo.floor} at the head QA last tested. Report the merge to the manager.`;
+  }
+
+  private async connectFloor(x: { repo: string; auto_assign?: boolean; auto_merge?: boolean; reason: string }) {
+    const fullName = x.repo.trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/.test(fullName) || ['.', '..'].includes(fullName.split('/')[1])) {
+      throw new HttpError(400, 'Give a GitHub repo as owner/name.');
+    }
+    const reason = x.reason?.trim();
+    if (!reason || reason.length > 1000) throw new HttpError(400, "Give the manager's instruction (1–1000 characters).");
+    this.postMessage('office', `Manager requested connecting ${fullName}: ${reason}`);
+    const existing = this.state.repos.find((r) => r.fullName.toLowerCase() === fullName.toLowerCase());
+    if (existing) throw new HttpError(409, `${fullName} is already floor ${existing.floor}; settings unchanged.`);
+    const repo = await this.connectRepo(fullName, { autoAssign: x.auto_assign, autoMerge: x.auto_merge });
+    return `${repo.fullName} connected as floor ${repo.floor}. Clone path: ${repo.checkoutPath}; clone: ${repo.cloneStatus}; sync: ${repo.syncError ?? (repo.lastSync ? 'ready' : 'pending')}; folder sync: ${repo.folderSync ?? 'pending'}. Auto-assign: ${repo.autoAssign ? 'on' : 'off'}; auto-merge: ${repo.autoMerge ? 'on' : 'off'}. Report to the manager.`;
   }
 
   private async startIssue(x: StartIssueRequest) {

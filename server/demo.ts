@@ -1388,6 +1388,16 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
     async chat(text: string) {
       const s = await status();
       await think('Reading your message.');
+      const connect = text.match(/\b(?:add|connect)\s+([\w.-]+\/[\w.-]+)\b/i);
+      if (connect) {
+        const assign = text.match(/\bauto[- ]assign\s+(on|off)\b/i);
+        const merge = text.match(/\bauto[- ]merge\s+(on|off)\b/i);
+        return use('connect_floor', {
+          repo: connect[1], reason: text.trim().slice(0, 1000),
+          ...(assign ? { auto_assign: assign[1].toLowerCase() === 'on' } : {}),
+          ...(merge ? { auto_merge: merge[1].toLowerCase() === 'on' } : {}),
+        });
+      }
       const close = text.match(/\bclose\s+(?:issue\s*)?#(\d+)\s+on\s+floor\s+(\d+)\s+because\s+([^\n]+)/i);
       if (close) return use('close_issue', { floor: Number(close[2]), number: Number(close[1]), reason: close[3].trim() });
       const merge = text.match(/\bmerge\s+(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))\s+(?:because|with|reason)\s+([^\n]+)/i);
