@@ -223,15 +223,25 @@
   outline-offset: 2px;
 }
 
-.dashboard-main > :is(.workers, .office-chip, .hud-banner) {
+.dashboard-main > :is(.office-chip, .hud-banner) {
   position: static;
   max-width: 100%;
   flex: none;
 }
 
-.dashboard-main > .workers {
-  align-self: flex-end;
-  max-height: 35dvh;
+/* The Lobby's work list is a grid card: its row's height bounds it and the list scrolls inside. */
+.dashboard-terminals > .workers {
+  position: static;
+  width: auto;
+  max-height: none;
+  min-height: 0;
+  border: 1px solid var(--dashboard-line);
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.dashboard-terminals > .workers-closed {
+  align-self: start;
 }
 
 .dashboard-main > .office-chip {
