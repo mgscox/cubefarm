@@ -195,6 +195,34 @@ describe('startCliSession on a host', () => {
     first.session.stop();
   });
 
+  it.each([
+    { cli: 'claude' as const, output: '● I fixed the "Do you trust the files in this folder?" screen handling.', draft: 'run the tests' },
+    { cli: 'claude' as const, output: 'const pattern = /Hooks need review/i;', draft: 'run the tests' },
+    { cli: 'claude' as const, output: '● I fixed the "Do you trust the files in this folder?" screen handling.', draft: 'continue with the next issue' },
+    { cli: 'claude' as const, output: '● Updated Quick safety check.', draft: '1. Yes, continue' },
+    { cli: 'codex' as const, output: 'const pattern = /Hooks need review/i;', draft: 'Ask a follow-up question' },
+    { cli: 'claude' as const, output: '● Done', draft: 'Explain Hooks need review' },
+    { cli: 'codex' as const, output: '● Done', draft: 'Explain Quick safety check' },
+    { cli: 'codex' as const, output: '● Done', draft: 'Explain Do you trust the files in this folder?' },
+  ])('sends a follow-up without menu keys at a $cli input containing "$draft"', async ({ cli, output, draft }) => {
+    let screen = '';
+    const first = claude(() => screen, () => null, { cli, keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(0);
+    first.hook({ hook_event_name: cli === 'claude' ? 'Stop' : 'TurnComplete', session_id: 'sess-1', input: 'Fix #12', last_assistant_message: 'Done' });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(first.cb.finished).toHaveBeenCalled();
+    screen = cli === 'claude' ? `${output}\n\n────\n❯ ${draft}\n────` : `${output}\n› ${draft}`;
+    pty.write.mockClear();
+    const next = first.again({ cli, prompt: 'Follow up', keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(150);
+    const writes = [['\x1b[200~Follow up\x1b[201~'], ['\r']];
+    expect(pty.write.mock.calls).toEqual(writes);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write.mock.calls).toEqual(writes);
+    expect(next.cb.finished).not.toHaveBeenCalled();
+    next.session.stop();
+  });
+
   it('gives a follow-up queued late in startup its own full hold window', async () => {
     let screen = '❯';
     const first = claude(() => screen, () => null);

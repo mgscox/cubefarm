@@ -56,7 +56,7 @@ describe('selectedOption', () => {
 });
 
 describe('startupQuestionOnScreen', () => {
-  it.each(['❯ ', '› ', '❯ Try "refactor this file"', '› Ask Codex to do anything'])(
+  it.each(['────\n❯ \n────', '────\n❯ Try "refactor this file"\n────', '────\n❯ run the tests\n────', '────\n❯ continue with the next issue\n────', '› ', '› Ask Codex to do anything', '› Ask a follow-up question'])(
     'ignores earlier question text above an idle prompt (%s)', (prompt) => {
       expect(startupQuestionOnScreen(`● Fixed the "Do you trust the files in this folder?" handling.\n${prompt}`)).toBe(false);
       expect(startupQuestionOnScreen(`const pattern = /Hooks need review/i;\n${prompt}`)).toBe(false);
@@ -70,7 +70,8 @@ describe('startupQuestionOnScreen', () => {
     expect(startupQuestionOnScreen('Do you trust this folder?\n❯ No, exit\n  Yes, I trust this folder')).toBe(true);
     expect(startupQuestionOnScreen('Hooks need review\n› 1. Review hooks\n  3. Continue without trusting')).toBe(true);
     expect(startupQuestionOnScreen('Do you trust this folder?\n❯ ')).toBe(true);
-    expect(startupQuestionOnScreen('Hooks need review\n› ')).toBe(true);
+    expect(startupQuestionOnScreen('Hooks need review\n› 1.')).toBe(true);
+    expect(startupQuestionOnScreen('Hooks need review\n› ')).toBe(false);
     expect(startupQuestionOnScreen('Do you trust this folder?\n────\n❯ \n────')).toBe(false);
     expect(startupQuestionOnScreen('❯ ')).toBe(false);
   });
@@ -96,6 +97,13 @@ describe('trustKey', () => {
     const screen = ['> You are in C:\\desk', '  Do you trust the contents of this directory?', '› 1. Yes, continue', '  2. No, quit'].join('\n');
     expect(trustKey(screen)).toBe('enter');
   });
+
+  it.each(['Allow Codex to work in this folder?', 'Do you want to allow Codex to work in this folder?'])(
+    'keeps the older Codex trust answer out of the question match (%s)', (question) => {
+      expect(trustKey(`${question}\n› 1. Yes, allow Codex to work in this folder\n  2. No, quit`)).toBe('enter');
+      expect(trustKey(`${question}\n  1. Yes, allow Codex to work in this folder\n› 2. No, quit`)).toBe('down');
+    },
+  );
 
   it('leaves every other screen alone', () => {
     expect(trustKey('❯ Try "refactor <filepath>"')).toBeNull();

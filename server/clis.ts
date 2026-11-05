@@ -476,7 +476,7 @@ export function readClaudeTurn(cwd: string, sessionId: string, home = os.homedir
 
 // ---------- prompts the office answers ----------
 
-const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|^[ \t]*(?:Do you )?trust this folder\b|allow Codex to work in this folder/im;
+const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|^[ \t]*(?:Do you )?trust this folder\b|^[ \t]*(?:Do you want to )?allow Codex to work in this folder/im;
 const HOOK_REVIEW_PROMPT = /Hooks need review/i;
 
 /** The sole selection below the latest question; partial or ambiguous menus need another screen redraw. */
@@ -493,14 +493,13 @@ export function selectedOption(screen: string, question: RegExp): string | null 
 export function startupQuestionOnScreen(screen: string): boolean {
   const last = [...screen.matchAll(new RegExp(`${TRUST_PROMPT.source}|${HOOK_REVIEW_PROMPT.source}`, 'gim'))].at(-1);
   if (!last) return false;
-  const below = screen.slice(last.index + last[0].length);
-  const prompt = below.match(/^[ \t]*[❯›][ \t]*(?:Try\b[^\n]*|Ask Codex\b[^\n]*)?$/m);
-  if (!prompt) return true;
-  if (prompt[0].trim().length !== 1) return false;
-  const prefix = screen.slice(screen.lastIndexOf('\n', last.index) + 1, last.index).trim();
-  const ruled = /(?:^|\n)[ \t]*[─━═-]{3,}[ \t]*\n[ \t]*$/.test(below.slice(0, prompt.index));
-  // A bare marker under a question heading may still be drawing its option label.
-  return !prefix && !ruled;
+  const lineStart = screen.lastIndexOf('\n', last.index) + 1;
+  const previousLine = screen.lastIndexOf('\n', lineStart - 2) + 1;
+  // The draft itself can mention a question: include its input row and Claude's preceding divider.
+  // shortcut: wrapped draft continuations need layout tracking; extend when those layouts are specified.
+  const claudeInput = /(?:^|\n)[ \t]*[─━═-]{3,}[ \t]*\n[ \t]*❯/.test(screen.slice(previousLine));
+  const codexInput = /^[ \t]*›(?![ \t]*\d+\.)/m.test(screen.slice(lineStart));
+  return !claudeInput && !codexInput;
 }
 
 /**
