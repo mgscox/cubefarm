@@ -1834,11 +1834,15 @@ export class Swarm {
     a.lastError = error;
     session?.stop();
     rt.terminal?.releaseIdle?.();
+    const idle = rt.terminal?.closing;
     // Cleanup is bounded independently; a silent box must never hold a freed agent's slot.
     const cleanup = new AbortController();
     const timer = setTimeout(() => cleanup.abort(new Error('Desk cleanup timed out')), startTimeouts().preparing);
     timer.unref();
-    void withOperation(cleanup.signal, () => machine.releaseDesk(repo.fullName, slug, this.port(a)))
+    void withOperation(cleanup.signal, async () => {
+      await idle;
+      await machine.releaseDesk(repo.fullName, slug, this.port(a));
+    })
       .catch(() => undefined).finally(() => clearTimeout(timer));
     this.emitAgent(a);
     this.save();
@@ -2718,6 +2722,7 @@ export class Swarm {
     this.abandonIdeaResearch(a);
     this.agentRt.get(id)?.session?.stop();
     this.agentRt.get(id)?.terminal?.releaseIdle?.();
+    const idle = this.agentRt.get(id)?.terminal?.closing;
     this.agentRt.get(id)?.terminal?.dispose();
     void removeScreens(id);
     void fs.rm(terminalFile(id), { force: true }).catch(() => undefined);
@@ -2730,8 +2735,8 @@ export class Swarm {
     if (repo) {
       const slug = this.agentSlug(a);
       const machine = this.machineFor(a);
-      void machine
-        .releaseDesk(repo.fullName, slug, this.port(a))
+      void Promise.resolve(idle)
+        .then(() => machine.releaseDesk(repo.fullName, slug, this.port(a)))
         .then(() => machine.removeDesk(repo.fullName, slug))
         .catch(() => undefined);
     }
@@ -3077,16 +3082,29 @@ export class Swarm {
         if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') await this.cloneRepo(repo.id);
         if (gone()) return null;
         // A fix round for the PR's own author stays on the desk with their conversation; anything else is a new task.
-        const where = this.place(a, job?.task === 'fix' && job.author === a.id ? 'within' : 'new');
+        const within = job?.task === 'fix' && job.author === a.id;
+        const where = this.place(a, within ? 'within' : 'new');
         if ('wait' in where) throw new Error(`Waiting: ${this.waitReason(where)}.`);
         if (where.fellBack) this.appendLog(a, [{ kind: 'system', text: `ℹ ${this.boxName(where.fellBack)} was removed: this task runs on the office's machine.` }]);
         const rt = this.agentRt.get(a.id);
-        if (rt) rt.deskMoved = where.box !== a.deskBox;
-        if (where.box !== a.deskBox) {
+        const moved = where.box !== a.deskBox;
+        if (rt) rt.deskMoved = moved;
+        if (moved) {
           a.deskBox = where.box;
           this.emitAgent(a);
         }
         if (where.box) this.appendLog(a, [{ kind: 'system', text: `🖥 Working on ${this.boxName(where.box)}.` }]);
+        // The CLI waiting at their prompt has the desk as its working directory, and Windows can't reset a folder a
+        // process is in: close it and wait for it, and for any CLI already closing there, to exit. Only the author's
+        // fix round that resumes that CLI's own conversation (prepareFix) picks it up again.
+        const term = rt?.terminal;
+        if (term?.releaseIdle) {
+          const resume = within && !moved ? job.rec.devSessionId ?? undefined : undefined;
+          const how = resume ? this.sessionRuntime(a, resume) : null;
+          await term.releaseIdle(how?.resumeSessionId ? { cli: how.cli, resumeSessionId: how.resumeSessionId, host: this.machineFor(a).cliHost } : undefined);
+        }
+        await term?.closing;
+        if (gone()) return null;
         await this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
         if (gone()) return null;
         const cwd = await this.machineFor(a).prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch, (text) => { if (!gone()) this.appendLog(a, [{ kind: 'system', text }]); });

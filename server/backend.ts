@@ -3,6 +3,7 @@ import * as workspace from './workspace.ts';
 import { startSession } from './agentRunner.ts';
 import { hooksReady, officeProcesses, reconnectClis, releaseClis, startCliSession, terminalsAvailable, type ReconnectedCli } from './cliRunner.ts';
 import { detectClis } from './clis.ts';
+import { localCliHost } from './localCliHost.ts';
 import { realPreviews, type PreviewBackend } from './previewRunner.ts';
 import { realOffice, type OfficeHost } from './officeUpdate.ts';
 import { connectBox } from './boxLink.ts';
@@ -116,6 +117,7 @@ export const realBackend: Backend = {
   prepareResearchFolder: workspace.ensureLocalRepo,
   releaseDesk: (fullName, agentSlug, port) => workspace.releaseDesk(fullName, agentSlug, port, officeProcesses()),
   startSession: (opts, cb) => (opts.terminal ? startCliSession(opts, cb) : startSession(opts, cb)),
+  cliHost: localCliHost,
   terminals: terminalsAvailable,
   reconnectClis: (terminalFor) => (terminalsAvailable ? reconnectClis(terminalFor) : Promise.resolve([])),
   hooksReady,

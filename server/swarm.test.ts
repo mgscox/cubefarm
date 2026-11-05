@@ -6,7 +6,7 @@ import { branchAhead, listIssues } from './github.ts';
 import { LOST_CONVERSATION, STUCK_MS } from './clis.ts';
 import { opencodeTurn } from './opencodeTranscript.ts';
 import { OPENCODE_IDLE_WITH_USAGE } from './fixtures/opencodeScreens.ts';
-import { handleHook, startCliSession } from './cliRunner.ts';
+import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
 import type { BoxConnection, CliHost } from './machine.ts';
 import { BOX_CLI_CHECK_MS } from './fleet.ts';
 import type { AgentTerminal } from './terminal.ts';
@@ -412,6 +412,92 @@ describe('PR fixes with an occupied author branch', () => {
     Object.assign(dev, { sessionId: 'fix-session', status: 'stopped' });
     await swarm.message('a1', 'Continue fixing');
     expect(start.mock.calls[1][4]).toContain(`git push origin HEAD:${headRef}`);
+  });
+});
+
+describe('desk reset and the CLI waiting at the prompt', () => {
+  let rec: QaRec;
+  let steps: string[];
+  const agent = () => s.state.agents[0];
+  const host = (pty: unknown): CliHost => ({
+    prepare: vi.fn(), recoverTurn: () => null, hasFile: () => false, claudeTurn: () => null, newShots: () => [], savedShot: () => null,
+    codexThread: async () => undefined, removeDir: vi.fn(), reconnect: async () => [], adopt: () => pty as never,
+    discard: vi.fn(), hooksReady: vi.fn(), leave: vi.fn(), protect: () => ({ pids: [], markers: [] }),
+  });
+
+  /** A Claude CLI waiting at a1's prompt in conversation `resumeId`, on the office's machine; it exits only on exit(). */
+  async function waiting(resumeId: string) {
+    const exits: ((code: number) => void)[] = [];
+    const pty = {
+      pid: 7, write: vi.fn(), resize: vi.fn(), setMeta: vi.fn(), onData: vi.fn(),
+      kill: vi.fn(() => steps.push('kill')), onExit: vi.fn((fn: (code: number) => void) => exits.push(fn)),
+    };
+    const h = { ...host(pty), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta: { agentId: 'a1', cli: 'claude', token: `t-${resumeId}`, dir: 'sessions/t', resumeId, busy: false } }] };
+    const term = { cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), write: vi.fn(), screen: () => '❯', releaseIdle: null, closing: null } as unknown as AgentTerminal;
+    await reconnectClis(() => term, h);
+    Object.assign(s.agentRt.get('a1')!, { terminal: term });
+    Object.assign(s.backend, { terminals: true, cliHost: h });
+    return { term, pty, exit: () => (steps.push('exited'), exits.forEach((fn) => fn(0))) };
+  }
+
+  beforeEach(() => {
+    steps = [];
+    Object.assign(repo, { links: [], defaultBranch: 'main' });
+    Object.assign(agent(), { model: '', effort: '', cli: 'claude', deskBox: '' });
+    (s as unknown as { state: { settings: { runtime: string } } }).state.settings.runtime = 'terminal';
+    Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready', pulls: [{ number: 204, headRefName: 'swarm/issue-9-ada', headSha: 'sha-1', closesIssues: [] } as unknown as PullInfo] });
+    rec = { repoId: repo.id, prNumber: 204, devAgentId: 'a1', devSessionId: 'conv-a', qaAgentId: 'q1', sessionFailures: 0, round: 1,
+      status: 'failed', summary: 'Fix it', checks: [], fixCrashes: [] } as unknown as QaRec;
+    s.state.qa.push(rec);
+    vi.spyOn(s.backend, 'releaseDesk').mockImplementation(async () => void steps.push('releaseDesk'));
+    vi.spyOn(s.backend, 'prepareDesk').mockImplementation(async () => (steps.push('prepareDesk'), 'demo-worktree'));
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ number: 204, state: 'OPEN', headSha: 'sha-1', closesIssues: [], body: '', title: 'Fix it', url: '' } as never);
+    vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+  });
+
+  it('waits for a CLI that Clear desk closed before new work resets the desk', async () => {
+    const cli = await waiting('conv-a');
+    swarm.resetAgent('a1');
+    expect(cli.term.releaseIdle).toBeNull(); // nothing left to close: only the pending exit tells
+    const task = s.runQa(agent(), repo, rec);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(steps).toEqual(['kill']);
+    cli.exit();
+    await task;
+    expect(steps).toEqual(['kill', 'exited', 'releaseDesk', 'prepareDesk']);
+    expect(cli.term.closing).toBeNull();
+  });
+
+  it("closes an author's waiting CLI on another conversation, and waits for it, before their fix round resets the desk", async () => {
+    const cli = await waiting('conv-b');
+    const task = s.runFix(agent(), repo, rec);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(steps).toEqual(['kill']);
+    cli.exit();
+    await task;
+    expect(steps).toEqual(['kill', 'exited', 'releaseDesk', 'prepareDesk']);
+  });
+
+  it("keeps the author's waiting CLI open for the fix round that resumes its conversation", async () => {
+    const cli = await waiting('conv-a');
+    const task = s.runFix(agent(), repo, rec);
+    await vi.advanceTimersByTimeAsync(1000);
+    await task;
+    expect(steps).toEqual(['releaseDesk', 'prepareDesk']);
+    expect(cli.pty.kill).not.toHaveBeenCalled();
+    expect(cli.term.releaseIdle).toEqual(expect.any(Function));
+    expect(vi.mocked(s.startAgentSession).mock.calls[0][5]).toBe('conv-a');
+  });
+
+  it('closes the same conversation when the fix round would start it on another machine', async () => {
+    const cli = await waiting('conv-a');
+    Object.assign(s.backend, { cliHost: host({}) });
+    const task = s.runFix(agent(), repo, rec);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(steps).toEqual(['kill']);
+    cli.exit();
+    await task;
+    expect(steps).toEqual(['kill', 'exited', 'releaseDesk', 'prepareDesk']);
   });
 });
 
