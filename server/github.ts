@@ -259,6 +259,7 @@ interface RawPull {
   labels?: { name: string }[];
   url: string;
   headRefName: string;
+  isCrossRepository: boolean;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   isDraft: boolean;
   mergeable: string;
@@ -277,7 +278,7 @@ interface RawPull {
 }
 
 const PR_FIELDS =
-  'number,title,labels,url,headRefName,headRefOid,baseRefOid,baseRefName,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions';
+  'number,title,labels,url,headRefName,isCrossRepository,headRefOid,baseRefOid,baseRefName,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions';
 
 type Check = NonNullable<RawPull['statusCheckRollup']>[number];
 const BAD = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'];
@@ -299,6 +300,7 @@ function toPull(p: RawPull): PullInfo {
     labels: (p.labels ?? []).map((label) => label.name),
     url: p.url,
     headRefName: p.headRefName,
+    isCrossRepository: p.isCrossRepository,
     state: p.state,
     isDraft: p.isDraft,
     mergeable: p.mergeable,

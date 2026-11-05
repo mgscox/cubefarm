@@ -22,7 +22,7 @@ import { researcherSystemPrompt } from './research.ts';
 import { ONE_TURN } from './clis.ts';
 import { QA_RESUME_PROMPT } from './qaRetry.ts';
 import { CHECK_RERUN_GRACE_MS, MAX_MERGE_FIXES } from './mergeGate.ts';
-import { AGENT_COMMENT_MARKER, issueWorkNote } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, issueWorkNote, READY_FOR_SECURITY_REVIEW } from '../shared/issues.ts';
 import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRunner.ts';
 
 // A Swarm that is never init()ed: no state file, scheduler timers or real sessions.
@@ -107,7 +107,7 @@ describe('closing issues', () => {
   beforeEach(() => {
     Object.assign(repo, { defaultBranch: 'main', links: [] });
     pull = {
-      number: 13, title: 'Feature', url: '', headRefName: 'swarm/issue-66-ada', state: 'OPEN', isDraft: false,
+      number: 13, title: 'Feature', url: '', isCrossRepository: false, headRefName: 'swarm/issue-66-ada', state: 'OPEN', isDraft: false,
       closesIssues: [66, 67], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'tested', reviewDecision: null,
       createdAt: '', mergedAt: null, additions: 0, deletions: 0, mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
     };
@@ -798,7 +798,7 @@ describe('explicit issue starts across office restarts', () => {
 describe('CEO rerun_qa', () => {
   const rerun = (args = { floor: 1, number: 13 }) => s.officeTools().call('rerun_qa', args);
   const pull = (state: PullInfo['state'] = 'OPEN'): PullInfo => ({
-    number: 13, title: 'Recovery', url: '', headRefName: 'swarm/13', state,
+    number: 13, title: 'Recovery', url: '', isCrossRepository: false, headRefName: 'swarm/13', state,
     isDraft: false, closesIssues: [], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'sha',
     reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
     mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
@@ -990,7 +990,7 @@ describe('QA records for PRs the sync no longer lists', () => {
   it('does not look up records whose PR is listed', async () => {
     s.state.qa.push(record(13, 'passed'));
     vi.mocked(s.backend.listPulls).mockResolvedValue({ pulls: [{
-      number: 13, title: '', url: '', headRefName: 'swarm/issue-67-ada', state: 'OPEN', isDraft: false, closesIssues: [67], checks: 'none',
+      number: 13, title: '', url: '', isCrossRepository: false, headRefName: 'swarm/issue-67-ada', state: 'OPEN', isDraft: false, closesIssues: [67], checks: 'none',
       mergeable: 'MERGEABLE', headSha: 'sha', reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
       mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
     }] });
@@ -1006,7 +1006,7 @@ describe('CEO merge_pr', () => {
   beforeEach(() => {
     Object.assign(repo, { defaultBranch: 'main', links: [] });
     pull = {
-      number: 13, title: 'Fix recovery', url: '', headRefName: 'swarm/issue-67-ada', state: 'OPEN',
+      number: 13, title: 'Fix recovery', url: '', isCrossRepository: false, headRefName: 'swarm/issue-67-ada', state: 'OPEN',
       isDraft: false, closesIssues: [67], checks: 'failing', mergeable: 'MERGEABLE', headSha: 'tested',
       reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
       mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
@@ -1235,7 +1235,7 @@ describe('CEO park_pr', () => {
     Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
     setIssues(issue(66), { ...issue(67), nativeBlockers: [{ number: 66, state: 'OPEN' }] });
     pull = {
-      number: 13, title: 'Blocker record', url: '', headRefName: 'swarm/issue-67-ada', state: 'OPEN',
+      number: 13, title: 'Blocker record', url: '', isCrossRepository: false, headRefName: 'swarm/issue-67-ada', state: 'OPEN',
       isDraft: true, closesIssues: [67], checks: 'none', mergeable: 'MERGEABLE', headSha: 'sha',
       reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
       mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
@@ -1546,7 +1546,7 @@ describe('CEO send_back_to_dev', () => {
     repo.autoAssign = false;
     Object.assign(repo, { defaultBranch: 'trunk', links: [] });
     pull = {
-      number: 13, title: 'Recovery', url: '', headRefName: 'swarm/13', state: 'OPEN',
+      number: 13, title: 'Recovery', url: '', isCrossRepository: false, headRefName: 'swarm/13', state: 'OPEN',
       isDraft: false, closesIssues: [], checks: 'failing', mergeable: 'MERGEABLE', headSha: 'sha',
       reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
       mergeState: 'CLEAN', failedChecks: [{ name: 'Build', url: null }], pendingChecks: [],
@@ -2758,7 +2758,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
 
 describe('company_status size', () => {
   const pr = (number: number): PullInfo => ({
-    number, title: `Pull request ${number} with a reasonably long descriptive title`, url: '', headRefName: `swarm/${number}`, state: 'OPEN',
+    number, title: `Pull request ${number} with a reasonably long descriptive title`, url: '', isCrossRepository: false, headRefName: `swarm/${number}`, state: 'OPEN',
     isDraft: false, closesIssues: [], checks: 'passing', mergeable: 'CONFLICTING', headSha: 'f'.repeat(40),
     reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0, mergeState: 'DIRTY', failedChecks: [], pendingChecks: [],
   });
@@ -2806,7 +2806,7 @@ describe('company_status size', () => {
 
 describe('QA rounds', () => {
   const pull: PullInfo = {
-    number: 13, title: 'Chaser', url: '', headRefName: 'swarm/13', state: 'OPEN',
+    number: 13, title: 'Chaser', url: '', isCrossRepository: false, headRefName: 'swarm/13', state: 'OPEN',
     isDraft: false, closesIssues: [], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'sha-1',
     reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
     mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
@@ -3894,7 +3894,7 @@ describe('prototype review', () => {
   const prototypeIssue = issue(66, ['swarm:prototype']);
   const draft = {
     number: 12, title: 'Prototype: filters', url: 'https://github.com/demo-co/pixel-todo/pull/12',
-    headRefName: 'prototype/issue-66-ada', headSha: 'prototype-sha', state: 'OPEN', isDraft: true,
+    isCrossRepository: false, headRefName: 'prototype/issue-66-ada', headSha: 'prototype-sha', state: 'OPEN', isDraft: true,
     closesIssues: [], checks: 'none', mergeable: 'MERGEABLE', reviewDecision: null, createdAt: '', mergedAt: null,
     additions: 1, deletions: 0, mergeState: 'DRAFT', failedChecks: [], pendingChecks: [],
   } satisfies PullInfo;
@@ -4277,7 +4277,7 @@ describe('manual office closure', () => {
     devAgentId: 'a1', qaAgentId: null, summary: null, checks: [], commentUrl: null, mergeNote: null, updatedAt: 0,
   });
   const qaPull = (): PullInfo => ({
-    number: 13, title: 'Feature', url: '', headRefName: 'swarm/13', state: 'OPEN', isDraft: false,
+    number: 13, title: 'Feature', url: '', isCrossRepository: false, headRefName: 'swarm/13', state: 'OPEN', isDraft: false,
     closesIssues: [], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'sha-1', reviewDecision: null,
     createdAt: '', mergedAt: null, additions: 0, deletions: 0, mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
   });
@@ -4526,6 +4526,7 @@ describe('researchers', () => {
   const r = () => s as unknown as Research & Internals;
   const pull = (headRefName: string): PullInfo => ({
     number: 21, title: 'Research: due dates', url: '', headRefName, state: 'OPEN',
+    isCrossRepository: false,
     isDraft: false, closesIssues: [5], checks: 'pending', mergeable: 'MERGEABLE', headSha: 'abc',
     reviewDecision: null, createdAt: '', mergedAt: null, additions: 80, deletions: 0,
     mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
@@ -4569,6 +4570,30 @@ describe('researchers', () => {
     const rec = s.state.qa[0];
     await s.advanceMerge(repo, rec, { ...pull('swarm/research-5-darwin'), headSha: 'def', checks: 'passing' });
     expect(rec).toEqual(expect.objectContaining({ status: 'passed', passedSha: 'def' }));
+  });
+
+  it.each([{ labels: [] }, { labels: [READY_FOR_SECURITY_REVIEW] }])('queues a fork research branch for QA and never auto-merges it before a pass (labels: $labels)', async ({ labels }) => {
+    const pr = { ...pull('swarm/research-5-darwin'), isCrossRepository: true, checks: 'passing' as const, labels };
+    Object.assign(repo, { autoMerge: true, defaultBranch: 'main' });
+    Object.assign(s.repoRt.get(repo.id)!, { pulls: [pr], fetchedAt: Date.now() });
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pr, body: '' });
+    const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+    r().reconcilePulls(repo, [pr]);
+    await (s as unknown as { advanceMerges(repo: Repo): Promise<void> }).advanceMerges(repo);
+    expect(merge).not.toHaveBeenCalled();
+    expect(s.state.qa).toEqual([expect.objectContaining({ prNumber: 21, status: 'queued', passedSha: null })]);
+    if (labels.length) expect(s.state.qa[0]).toMatchObject({ securityReview: { qaSha: null } });
+  });
+
+  it('requeues new commits on a fork research branch after QA passes', async () => {
+    const pr = { ...pull('swarm/research-5-darwin'), isCrossRepository: true, checks: 'passing' as const };
+    r().reconcilePulls(repo, [pr]);
+    const rec = s.state.qa[0];
+    Object.assign(rec, { status: 'passed', passedSha: 'abc', testedSha: 'abc' });
+    const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+    expect(await s.advanceMerge(repo, rec, { ...pr, headSha: 'def' })).toBe(false);
+    expect(rec).toMatchObject({ status: 'queued', passedSha: 'abc', testedSha: 'abc', round: 2, retests: 1 });
+    expect(merge).not.toHaveBeenCalled();
   });
 
   it('always has a lobby researcher, who takes briefs and files company research', async () => {
@@ -5160,7 +5185,7 @@ describe('closed work', () => {
     let prState: PullInfo['state'] | Error;
     // The production listPulls over gh's answers: open PRs and the newest merged ones, never a closed one.
     const raw = (number: number, state: 'OPEN' | 'MERGED') => ({
-      number, title: '', url: '', headRefName: `feature/${number}`, headRefOid: 'sha', state, isDraft: false, mergeable: 'MERGEABLE',
+      number, title: '', url: '', isCrossRepository: false, headRefName: `feature/${number}`, headRefOid: 'sha', state, isDraft: false, mergeable: 'MERGEABLE',
       mergeStateStatus: 'CLEAN', reviewDecision: null, labels: [], closingIssuesReferences: [], createdAt: '',
       mergedAt: state === 'MERGED' ? '2026-11-01' : null, additions: 0, deletions: 0, statusCheckRollup: [],
     });

@@ -3,7 +3,7 @@ import type { PullInfo, QaView } from '../../shared/types';
 import { qaCounts } from './qaCounts';
 
 const pull = (number: number, state: PullInfo['state'] = 'OPEN', isDraft = false): PullInfo => ({
-  number, title: '', url: '', headRefName: `swarm/issue-${number}-ada`, state, isDraft, closesIssues: [], checks: 'none',
+  number, title: '', url: '', isCrossRepository: false, headRefName: `swarm/issue-${number}-ada`, state, isDraft, closesIssues: [], checks: 'none',
   mergeable: 'MERGEABLE', headSha: 'sha', reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
   mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
 });

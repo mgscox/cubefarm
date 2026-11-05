@@ -437,7 +437,7 @@ test('repository refresh distinguishes unavailable checks, REST fallback, stale 
     repo.syncing = false;
     repo.syncError = undefined;
     repo.pulls = [{
-      number: 12, title: 'Fallback checks', url: `https://github.com/${repo.fullName}/pull/12`, headRefName: 'swarm/12',
+      number: 12, title: 'Fallback checks', url: `https://github.com/${repo.fullName}/pull/12`, isCrossRepository: false, headRefName: 'swarm/12',
       state: 'OPEN', isDraft: false, mergeable: 'MERGEABLE', reviewDecision: null, closesIssues: [],
       createdAt: '2026-10-01', mergedAt: null, additions: 1, deletions: 0, headSha: 'abc', mergeState: 'CLEAN',
       checks: phase === 'checks' ? 'unavailable' : 'passing', failedChecks: [], pendingChecks: [],

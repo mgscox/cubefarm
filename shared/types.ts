@@ -45,6 +45,7 @@ export interface PullInfo {
   labels?: string[];
   url: string;
   headRefName: string;
+  isCrossRepository: boolean;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   isDraft: boolean;
   mergeable: string; // MERGEABLE | CONFLICTING | UNKNOWN

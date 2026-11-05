@@ -17,7 +17,7 @@ test('Blocked prototypes expose review evidence, feedback and explicit implement
           issues: [{ number: 999999, title: 'Prototype the research handoff', body: '', url: '', labels: ['swarm:prototype'], createdAt: '' }],
           pulls: [{
             number: 999999, title: 'Prototype the research handoff', url: 'https://example.invalid/prototype',
-            headRefName: 'prototype/issue-999999-ada', headSha: 'reviewed-prototype',
+            isCrossRepository: false, headRefName: 'prototype/issue-999999-ada', headSha: 'reviewed-prototype',
             state: 'OPEN', isDraft: true, closesIssues: [], mergeable: 'MERGEABLE', reviewDecision: null,
             createdAt: '', mergedAt: null, additions: 1, deletions: 0, checks: 'none',
             mergeState: 'DRAFT', failedChecks: [], pendingChecks: [],

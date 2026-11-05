@@ -5,7 +5,7 @@ import { kanbanFor } from './store';
 vi.mock('./ui/sfx', () => ({ chirp: () => {}, cue: () => {} })); // it listens on window, which tests don't have
 
 const pull: PullInfo = {
-  number: 45, title: 'Toolbar', url: '', headRefName: 'swarm/issue-12-ada', state: 'OPEN', isDraft: false, closesIssues: [12], checks: 'none',
+  number: 45, title: 'Toolbar', url: '', isCrossRepository: false, headRefName: 'swarm/issue-12-ada', state: 'OPEN', isDraft: false, closesIssues: [12], checks: 'none',
   mergeable: 'MERGEABLE', headSha: 'sha', reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
   mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
 };
