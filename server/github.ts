@@ -259,6 +259,7 @@ interface RawPull {
   labels?: { name: string }[];
   url: string;
   headRefName: string;
+  isCrossRepository?: boolean;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   isDraft: boolean;
   mergeable: string;
@@ -277,7 +278,7 @@ interface RawPull {
 }
 
 const PR_FIELDS =
-  'number,title,labels,url,headRefName,headRefOid,baseRefOid,baseRefName,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions';
+  'number,title,labels,url,headRefName,isCrossRepository,headRefOid,baseRefOid,baseRefName,state,isDraft,mergeable,mergeStateStatus,reviewDecision,closingIssuesReferences,createdAt,mergedAt,additions,deletions';
 
 type Check = NonNullable<RawPull['statusCheckRollup']>[number];
 const BAD = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'];
@@ -299,6 +300,7 @@ function toPull(p: RawPull): PullInfo {
     labels: (p.labels ?? []).map((label) => label.name),
     url: p.url,
     headRefName: p.headRefName,
+    isCrossRepository: p.isCrossRepository,
     state: p.state,
     isDraft: p.isDraft,
     mergeable: p.mergeable,
@@ -572,9 +574,12 @@ export async function closePull(fullName: string, number: number): Promise<void>
   await gh(['pr', 'close', String(number), '-R', fullName]);
 }
 
-export async function prForBranch(fullName: string, branch: string): Promise<{ number: number; url: string } | null> {
-  const list = await ghJson<{ number: number; url: string }[]>(['pr', 'list', '-R', fullName, '--head', branch, '--state', 'all', '--json', 'number,url', '--limit', '1']);
-  return list[0] ?? null;
+/** The open PR from this repo's own `branch`: `--head` matches a fork's same-named branch too, and the newest PR may be one. */
+export async function prForBranch(fullName: string, branch: string, query: RestQuery = ghJson): Promise<{ number: number; url: string } | null> {
+  const list = await query(['pr', 'list', '-R', fullName, '--head', branch, '--state', 'open', '--json', 'number,url,headRefName,isCrossRepository', '--limit', '30']) as
+    { number: number; url: string; headRefName: string; isCrossRepository: boolean }[];
+  const own = list.find((pr) => pr.isCrossRepository === false && pr.headRefName === branch);
+  return own ? { number: own.number, url: own.url } : null;
 }
 
 async function compareAhead(fullName: string, left: string, right: string, api: RestQuery): Promise<number> {

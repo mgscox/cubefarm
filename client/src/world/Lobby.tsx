@@ -343,6 +343,7 @@ function candidateAgent(r: HireRequestView): Agent {
     startedAt: null,
     endedAt: null,
     costUsd: 0,
+    score: 0,
     turns: 0,
     browserUrl: null,
     hasScreenshot: false,

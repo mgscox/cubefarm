@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
-import { branchAhead, closeIssue, containsCommit, ensureLabel, findIssuesByMarker, isCheckAccessError, listPulls, readIssue, readTwice } from './github.ts';
+import { branchAhead, closeIssue, containsCommit, ensureLabel, findIssuesByMarker, isCheckAccessError, listPulls, prForBranch, readIssue, readTwice } from './github.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { mergeStep } from './mergeGate.ts';
 
@@ -336,5 +336,17 @@ describe('publication reads', () => {
     expect(await readIssue('demo/repo', 1, async () => rest(1, 'x', { pull_request: {} }))).toBeNull();
     expect(await readIssue('demo/repo', 9, async () => { throw error('HTTP 404: Not Found'); })).toBeNull();
     await expect(readIssue('demo/repo', 9, async () => { throw error('HTTP 502: Bad Gateway'); })).rejects.toThrow();
+  });
+});
+
+describe('desk branch PR lookup', () => {
+  it('returns the open same-repo PR on the branch, skipping newer fork PRs with the same bare name', async () => {
+    const query = vi.fn(async () => [
+      { number: 9, url: 'u9', headRefName: 'swarm/issue-1-ada', isCrossRepository: true },
+      { number: 7, url: 'u7', headRefName: 'swarm/issue-1-ada', isCrossRepository: false },
+    ]);
+    expect(await prForBranch('demo/repo', 'swarm/issue-1-ada', query)).toEqual({ number: 7, url: 'u7' });
+    expect(query).toHaveBeenCalledWith(expect.arrayContaining(['--head', 'swarm/issue-1-ada', '--state', 'open']));
+    expect(await prForBranch('demo/repo', 'swarm/issue-1-ada', async () => [{ number: 9, url: 'u9', headRefName: 'swarm/issue-1-ada', isCrossRepository: true }])).toBeNull();
   });
 });
