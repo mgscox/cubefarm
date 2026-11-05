@@ -21,6 +21,13 @@ describe('issueTaken', () => {
     expect(issueTaken([], 'r1', 6, [pull], now)).toBe(false);
   });
 
+  it('holds an open prototype only until the source issue is approved', () => {
+    const draft = { state: 'OPEN' as const, mergedAt: null, closesIssues: [], headRefName: 'prototype/issue-66-ada' };
+    expect(issueTaken([], 'r1', 66, [draft], now, true)).toBe(true);
+    expect(issueTaken([], 'r1', 66, [draft], now)).toBe(false);
+    expect(issueTaken([], 'r1', 66, [{ ...draft, state: 'CLOSED' }], now, true)).toBe(false);
+  });
+
   it('keeps researcher sessions and held retries, excluding QA and other floors', () => {
     const a = agent('a');
     expect(issueTaken([{ ...a, role: 'researcher' }], 'r1', 66, [], now)).toBe(true);

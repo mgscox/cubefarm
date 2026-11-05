@@ -29,7 +29,7 @@ export const repoDir = (fullName: string) => path.join(WORKSPACE_ROOT, fullName.
 export const mainDir = (fullName: string) => localRoots.get(fullName.toLowerCase()) ?? path.join(repoDir(fullName), 'main');
 export const deskDir = (fullName: string, agentSlug: string) => path.join(repoDir(fullName), 'desks', agentSlug);
 
-/** A folder the office keeps under git with no remote (the company's research), initialised on first use. */
+/** A folder the office keeps under git with no remote (Idea research sessions), initialised on first use. */
 export async function ensureLocalRepo(dir: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true });
   if (await fs.stat(path.join(dir, '.git')).catch(() => null)) return;

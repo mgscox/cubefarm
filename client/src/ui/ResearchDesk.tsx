@@ -124,7 +124,7 @@ export function ResearchDesk() {
         </button>
       </form>
       <p className="muted small">
-        Company research is committed to the office's research folder, which the CEO reads. Research for a floor goes into its repo's <code>docs/research/</code> by pull request, without QA. Floors can have
+        Company research goes into <code>cubebase/docs/research/company/</code> by pull request. Research for a floor goes into its repo's <code>docs/research/</code> by pull request. Floors can have
         their own researchers too: they take <code>swarm:research</code> issues.
       </p>
 

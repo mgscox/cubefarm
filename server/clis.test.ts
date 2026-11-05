@@ -194,6 +194,11 @@ describe('launchArgs', () => {
     expect(args).not.toContain('--mcp-config');
   });
 
+  it.each([undefined, 'research-session'])('starts researcher terminals in Claude Auto mode (resume: %s)', (resumeId) => {
+    const { args } = launchArgs('claude', ctx({ role: 'researcher', resumeId }));
+    expect(args[args.indexOf('--permission-mode') + 1]).toBe('auto');
+  });
+
   it("resumes Claude Code sessions and keeps the CEO's hands off the shell", () => {
     const { args } = launchArgs('claude', ctx({ resumeId: 'abc', role: 'ceo', files: { settings: 's', mcp: 'mcp.json', system: 'i' } }));
     expect(args.slice(0, 2)).toEqual(['--resume', 'abc']);

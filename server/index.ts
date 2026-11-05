@@ -126,6 +126,10 @@ app.post(
   }),
 );
 app.delete('/api/repos/:repo/preview', route((req) => swarm.stopPreview(repoId(req))));
+app.post('/api/repos/:repo/pulls/:n/prototype/approve', route((req) =>
+  swarm.approvePrototype(repoId(req), num(req.params.n), str(req.body.head), str(req.body.title), str(req.body.body))));
+app.post('/api/repos/:repo/pulls/:n/prototype/revise', route((req) =>
+  swarm.revisePrototype(repoId(req), num(req.params.n), str(req.body.head), str(req.body.feedback))));
 app.post('/api/repos/:repo/pulls/:n/merge', route((req) => swarm.mergePull(repoId(req), num(req.params.n), req.body?.method ?? 'squash')));
 app.post('/api/repos/:repo/pulls/:n/close', route((req) => swarm.closePull(repoId(req), num(req.params.n))));
 app.post('/api/repos/:repo/pulls/:n/qa', route((req) => swarm.sendToQa(repoId(req), num(req.params.n))));
