@@ -9,7 +9,7 @@ const DESK_BUNDLE = '.agents/skills/cubefarm-bundle';
 const DESK_EXCLUDE = `/${DESK_BUNDLE}/`;
 const OWNED = '.cubefarm-managed';
 const OWNER = 'cubefarm repo skills';
-const SKILL_NAME = /^cubefarm-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SKILL_NAME = /^(?:cubebase-prototype|cubefarm-[a-z0-9]+(?:-[a-z0-9]+)*)$/;
 
 interface SkillFile {
   path: string;

@@ -3886,6 +3886,81 @@ describe('developer specialism', () => {
   });
 });
 
+describe('prototype review', () => {
+  const prototypeIssue = issue(66, ['swarm:prototype']);
+  const draft = {
+    number: 12, title: 'Prototype: filters', url: 'https://github.com/demo-co/pixel-todo/pull/12',
+    headRefName: 'prototype/issue-66-ada', headSha: 'prototype-sha', state: 'OPEN', isDraft: true,
+    closesIssues: [], checks: 'none', mergeable: 'MERGEABLE', reviewDecision: null, createdAt: '', mergedAt: null,
+    additions: 1, deletions: 0, mergeState: 'DRAFT', failedChecks: [], pendingChecks: [],
+  } satisfies PullInfo;
+  const evidence = '## Question and scope\nCan people find a report?\n## How to run and review\nOpen the preview.\n## Screenshots\n![The filter panel](https://example.invalid/filter.png)\n## Findings and limitations\nUses sample data.';
+  beforeEach(() => {
+    Object.assign(repo, { links: [], defaultBranch: 'main' });
+    setIssues({ ...prototypeIssue, labels: [...prototypeIssue.labels] });
+  });
+
+  it('finishes a prototype with a review link and never queues production QA', async () => {
+    const dev = s.state.agents[0];
+    await swarm.assign('a1', 66);
+    expect(dev.branch).toBe(draft.headRefName);
+    vi.spyOn(s.backend, 'listPulls').mockResolvedValue({ pulls: [draft] });
+    vi.spyOn(swarm, 'syncRepo').mockResolvedValue(undefined as never);
+    const generation = (s.agentRt.get('a1') as { generation?: undefined }).generation;
+    await s.recordFinished(dev, repo, { ok: true, text: draft.url, errors: [], costUsd: 0, turns: 1 }, generation, undefined);
+    s.reconcilePulls(repo, [draft]);
+    expect(dev).toMatchObject({ status: 'done', prNumber: draft.number, prUrl: draft.url });
+    expect(s.state.qa).toEqual([]);
+  });
+
+  it('revises the same draft with the manager’s feedback', async () => {
+    s.repoRt.get(repo.id)!.pulls = [draft];
+    await expect(swarm.assign('a1', 66)).rejects.toThrow('Blocked board');
+    await swarm.revisePrototype(repo.id, draft.number, draft.headSha, 'Make the floor filter visible');
+    expect(runTask).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ branch: draft.headRefName, prNumber: draft.number }),
+      repo, prototypeIssue, 'Make the floor filter visible',
+    );
+    await expect(swarm.approvePrototype(repo.id, draft.number, draft.headSha, 'Build filters', 'Show all floors.')).rejects.toThrow('update to finish');
+  });
+
+  it('keeps a successful approval visible when the subsequent board refresh fails', async () => {
+    s.repoRt.get(repo.id)!.pulls = [draft];
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ ...prototypeIssue, repo: repo.fullName, state: 'OPEN' });
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({
+      ...draft, body: evidence, isCrossRepository: false,
+    } as unknown as Awaited<ReturnType<Backend['prDetails']>>);
+    vi.spyOn(s.backend, 'editIssue').mockResolvedValue();
+    vi.spyOn(swarm, 'syncRepo').mockRejectedValue(new Error('offline'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(swarm.approvePrototype(repo.id, draft.number, draft.headSha, 'Build filters', 'Show all floors.')).resolves.toBeUndefined();
+    expect(s.repoRt.get(repo.id)!.issues[0]).toMatchObject({ title: 'Build filters', labels: [] });
+    expect(ready()).toEqual([66]);
+  });
+
+  it('holds approval for missing screenshots and releases the source issue for regular implementation once approved', async () => {
+    s.repoRt.get(repo.id)!.pulls = [draft];
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ ...prototypeIssue, repo: repo.fullName, state: 'OPEN' });
+    const details = { ...draft, body: evidence, isCrossRepository: false } as unknown as Awaited<ReturnType<Backend['prDetails']>>;
+    const prDetails = vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...details, body: evidence.replace('![The filter panel](https://example.invalid/filter.png)', 'Screenshot not taken') });
+    const edit = vi.spyOn(s.backend, 'editIssue').mockImplementation(async (_repo, _n, patch) => {
+      setIssues({ ...prototypeIssue, title: patch.title!, body: patch.body!, labels: [] });
+    });
+    vi.spyOn(swarm, 'syncRepo').mockResolvedValue(undefined as never);
+    const approve = () => swarm.approvePrototype(repo.id, draft.number, draft.headSha, 'Build filters', 'Show all floors.');
+    await expect(approve()).rejects.toThrow('attach screenshots');
+    expect(edit).not.toHaveBeenCalled();
+    prDetails.mockResolvedValue(details);
+    await approve();
+    expect(edit).toHaveBeenCalledExactlyOnceWith(repo.fullName, 66, expect.objectContaining({
+      title: 'Build filters', body: expect.stringContaining(draft.headSha), removeLabels: ['swarm:prototype'],
+    }));
+    expect(ready()).toEqual([66]);
+    await swarm.assign('a1', 66);
+    expect(s.state.agents[0].branch).toBe('swarm/issue-66-ada');
+  });
+});
+
 describe('QA specialism', () => {
   it('rereads the QA playbook for both the tester and a developer covering QA', () => {
     const read = vi.spyOn(syncFs, 'readFileSync').mockReturnValueOnce('QA playbook').mockReturnValueOnce('Edited QA playbook');
@@ -3920,7 +3995,7 @@ describe('the line about turns ending', () => {
       p.buildSystemAppend(a, repo, '/desk', 'fix/13', { pr: 13, headRef: 'swarm/13' }),
       p.buildQaSystemAppend(a, repo, '/desk', 'qa/pr-13-ada', pr),
       ceoSystemPrompt({ name: 'Joi', company: 'Acme', manager: 'Sam', notesFile: '/notes.md', researchFolder: '/research', sessionLimit: 4, teamCap: 5, hiring: 'approve' }),
-      researcherSystemPrompt({ name: 'Hypatia', title: '', brief: '', company: 'Acme', today: '2026-10-15', companyFolder: '/research', place: { kind: 'company', folder: '/research' } }),
+      researcherSystemPrompt({ name: 'Hypatia', title: '', brief: '', company: 'Acme', today: '2026-10-15', companyFolder: '/research', place: { kind: 'company', repo: 'demo-manager/cubebase', defaultBranch: 'main', cwd: '/research', branch: 'swarm/research-doc-test', autoMerge: false } }),
     ];
     for (const prompt of prompts) expect(prompt.split(ONE_TURN)).toHaveLength(2);
   });
@@ -4504,13 +4579,16 @@ describe('researchers', () => {
     expect(await s.officeTools().call('request_research', { topic: 'todo app pricing', brief: 'again' })).toContain('already on Hypatia');
     expect(JSON.parse(s.companyStatus()).research.queue).toEqual(['Researching "Todo app pricing"']);
 
-    vi.spyOn(s.backend, 'prepareResearchFolder').mockResolvedValue(); // no disk
     const start = vi.spyOn(s.backend, 'startSession');
     r().startResearchWork();
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({ role: 'researcher', prompt: expect.stringContaining('company research folder') }), expect.anything());
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      role: 'researcher',
+      cwd: expect.stringContaining('/demo-manager/cubebase/desks/'),
+      prompt: expect.stringContaining('docs/research/company/ by pull request'),
+    }), expect.anything());
     await vi.advanceTimersByTimeAsync(120_000);
-    expect(r().state.research.done).toEqual([expect.objectContaining({ topic: 'Todo app pricing', where: expect.stringMatching(/todo-app-pricing\.md$/) })]);
+    expect(r().state.research.done).toEqual([expect.objectContaining({ topic: 'Todo app pricing', where: expect.stringMatching(/^https:\/\/github\.com\/demo-manager\/cubebase\/pull\/\d+$/) })]);
     expect(lobby.status).toBe('done');
   });
 });

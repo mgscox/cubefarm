@@ -1,5 +1,7 @@
-import { useMemo, useState } from 'react';
-import { hasLabel, NEEDS_REVIEW } from '../../../shared/issues';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import './prototype.css';
+import { hasLabel, NEEDS_REVIEW, PROTOTYPE } from '../../../shared/issues';
 import { api } from '../api';
 import { agentsOnRepo, kanbanFor, useStore, type Agent, type KanbanCard } from '../store';
 import { confirmDialog } from './Confirm';
@@ -20,8 +22,9 @@ export function IssueForm({ repoId, agents, onDone }: { repoId: string; agents: 
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [assignTo, setAssignTo] = useState('');
+  const [prototype, setPrototype] = useState(false);
   const [busy, setBusy] = useState(false);
-  const free = agents.filter((a) => (a.role === 'dev' || a.role === 'researcher') && a.status !== 'working' && a.status !== 'preparing');
+  const free = agents.filter((a) => (a.role === 'dev' || (!prototype && a.role === 'researcher')) && a.status !== 'working' && a.status !== 'preparing');
   return (
     <form
       className="issue-form"
@@ -30,10 +33,11 @@ export function IssueForm({ repoId, agents, onDone }: { repoId: string; agents: 
         if (!title.trim()) return;
         setBusy(true);
         try {
-          await api.createIssue(repoId, title, body, assignTo || undefined);
+          await api.createIssue(repoId, title, body, assignTo || undefined, prototype ? PROTOTYPE : undefined);
           setTitle('');
           setBody('');
           setAssignTo('');
+          setPrototype(false);
           onDone?.();
         } catch {
           // toasted
@@ -45,11 +49,15 @@ export function IssueForm({ repoId, agents, onDone }: { repoId: string; agents: 
       <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Issue title, e.g. Add a dark mode toggle" autoFocus />
       <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Describe what you want. Acceptance criteria help the developer and the QA tester a lot." rows={5} />
       <div className="row">
-        <select value={assignTo} onChange={(e) => setAssignTo(e.target.value)}>
+        <select aria-label="Work type" value={prototype ? PROTOTYPE : 'implementation'} onChange={(e) => { setPrototype(e.target.value === PROTOTYPE); setAssignTo(''); }}>
+          <option value="implementation">Implementation</option>
+          <option value={PROTOTYPE}>Prototype</option>
+        </select>
+        <select aria-label="Assign issue" value={assignTo} onChange={(e) => setAssignTo(e.target.value)}>
           <option value="">Leave in To do (auto-assign picks it up if enabled)</option>
           {free.map((a) => (
             <option key={a.id} value={a.id}>
-              Give it to {a.name} right away
+              Give it to {a.name}{a.specialty ? ` · ${a.specialty}` : ''} right away
             </option>
           ))}
         </select>
@@ -67,6 +75,70 @@ function QaLink({ card }: { card: KanbanCard }) {
     <a className="small" href={card.qa.commentUrl} target="_blank" rel="noreferrer" title={card.qa.summary ?? ''}>
       QA report ↗
     </a>
+  );
+}
+
+function PrototypeDecision({ card, repoId, autoAssign }: { card: KanbanCard; repoId: string; autoAssign: boolean }) {
+  const [decision, setDecision] = useState<'approve' | 'revise' | null>(null);
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [busy, setBusy] = useState(false);
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    if (decision && dialog.current && !dialog.current.open) dialog.current.showModal();
+  }, [decision]);
+  if (!card.prototype || !card.prNumber) return null;
+  const { head, issueNumber } = card.prototype;
+  const prNumber = card.prNumber;
+  if (!decision) return (
+    <>
+      <button className="btn btn-small btn-good" onClick={() => { setBody(''); setDecision('approve'); }}>Approve for implementation…</button>
+      <button className="btn btn-small" onClick={() => { setBody(''); setDecision('revise'); }}>Send back…</button>
+    </>
+  );
+  return createPortal(
+    <dialog ref={dialog} className="prototype-dialog" aria-label={decision === 'approve' ? 'Approve prototype for implementation' : 'Send prototype feedback'}
+      onCancel={(e) => { e.preventDefault(); if (!busy) setDecision(null); }}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!busy) setDecision(null);
+        }
+      }}>
+    <h3>{decision === 'approve' ? 'Approve for implementation' : 'Send prototype back'}</h3>
+    <p className="small"><a href={card.url} target="_blank" rel="noreferrer">Review prototype PR #{prNumber}</a></p>
+    <form className="issue-form" onSubmit={async (e) => {
+      e.preventDefault();
+      setBusy(true);
+      try {
+        if (decision === 'approve') await api.approvePrototype(repoId, prNumber, head, title, body);
+        else await api.revisePrototype(repoId, prNumber, head, body);
+        setDecision(null);
+      } catch {
+        // The API already shows the error and keeps the input available.
+      } finally {
+        setBusy(false);
+      }
+    }}>
+      {decision === 'approve' && (
+        <>
+          <p className="small">Issue #{issueNumber} becomes implementation work.{autoAssign && ' Auto-assign may start it immediately.'}</p>
+          <label className="field">Implementation title<input value={title} onChange={(e) => setTitle(e.target.value)} required autoFocus /></label>
+        </>
+      )}
+      <label className="field">
+        {decision === 'approve' ? 'Implementation scope and acceptance criteria' : 'What should the developer change?'}
+        <textarea value={body} onChange={(e) => setBody(e.target.value)} required rows={4} autoFocus={decision === 'revise'} />
+      </label>
+      <div className="row">
+        <button type="button" className="btn btn-small" disabled={busy} onClick={() => setDecision(null)}>Cancel</button>
+        <button className="btn btn-small btn-good" disabled={busy || !body.trim() || (decision === 'approve' && !title.trim())}>
+          {decision === 'approve' ? 'Approve and release issue' : 'Send feedback'}
+        </button>
+      </div>
+    </form>
+    </dialog>, document.body,
   );
 }
 
@@ -336,6 +408,7 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
               <span className="muted small">{c.note}{c.needsHumanLabel && ' · remove needs-human on GitHub to resume'}</span>
               <QaLink card={c} />
               {c.prNumber && previewButton(c)}
+              {c.prototype && <PrototypeDecision key={c.prototype.head} card={c} repoId={repo.id} autoAssign={repo.autoAssign} />}
               {c.qa?.status === 'needs-human' && !c.needsHumanLabel && (
                 <>
                   <button className="btn btn-small btn-good" disabled={pending === c.key} onClick={() => act(c.key, () => api.sendToQa(repo.id, c.number))}>

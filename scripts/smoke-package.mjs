@@ -35,7 +35,7 @@ try {
   }
   console.log(`repo skills verified: ${packed.skills.length}`);
 
-  for (const name of ['developer.md', 'qa.md']) {
+  for (const name of ['developer.md', 'prototype.md', 'qa.md']) {
     const specialism = path.join('docs', 'specialisms', name);
     if (!fs.readFileSync(path.join(installed, specialism)).equals(fs.readFileSync(path.join(root, specialism)))) {
       throw new Error(`npm package specialism differs from the checkout: ${name}`);

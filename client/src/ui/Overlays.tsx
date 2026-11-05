@@ -160,7 +160,7 @@ function Help() {
         </p>
         <h3>Research</h3>
         <p>
-          The researcher at the desk by the lobby's east windows searches the web for you or the CEO and writes up what they find: company research goes into the office's research folder, research for a floor into its
+          The researcher at the desk by the lobby's east windows searches the web for you or the CEO and writes up what they find: company research goes into <code>cubebase/docs/research/company/</code>, research for a floor into its
           repo's <code>docs/research/</code> by pull request (no QA needed). Floors can hire their own researchers; they take issues labelled <code>swarm:research</code>.
         </p>
         <h3>Your team</h3>

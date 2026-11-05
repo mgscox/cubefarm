@@ -88,7 +88,7 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
   `/ws/term` viewers, and keystrokes/resizes to the running CLI.
 - `ceo.ts`: the CEO's office MCP tools (`createOfficeTools`, zod-validated), `ceoSystemPrompt`, `ceoJobPrompt`.
 - `research.ts`: researchers' prompts, branches and briefs. The lobby researcher (always present) takes briefs into
-  the company research folder (`<SWARM_HOME>/research`, local git) or a floor's `docs/research/`; floor researchers take
+  the signed-in GitHub account's `cubebase` repo under `docs/research/company/` or a floor's `docs/research/` by pull request; floor researchers take
   `swarm:research` issues. Research PRs skip QA.
 - `issuePlan.ts`: an Idea's Issue Plan drafted from a PRD revision: pure checks, reuse of open issues, cycle rejection.
   `planFixture.ts` is the demo's PRD and draft (`POST /api/ideas/:id/plans/demo`, demo only).

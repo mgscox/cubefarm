@@ -57,7 +57,7 @@ export interface Backend extends Machine {
   inspectFolder(dir: string): Promise<workspace.LocalFolder>;
   publishFolder(dir: string, opts: { name: string; visibility: 'private' | 'public'; owner?: string; description?: string }): Promise<string>;
   createProject(root: string, name: string, opts: { visibility: 'private' | 'public'; owner?: string; description?: string }): Promise<{ fullName: string; path: string }>;
-  /** The company's research folder: created and put under git (no remote) on first use. */
+  /** Local workspace for Idea research sessions, created on first use. */
   prepareResearchFolder(dir: string): Promise<void>;
   /** The office started: the CLIs its terminal keeper kept running through a restart, back in their agents' terminals. */
   reconnectClis(terminalFor: (agentId: string) => AgentTerminal | null): Promise<ReconnectedCli[]>;

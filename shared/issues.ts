@@ -31,6 +31,11 @@ export const RESEARCH_BRANCH = 'swarm/research-';
 
 export const isResearchIssue = (labels: string[]) => issueSpecialty(labels) === RESEARCH;
 
+export const PROTOTYPE = 'prototype';
+export const PROTOTYPE_BRANCH = 'prototype/issue-';
+export const isPrototypeIssue = (labels: string[]) => issueSpecialty(labels) === PROTOTYPE;
+export const prototypeIssueNumber = (branch: string) => Number(/^prototype\/issue-(\d+)-/.exec(branch)?.[1]) || null;
+
 /** The label the manager puts on issues that need a person (hardware, live servers, accounts, sign-off). */
 export const READY_FOR_HUMAN = 'ready-for-human';
 export const NEEDS_HUMAN = 'needs-human';

@@ -203,7 +203,7 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         ...(ctx.effort ? ['--effort', ctx.effort] : []),
         // The office's PreToolUse hook answers every permission question (allow, or deny with an office rule).
         '--permission-mode',
-        'acceptEdits',
+        ctx.role === 'researcher' ? 'auto' : 'acceptEdits',
         // On top of the manager's own setup (settings, skills, plugins, MCP servers): the office's hooks and servers.
         '--settings',
         ctx.files.settings,
