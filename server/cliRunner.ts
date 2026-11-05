@@ -383,6 +383,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let trustKeys = 0; // keys pressed on a folder-trust question (a few at most)
   let trustedAt = 0;
   const pendingPrompts: string[] = [];
+  let promptUntil = 0;
 
   let reportedSessionId = opts.resumeSessionId ?? null;
   const cb: SessionCallbacks = { ...callbacks, sessionId: (id) => {
@@ -851,14 +852,21 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     if (screenTimer) return;
     const until = Date.now() + BOOT_MS * 2;
     screenTimer = setInterval(() => {
-      if (done || (Date.now() > until && !pendingPrompts.length)) {
+      if (done || Date.now() > (pendingPrompts.length ? promptUntil : until)) {
         clearInterval(screenTimer);
         screenTimer = undefined;
+        if (!done && pendingPrompts.length) {
+          const error = `${label} is still showing a startup question after 2 minutes; follow-up was not sent.`;
+          term.note(`── ${error} ──`);
+          log([{ kind: 'error', text: error }]);
+          finish({ ok: false, text: lastText, errors: [error] });
+        }
         return;
       }
       const screen = term.screen();
-      const review = hookReviewKey(screen);
-      const key = trustKeys < 12 && Date.now() - trustedAt > 3000 ? (trustKey(screen) ?? review) : null;
+      const question = startupQuestionOnScreen(screen);
+      const review = question ? hookReviewKey(screen) : null;
+      const key = question && trustKeys < 12 && Date.now() - trustedAt > 3000 ? (trustKey(screen) ?? review) : null;
       if (key === 'down') {
         trustKeys += 1;
         quietly(() => live?.proc?.write(term.appCursor ? '\x1bOB' : '\x1b[B'));
@@ -880,7 +888,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         nudged.add('setup');
         log([{ kind: 'error', text: `⚠ ${label} is waiting on a setup screen: open the terminal to answer it.` }]);
       }
-      if (pendingPrompts.length && !startupQuestionOnScreen(screen)) sendPrompt(pendingPrompts.shift()!);
+      if (pendingPrompts.length && !question) sendPrompt(pendingPrompts.shift()!);
     }, 1000);
   };
 
@@ -890,6 +898,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       if (pendingPrompts.length || startupQuestionOnScreen(term.screen())) {
         busy();
         turnError = null;
+        if (!pendingPrompts.length) promptUntil = Date.now() + BOOT_MS * 2;
         pendingPrompts.push(text);
         watchStartup();
         return;

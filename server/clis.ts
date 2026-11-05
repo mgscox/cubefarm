@@ -491,7 +491,16 @@ export function selectedOption(screen: string, question: RegExp): string | null 
 
 /** Keep follow-up text out of a startup menu, even before its selection marker has been drawn. */
 export function startupQuestionOnScreen(screen: string): boolean {
-  return TRUST_PROMPT.test(screen) || HOOK_REVIEW_PROMPT.test(screen);
+  const last = [...screen.matchAll(new RegExp(`${TRUST_PROMPT.source}|${HOOK_REVIEW_PROMPT.source}`, 'gim'))].at(-1);
+  if (!last) return false;
+  const below = screen.slice(last.index + last[0].length);
+  const prompt = below.match(/^[ \t]*[❯›][ \t]*(?:Try\b[^\n]*|Ask Codex\b[^\n]*)?$/m);
+  if (!prompt) return true;
+  if (prompt[0].trim().length !== 1) return false;
+  const prefix = screen.slice(screen.lastIndexOf('\n', last.index) + 1, last.index).trim();
+  const ruled = /(?:^|\n)[ \t]*[─━═-]{3,}[ \t]*\n[ \t]*$/.test(below.slice(0, prompt.index));
+  // A bare marker under a question heading may still be drawing its option label.
+  return !prefix && !ruled;
 }
 
 /**

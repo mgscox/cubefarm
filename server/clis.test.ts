@@ -5,7 +5,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, cliStartupFailed, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, selectedOption, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, cliStartupFailed, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, selectedOption, startupQuestionOnScreen, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
 
@@ -52,6 +52,27 @@ describe('selectedOption', () => {
   it('requires a question and a selection on a later line', () => {
     expect(selectedOption('❯ Yes', question)).toBeNull();
     expect(selectedOption('Trust this folder? ❯ Yes', question)).toBeNull();
+  });
+});
+
+describe('startupQuestionOnScreen', () => {
+  it.each(['❯ ', '› ', '❯ Try "refactor this file"', '› Ask Codex to do anything'])(
+    'ignores earlier question text above an idle prompt (%s)', (prompt) => {
+      expect(startupQuestionOnScreen(`● Fixed the "Do you trust the files in this folder?" handling.\n${prompt}`)).toBe(false);
+      expect(startupQuestionOnScreen(`const pattern = /Hooks need review/i;\n${prompt}`)).toBe(false);
+      expect(startupQuestionOnScreen(`● Updated Quick safety check.\n${prompt}`)).toBe(false);
+    },
+  );
+
+  it('holds an incomplete latest menu after an earlier idle prompt', () => {
+    expect(startupQuestionOnScreen('Hooks need review\n› \nDo you trust this folder?')).toBe(true);
+    expect(startupQuestionOnScreen('Quick safety check\n❯ \nHooks need review')).toBe(true);
+    expect(startupQuestionOnScreen('Do you trust this folder?\n❯ No, exit\n  Yes, I trust this folder')).toBe(true);
+    expect(startupQuestionOnScreen('Hooks need review\n› 1. Review hooks\n  3. Continue without trusting')).toBe(true);
+    expect(startupQuestionOnScreen('Do you trust this folder?\n❯ ')).toBe(true);
+    expect(startupQuestionOnScreen('Hooks need review\n› ')).toBe(true);
+    expect(startupQuestionOnScreen('Do you trust this folder?\n────\n❯ \n────')).toBe(false);
+    expect(startupQuestionOnScreen('❯ ')).toBe(false);
   });
 });
 

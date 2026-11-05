@@ -158,6 +158,57 @@ describe('startCliSession on a host', () => {
     first.session.stop();
   });
 
+  it.each([
+    '● I fixed the "Do you trust the files in this folder?" screen handling.',
+    'const HOOK_REVIEW_PROMPT = /Hooks need review/i;',
+    '● Updated the Quick safety check handling.',
+  ])('sends a follow-up at an idle prompt below earlier output: %s', async (output) => {
+    const screen = `${output}\n\n────\n❯ \n────`;
+    const first = claude(() => screen, () => null, { keepAlive: true, resumeSessionId: 'sess-1' });
+    first.hook({ hook_event_name: 'Stop', last_assistant_message: 'Done' });
+    await vi.advanceTimersByTimeAsync(3000);
+    pty.write.mockClear();
+    const next = first.again({ prompt: 'Follow up', keepAlive: true, resumeSessionId: 'sess-1' });
+    await vi.advanceTimersByTimeAsync(150);
+    expect(pty.write.mock.calls).toEqual([['\x1b[200~Follow up\x1b[201~'], ['\r']]);
+    next.session.stop();
+  });
+
+  it('reports and ends a follow-up held by an unchanged startup question past its deadline', async () => {
+    const first = claude(() => 'Hooks need review', () => null, { keepAlive: true });
+    pty.write.mockClear();
+    first.session.send('Follow up');
+    await vi.advanceTimersByTimeAsync(121_000);
+    expect(pty.write).not.toHaveBeenCalled();
+    expect(errors(first.cb)).toContain('Claude Code is still showing a startup question after 2 minutes; follow-up was not sent.');
+    expect(first.cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: ['Claude Code is still showing a startup question after 2 minutes; follow-up was not sent.'] }));
+    await vi.advanceTimersByTimeAsync(STUCK_MS);
+    expect(first.cb.finished).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves an idle Codex prompt alone when earlier output quotes the hook-review question', async () => {
+    const first = claude(() => 'const pattern = /Hooks need review/i;\n› Ask Codex to do anything', () => null, { cli: 'codex' });
+    pty.write.mockClear();
+    first.session.send('Follow up');
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(pty.write.mock.calls).toEqual([['\x1b[200~Follow up\x1b[201~'], ['\r']]);
+    first.session.stop();
+  });
+
+  it('gives a follow-up queued late in startup its own full hold window', async () => {
+    let screen = '❯';
+    const first = claude(() => screen, () => null);
+    await vi.advanceTimersByTimeAsync(119_000);
+    screen = 'Hooks need review';
+    pty.write.mockClear();
+    first.session.send('Follow up');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(first.cb.finished).not.toHaveBeenCalled();
+    expect(pty.write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(118_000);
+    expect(first.cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: ['Claude Code is still showing a startup question after 2 minutes; follow-up was not sent.'] }));
+  });
+
   it('sends queued follow-ups in order when another arrives just after the question disappears', async () => {
     let screen = 'Do you trust this folder?';
     const first = claude(() => screen, () => null);
