@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { browserUrl, localAddress, localUrl, officeHost } from './officeNetwork.js';
 
 const MIN_NODE = 22;
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -166,9 +167,9 @@ const printCheck = (c) => console.log(`  ${c.ok ? green('✓') : red('✗')} ${c
 
 // ---------- helpers ----------
 
-function portOpen(port) {
+function portOpen(port, host) {
   return new Promise((resolve) => {
-    const socket = net.connect({ port, host: '127.0.0.1' });
+    const socket = net.connect({ port, host });
     const done = (open) => {
       socket.destroy();
       resolve(open);
@@ -248,12 +249,20 @@ if (command !== 'start') fail(`Unknown command "${command}". Run npx cubefarm --
 
 const port = Number(values.port ?? process.env.SWARM_PORT ?? 4317);
 if (!Number.isInteger(port) || port < 0 || port > 65535) fail(`"${values.port ?? process.env.SWARM_PORT}" isn't a port number.`);
-const url = `http://localhost:${port}`;
+let host;
+try {
+  host = officeHost();
+} catch (err) {
+  fail(err.message);
+}
+// An office bound to one address isn't on 127.0.0.1: probe and open it where it listens.
+const probeHost = localAddress(host);
+const url = browserUrl(host, port);
 const demo = values.demo || process.env.SWARM_DEMO === '1' || process.env.SWARM_DEMO === 'true';
 
 // A second office on the same state would resume every agent's session a second time.
-if (port !== 0 && (await portOpen(port))) {
-  if (!(await isOffice(`http://127.0.0.1:${port}`))) fail(`Something else is using port ${port}. Start cubefarm on another one: npx cubefarm --port 4400`);
+if (port !== 0 && (await portOpen(port, probeHost))) {
+  if (!(await isOffice(localUrl(host, port)))) fail(`Something else is using port ${port}. Start cubefarm on another one: npx cubefarm --port 4400`);
   console.log(`\n  cubefarm is already running: ${url}\n`);
   if (!values['no-open']) openBrowser(url);
   process.exit(0);
@@ -279,7 +288,7 @@ process.setSourceMapsEnabled(true);
 await import(pathToFileURL(entry).href);
 
 if (!values['no-open'] && port !== 0) {
-  for (let i = 0; i < 100 && !(await portOpen(port)); i++) await new Promise((r) => setTimeout(r, 200));
+  for (let i = 0; i < 100 && !(await portOpen(port, probeHost)); i++) await new Promise((r) => setTimeout(r, 200));
   openBrowser(url);
 }
 void checkForUpdate();

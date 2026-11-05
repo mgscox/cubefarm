@@ -13,7 +13,7 @@ import { execFile, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { bindMessage, officeHost } from '../bin/officeNetwork.js';
+import { bindMessage, browserUrl, officeHost } from '../bin/officeNetwork.js';
 import { clientPort, isUpdateCommand, parseOfficeArgs, parseSymref, refusal, rollbackPlan, stepsFor, swarmHome } from './officeSteps.mjs';
 
 const HELP = `
@@ -35,9 +35,10 @@ const STOP_TIMEOUT_MS = 20_000;
 // version would reformat it), which would leave local changes and refuse every later update.
 const INSTALL = ['install', '--no-audit', '--no-fund', '--no-save'];
 
-let opts;
+let opts, host;
 try {
   opts = parseOfficeArgs(process.argv.slice(2));
+  host = officeHost();
 } catch (err) {
   console.error(`${err.message}\n${HELP}`);
   process.exit(1);
@@ -124,8 +125,8 @@ function startChildren() {
   startServer();
   if (opts.dev) {
     startClient();
-    log(`Open http://localhost:${clientPort()}  ·  type u + Enter to update the office`);
-    log(bindMessage(officeHost(), clientPort()));
+    log(`Open ${browserUrl(host, clientPort())}  ·  type u + Enter to update the office`);
+    log(bindMessage(host, clientPort()));
   } else {
     log('Type u + Enter to update the office');
   }
