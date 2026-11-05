@@ -56,7 +56,8 @@ jobs:
   e2e:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64, cubefarm]
-    timeout-minutes: 10
+    # The software-rendered browser suite approaches ten minutes before setup and cleanup.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
