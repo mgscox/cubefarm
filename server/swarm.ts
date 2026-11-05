@@ -1833,7 +1833,8 @@ export class Swarm {
     a.endedAt = Date.now();
     a.lastError = error;
     session?.stop();
-    const idle = rt.terminal?.releaseIdle?.();
+    rt.terminal?.releaseIdle?.();
+    const idle = rt.terminal?.closing;
     // Cleanup is bounded independently; a silent box must never hold a freed agent's slot.
     const cleanup = new AbortController();
     const timer = setTimeout(() => cleanup.abort(new Error('Desk cleanup timed out')), startTimeouts().preparing);
@@ -2720,7 +2721,8 @@ export class Swarm {
 
     this.abandonIdeaResearch(a);
     this.agentRt.get(id)?.session?.stop();
-    const idle = this.agentRt.get(id)?.terminal?.releaseIdle?.();
+    this.agentRt.get(id)?.terminal?.releaseIdle?.();
+    const idle = this.agentRt.get(id)?.terminal?.closing;
     this.agentRt.get(id)?.terminal?.dispose();
     void removeScreens(id);
     void fs.rm(terminalFile(id), { force: true }).catch(() => undefined);
@@ -3093,9 +3095,15 @@ export class Swarm {
         }
         if (where.box) this.appendLog(a, [{ kind: 'system', text: `🖥 Working on ${this.boxName(where.box)}.` }]);
         // The CLI waiting at their prompt has the desk as its working directory, and Windows can't reset a folder a
-        // process is in: close it and let it exit first. Only the author's fix round that resumes their conversation
-        // (prepareFix) picks that CLI up again.
-        if (!(within && !moved && job.rec.devSessionId)) await rt?.terminal?.releaseIdle?.();
+        // process is in: close it and wait for it, and for any CLI already closing there, to exit. Only the author's
+        // fix round that resumes that CLI's own conversation (prepareFix) picks it up again.
+        const term = rt?.terminal;
+        if (term?.releaseIdle) {
+          const resume = within && !moved ? job.rec.devSessionId ?? undefined : undefined;
+          const how = resume ? this.sessionRuntime(a, resume) : null;
+          await term.releaseIdle(how?.resumeSessionId ? { cli: how.cli, resumeSessionId: how.resumeSessionId, host: this.machineFor(a).cliHost } : undefined);
+        }
+        await term?.closing;
         if (gone()) return null;
         await this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
         if (gone()) return null;
