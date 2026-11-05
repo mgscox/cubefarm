@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { planCli, type CliHost } from './machine.ts';
 import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
 import { STUCK_MS, type ClaudeTurn } from './clis.ts';
-import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
+import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
 import type { SessionCallbacks, SessionOptions } from './agentRunner.ts';
 import type { AgentTerminal } from './terminal.ts';
 
@@ -172,6 +172,19 @@ describe('startCliSession on a host', () => {
     await vi.advanceTimersByTimeAsync(150);
     expect(pty.write.mock.calls).toEqual([['\x1b[200~Follow up\x1b[201~'], ['\r']]);
     next.session.stop();
+  });
+
+  it.each([OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE])('sends an OpenCode follow-up at once when earlier output quotes a startup question (%#)', async (idle) => {
+    const first = claude(() => `  ● Updated the Quick safety check handling in server/clis.ts.\n${idle}`, () => null, { cli: 'opencode' });
+    pty.write.mockClear();
+    first.session.send('Follow up');
+    await vi.advanceTimersByTimeAsync(150);
+    const writes = [['\x1b[200~Follow up\x1b[201~'], ['\r']];
+    expect(pty.write.mock.calls).toEqual(writes);
+    await vi.advanceTimersByTimeAsync(121_000);
+    expect(pty.write.mock.calls).toEqual(writes);
+    expect(errors(first.cb)).not.toContain('OpenCode is still showing a startup question after 2 minutes; follow-up was not sent.');
+    first.session.stop();
   });
 
   it('reports and ends a follow-up held by an unchanged startup question past its deadline', async () => {

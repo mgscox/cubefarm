@@ -489,8 +489,12 @@ export function selectedOption(screen: string, question: RegExp): string | null 
   return markers.length === 1 ? markers[0][1].trim() || null : null;
 }
 
-/** Keep follow-up text out of a startup menu, even before its selection marker has been drawn. */
-export function startupQuestionOnScreen(screen: string): boolean {
+/**
+ * Keep follow-up text out of a startup menu, even before its selection marker has been drawn. Only Claude Code and
+ * Codex show these menus; other CLIs (OpenCode) never hold a follow-up.
+ */
+export function startupQuestionOnScreen(screen: string, cli: AgentCli): boolean {
+  if (cli !== 'claude' && cli !== 'codex') return false;
   const last = [...screen.matchAll(new RegExp(`${TRUST_PROMPT.source}|${HOOK_REVIEW_PROMPT.source}`, 'gim'))].at(-1);
   if (!last) return false;
   const lineStart = screen.lastIndexOf('\n', last.index) + 1;

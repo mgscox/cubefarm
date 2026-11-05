@@ -864,7 +864,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         return;
       }
       const screen = term.screen();
-      const question = startupQuestionOnScreen(screen);
+      const question = startupQuestionOnScreen(screen, cli);
       const review = question ? hookReviewKey(screen) : null;
       const key = question && trustKeys < 12 && Date.now() - trustedAt > 3000 ? (trustKey(screen) ?? review) : null;
       if (key === 'down') {
@@ -895,7 +895,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const handle: SessionHandle = {
     send(text) {
       if (done || !live?.proc) return;
-      if (pendingPrompts.length || startupQuestionOnScreen(term.screen())) {
+      if (pendingPrompts.length || startupQuestionOnScreen(term.screen(), cli)) {
         busy();
         turnError = null;
         if (!pendingPrompts.length) promptUntil = Date.now() + BOOT_MS * 2;
