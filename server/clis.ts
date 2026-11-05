@@ -81,7 +81,7 @@ export function unwrapCmdShim(shimPath: string, text: string): { file: string; a
  */
 let bundled: string | null | undefined;
 
-function bundledClaude(): string | null {
+export function bundledClaude(): string | null {
   if (bundled !== undefined) return bundled;
   bundled = null;
   let sdk: string;

@@ -1,3 +1,4 @@
+import { ClaudeAuthenticationSettings } from './ClaudeAuthenticationSettings';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { isBusy, pendingRequests, qaKey, unreadMessages, useStore, type PhoneTab } from '../store';
@@ -458,6 +459,7 @@ export function Phone({ tab: initialTab, requestId, onFloor }: { tab?: PhoneTab;
     ['hires', '📄', 'Hires', pending],
     ['company', '📊', 'Company', 0],
     ['games', '🎮', 'Games', 0],
+    ['settings', '⚙️', 'Settings', 0],
   ];
   return (
     <div className="overlay phone-overlay" onMouseDown={(e) => e.target === e.currentTarget && closeOverlay()}>
@@ -468,6 +470,7 @@ export function Phone({ tab: initialTab, requestId, onFloor }: { tab?: PhoneTab;
           <span>📶 🔋</span>
         </div>
         <div className="phone-screen">
+          {tab === 'settings' && <div className="phone-scroll"><h2 className="phone-h">Settings</h2><ClaudeAuthenticationSettings /></div>}
           {tab === 'chat' && <Chat />}
           {tab === 'hires' && <Hires focusId={requestId} />}
           {tab === 'company' && <Company onFloor={onFloor ?? goToFloor} />}

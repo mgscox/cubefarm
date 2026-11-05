@@ -1,4 +1,5 @@
-import { expect, test } from '@playwright/test';
+import { expect } from '@playwright/test';
+import { test } from './isolatedDemo';
 import type { IdeaView, ProposalView, WorldSnapshot } from '../shared/types';
 
 test('description to reviewed card, exact View PRD, one approval and verified publication', async ({ page, request, baseURL }, testInfo) => {

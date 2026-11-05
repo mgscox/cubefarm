@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { claudeEnv } from './claudeAuth.js';
 import { browserUrl, localAddress, localUrl, officeHost } from './officeNetwork.js';
 
 const MIN_NODE = 22;
@@ -107,13 +108,6 @@ function claudeBinary() {
     }
   }
   return null;
-}
-
-// Like the agents: no API keys or settings inherited from a Claude Code session this was started from.
-function claudeEnv() {
-  const env = {};
-  for (const [k, v] of Object.entries(process.env)) if (!/^(ANTHROPIC_|CLAUDE)/i.test(k) || k === 'CLAUDE_CONFIG_DIR') env[k] = v;
-  return env;
 }
 
 // ---------- checks ----------
@@ -250,7 +244,7 @@ if (command === 'login') {
   const claude = claudeBinary();
   if (!claude) fail(`Claude Code for ${process.platform}-${process.arch} is missing. Reinstall cubefarm.`);
   console.log('\n  Signing in to Claude. Your agents use this login and your subscription.\n');
-  const res = spawnSync(claude, ['auth', 'login'], { stdio: 'inherit', env: claudeEnv() });
+  const res = spawnSync(claude, ['auth', 'login'], { stdio: 'inherit', env: claudeEnv(process.env, { login: true }) });
   process.exit(res.status ?? 1);
 }
 
