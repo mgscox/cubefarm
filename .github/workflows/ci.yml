@@ -68,9 +68,7 @@ jobs:
           node-version: 'lts/*'
           check-latest: true
       - run: npm ci
-      # A per-job browser folder: jobs sharing the runner's ~/.cache/ms-playwright deleted and re-fetched each
-      # other's Chromium and hung after the download.
-      - run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ms-playwright" >> "$GITHUB_ENV"
+      # Normally a no-op (the runner caches Chromium); a stalled download fails here rather than at the job cap.
       - run: npx playwright install chromium
         timeout-minutes: 5
 
