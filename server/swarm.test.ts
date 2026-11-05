@@ -5038,6 +5038,42 @@ describe('closed work', () => {
       expect(s.state.qa[0]).toMatchObject({ prNumber: 12, status: 'fixing' });
     });
 
+    it('stops a resumed issue session once its PR closed unmerged, though the issue is still open', async () => {
+      const session = { send: vi.fn(), stop: vi.fn() };
+      const starts = vi.spyOn(s.backend, 'startSession').mockReturnValue(session);
+      vi.spyOn(s.backend, 'deskHead').mockResolvedValue('base');
+      vi.mocked(s.backend.listIssues).mockResolvedValue([issue(7)]);
+      c.agentRt.get('a1')!.session = null;
+      Object.assign(s.state.agents[0], { status: 'done', task: 'issue', prNumber: 12, sessionId: 'dev-session', model: '', effort: '', cli: '' });
+      await swarm.message('a1', 'Carry on');
+      expect(starts).toHaveBeenCalledOnce();
+      expect(s.state.agents[0]).toMatchObject({ status: 'working', task: 'issue', prNumber: 12 });
+      await swarm.syncRepo(repo.id);
+      expect(s.backend.prDetails).toHaveBeenCalledWith(repo.fullName, 12);
+      expect(session.stop).toHaveBeenCalledOnce();
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null, issueNumber: null, prNumber: null });
+      expect(log()).toContain('Stopped: PR #12 was closed without merging');
+    });
+
+    it('still stops an issue task on a closed issue when its unlisted PR reads back open', async () => {
+      prState = 'OPEN';
+      vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+      Object.assign(s.state.agents[0], { prNumber: 12 });
+      await swarm.syncRepo(repo.id);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(log()).toContain('Stopped: issue #7 was closed');
+    });
+
+    it.each([['merged', 'MERGED'], ['unreadable', new Error('HTTP 502')]] as const)('leaves an issue task on a %s unlisted PR, even with its issue closed', async (_, state) => {
+      prState = state;
+      const read = vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+      Object.assign(s.state.agents[0], { prNumber: 12 });
+      await swarm.syncRepo(repo.id);
+      expect(read).not.toHaveBeenCalledWith(repo.fullName, 7);
+      expect(stop).not.toHaveBeenCalled();
+      expect(s.state.agents[0]).toMatchObject({ status: 'working', task: 'issue', issueNumber: 7 });
+    });
+
     it('leaves a CEO-parked PR alone without reading it', async () => {
       Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
       repo.parkedBranches = [{ issueNumber: 7, prNumber: 12, branch: 'swarm/issue-7-ada' }];

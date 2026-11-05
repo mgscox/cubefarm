@@ -2432,12 +2432,17 @@ export class Swarm {
       parkedPrs: new Set((repo.parkedBranches ?? []).map((p) => p.prNumber)),
     };
     for (const a of this.state.agents.filter((x) => x.repoId === repo.id)) {
-      const work = closedWork(a, floor);
+      let work = closedWork(a, floor);
       if (!work) continue;
       const generation = this.agentRt.get(a.id)?.generation;
+      if (work.kind === 'pr' && !pulls.some((p) => p.number === work!.number)) {
+        // Unlisted: read it, then ask again with it listed, so an open PR still lets a closed issue stop an issue task.
+        const state = await this.backend.prDetails(repo.fullName, work.number).then((d) => d.state, () => null);
+        if (!state) continue;
+        work = closedWork(a, { ...floor, pulls: [...pulls, { number: work.number, state }] });
+        if (!work) continue;
+      }
       if (work.kind === 'issue' && !issueClosed(await this.backend.readIssue(repo.fullName, work.number).catch(() => null))) continue;
-      if (work.kind === 'pr' && !pulls.some((p) => p.number === work.number) &&
-        await this.backend.prDetails(repo.fullName, work.number).then((d) => d.state, () => null) !== 'CLOSED') continue;
       if (!this.state.agents.includes(a) || this.agentRt.get(a.id)?.generation !== generation) continue; // moved on meanwhile
       this.endClosedWork(a, repo, work, `■ Stopped: ${closedWorkText(work)}. Ready for new work.`);
       this.postMessage('office', `■ Stopped ${a.name} on ${repo.fullName}: ${closedWorkText(work)}.`);

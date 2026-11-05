@@ -22,12 +22,12 @@ describe('closed work', () => {
   it.each([['a fix', fixer], ['QA', tester]])('flags %s on a PR closed unmerged', (_, a) => {
     expect(closedWork(a, floor({ pulls: [{ number: 12, state: 'CLOSED' }] }))).toEqual({ kind: 'pr', number: 12 });
   });
-  it.each([['a fix', fixer], ['QA', tester]])('flags %s on a PR the open and merged lists leave out, to be read back', (_, a) => {
+  it.each([['a fix', fixer], ['QA', tester], ['an issue', { ...dev, prNumber: 12 }]])('flags %s task on a PR the open and merged lists leave out, to be read back', (_, a) => {
     expect(closedWork(a, floor({ pulls: [{ number: 13, state: 'OPEN' }] }))).toEqual({ kind: 'pr', number: 12 });
   });
-  it('checks an unlisted PR on an issue task through its issue', () => {
-    expect(closedWork({ ...dev, prNumber: 12 }, floor())).toBeNull();
-    expect(closedWork({ ...dev, prNumber: 12 }, floor({ openIssues: new Set() }))).toEqual({ kind: 'issue', number: 7 });
+  it('checks an issue task on an open PR through its issue', () => {
+    expect(closedWork({ ...dev, prNumber: 12 }, floor({ pulls: [{ number: 12, state: 'OPEN' }] }))).toBeNull();
+    expect(closedWork({ ...dev, prNumber: 12 }, floor({ pulls: [{ number: 12, state: 'OPEN' }], openIssues: new Set() }))).toEqual({ kind: 'issue', number: 7 });
   });
   it('leaves an open PR alone', () => expect(closedWork(fixer, floor({ pulls: [{ number: 12, state: 'OPEN' }] }))).toBeNull());
   it('leaves a merged PR to the merge flow, even once its issue closes', () => {
