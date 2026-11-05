@@ -56,7 +56,7 @@ jobs:
   e2e:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64, cubefarm]
-    # The suite runs on one worker with software WebGL and takes ~10 minutes; the cap only catches a hung run.
+    # The software-rendered browser suite approaches ten minutes before setup and cleanup.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
@@ -65,10 +65,10 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 'lts/*'
+          # Playwright's bundled ZIP extractor stalls on Node 26; keep browser setup on Node 24.
+          node-version: '24'
           check-latest: true
       - run: npm ci
-      # Normally a no-op (the runner caches Chromium); a stalled download fails here rather than at the job cap.
       - run: npx playwright install chromium
         timeout-minutes: 5
 
