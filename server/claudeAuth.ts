@@ -84,6 +84,7 @@ export class ClaudeAuthentication {
     if (flow.bytes > 65536) { void this.end('failed'); return; }
     flow.output += data;
     const text = terminalText(flow.output);
+
     if (/OAuth error:|Authentication failed|Error:/i.test(text)) { void this.end('failed'); return; }
     if (!flow.submitted) {
       // Wait for a delimiter: a URL split across PTY chunks must never be published partially.
@@ -122,7 +123,14 @@ export class ClaudeAuthentication {
     this.phase = 'exchanging';
     if (this.demo) { await this.end(code === 'demo-code-123' ? 'complete' : 'failed'); }
     else {
-      try { flow.session!.pty.write(code + '\r'); }
+      try {
+        // Ink treats a long code plus Enter in one PTY chunk as a paste, not submission.
+        flow.session!.pty.write(code);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        if (this.flow === flow && this.phase === 'exchanging' && flow.expiresAt > Date.now()) {
+          flow.session!.pty.write('\r');
+        }
+      }
       catch { await this.end('failed'); }
     }
     return this.view();

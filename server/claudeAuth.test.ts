@@ -194,7 +194,7 @@ it('wires protected code requests to the actual auth manager with an injected PT
   data(authorizationUrl + '\r\nPaste\x1b[1Ccode\x1b[1Chere\x1b[1Cif\x1b[1Cprompted >');
   expect(await (await post('/status')).json()).toMatchObject({ phase: 'awaiting-code', authorizationUrl });
   expect((await post('/code', { flowId: first.flowId, code: 'dummy-http-code#dummy-http-state' })).status).toBe(200);
-  expect(write).toHaveBeenCalledExactlyOnceWith('dummy-http-code#dummy-http-state\r');
+  expect(write.mock.calls).toEqual([['dummy-http-code#dummy-http-state'], ['\r']]);
   expect((await post('/code', { flowId: first.flowId, code: 'dummy-http-code' })).status).toBe(409);
   const token = 'sk-ant-oat01-' + 'h'.repeat(80);
   data('Long-lived authentication token created successfully!\r\nYour OAuth token (valid for 1 year):\r\n' + token + '\r\n');
