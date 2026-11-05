@@ -38,6 +38,7 @@ export interface OfficeHandlers {
   fileIssue(a: { floor: number; title: string; body: string; specialty?: string; ready_for_human?: boolean }): Promise<string>;
   closeIssue(a: { floor: number; number: number; reason: string }): Promise<string>;
   routeIssue(a: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean }): Promise<string>;
+  connectFloor(a: { repo: string; auto_assign?: boolean; auto_merge?: boolean; reason: string }): Promise<string>;
   startIssue(a: StartIssueRequest): Promise<string>;
   rerunQa(a: { floor: number; number: number; note?: string }): Promise<string>;
   sendBackToDev(a: DevFixRequest): Promise<string>;
@@ -304,6 +305,17 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
         ready_for_human: z.boolean().optional().describe('true adds the ready-for-human label (agents never start it; a running session keeps going), false removes it so agents can start it'),
       },
       (a) => run(() => h.routeIssue(a)),
+    ),
+    tool(
+      'connect_floor',
+      "Add a GitHub repo as a new floor. Use ONLY when the manager explicitly asks for a repo to be added; report afterwards. Never on your own initiative. An existing floor is returned without changing its settings.",
+      {
+        repo: z.string().trim().min(1).max(140).describe('GitHub owner/name'),
+        auto_assign: z.boolean().optional().describe('Start backlog work automatically; defaults to false'),
+        auto_merge: z.boolean().optional().describe('Merge after QA and checks pass; defaults to true'),
+        reason: z.string().trim().min(1).max(1000).describe("The manager's instruction, logged in the office conversation"),
+      },
+      (a) => run(() => h.connectFloor(a)),
     ),
     tool(
       'start_issue',
