@@ -102,3 +102,44 @@ test('CLI binding defaults to loopback and wildcard serves the office through bu
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
   }
 });
+
+test('a single-address SWARM_HOST is probed, opened and proxied on that address, and a bad one is refused', async () => {
+  const home = fs.mkdtempSync(path.join(root, 'test-results', 'lan-home-'));
+  const children: ChildProcess[] = [];
+  try {
+    const bad = await start(['bin/cubefarm.js', '--demo', '--no-open', '--port', '0'], { SWARM_HOME: path.join(home, 'bad'), SWARM_HOST: 'mini.local' });
+    children.push(bad.proc);
+    await expect.poll(bad.output).toContain(`SWARM_HOST="mini.local" isn't an address to listen on`);
+    await expect.poll(() => bad.proc.exitCode).toBe(1);
+
+    const url = new RegExp(`http://${lanHost.replaceAll('.', '\\.')}:(\\d+)`);
+    const server = await start(['bin/cubefarm.js', '--demo', '--no-open', '--port', '0'], { SWARM_HOME: path.join(home, 'single'), SWARM_HOST: ` ${lanHost} ` });
+    children.push(server.proc);
+    await expect.poll(() => server.error()?.message ?? server.output()).toMatch(new RegExp(`cubefarm on ${url.source}`));
+    const port = Number(server.output().match(url)![1]);
+    const remote = `http://${lanHost}:${port}`;
+    expect(server.output()).toContain(`Listening on ${lanHost}:${port} · remote: ${remote}`);
+    expect((await fetch(`${remote}/api/state`).then((r) => r.json())).demo).toBe(true);
+    await expect(fetch(`http://127.0.0.1:${port}/api/state`, { signal: AbortSignal.timeout(3000) })).rejects.toThrow();
+
+    const duplicate = await start(['bin/cubefarm.js', '--demo', '--no-open', '--port', String(port)], { SWARM_HOME: path.join(home, 'duplicate'), SWARM_HOST: lanHost });
+    children.push(duplicate.proc);
+    await expect.poll(duplicate.output).toContain(`already running: ${remote}`);
+    expect(fs.existsSync(path.join(home, 'duplicate'))).toBe(false);
+
+    const vite = await start(['node_modules/vite/bin/vite.js', '--port', '0'], { SWARM_PORT: String(port), SWARM_HOST: lanHost });
+    children.push(vite.proc);
+    await expect.poll(vite.output).toMatch(url);
+    const client = `${lanHost}:${Number(vite.output().match(url)![1])}`;
+    expect((await fetch(`http://${client}/api/state`).then((r) => r.json())).demo).toBe(true);
+    const first = await new Promise<{ type: string }>((resolve, reject) => {
+      const socket = new WebSocket(`ws://${client}/ws`);
+      socket.onmessage = (event) => { resolve(JSON.parse(String(event.data))); socket.close(); };
+      socket.onerror = () => reject(new Error('Vite /ws proxy failed'));
+    });
+    expect(first.type).toBe('snapshot');
+  } finally {
+    for (const child of children.reverse()) await stop(child);
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
+  }
+});

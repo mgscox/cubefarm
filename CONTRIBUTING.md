@@ -19,7 +19,7 @@ All three run `scripts/office.mjs`, the launcher: `--dev` runs the server from s
 
 ## Trusted LAN access
 
-`SWARM_HOST` controls both the office server and Vite: it defaults to `127.0.0.1`; `0.0.0.0` listens on all IPv4 interfaces. Set it in the launcher's environment so it remains in effect across code-change and update restarts.
+`SWARM_HOST` controls both the office server and Vite: it defaults to `127.0.0.1`; `0.0.0.0` listens on all IPv4 interfaces, and one of the machine's IP addresses listens on that address only. Anything other than an IP address or `localhost` is refused at startup. Set it in the launcher's environment so it remains in effect across code-change and update restarts.
 
 ```bash
 SWARM_HOST=0.0.0.0 npm run dev
@@ -36,7 +36,7 @@ npm start
 Remove-Item Env:SWARM_HOST
 ```
 
-Remote devices open `http://<office-machine-LAN-IP>:5317` in development (`SWARM_CLIENT_PORT` overrides it), or port `4317` for the built office (`SWARM_PORT` overrides it). Local browser URLs, duplicate-office probes, agent hook/MCP callbacks and Vite's REST/WebSocket proxy targets stay on loopback. Never open `http://0.0.0.0`.
+Remote devices open `http://<office-machine-LAN-IP>:5317` in development (`SWARM_CLIENT_PORT` overrides it), or port `4317` for the built office (`SWARM_PORT` overrides it). With `0.0.0.0` or `::`, local browser URLs, duplicate-office probes, agent hook/MCP callbacks and Vite's REST/WebSocket proxy targets stay on loopback; with a single address they use that address, since nothing listens on loopback. Never open `http://0.0.0.0`.
 
 Reachable clients have access to the manager API and terminals without a manager login: use only on a trusted LAN. This setting adds no authentication or TLS and does not expose floor-app previews. Agents testing this repo must follow [CLAUDE.md](CLAUDE.md#safety-read-first): demo mode, isolated `SWARM_HOME`, reserved ports, and no live-office restart.
 
@@ -52,7 +52,7 @@ npm run test:e2e     # browser smoke tests (Playwright): builds, boots a demo of
 
 - Tests sit next to the code they cover as `*.test.ts`, anywhere under `client/`, `server/`, `shared/` or `scripts/` (e.g. `shared/issues.test.ts`). Vitest finds them through `vitest.config.ts`; `tsc` type-checks them and the Vite build leaves them out, since nothing in the app imports them.
 - Keep them fast and offline: no network, no GitHub (`gh`), no Claude sessions and no real `~/.cubefarm`. Test pure logic directly, fake anything that would spend usage, and use a temp `SWARM_HOME` and random free ports for anything that needs a server. `npm test` already points `SWARM_HOME` at a temp folder.
-- `npm run test:e2e` runs `e2e/*.spec.ts` in headless Chromium with software WebGL against a demo office on port 4399 (`E2E_PORT` changes it) with a temp `SWARM_HOME`. The first time, get the browser with `npx playwright install chromium`. Wait on what the page shows rather than sleeping, and don't rely on pointer lock, which a headless browser may not grant.
+- `npm run test:e2e` runs `e2e/*.spec.ts` headless with software WebGL against a demo office on port 4399 (`E2E_PORT` changes it) with a temp `SWARM_HOME`. It uses your installed Google Chrome when there is one, otherwise Playwright's Chromium (always in CI, or with `E2E_BROWSER=chromium`; get it once with `npx playwright install chromium`). Just built? `E2E_SKIP_BUILD=1` reuses `dist/` instead of building again. Wait on what the page shows rather than sleeping, and don't rely on pointer lock, which a headless browser may not grant.
 - GitHub Actions (`.github/workflows/ci.yml`) runs `npm ci`, `npm run typecheck`, `npm test` and `npm run build` on Ubuntu and Windows for every pull request and every push to `main`, then packs the npm package, installs it into an empty folder and boots it in demo mode (`scripts/smoke-package.mjs`). A separate `e2e` job on Ubuntu runs `npm run test:e2e` and uploads the Playwright report when it fails. It needs no secrets.
 
 ## Architecture

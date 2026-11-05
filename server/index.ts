@@ -5,7 +5,7 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { DEMO, HOST, PORT, STATE_FILE, WORKSPACE_ROOT, readConfigEnv } from './config.ts';
-import { bindMessage } from '../bin/officeNetwork.js';
+import { bindMessage, browserUrl, localUrl } from '../bin/officeNetwork.js';
 import { realBackend } from './backend.ts';
 import { handleHook, handleMcp, setOfficeUrl } from './cliRunner.ts';
 import { createDemoBackend } from './demo.ts';
@@ -16,7 +16,7 @@ import { HttpError, Swarm } from './swarm.ts';
 
 const swarm = new Swarm(DEMO ? createDemoBackend() : realBackend);
 // Sessions the office picks back up while it starts need the address their CLIs call back on before it listens.
-if (PORT) setOfficeUrl(`http://127.0.0.1:${PORT}`);
+if (PORT) setOfficeUrl(localUrl(HOST, PORT));
 await swarm.init();
 
 const app = express();
@@ -223,8 +223,8 @@ server.on('upgrade', (req, socket, head) => {
 
 server.listen(PORT, HOST, () => {
   const port = (server.address() as AddressInfo).port;
-  setOfficeUrl(`http://127.0.0.1:${port}`);
-  console.log(`\n  🏢 cubefarm on http://localhost:${port}${DEMO ? '  (DEMO MODE: fake GitHub + fake agents)' : ''}`);
+  setOfficeUrl(localUrl(HOST, port));
+  console.log(`\n  🏢 cubefarm on ${browserUrl(HOST, port)}${DEMO ? '  (DEMO MODE: fake GitHub + fake agents)' : ''}`);
   console.log(`     ${bindMessage(HOST, port)}`);
   console.log(`     state: ${STATE_FILE}`);
   console.log(`     workspaces: ${WORKSPACE_ROOT}\n`);
