@@ -855,6 +855,14 @@ export function createDemoBackend(): Backend {
       const r = repos.get(fullName);
       return r?.issues.some((i) => i.number === number) ? 'OPEN' : closedIssues.has(`${fullName}#${number}`) ? 'CLOSED' : null;
     },
+    closeIssue: async (fullName, number, reason, _comment) => {
+      const r = repos.get(fullName);
+      const i = r?.issues.find((x) => x.number === number);
+      if (!r || (!i && !closedIssues.has(`${fullName}#${number}`))) throw new Error(`Unknown issue #${number}`);
+      if (refusing(fullName)) throw new CommandError('gh issue close failed: HTTP 403', 'HTTP 403: Resource not accessible by integration', 1, '');
+      if (i) closedIssues.set(`${fullName}#${number}`, { ...tracked(fullName, i), state: 'CLOSED', stateReason: reason === 'completed' ? 'completed' : 'not_planned' });
+      r.issues = r.issues.filter((x) => x.number !== number);
+    },
     editIssue: async (fullName, number, edit) => {
       const i = repos.get(fullName)?.issues.find((x) => x.number === number);
       if (!i) throw new Error(`Unknown issue #${number}`);
@@ -881,6 +889,11 @@ export function createDemoBackend(): Backend {
       if (!pr) throw new Error('Unknown PR');
       Object.assign(pr, { headSha: fakeSha(), mergeState: 'CLEAN' });
       runChecks(pr, false);
+    },
+    rerunFailedJobs: async (fullName, runIds) => {
+      for (const pr of repos.get(fullName)?.pulls ?? []) {
+        if (runIds.includes(pr.number) && pr.checks === 'failing') runChecks(pr, false);
+      }
     },
     markPullReady: async (fullName, number) => {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
@@ -1351,6 +1364,8 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
     async chat(text: string) {
       const s = await status();
       await think('Reading your message.');
+      const close = text.match(/\bclose\s+(?:issue\s*)?#(\d+)\s+on\s+floor\s+(\d+)\s+because\s+([^\n]+)/i);
+      if (close) return use('close_issue', { floor: Number(close[2]), number: Number(close[1]), reason: close[3].trim() });
       const merge = text.match(/\bmerge\s+(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))\s+(?:because|with|reason)\s+([^\n]+)/i);
       if (merge) {
         const floor = merge[2] ? Number(merge[2]) : s.floors.find((f) => f.repo.toLowerCase() === merge[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === merge[3].toLowerCase())?.floor;

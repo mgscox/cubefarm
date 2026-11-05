@@ -22,6 +22,7 @@ export interface Backend extends Machine {
   listIssues(fullName: string): Promise<IssueInfo[]>;
   listPulls(fullName: string): Promise<PullRefresh>;
   createIssue(fullName: string, title: string, body: string, labels?: string[]): Promise<number>;
+  closeIssue(fullName: string, number: number, reason: 'completed' | 'not planned', comment: string): Promise<void>;
   /** OPEN or CLOSED; null when there is no such issue. */
   issueState(fullName: string, number: number): Promise<'OPEN' | 'CLOSED' | null>;
   editIssue(fullName: string, number: number, edit: { title?: string; body?: string; addLabels?: string[]; removeLabels?: string[] }): Promise<void>;
@@ -33,6 +34,7 @@ export interface Backend extends Machine {
   findIssuesByMarker(fullName: string, marker: string, since: string): Promise<github.TrackedIssue[]>;
   mergePull(fullName: string, number: number, method: 'squash' | 'merge' | 'rebase', headSha?: string): Promise<void>;
   updateBranch(fullName: string, number: number): Promise<void>;
+  rerunFailedJobs(fullName: string, runIds: number[]): Promise<void>;
   /** Marks a draft PR ready for review. */
   markPullReady(fullName: string, number: number): Promise<void>;
   setSecurityReviewLabel(fullName: string, number: number, present: boolean): Promise<void>;
@@ -79,6 +81,7 @@ export const realBackend: Backend = {
   listIssues: github.listIssues,
   listPulls: github.listPulls,
   createIssue: github.createIssue,
+  closeIssue: github.closeIssue,
   issueState: github.issueState,
   editIssue: github.editIssue,
   issueAccess: github.issueAccess,
@@ -86,6 +89,7 @@ export const realBackend: Backend = {
   findIssuesByMarker: (fullName, marker, since) => github.findIssuesByMarker(fullName, marker, since),
   mergePull: github.mergePull,
   updateBranch: github.updateBranch,
+  rerunFailedJobs: github.rerunFailedJobs,
   markPullReady: github.markPullReady,
   setSecurityReviewLabel: github.setSecurityReviewLabel,
   closePull: github.closePull,

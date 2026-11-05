@@ -1,6 +1,6 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
-import { PerformanceMonitor, type PerformanceMonitorApi } from '@react-three/drei';
+import { DPR, dprSample, dprSettle, newDpr } from './dprControl';
 import { coversView, useStore } from './store';
 
 // Keeping the office cheap to leave open all day: the 3D view stops drawing while a panel hides it or
@@ -48,27 +48,66 @@ export function FrameWhilePaused({ paused }: { paused: boolean }) {
   return null;
 }
 
-// Low/high fps bounds relative to the display's refresh rate, so a 60 Hz screen holding ~55 fps still
-// counts as healthy. The monitor reports the highest rate it has ever measured, and a burst of catch-up
-// frames can overshoot it (and then nothing ever counts as recovered), so snap it to a common display rate.
-function fpsBounds(measured: number): [number, number] {
-  const hz = measured > 130 ? 144 : measured > 100 ? 120 : 60;
-  return [Math.round(hz * 0.6), Math.round(hz * 0.9)];
+// The adaptive resolution's state (its decisions are in dprControl.ts), outside React: a step changes the Canvas's
+// pixel ratio through R3F's own setDpr, so it never re-renders Game and the whole scene under it.
+const dprCap = () => Math.min(MAX_DPR, Math.max(1, window.devicePixelRatio || 1));
+const dprState = newDpr(dprCap());
+// Its max follows the screen the window is on (moving to another monitor); updated in place, no per-sample object.
+const dprConfig = { ...DPR };
+
+/** Pin Canvas's range to the current DPR in place: R3F reads it again on resize without re-rendering Game. */
+export const adaptiveDpr: [number, number] = [dprState.dpr, dprState.dpr];
+
+/**
+ * Lives inside the Canvas. Steps the pixel ratio down toward 1 after sustained slow frames and back up toward
+ * MAX_DPR after sustained headroom, waiting longer after every step up that didn't hold (dprControl.ts): walking
+ * between busy and quiet parts of a floor never bounces it, and it never gives up and stays low all day.
+ */
+export function AdaptiveResolution({ paused }: { paused: boolean }) {
+  const get = useThree((s) => s.get);
+  const onSample = useCallback(
+    (fps: number, ms: number) => {
+      dprConfig.max = dprCap();
+      dprState.dpr = Math.min(dprState.dpr, dprConfig.max);
+      dprSample(dprState, fps, ms, dprConfig);
+      adaptiveDpr[0] = adaptiveDpr[1] = dprState.dpr;
+      const { viewport, setDpr } = get();
+      if (viewport.dpr !== dprState.dpr) setDpr(dprState.dpr);
+    },
+    [get],
+  );
+  const onPause = useCallback(() => dprSettle(dprState, dprConfig), []);
+  return <FrameRateSampler paused={paused} onSample={onSample} onPause={onPause} />;
 }
 
 /**
- * Lives inside the Canvas. Steps the pixel ratio down toward 1 while the frame rate stays low, and
- * back up toward MAX_DPR once it recovers. No flip-flop limit: drei's fallback would stop monitoring and
- * leave the view at its lowest resolution for the rest of the day after one busy spell (a build, a test
- * run). The gap between the low and high bounds keeps it from bouncing between steps.
- *
- * Driven from onIncline/onDecline rather than onChange: drei compares against a `lastFactor` that is
- * reset to 0 on every render, and each step re-renders the Canvas, so the last step down to factor 0
- * looked unchanged and the view got stuck one step above DPR 1.
+ * Lives inside the Canvas: every half second of drawing, `onSample` gets the average fps over it. A pause (panel
+ * open, tab hidden) calls `onPause` and starts a fresh window, so time the view wasn't drawing never counts as slow
+ * frames; a genuinely slow frame (software WebGL) does.
  */
-export function AdaptiveResolution({ onChange }: { onChange: (maxDpr: number) => void }) {
-  const apply = ({ factor }: PerformanceMonitorApi) => onChange(Math.round((1 + (MAX_DPR - 1) * factor) * 100) / 100);
-  return <PerformanceMonitor factor={1} step={0.25} bounds={fpsBounds} onIncline={apply} onDecline={apply} />;
+export function FrameRateSampler({ paused, onSample, onPause }: { paused: boolean; onSample: (fps: number, ms: number) => void; onPause?: () => void }) {
+  const acc = useRef({ start: 0, frames: 0 });
+  useEffect(() => {
+    acc.current.start = 0;
+    if (paused) onPause?.();
+  }, [paused, onPause]);
+  useFrame(() => {
+    if (paused) return; // FrameWhilePaused's one-off frames
+    const now = performance.now();
+    const a = acc.current;
+    if (!a.start) {
+      a.start = now;
+      a.frames = 0;
+      return;
+    }
+    a.frames++;
+    const elapsed = now - a.start;
+    if (elapsed < 500) return;
+    onSample((a.frames * 1000) / elapsed, elapsed);
+    a.start = now;
+    a.frames = 0;
+  });
+  return null;
 }
 
 // The probe inside the Canvas writes straight into this element, so the readout never re-renders React.
@@ -98,7 +137,8 @@ export function StatsProbe({ paused }: { paused: boolean }) {
     // gl.info holds the previous frame's totals (shadow passes included) until this frame renders.
     const { calls, triangles } = gl.info.render;
     const fps = (a.frames * 1000) / elapsed;
-    readoutEl.textContent = `${Math.round(fps)} fps · ${(elapsed / a.frames).toFixed(1)} ms · ${calls} calls · ${fmt(triangles)} tris · dpr ${gl.getPixelRatio().toFixed(2)}`;
+    // Geometries on the GPU: should come back down after leaving a floor, or something isn't freeing its buffers.
+    readoutEl.textContent = `${Math.round(fps)} fps · ${(elapsed / a.frames).toFixed(1)} ms · ${calls} calls · ${fmt(triangles)} tris · ${gl.info.memory.geometries} geo · dpr ${gl.getPixelRatio().toFixed(2)}`;
     a.start = now;
     a.frames = 0;
   });

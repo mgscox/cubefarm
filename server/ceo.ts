@@ -2,6 +2,7 @@ import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@
 import { z } from 'zod';
 import { issueBlockers, forHuman, issueSpecialty, READY_FOR_HUMAN, RESEARCH, setDependsOn, type IssueRef } from '../shared/issues.ts';
 import type { AgentView, CeoJobKind, IssueInfo, PullInfo, QaView } from '../shared/types.ts';
+import { PREVIEW_ENV_MAX_CHARS } from '../shared/previewEnv.ts';
 import { ONE_TURN } from './clis.ts';
 import type { FixReason } from './fixPlan.ts';
 
@@ -35,6 +36,7 @@ export interface OfficeHandlers {
   }): string;
   proposeLetGo(a: { agent_id: string; reason: string }): string;
   fileIssue(a: { floor: number; title: string; body: string; specialty?: string; ready_for_human?: boolean }): Promise<string>;
+  closeIssue(a: { floor: number; number: number; reason: string }): Promise<string>;
   routeIssue(a: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean }): Promise<string>;
   startIssue(a: StartIssueRequest): Promise<string>;
   rerunQa(a: { floor: number; number: number; note?: string }): Promise<string>;
@@ -233,7 +235,7 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
           .object({})
           .catchall(z.string())
           .optional()
-          .describe('Extra environment variables for the preview; {port} and {tmp} are replaced in the values. Replaces the whole set.'),
+          .describe(`Extra environment variables for the preview; {port} and {tmp} are replaced in the values. Replaces the whole set. At most ${PREVIEW_ENV_MAX_CHARS} characters across names and values.`),
       },
       (a) => run(() => h.setFloorProfile(a)),
     ),
@@ -280,6 +282,16 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
         ready_for_human: z.boolean().optional().describe('Reserve this issue for a person at creation'),
       },
       (a) => run(() => h.fileIssue(a)),
+    ),
+    tool(
+      'close_issue',
+      'Close an unwanted or superseded issue as not planned, posting the reason. Refuses closed or unknown issues and issues an open PR closes; resolve that PR first.',
+      {
+        floor: z.number().int(),
+        number: z.number().int().positive(),
+        reason: z.string().trim().min(1).max(1000).describe('Reason posted as an issue comment'),
+      },
+      (a) => run(() => h.closeIssue(a)),
     ),
     tool(
       'route_issue',

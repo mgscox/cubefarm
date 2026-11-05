@@ -411,10 +411,14 @@ export async function listPulls(fullName: string, query: BoardQuery<RawPull[]> =
 // swarm:<specialty> labels route issues to specialists. gh refuses unknown labels, so they're created on first use.
 const labelsMade = new Set<string>();
 
-async function ensureLabel(fullName: string, name: string) {
+export async function ensureLabel(fullName: string, name: string, command: typeof gh = gh) {
   const key = `${fullName}#${name}`;
   if (labelsMade.has(key)) return;
-  await gh(['label', 'create', name, '-R', fullName, '--color', 'c77dff', '--description', 'cubefarm: routed to this specialty', '--force']);
+  try {
+    await command(['label', 'create', name, '-R', fullName, '--color', 'c77dff', '--description', 'cubefarm: routed to this specialty']);
+  } catch (err) {
+    if (!(err instanceof CommandError) || !/already exists/i.test(err.stderr)) throw err;
+  }
   labelsMade.add(key);
 }
 
@@ -436,6 +440,10 @@ export async function issueState(fullName: string, number: number): Promise<'OPE
   } catch {
     return null;
   }
+}
+
+export async function closeIssue(fullName: string, number: number, reason: 'completed' | 'not planned', comment: string, command: typeof gh = gh): Promise<void> {
+  await command(['issue', 'close', String(number), '-R', fullName, '--reason', reason, '--comment', comment]);
 }
 
 /** Replace an issue's title and/or body, and add and remove labels. */
@@ -530,6 +538,13 @@ export async function mergePull(fullName: string, number: number, method: 'squas
 /** Merge the base branch into a PR's branch on GitHub, for repos that only merge up-to-date branches. */
 export async function updateBranch(fullName: string, number: number): Promise<void> {
   await gh(['pr', 'update-branch', String(number), '-R', fullName], { timeoutMs: 60_000 });
+}
+
+/** Retry only the failed jobs in each GitHub Actions run. */
+export async function rerunFailedJobs(fullName: string, runIds: number[]): Promise<void> {
+  for (const id of runIds) {
+    await gh(['run', 'rerun', String(id), '--failed', '-R', fullName], { timeoutMs: 60_000 });
+  }
 }
 
 export async function markPullReady(fullName: string, number: number): Promise<void> {

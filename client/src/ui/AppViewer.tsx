@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { useStore } from '../store';
 import type { PreviewStatus, RepoView } from '../../../shared/types';
+import { PREVIEW_ENV_MAX_CHARS, previewEnvTooBig } from '../../../shared/previewEnv';
 import { Panel } from './Overlays';
 
 const STATUS_LABEL: Record<PreviewStatus, string> = {
@@ -52,7 +53,7 @@ function parseEnv(text: string): { env: Record<string, string>; error: string | 
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return { env, error: `Line ${i + 1}: “${key}” is not a valid variable name.` };
     env[key] = line.slice(eq + 1).trim();
   }
-  return { env, error: null };
+  return { env, error: previewEnvTooBig(env) ? `Preview environment exceeds ${PREVIEW_ENV_MAX_CHARS} characters across names and values.` : null };
 }
 
 export function PreviewSettings({ repo, saveLabel = 'Save', onSaved }: { repo: RepoView; saveLabel?: string; onSaved?: () => void }) {
@@ -97,7 +98,7 @@ export function PreviewSettings({ repo, saveLabel = 'Save', onSaved }: { repo: R
         />
       </label>
       <label className="field">
-        <span>Environment (KEY=value, one per line)</span>
+        <span>Environment (KEY=value, one per line; up to {PREVIEW_ENV_MAX_CHARS} characters across names and values)</span>
         <textarea value={env} onChange={(e) => setEnv(e.target.value)} rows={3} placeholder={'API_URL=http://localhost:{port}/api\nDATA_DIR={tmp}'} spellCheck={false} />
       </label>
       <p className="muted small">

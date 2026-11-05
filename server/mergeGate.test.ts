@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, mergeStep, type MergePull, type MergeRecord } from './mergeGate.ts';
+import { CHECKS_ALERT_MS, CHECK_RERUN_GRACE_MS, MAX_MERGE_FIXES, mergeStep, type MergePull, type MergeRecord } from './mergeGate.ts';
 
 const NOW = 1_800_000_000_000;
 const base = { base: 'main' };
@@ -21,6 +21,8 @@ const record = (r: Partial<MergeRecord> = {}): MergeRecord => ({
   pendingSince: null,
   mergeRetryAt: null,
   alerted: false,
+  checkRerunSha: null,
+  checkRerunAt: null,
   ...r,
 });
 
@@ -120,6 +122,39 @@ describe('mergeStep', () => {
   });
 
   describe('failing checks', () => {
+    it('reruns failed GitHub Actions jobs before spending a merge fix', () => {
+      const pr = pull({ checks: 'failing', failedChecks: [{ name: 'test', url: 'https://github.com/o/r/actions/runs/42/job/9' }] });
+      expect(mergeStep(pr, record(), NOW, base)).toMatchObject({ do: 'rerun', runIds: [42] });
+    });
+
+    it.each(['failing', 'passing', 'pending'] as const)('allows GitHub two minutes to refresh after a rerun even while checks say %s', (checks) => {
+      expect(mergeStep(pull({ checks }), record({ checkRerunSha: 'abc123', checkRerunAt: NOW }), NOW + CHECK_RERUN_GRACE_MS - 1, base))
+        .toMatchObject({ do: 'wait', note: expect.stringContaining('refresh') });
+    });
+
+    it('waits for a running retry beyond the grace, then merges when it passes', () => {
+      const rec = record({ checkRerunSha: 'abc123', checkRerunAt: NOW - CHECK_RERUN_GRACE_MS });
+      expect(mergeStep(pull({ checks: 'pending' }), rec, NOW, base).do).toBe('wait');
+      expect(mergeStep(pull({ checks: 'passing' }), rec, NOW, base).do).toBe('merge');
+    });
+
+    it('retries once again only after a new head passes QA', () => {
+      const pr = pull({ checks: 'failing', failedChecks: [{ name: 'test', url: 'https://github.com/o/r/actions/runs/42' }] });
+      expect(mergeStep(pr, record({ checkRerunSha: 'old-head', checkRerunAt: NOW }), NOW, base)).toMatchObject({ do: 'rerun', runIds: [42] });
+      expect(mergeStep(pr, record({ passedSha: 'old-head' }), NOW, base).do).toBe('requeue');
+    });
+
+    it('keeps unavailable checks and conflicts ahead of retry grace', () => {
+      const rec = record({ checkRerunSha: 'abc123', checkRerunAt: NOW });
+      expect(mergeStep(pull({ checks: 'unavailable' }), rec, NOW, base)).toMatchObject({ do: 'wait', note: expect.stringContaining('checks unavailable') });
+      expect(mergeStep(pull({ mergeState: 'DIRTY' }), rec, NOW, base)).toMatchObject({ do: 'send-back', reason: 'conflict' });
+    });
+
+    it('sends external check failures back without a retryable run ID', () => {
+      expect(mergeStep(pull({ checks: 'failing', failedChecks: [{ name: 'deploy', url: 'https://vercel.com/deploy/42' }] }), record(), NOW, base))
+        .toMatchObject({ do: 'send-back', reason: 'checks' });
+    });
+
     it('lists each failed check with its log URL when there is one', () => {
       const pr = pull({
         checks: 'failing',
@@ -128,7 +163,7 @@ describe('mergeStep', () => {
           { name: 'lint', url: null },
         ],
       });
-      expect(mergeStep(pr, record(), NOW, base)).toEqual({
+      expect(mergeStep(pr, record({ checkRerunSha: pr.headSha, checkRerunAt: NOW - 120_000 }), NOW, base)).toEqual({
         do: 'send-back',
         reason: 'checks',
         instructions: '- check (ubuntu-latest): https://github.com/o/r/actions/runs/1/job/2\n- lint',
