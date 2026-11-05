@@ -22,7 +22,7 @@ import {
   type SessionResult,
 } from './agentRunner.ts';
 import type { OfficeTools } from './ceo.ts';
-import type { AgentTerminal } from './terminal.ts';
+import type { AgentTerminal, NextSession } from './terminal.ts';
 import type { AgentBoot, AgentCli } from '../shared/types.ts';
 
 // One agent session as the real CLI in a pseudo-terminal: the same contract as the Agent SDK runner (log lines, the
@@ -181,7 +181,7 @@ const exitOf = (p: Pty) =>
     setTimeout(resolve, 5000);
   });
 
-/** Close a CLI for good. A Codex thread is archived once its CLI is gone (see codexThread). */
+/** Close a CLI for good; settles once it has exited. A Codex thread is archived after that (see codexThread). */
 function endLive(live: LiveCli): Promise<void> {
   if (lives.get(live.term) !== live) return Promise.resolve();
   lives.delete(live.term);
@@ -189,12 +189,19 @@ function endLive(live: LiveCli): Promise<void> {
   routes.delete(live.token);
   live.term.releaseIdle = null;
   live.term.bind(null);
-  const gone = live.proc ? exitOf(live.proc) : undefined;
+  const exited = live.proc ? exitOf(live.proc) : Promise.resolve();
+  // Shared, so whoever resets the desk next waits for this exit too, whoever closed the CLI.
+  const gone = Promise.all([live.term.closing, exited]).then(() => undefined);
+  live.term.closing = gone;
+  void gone.then(() => {
+    if (live.term.closing === gone) live.term.closing = null;
+  });
   live.proc?.kill();
   live.proc = null;
   live.term.note(`── ${cliLabel(live.cli)} session ended ──`);
   live.host.removeDir(live.dir);
-  return live.cli === 'codex' && live.resumeId ? live.host.codexThread('archive', live.resumeId, gone) : Promise.resolve();
+  if (live.cli === 'codex' && live.resumeId) void live.host.codexThread('archive', live.resumeId, gone).catch(() => undefined);
+  return gone;
 }
 
 /** What the keeper holds with a CLI's terminal, so the office can pick it up again after a restart. */
@@ -249,7 +256,7 @@ function wire(l: LiveCli, office?: OfficeTools) {
 function waitAtPrompt(l: LiveCli, persist = true) {
   clearTimeout(l.idleTimer);
   l.idleTimer = setTimeout(() => endLive(l), IDLE_MS);
-  l.term.releaseIdle = () => endLive(l);
+  l.term.releaseIdle = (next) => (next?.host && adopts(l, next, next.host) ? Promise.resolve() : endLive(l));
   if (persist) remember(l);
 }
 
@@ -328,14 +335,19 @@ function idleHook(live: LiveCli, b: Record<string, unknown>): Record<string, unk
 
 // ---------- the session ----------
 
+/** A session started with `next` on `host` picks up this CLI waiting at its prompt instead of replacing it. */
+function adopts(l: LiveCli, next: NextSession & { reattach?: boolean }, host: CliHost): boolean {
+  if (!l.proc || l.session || l.host !== host) return false;
+  return !!next.reattach || (l.cli === (next.cli ?? 'claude') && !!next.resumeSessionId && l.resumeId === next.resumeSessionId);
+}
+
 /** An agent session in its CLI, which runs on host (the office's own machine unless said otherwise). */
 export function startCliSession(opts: SessionOptions, callbacks: SessionCallbacks, host: CliHost = localCliHost): SessionHandle {
   const term = opts.terminal!;
   // A follow-up to the session a CLI is still waiting in picks that CLI up again, and so does an office that restarted
   // while it worked (reattach); anything else replaces it.
   const prev = lives.get(term);
-  const waiting = !!prev?.proc && !prev.session;
-  const adopt = waiting && prev!.host === host && (!!opts.reattach || (prev!.cli === (opts.cli ?? 'claude') && !!opts.resumeSessionId && prev!.resumeId === opts.resumeSessionId));
+  const adopt = !!prev && adopts(prev, opts, host);
   if (prev && !adopt) endLive(prev);
   let live: LiveCli | null = adopt ? prev! : null;
   const cli = live?.cli ?? opts.cli ?? 'claude';

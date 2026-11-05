@@ -3,6 +3,7 @@ import { PORT } from './config.ts';
 import { HttpError } from './httpError.ts';
 import { PREVIEW_SLUG, portOpen, type PreviewHandle } from './previewRunner.ts';
 import type { PreviewConfig, PreviewStatus, PreviewView, PullInfo } from '../shared/types.ts';
+import { PREVIEW_ENV_MAX_CHARS, previewEnvTooBig } from '../shared/previewEnv.ts';
 
 // One preview per floor: the floor's app, run from its own worktree on a port reserved for the floor.
 // Only the config is persisted; after a restart every preview reads 'stopped'.
@@ -53,14 +54,13 @@ export function parsePreviewPatch(command: unknown, env: unknown): Partial<Previ
     else {
       if (typeof env !== 'object' || Array.isArray(env)) throw new HttpError(400, 'previewEnv must be an object of string values');
       const entries = Object.entries(env as Record<string, unknown>);
-      if (entries.length > 50) throw new HttpError(400, 'previewEnv has too many variables');
       for (const [k, v] of entries) {
         if (typeof v !== 'string') throw new HttpError(400, `previewEnv.${k} must be a string`);
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new HttpError(400, `"${k}" is not a valid environment variable name`);
         if (/^(ANTHROPIC_|CLAUDE)/i.test(k)) throw new HttpError(400, `${k} can't be set on a preview: Claude credentials never reach the apps the office runs`);
-        if (v.length > 4000) throw new HttpError(400, `previewEnv.${k} is too long`);
       }
       out.env = Object.fromEntries(entries) as Record<string, string>;
+      if (previewEnvTooBig(out.env)) throw new HttpError(400, `Preview environment exceeds ${PREVIEW_ENV_MAX_CHARS} characters across names and values.`);
     }
   }
   return out;

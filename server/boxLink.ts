@@ -461,6 +461,7 @@ export function connectBox(opts: BoxOptions): BoxConnection {
       setTimeout(() => cb.finished({ ok: false, text: '', errors: [`${opts.box.name} runs agents in terminals only: switch the office's runtime to terminals.`], costUsd: 0, turns: 0 }), 0);
       return { send: () => undefined, stop: () => undefined };
     },
+    cliHost: link,
     terminals: true,
     detectClis: () => link.call<CliView[]>('detectClis'),
   };

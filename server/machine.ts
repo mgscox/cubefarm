@@ -28,6 +28,8 @@ export interface Machine {
   deskAhead(fullName: string, agentSlug: string, base: string): Promise<number>;
   /** An agent session: the real CLI in the agent's terminal when opts.terminal is set, else an Agent SDK session. */
   startSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle;
+  /** Where startSession runs its terminal CLIs (unset: none run here). */
+  cliHost?: CliHost;
   /** Terminals can run here (the native pseudo-terminal module loaded). */
   terminals: boolean;
   /** The coding-agent CLIs installed here. */

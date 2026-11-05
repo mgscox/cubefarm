@@ -38,14 +38,16 @@ export function useCanvasTexture(w: number, h: number, draw: (ctx: CanvasRenderi
     ctx.clearRect(0, 0, w, h);
     draw(ctx);
     tex.needsUpdate = true;
-    // web fonts may arrive after the first paint
+    // web fonts may arrive after the first paint; once they're in, `ready` resolves at once and would paint twice
     let alive = true;
-    document.fonts?.ready.then(() => {
-      if (!alive) return;
-      ctx.clearRect(0, 0, w, h);
-      draw(ctx);
-      tex.needsUpdate = true;
-    });
+    if (document.fonts && document.fonts.status !== 'loaded') {
+      void document.fonts.ready.then(() => {
+        if (!alive) return;
+        ctx.clearRect(0, 0, w, h);
+        draw(ctx);
+        tex.needsUpdate = true;
+      });
+    }
     return () => {
       alive = false;
     };

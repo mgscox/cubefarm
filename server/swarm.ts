@@ -17,8 +17,9 @@ import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, readConfigEnv, SCHEDULER_INTE
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type MergePrRequest, type OfficeTools, type ParkPrRequest, type ResearchRequest, type StartIssueRequest } from './ceo.ts';
 import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
-import { issueHolder, duplicateIssueSessions } from './issueClaims.ts';
+import { issueHolder, duplicateIssueSessions, issueTaken } from './issueClaims.ts';
 import { orphanedQa } from './qaOwnership.ts';
+import { closedWork, closedWorkText, issueClosed, type ClosedWork } from './closedWork.ts';
 import { startTimeouts, stuckStarting } from './sessionStart.ts';
 import { withOperation } from './operation.ts';
 import { QA_RESUME_PROMPT, qaRetry } from './qaRetry.ts';
@@ -36,6 +37,7 @@ import { createDemoProposalWorker, demoHandoff } from './proposalFixture.ts';
 import { demoProposalRecords, demoReview, isReviewFixture } from './demoIdeaReview.ts';
 import { currentRound, nextStep, pickReviewers, promote, recordReview, REVIEW_FOCUSES, reviseRound, startReview } from '../shared/ideaReview.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
+import { qaOutcome } from './qaOutcome.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
 import { pickRequestedStart, retainRequestedStarts } from './requestedStarts.ts';
@@ -46,7 +48,7 @@ import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type La
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
-import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH, RESEARCH_BRANCH } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
 import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
@@ -185,6 +187,8 @@ interface QaRecord extends QaView {
   pendingSince: number | null; // when auto-merge started waiting on its checks
   mergeRetryAt: number | null; // GitHub refused the merge: try again after this
   alerted: boolean; // the manager has been told it's stuck
+  checkRerunSha: string | null;
+  checkRerunAt: number | null;
 }
 
 type PrepJob = { rec: QaRecord; task: 'qa' } | { rec: QaRecord; task: 'fix'; author: string | null };
@@ -550,6 +554,7 @@ export class Swarm {
       proposeHire: (a) => this.proposeHire(a),
       proposeLetGo: (a) => this.proposeLetGo(a),
       fileIssue: (a) => this.fileIssue(a),
+      closeIssue: (a) => this.closeIssue(a),
       routeIssue: (a) => this.routeIssue(a),
       startIssue: (a) => this.startIssue(a),
       rerunQa: (a) => this.rerunQa(a),
@@ -688,6 +693,8 @@ export class Swarm {
           pendingSince: q.pendingSince ?? null,
           mergeRetryAt: q.mergeRetryAt ?? null,
           alerted: q.alerted ?? false,
+          checkRerunSha: q.checkRerunSha ?? null,
+          checkRerunAt: q.checkRerunAt ?? null,
           // Merge progress is re-read after a restart; why a PR needs the manager isn't.
           mergeNote: q.status === 'needs-human' ? (q.mergeNote ?? null) : null,
         })),
@@ -972,6 +979,8 @@ export class Swarm {
       checks: q.checks,
       commentUrl: q.commentUrl,
       mergeNote: q.mergeNote,
+      checkRerunSha: q.checkRerunSha,
+      checkRerunAt: q.checkRerunAt,
       rerunNote: q.rerunNote,
       preparation: q.preparation,
       updatedAt: q.updatedAt,
@@ -1826,11 +1835,15 @@ export class Swarm {
     a.lastError = error;
     session?.stop();
     rt.terminal?.releaseIdle?.();
+    const idle = rt.terminal?.closing;
     // Cleanup is bounded independently; a silent box must never hold a freed agent's slot.
     const cleanup = new AbortController();
     const timer = setTimeout(() => cleanup.abort(new Error('Desk cleanup timed out')), startTimeouts().preparing);
     timer.unref();
-    void withOperation(cleanup.signal, () => machine.releaseDesk(repo.fullName, slug, this.port(a)))
+    void withOperation(cleanup.signal, async () => {
+      await idle;
+      await machine.releaseDesk(repo.fullName, slug, this.port(a));
+    })
       .catch(() => undefined).finally(() => clearTimeout(timer));
     this.emitAgent(a);
     this.save();
@@ -2104,6 +2117,11 @@ export class Swarm {
     }
     if (this.holdForSecurityReview(repo, rec, pr, false)) return false;
     if (hasLabel(pr.labels, NEEDS_REVIEW) && step.do !== 'ready') return false;
+    if (step.do === 'rerun') {
+      this.setQa(rec, { checkRerunSha: pr.headSha, checkRerunAt: Date.now(), pendingSince: null, mergeNote: 're-running failed checks once' });
+      await this.backend.rerunFailedJobs(repo.fullName, step.runIds);
+      return false;
+    }
     if (step.do === 'send-back') return this.sendBack(repo, rec, step.reason, step.instructions, step.needsHuman);
     if (step.do === 'wait') {
       if (step.alert) {
@@ -2169,6 +2187,7 @@ export class Swarm {
       return this.mergeNote(rec, `merge blocked: ${error}`);
     }
     this.toast('success', `🔀 Merged PR #${pr.number} into ${repo.defaultBranch}: ${pr.title}`);
+    await this.closeResolvedIssues(repo, pr.number, latest.closesIssues);
     return true;
   }
 
@@ -2332,6 +2351,7 @@ export class Swarm {
       const pulls = pullResult.value.pulls;
       rt.fetchedAt = started;
       this.reconcilePulls(repo, pulls);
+      await this.stopClosedWork(repo, issues.status === 'fulfilled' ? issues.value : null, pulls);
       await this.pruneUnlistedQa(repo, pulls);
       // Something was merged since the last look (by the office or anyone else): bring the folder up to date.
       const newest = pulls.reduce<string | null>((m, p) => (p.mergedAt && (!m || p.mergedAt > m) ? p.mergedAt : m), null);
@@ -2408,6 +2428,52 @@ export class Swarm {
     this.broadcast({ type: 'qaRemoved', repoId: rec.repoId, prNumber: rec.prNumber });
   }
 
+  /** Stop busy sessions whose issue closed or whose PR closed unmerged. A missing issue or PR is read back first. */
+  private async stopClosedWork(repo: PersistedRepo, issues: IssueInfo[] | null, pulls: PullInfo[]) {
+    const floor = {
+      pulls,
+      openIssues: issues && new Set(issues.map((i) => i.number)),
+      parkedPrs: new Set((repo.parkedBranches ?? []).map((p) => p.prNumber)),
+    };
+    for (const a of this.state.agents.filter((x) => x.repoId === repo.id)) {
+      let work = closedWork(a, floor);
+      if (!work) continue;
+      const generation = this.agentRt.get(a.id)?.generation;
+      if (work.kind === 'pr' && !pulls.some((p) => p.number === work!.number)) {
+        // Unlisted: read it, then ask again with it listed, so an open PR still lets a closed issue stop an issue task.
+        const state = await this.backend.prDetails(repo.fullName, work.number).then((d) => d.state, () => null);
+        if (!state) continue;
+        work = closedWork(a, { ...floor, pulls: [...pulls, { number: work.number, state }] });
+        if (!work) continue;
+      }
+      if (work.kind === 'issue' && !issueClosed(await this.backend.readIssue(repo.fullName, work.number).catch(() => null))) continue;
+      if (!this.state.agents.includes(a) || this.agentRt.get(a.id)?.generation !== generation) continue; // moved on meanwhile
+      this.endClosedWork(a, repo, work, `■ Stopped: ${closedWorkText(work)}. Ready for new work.`);
+      this.postMessage('office', `■ Stopped ${a.name} on ${repo.fullName}: ${closedWorkText(work)}.`);
+    }
+  }
+
+  /** End an agent's task on closed work: its session, its desk and the QA record it was testing or fixing. */
+  private endClosedWork(a: PersistedAgent, repo: PersistedRepo, work: ClosedWork, log: string, prState: 'CLOSED' | 'MERGED' = 'CLOSED') {
+    const rt = this.agentRt.get(a.id);
+    const session = rt?.session;
+    if (rt) rt.session = null;
+    const rec = work.kind === 'pr' && this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === work.number && !q.closed &&
+      ((q.status === 'testing' && q.qaAgentId === a.id) || (q.status === 'fixing' && q.devAgentId === a.id)));
+    if (rec) {
+      // A kept record (it holds a security review) must not look in progress, or it would read as orphaned QA.
+      Object.assign(rec, { status: 'queued', qaAgentId: null });
+      this.closeQaRecord(rec, prState);
+    }
+    this.appendLog(a, [{ kind: 'system', text: log }]);
+    this.clearTask(a); // revokes the session's callbacks and any desk preparation in flight
+    a.sessionId = null;
+    this.state.deferredResumes = this.state.deferredResumes.filter((id) => id !== a.id);
+    session?.stop();
+    rt?.terminal?.releaseIdle?.();
+    this.save();
+  }
+
   /**
    * The sync only lists open and recently merged PRs, so a record whose PR merged or closed a while ago never shows up
    * finished there. Ask GitHub about each one; a failed lookup keeps the record for the next sync. The first sync after
@@ -2426,6 +2492,14 @@ export class Swarm {
       removed = true;
     });
     if (removed) this.save();
+  }
+
+  /** Demo only: close an issue on the fake GitHub as if someone did it there, then sync to show its session stopping. */
+  async closeDemoIssue(repoId: string, number: number) {
+    if (!this.backend.demo) throw new HttpError(404, 'Closing issues this way is only available in the demo office');
+    const repo = this.repo(repoId);
+    await this.backend.closeIssue(repo.fullName, number, 'not planned', 'Closed in the demo.').catch((err) => { throw new HttpError(404, (err as Error).message); });
+    await this.syncRepo(repo.id);
   }
 
   async createIssue(repoId: string, title: string, body: string, assignTo?: string, specialty?: string) {
@@ -2532,6 +2606,7 @@ export class Swarm {
       if (approval) await this.backend.mergePull(repo.fullName, number, method, headSha);
       else if (rec?.securityReview) await this.backend.mergePull(repo.fullName, number, method, pr.headSha);
       else await this.backend.mergePull(repo.fullName, number, method);
+      await this.closeResolvedIssues(repo, number, pr.closesIssues);
       if (approval) rt.parking = false; // The normal refresh reconciles merged agents and removes QA.
       this.toast('success', `Merged PR #${number} into ${repo.defaultBranch}`);
       await this.syncRepo(repo.id);
@@ -2547,6 +2622,21 @@ export class Swarm {
     if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');
     await this.backend.closePull(repo.fullName, number);
     await this.syncRepo(repo.id);
+  }
+
+  /** Closing failures must not turn a successful merge into a failed merge attempt. */
+  private async closeResolvedIssues(repo: PersistedRepo, prNumber: number, issues: number[]) {
+    const rt = this.repoRt.get(repo.id)!;
+    rt.pulls = rt.pulls.map((p) => p.number === prNumber ? { ...p, state: 'MERGED', mergedAt: new Date().toISOString() } : p);
+    for (const number of new Set(issues)) {
+      try {
+        await this.backend.closeIssue(repo.fullName, number, 'completed', `Completed by PR #${prNumber}.\n\n${AGENT_COMMENT_MARKER}`);
+        rt.issues = rt.issues.filter((i) => i.number !== number);
+      } catch (err) {
+        this.postMessage('office', `PR #${prNumber} merged on ${repo.fullName}, but closing issue #${number} failed: ${oneLine(err)}. Close it as completed on GitHub.`);
+      }
+    }
+    this.emitRepo(repo);
   }
 
   // ---------- agents ----------
@@ -2688,6 +2778,7 @@ export class Swarm {
     this.abandonIdeaResearch(a);
     this.agentRt.get(id)?.session?.stop();
     this.agentRt.get(id)?.terminal?.releaseIdle?.();
+    const idle = this.agentRt.get(id)?.terminal?.closing;
     this.agentRt.get(id)?.terminal?.dispose();
     void removeScreens(id);
     void fs.rm(terminalFile(id), { force: true }).catch(() => undefined);
@@ -2700,8 +2791,8 @@ export class Swarm {
     if (repo) {
       const slug = this.agentSlug(a);
       const machine = this.machineFor(a);
-      void machine
-        .releaseDesk(repo.fullName, slug, this.port(a))
+      void Promise.resolve(idle)
+        .then(() => machine.releaseDesk(repo.fullName, slug, this.port(a)))
         .then(() => machine.removeDesk(repo.fullName, slug))
         .catch(() => undefined);
     }
@@ -2818,9 +2909,7 @@ export class Swarm {
   }
 
   private issueTaken(repo: PersistedRepo, n: number) {
-    if (this.state.agents.some((a) => a.repoId === repo.id && (a.role === 'dev' || a.role === 'researcher') && a.task !== 'qa' && a.issueNumber === n && (a.heldRetry || (a.status !== 'idle' && a.status !== 'error')))) return true;
-    const pulls = this.repoRt.get(repo.id)?.pulls ?? [];
-    return pulls.some((p) => p.state === 'OPEN' && (p.closesIssues.includes(n) || p.headRefName.startsWith(`swarm/issue-${n}-`) || p.headRefName.startsWith(`${RESEARCH_BRANCH}${n}-`)));
+    return issueTaken(this.state.agents, repo.id, n, this.repoRt.get(repo.id)?.pulls ?? [], Date.now());
   }
 
   private ensureSlot() {
@@ -3049,16 +3138,29 @@ export class Swarm {
         if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') await this.cloneRepo(repo.id);
         if (gone()) return null;
         // A fix round for the PR's own author stays on the desk with their conversation; anything else is a new task.
-        const where = this.place(a, job?.task === 'fix' && job.author === a.id ? 'within' : 'new');
+        const within = job?.task === 'fix' && job.author === a.id;
+        const where = this.place(a, within ? 'within' : 'new');
         if ('wait' in where) throw new Error(`Waiting: ${this.waitReason(where)}.`);
         if (where.fellBack) this.appendLog(a, [{ kind: 'system', text: `ℹ ${this.boxName(where.fellBack)} was removed: this task runs on the office's machine.` }]);
         const rt = this.agentRt.get(a.id);
-        if (rt) rt.deskMoved = where.box !== a.deskBox;
-        if (where.box !== a.deskBox) {
+        const moved = where.box !== a.deskBox;
+        if (rt) rt.deskMoved = moved;
+        if (moved) {
           a.deskBox = where.box;
           this.emitAgent(a);
         }
         if (where.box) this.appendLog(a, [{ kind: 'system', text: `🖥 Working on ${this.boxName(where.box)}.` }]);
+        // The CLI waiting at their prompt has the desk as its working directory, and Windows can't reset a folder a
+        // process is in: close it and wait for it, and for any CLI already closing there, to exit. Only the author's
+        // fix round that resumes that CLI's own conversation (prepareFix) picks it up again.
+        const term = rt?.terminal;
+        if (term?.releaseIdle) {
+          const resume = within && !moved ? job.rec.devSessionId ?? undefined : undefined;
+          const how = resume ? this.sessionRuntime(a, resume) : null;
+          await term.releaseIdle(how?.resumeSessionId ? { cli: how.cli, resumeSessionId: how.resumeSessionId, host: this.machineFor(a).cliHost } : undefined);
+        }
+        await term?.closing;
+        if (gone()) return null;
         await this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
         if (gone()) return null;
         const cwd = await this.machineFor(a).prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch, (text) => { if (!gone()) this.appendLog(a, [{ kind: 'system', text }]); });
@@ -3112,6 +3214,7 @@ export class Swarm {
   private async prepareTask(a: PersistedAgent, repo: PersistedRepo, issue: IssueInfo, note?: string) {
     const research = a.role === 'researcher';
     const branch = a.branch!;
+    if (await this.closedBeforeStart(a, repo, { kind: 'issue', number: issue.number })) return;
     const cwd = await this.prepare(a, repo, {}, branch);
     if (!cwd) return;
 
@@ -3128,6 +3231,29 @@ export class Swarm {
       .join('\n');
 
     await this.startAgentSession(a, repo, cwd, prompt, this.buildSystemAppend(a, repo, cwd, branch));
+  }
+
+  /**
+   * Re-read the work just before its desk is prepared: it may have closed since the last sync. Returns true when the
+   * caller must not go on: the work is closed (the task is cleared), or the agent was removed or moved on to another
+   * task while GitHub answered. A failed read lets the work go ahead.
+   */
+  private async closedBeforeStart(a: PersistedAgent, repo: PersistedRepo, work: ClosedWork) {
+    const generation = this.agentRt.get(a.id)?.generation;
+    const state = await (work.kind === 'issue'
+      ? this.backend.readIssue(repo.fullName, work.number).then((i) => (issueClosed(i) ? 'CLOSED' : 'OPEN'))
+      : this.backend.prDetails(repo.fullName, work.number).then((d) => d.state)
+    ).catch(() => 'OPEN' as const);
+    if (!this.state.agents.includes(a) || a.status !== 'preparing' || this.agentRt.get(a.id)?.generation !== generation) return true;
+    if (state === 'OPEN') return false;
+    // Until the next sync, the scheduler must not hand the same closed work out again.
+    const rt = this.repoRt.get(repo.id);
+    if (rt && work.kind === 'issue') rt.issues = rt.issues.filter((i) => i.number !== work.number);
+    if (rt && work.kind === 'pr') rt.pulls = rt.pulls.map((p) => (p.number === work.number ? { ...p, state } : p));
+    const text = work.kind === 'issue' ? `issue #${work.number} is closed` : `PR #${work.number} is ${state === 'MERGED' ? 'merged' : 'closed'}`;
+    this.endClosedWork(a, repo, work, `⏹ Not starting: ${text}.`, state);
+    this.emitRepo(repo);
+    return true;
   }
 
   private async startAgentSession(
@@ -3550,6 +3676,8 @@ export class Swarm {
         pendingSince: null,
         mergeRetryAt: null,
         alerted: false,
+        checkRerunSha: null,
+        checkRerunAt: null,
       };
       this.state.qa.push(rec);
       this.setQa(rec, {});
@@ -3607,6 +3735,7 @@ export class Swarm {
       `Your worktree: ${cwd}. It has the pull request's code at HEAD (local branch ${branch}, or detached if another worktree holds it).`,
       '',
       'How to test:',
+      `A conflict with ${repo.defaultBranch} is not a QA fail. Test the PR's head; the office sends conflicts to a developer before merging.`,
       '1. Read the PR description and the linked issue, and work out the acceptance criteria.',
       `2. Review the code as a careful reviewer would: git diff origin/${repo.defaultBranch}...HEAD. Look for bugs, unhandled errors and edge cases, security problems, leftover debug code, and new logic without tests.`,
       "3. Install dependencies if needed, then run the project's test suite, linters, type checks and build (whichever exist).",
@@ -3720,7 +3849,7 @@ export class Swarm {
       `URL: ${pr.url}`,
       `Author: ${dev ? `${dev.name} (developer agent)` : 'a teammate'} · QA round ${rec.round}`,
       rec.rerunNote?.round === rec.round ? `Note from the manager: ${rec.rerunNote.text}` : '',
-      rec.fixReason === 'conflict'
+      rec.fixReason === 'conflict' && rec.passedSha
         ? `\nQA passed it before, but since then the branch was updated with ${repo.defaultBranch} to resolve merge conflicts. Re-check everything, especially where this change meets the newly merged work.`
         : rec.fixReason === 'checks'
           ? '\nQA passed it before, but since then the developer changed the code to fix failing GitHub checks. Re-check everything.'
@@ -3858,6 +3987,19 @@ export class Swarm {
         }
         a.status = 'done';
       };
+      const qaRounds = rec.round - rec.retests; // rounds QA itself asked for
+      let conflict: PrDetails | null = null;
+      if (!security && !pass && !incomplete && !escalate && qaRounds >= MAX_QA_ROUNDS && rec.mergeFixes < MAX_MERGE_FIXES) {
+        try {
+          const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
+          if (gone()) return;
+          if (pr.state === 'OPEN' && pr.headSha === rec.testedSha) conflict = pr;
+        } catch (err) {
+          this.appendLog(a, [{ kind: 'error', text: `Could not check for a merge conflict: ${oneLine(err)}` }]);
+        }
+      }
+      if (gone()) return;
+      const outcome = () => qaOutcome({ pass, incomplete, escalate, security, qaRounds, mergeFixes: rec.mergeFixes }, conflict, MAX_QA_ROUNDS);
       try {
         if (security) {
           const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
@@ -3865,7 +4007,7 @@ export class Swarm {
           if (!isCurrentAudit(pr)) return handBackStaleAudit(pr);
         }
         this.appendLog(a, [{ kind: 'system', text: '📎 Uploading evidence and posting the QA report on the PR…' }]);
-        const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security);
+        const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security, outcome().conflictFix);
         if (gone()) return;
         commentUrl = (await this.backend.commentPull(repo.fullName, rec.prNumber, body)) || null;
         if (gone()) return;
@@ -3893,16 +4035,17 @@ export class Swarm {
           report.summary = `Could not finish the security review handoff: ${oneLine(err)}`;
         }
       }
-      const qaRounds = rec.round - rec.retests; // rounds QA itself asked for
-      const nextStatus = escalate ? 'queued' : pass ? 'passed' : incomplete || qaRounds >= MAX_QA_ROUNDS ? 'needs-human' : 'failed';
+      const { status: nextStatus, conflictFix } = outcome();
+      const findings = report.fixInstructions ?? report.checks.filter((c) => c.result === 'fail').map((c) => `${c.name}: ${c.details}`).join('\n');
       this.setQa(rec, {
         status: nextStatus,
         summary: report.summary,
         checks: report.checks,
         commentUrl: commentUrl ?? rec.commentUrl,
-        fixInstructions: report.fixInstructions ?? report.checks.filter((c) => c.result === 'fail').map((c) => `${c.name}: ${c.details}`).join('\n'),
+        fixInstructions: conflictFix ? `It conflicts with ${repo.defaultBranch}.\n${findings}` : findings,
         sessionFailures: 0,
-        fixReason: pass || incomplete ? null : 'qa',
+        fixReason: pass || incomplete ? null : conflictFix ? 'conflict' : 'qa',
+        ...(conflictFix ? { mergeFixes: rec.mergeFixes + 1 } : {}),
         passedSha: pass && !escalate ? rec.testedSha : null,
         failedSha: pass || incomplete ? null : rec.testedSha,
         securityReview: security && pass && rec.testedSha ? { ...review, approvedSha: rec.testedSha } : rec.securityReview,
@@ -3937,7 +4080,7 @@ export class Swarm {
     this.toast('info', `PR #${rec.prNumber} is unchanged since QA failed it: ${human ? 'it needs a human' : 'back to a developer, no re-test'}`);
   }
 
-  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[], security = false) {
+  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[], security = false, conflictFix = false) {
     const pass = report.verdict === 'pass';
     const images: string[] = [];
     const evidence = shots.slice(-8);
@@ -3977,7 +4120,8 @@ export class Swarm {
     const merge = repo.autoMerge ? "merges automatically once GitHub's checks pass" : 'ready for the manager to merge';
     const next = security && pass ? 'audit result applies to the cited revision. CubeFarm verifies it before clearing the merge hold'
       : !security && pass && (report.securityReviewReason || rec.securityReview) ? 'waiting for detailed security review'
-      : pass ? merge : report.verdict === 'incomplete' || rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes';
+      : pass ? merge : conflictFix ? 'sent back to the developer to resolve the conflict and address QA findings'
+      : report.verdict === 'incomplete' || rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes';
     lines.push('', `<sub>Posted by cubefarm · ${next}</sub>`);
     return lines.join('\n');
   }
@@ -4004,6 +4148,7 @@ export class Swarm {
     );
     this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
     const generation = this.agentRt.get(dev.id)?.generation;
+    if (await this.closedBeforeStart(dev, repo, { kind: 'pr', number: rec.prNumber })) return;
     const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, headRef, { rec, task: 'fix', author });
     if (this.agentRt.get(dev.id)?.generation !== generation) return;
     if (!cwd) {
@@ -6017,6 +6162,23 @@ export class Swarm {
     const n = await this.backend.createIssue(repo.fullName, title, body, labels);
     this.ceoIssues.record(repo.id);
     return `Filed #${n}${x.ready_for_human ? ' for a person' : ''} on floor ${repo.floor}: ${title}${slug ? ` (routed to ${slug})` : ''}.`;
+  }
+
+  private async closeIssue(x: { floor: number; number: number; reason: string }) {
+    const repo = this.floorRepo(x.floor);
+    const reason = x.reason.trim();
+    if (!reason || reason.length > 1000) throw new Error('Give a short closing reason (1–1000 characters).');
+    const issue = await this.backend.readIssue(repo.fullName, x.number);
+    if (!issue) throw new Error(`Unknown issue #${x.number} on floor ${repo.floor}. Check company_status for open issues.`);
+    if (issue.state === 'CLOSED') throw new Error(`Issue #${x.number} is already closed. Check company_status for open issues.`);
+    const { pulls } = await this.backend.listPulls(repo.fullName);
+    const pr = pulls.find((p) => p.state === 'OPEN' && p.closesIssues.includes(x.number));
+    if (pr) throw new Error(`Open PR #${pr.number} closes #${x.number}. Merge or park that PR first.`);
+    await this.backend.closeIssue(repo.fullName, x.number, 'not planned', `${reason}\n\n${AGENT_COMMENT_MARKER}`);
+    const rt = this.repoRt.get(repo.id)!;
+    rt.issues = rt.issues.filter((i) => i.number !== x.number);
+    this.emitRepo(repo);
+    return `Closed #${x.number} on floor ${repo.floor} as not planned: ${reason}`;
   }
 
   /** Explicit manager instruction through the CEO, pinned to the last QA head. */

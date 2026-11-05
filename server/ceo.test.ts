@@ -80,6 +80,10 @@ describe('office tools', () => {
       proposeHire: () => '',
       proposeLetGo: () => '',
       fileIssue,
+      closeIssue: async (a) => {
+        if (a.number === 14) throw new Error('Open PR #15 closes #14. Merge or park that PR first.');
+        return `closed #${a.number}: ${a.reason}`;
+      },
       routeIssue: async () => '',
       startIssue,
       rerunQa,
@@ -98,7 +102,17 @@ describe('office tools', () => {
   it('lists every tool the CEO relies on', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'company_status', 'file_issue', 'merge_pr', 'park_pr', 'propose_hire', 'propose_let_go', 'request_research', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'close_issue', 'company_status', 'file_issue', 'merge_pr', 'park_pr', 'propose_hire', 'propose_let_go', 'request_research', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+  });
+
+  it('validates closing arguments and reports the blocking PR', async () => {
+    const { client } = await connect();
+    const args = { floor: 1, number: 13, reason: 'Superseded by #16' };
+    expect(await client.callTool({ name: 'close_issue', arguments: { ...args, reason: `  ${args.reason}  ` } })).toMatchObject({ content: [{ text: 'closed #13: Superseded by #16' }] });
+    for (const invalid of [{ floor: 1, number: 13 }, { ...args, floor: 1.5 }, { ...args, number: 0 }, { ...args, reason: ' ' }, { ...args, reason: 'x'.repeat(1001) }]) {
+      expect(await client.callTool({ name: 'close_issue', arguments: invalid })).toMatchObject({ isError: true });
+    }
+    expect(await client.callTool({ name: 'close_issue', arguments: { ...args, number: 14 } })).toMatchObject({ isError: true, content: [{ text: 'Refused: Open PR #15 closes #14. Merge or park that PR first.' }] });
   });
 
   it('validates merge arguments and surfaces actionable refusals', async () => {

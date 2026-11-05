@@ -1,7 +1,37 @@
 import { describe, expect, it } from 'vitest';
-import { duplicateIssueSessions, issueHolder } from './issueClaims.ts';
+import { duplicateIssueSessions, issueHolder, issueTaken } from './issueClaims.ts';
 
 const agent = (id: string) => ({ id, repoId: 'r1', role: 'dev' as const, task: 'issue' as const, status: 'working' as const, issueNumber: 66, prNumber: null as number | null, startedAt: 100 });
+
+describe('issueTaken', () => {
+  const now = Date.parse('2026-11-04T12:00:00Z');
+  it.each([
+    { closesIssues: [66], headRefName: 'feature' },
+    { closesIssues: [], headRefName: 'swarm/issue-66-ada' },
+    { closesIssues: [], headRefName: 'swarm/research-66-hypatia' },
+  ])('holds recently merged work: %j', (link) => {
+    const pull = { ...link, state: 'MERGED' as const, mergedAt: '2026-11-04T11:59:00Z' };
+    expect(issueTaken([], 'r1', 66, [pull], now)).toBe(true);
+    expect(issueTaken([], 'r1', 66, [{ ...pull, state: 'OPEN', mergedAt: null }], now)).toBe(true);
+    expect(issueTaken([], 'r1', 66, [{ ...pull, state: 'CLOSED' }], now)).toBe(false);
+    expect(issueTaken([], 'r1', 66, [{ ...pull, mergedAt: null }], now)).toBe(false);
+    expect(issueTaken([], 'r1', 66, [{ ...pull, mergedAt: 'invalid' }], now)).toBe(false);
+    expect(issueTaken([], 'r1', 66, [{ ...pull, mergedAt: '2026-11-04T06:00:01Z' }], now)).toBe(true);
+    expect(issueTaken([], 'r1', 66, [{ ...pull, mergedAt: '2026-11-04T06:00:00Z' }], now)).toBe(false);
+    expect(issueTaken([], 'r1', 6, [pull], now)).toBe(false);
+  });
+
+  it('keeps researcher sessions and held retries, excluding QA and other floors', () => {
+    const a = agent('a');
+    expect(issueTaken([{ ...a, role: 'researcher' }], 'r1', 66, [], now)).toBe(true);
+    expect(issueTaken([{ ...a, status: 'error', heldRetry: {} }], 'r1', 66, [], now)).toBe(true);
+    expect(issueTaken([{ ...a, status: 'idle' }], 'r1', 66, [], now)).toBe(false);
+    expect(issueTaken([{ ...a, status: 'error' }], 'r1', 66, [], now)).toBe(false);
+    expect(issueTaken([{ ...a, role: 'qa' }], 'r1', 66, [], now)).toBe(false);
+    expect(issueTaken([{ ...a, task: 'qa' }], 'r1', 66, [], now)).toBe(false);
+    expect(issueTaken([a], 'r2', 66, [], now)).toBe(false);
+  });
+});
 
 describe('issue claims', () => {
   it('counts fixes and held retries, excludes QA, free desks, other floors and the caller', () => {

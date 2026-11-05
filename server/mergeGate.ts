@@ -1,10 +1,12 @@
 import type { PullInfo } from '../shared/types.ts';
+import { failedRunIds } from './checkRuns.ts';
 
 // Auto-merge: fixes for failing checks or conflicts before a PR needs the manager, how long checks may run before
 // the manager hears about it, and how long to wait before retrying a merge GitHub refused.
 export const MAX_MERGE_FIXES = 3;
 export const CHECKS_ALERT_MS = 30 * 60_000;
 export const MERGE_RETRY_MS = 10 * 60_000;
+export const CHECK_RERUN_GRACE_MS = 2 * 60_000;
 
 /** The parts of a QA record the merge gate reads. */
 export interface MergeRecord {
@@ -13,6 +15,8 @@ export interface MergeRecord {
   pendingSince: number | null;
   mergeRetryAt: number | null;
   alerted: boolean;
+  checkRerunSha: string | null;
+  checkRerunAt: number | null;
 }
 
 /** Bookkeeping the caller writes onto the record as it is (it doesn't count as a change to the record). */
@@ -25,6 +29,7 @@ export type MergeStep = { set: MergeBookkeeping } & (
   | { do: 'wait'; note?: string; alert?: boolean } // no note: leave the card as it is; alert: tell the manager checks are slow
   | { do: 'details' } // GitHub hasn't worked out mergeability: ask about the PR itself, then decide again with `detailed`
   | { do: 'requeue' } // commits arrived after QA's sign-off: QA tests them too
+  | { do: 'rerun'; runIds: number[] }
   | { do: 'send-back'; reason: 'checks' | 'conflict'; instructions: string; needsHuman: boolean } // needsHuman: the fix budget ran out
   | { do: 'update-branch' } // the repo only merges up-to-date branches
   | { do: 'ready' } // still a draft although QA passed it: mark it ready for review, then carry on
@@ -51,7 +56,12 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
     set.pendingSince = null;
     return { do: 'wait', note: 'checks unavailable: restore GitHub check access before merging', set };
   }
+  if (rec.checkRerunSha === pr.headSha && rec.checkRerunAt != null && now - rec.checkRerunAt < CHECK_RERUN_GRACE_MS) {
+    return { do: 'wait', note: 'waiting for re-run checks to refresh', set };
+  }
   if (pr.checks === 'failing') {
+    const runIds = failedRunIds(pr.failedChecks);
+    if (rec.checkRerunSha !== pr.headSha && runIds.length) return { do: 'rerun', runIds, set };
     const instructions = pr.failedChecks.map((c) => `- ${c.name}${c.url ? `: ${c.url}` : ''}`).join('\n');
     return { do: 'send-back', reason: 'checks', instructions, needsHuman, set };
   }
