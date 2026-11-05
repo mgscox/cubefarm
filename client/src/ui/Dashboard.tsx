@@ -188,12 +188,13 @@ export function Dashboard({ onOffice }: { onOffice: () => void }) {
         </header>
 
         <OfficeNotices />
-        {!repo && <WorkersPanel dashboard />}
 
         {pane === 'kanban' && repo ? (
           <KanbanView key={repo.id} repoId={repo.id} inline />
-        ) : team.length ? (
+        ) : team.length || !repo ? (
           <div className={`dashboard-terminals${focused ? ' dashboard-expanded' : ''}`}>
+            {/* The Lobby's work list is the grid's first card, so a long list scrolls inside it instead of pushing terminals down. */}
+            {!repo && !focused && <WorkersPanel dashboard />}
             {(focused ? [focused] : team).map((agent) => (
               <AgentTile key={agent.id} agent={agent} expanded={focused?.id === agent.id} toggle={() => setExpanded(focused ? null : agent.id)} />
             ))}
