@@ -47,7 +47,7 @@ it('phone flow isolates official setup-token, accepts one code, and saves only a
   expect(f.auth.view()).toMatchObject({ phase: 'awaiting-code', authorizationUrl: url });
   const id = start!.flowId!;
   expect(await f.auth.submitCode(id, 'dummy-code_123#dummy-state_456')).toMatchObject({ phase: 'exchanging', authorizationUrl: null });
-  expect(f.writes).toEqual(['dummy-code_123#dummy-state_456\r']);
+  expect(f.writes).toEqual(['dummy-code_123#dummy-state_456', '\r']);
   expect(await f.auth.submitCode(id, 'dummy-code_123')).toBeNull();
   f.data('Long-lived authentication token created successfully!\r\nYour OAuth token (valid for 1 year):\r\n' + token + '\r\nStore this token securely.');
   expect(fs.existsSync(path.join(f.home, 'credentials'))).toBe(false);
@@ -214,7 +214,7 @@ it('rejects a token hidden in otherwise allowed authorization query fields', () 
 
 it('keeps the ten-minute deadline active while a successful exit is being cleaned up', async () => {
   const f = fixture();
-  f.auth.options.lifetimeMs = 40;
+  f.auth.options.lifetimeMs = 400;
   await f.auth.start();
   f.data(url + '\r\nPaste code here if prompted >');
   await f.auth.submitCode(f.auth.view().flowId!, 'dummy-code-123');
@@ -222,7 +222,7 @@ it('keeps the ten-minute deadline active while a successful exit is being cleane
   f.stop.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
   f.data('Long-lived authentication token created successfully!\r\nYour OAuth token (valid for 1 year):\r\n' + token + '\r\n');
   f.exit(0);
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  await new Promise((resolve) => setTimeout(resolve, 300));
   const phaseAtDeadline = f.auth.view().phase;
   release();
   await vi.waitFor(() => expect(fs.existsSync(f.spawn.mock.calls[0][2].cwd)).toBe(false));
@@ -246,4 +246,15 @@ it('bounds a hung Windows taskkill and still closes the native PTY without expos
     // A late child error is absorbed after the deadline too.
     expect(() => child.emit('error', new Error('private-kill-error'))).not.toThrow();
   } finally { vi.useRealTimers(); }
+});
+
+
+it('does not send Enter if a submitted paste is cancelled before the separate key event', async () => {
+  const f = fixture();
+  const start = f.auth.start();
+  f.data(url + '\r\nPaste code here if prompted >');
+  const submission = f.auth.submitCode(start!.flowId!, 'dummy-code-private-123');
+  await f.auth.cancel(start!.flowId!);
+  await submission;
+  expect(f.writes).toEqual(['dummy-code-private-123']);
 });

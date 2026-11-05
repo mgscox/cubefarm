@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchPullUrl, researchIssueBranch, researchJobLabel, researchJobPrompt, researchSlug } from './research.ts';
+import { isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchIssueBranch, researchJobLabel, researchJobPrompt, researchSlug } from './research.ts';
 
 const base = { name: 'Hypatia', title: 'Head of Research', brief: '', company: 'Demo Co.', today: '2026-10-15', companyFolder: 'home/research' };
 const floor = { kind: 'floor' as const, repo: 'demo-co/pixel-todo', defaultBranch: 'main', summary: 'Todo app', mission: '', cwd: 'desks/hypatia', branch: 'swarm/research-doc-x-ab12', autoMerge: true };
@@ -64,14 +64,5 @@ describe('researcherSystemPrompt', () => {
     expect(p).toContain('only change files under docs/research/company/');
     expect(p).toContain('gh pr create --base main --head swarm/research-doc-x-ab12');
     expect(p).toContain('the manager merges it');
-  });
-});
-
-describe('researchPullUrl', () => {
-  it('only picks a pull request in the filing repository', () => {
-    const url = 'https://github.com/demo-manager/cubebase/pull/12';
-    const other = 'https://github.com/demo-co/pixel-todo/pull/12';
-    expect(researchPullUrl(`Done. ${other} ${url}`, 'demo-manager/cubebase')).toBe(url);
-    expect(researchPullUrl(other, 'demo-manager/cubebase')).toBeUndefined();
   });
 });

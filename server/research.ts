@@ -56,11 +56,6 @@ export function researchJobLabel(job: ResearchJob, floor: { floor: number } | nu
   return `Researching "${clip(job.topic, 60)}"${where}`;
 }
 
-export function researchPullUrl(text: string, fullName: string): string | undefined {
-  const escaped = fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return text.match(new RegExp(`https://github\\.com/${escaped}/pull/\\d+`, 'i'))?.[0];
-}
-
 type ResearchCheckout = { repo: string; defaultBranch: string; cwd: string; branch: string; autoMerge: boolean };
 
 export type ResearchPlace = ResearchCheckout & (

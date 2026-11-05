@@ -38,6 +38,8 @@ Remove-Item Env:SWARM_HOST
 
 Remote devices open `http://<office-machine-LAN-IP>:5317` in development (`SWARM_CLIENT_PORT` overrides it), or port `4317` for the built office (`SWARM_PORT` overrides it). With `0.0.0.0` or `::`, local browser URLs, duplicate-office probes, agent hook/MCP callbacks and Vite's REST/WebSocket proxy targets stay on loopback; with a single address they use that address, since nothing listens on loopback. Never open `http://0.0.0.0`.
 
+The `/ws` and `/ws/term` websockets refuse a browser page from another origin (`server/wsOrigin.ts`). The page's `Origin` must match the address it opened (`Host`: the server's port, or Vite's in development) under a loopback name, or with a non-loopback `SWARM_HOST` the bound address, the machine's interface addresses or its hostname. A missing `Origin` is accepted: browsers always send one, so it's a non-browser client, which could send any `Origin` anyway. A refused page is logged once per origin.
+
 Reachable clients have access to the manager API and terminals without a manager login: use only on a trusted LAN. This setting adds no authentication or TLS and does not expose floor-app previews. Agents testing this repo must follow [CLAUDE.md](CLAUDE.md#safety-read-first): demo mode, isolated `SWARM_HOME`, reserved ports, and no live-office restart.
 
 ## Testing

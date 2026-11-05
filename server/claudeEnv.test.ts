@@ -1,9 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import { claudeEnv } from '../bin/claudeAuth.js';
 
 describe('doctor and interactive login environment', () => {
+  const homes: string[] = [];
+  afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
   it('doctor keeps a subscription token; interactive login strips it to avoid short circuit', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-env-test-'));
+    homes.push(home);
     const input = {
+      SWARM_HOME: home,
       PATH: '/dummy', CLAUDE_CONFIG_DIR: '/dummy/config', CLAUDE_CODE_OAUTH_TOKEN: 'dummy-subscription',
       ANTHROPIC_API_KEY: 'dummy-key', ANTHROPIC_BASE_URL: 'dummy-proxy', ANTHROPIC_AUTH_TOKEN: 'dummy-bearer',
       CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'dummy-session', CLAUDE_CODE_USE_VERTEX: '1',
@@ -11,7 +19,7 @@ describe('doctor and interactive login environment', () => {
     const doctor = claudeEnv(input);
     expect(doctor.CLAUDE_CODE_OAUTH_TOKEN === input.CLAUDE_CODE_OAUTH_TOKEN).toBe(true);
     delete doctor.CLAUDE_CODE_OAUTH_TOKEN;
-    expect(doctor).toEqual({ PATH: '/dummy', CLAUDE_CONFIG_DIR: '/dummy/config' });
+    expect(doctor).toEqual({ SWARM_HOME: home, PATH: '/dummy', CLAUDE_CONFIG_DIR: '/dummy/config' });
     expect(claudeEnv(input, { login: true })).toEqual(doctor);
   });
 });

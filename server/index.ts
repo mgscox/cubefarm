@@ -1,5 +1,6 @@
 import { ClaudeAuthentication, claudeAuthRouter } from './claudeAuth.ts';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import express, { type NextFunction, type Request, type Response } from 'express';
@@ -14,6 +15,7 @@ import { managerMcpRouter } from './managerMcp.ts';
 import { isMainMcpOffice, ManagerMcpSettings, managerMcpSettingsRouter } from './managerMcpSettings.ts';
 import { underLauncher } from './officeUpdate.ts';
 import { HttpError, Swarm } from './swarm.ts';
+import { allowUpgrade, officeHostnames } from './wsOrigin.ts';
 
 const swarm = new Swarm(DEMO ? createDemoBackend() : realBackend);
 // Sessions the office picks back up while it starts need the address their CLIs call back on before it listens.
@@ -220,10 +222,19 @@ const wss = new WebSocketServer({ noServer: true });
 const terms = new WebSocketServer({ noServer: true });
 wss.on('connection', (ws) => swarm.addClient(ws));
 terms.on('connection', (ws, req) => swarm.attachTerminal(new URL(req.url ?? '', 'http://localhost').searchParams.get('agent') ?? '', ws));
+const refusedOrigins = new Set<string>(); // logged once each, as a refused page keeps reconnecting
 server.on('upgrade', (req, socket, head) => {
   const { pathname } = new URL(req.url ?? '', 'http://localhost');
   const target = pathname === '/ws' ? wss : pathname === '/ws/term' ? terms : null;
   if (!target) return void socket.destroy();
+  // Only the office's own pages: interfaces are read per upgrade, so a LAN address that changes still works.
+  if (!allowUpgrade(req.headers.origin, req.headers.host, officeHostnames(HOST, os.networkInterfaces(), os.hostname()))) {
+    if (refusedOrigins.size < 100 && !refusedOrigins.has(String(req.headers.origin))) {
+      refusedOrigins.add(String(req.headers.origin));
+      console.warn(`Refused a websocket from ${req.headers.origin} (opened as ${req.headers.host}): not this office's page.`);
+    }
+    return void socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+  }
   target.handleUpgrade(req, socket, head, (ws) => target.emit('connection', ws, req));
 });
 

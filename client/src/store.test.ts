@@ -9,6 +9,13 @@ const agent = { id: 'a1', role: 'dev', status: 'working', hasScreenshot: false, 
 
 beforeEach(() => useStore.setState({ agents: {}, screens: {}, loaded: false }));
 
+it('receives developer score changes through agent events', () => {
+  const apply = useStore.getState().apply;
+  apply({ type: 'agent', agent: { ...agent, score: 0 } });
+  apply({ type: 'agent', agent: { ...agent, score: 2 } });
+  expect(useStore.getState().agents[agent.id].score).toBe(2);
+});
+
 describe('agent screenshot availability', () => {
   it('invalidates the previous session thumbnail when a handoff clears its screenshot', () => {
     const apply = useStore.getState().apply;

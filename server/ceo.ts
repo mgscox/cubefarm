@@ -80,14 +80,14 @@ export interface StartIssueRequest {
   note?: string;
 }
 
-/** Prefer a match, then leave specialists with more ready/open work free, then use desk order. */
-export function pickDeveloper<A extends { specialty: string; desk: number }>(devs: A[], suits: (a: A) => boolean, ready: string[], open: string[]): A | undefined {
+/** Prefer the highest score; ties use match, ready/open load, then desk order. */
+export function pickDeveloper<A extends { specialty: string; desk: number; score?: number }>(devs: A[], suits: (a: A) => boolean, ready: string[], open: string[]): A | undefined {
   const rank = (a: A) => {
     const s = a.specialty.toLowerCase();
     return [suits(a) ? 0 : 1, ready.filter((w) => w === s).length, open.filter((w) => w === s).length, a.desk];
   };
   return devs.map((a) => ({ a, r: rank(a) }))
-    .sort((x, y) => x.r[0] - y.r[0] || x.r[1] - y.r[1] || x.r[2] - y.r[2] || x.r[3] - y.r[3])[0]?.a;
+    .sort((x, y) => (y.a.score ?? 0) - (x.a.score ?? 0) || x.r[0] - y.r[0] || x.r[1] - y.r[1] || x.r[2] - y.r[2] || x.r[3] - y.r[3])[0]?.a;
 }
 
 type StartAgent = Pick<AgentView, 'id' | 'name' | 'repoId' | 'role' | 'status' | 'specialty' | 'desk'>;

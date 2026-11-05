@@ -45,7 +45,8 @@ export interface PullInfo {
   labels?: string[];
   url: string;
   headRefName: string;
-  isCrossRepository: boolean;
+  /** From a fork: its bare branch name may match one of the office's desk branches. */
+  isCrossRepository?: boolean;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   isDraft: boolean;
   mergeable: string; // MERGEABLE | CONFLICTING | UNKNOWN
@@ -319,6 +320,7 @@ export interface AgentView {
   startedAt: number | null;
   endedAt: number | null;
   costUsd: number;
+  score: number; // developer feedback: +2 per merged PR, -1 per QA send-back
   turns: number;
   browserUrl: string | null;
   hasScreenshot: boolean;
