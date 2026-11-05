@@ -9,7 +9,7 @@ const error = (stderr: string) => new CommandError(`gh pr list -R failed: ${stde
 type Query = NonNullable<Parameters<typeof listPulls>[1]>;
 type Api = NonNullable<Parameters<typeof listPulls>[2]>;
 const raw = {
-  number: 12, title: 'A useful change', url: 'https://github.com/demo/repo/pull/12', headRefName: 'swarm/12', headRefOid: 'abc',
+  number: 12, title: 'A useful change', url: 'https://github.com/demo/repo/pull/12', isCrossRepository: false, headRefName: 'swarm/12', headRefOid: 'abc',
   state: 'OPEN' as const, isDraft: false, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', reviewDecision: null,
   labels: [{ name: 'needs-review' }], closingIssuesReferences: [{ number: 11 }], createdAt: '2026-10-01', mergedAt: null, additions: 1, deletions: 0,
 };
@@ -129,6 +129,18 @@ describe('remote branch commits', () => {
 });
 
 describe('optional PR checks', () => {
+  it.each([false, true])('preserves repository provenance (%s) in normal and fallback PR lists', async (isCrossRepository) => {
+    for (const fallback of [false, true]) {
+      const query = vi.fn<Query>(async (args) => {
+        if (fallback && args.at(-1)!.includes('statusCheckRollup')) throw error(`GraphQL: ${denial()}`);
+        return [{ ...raw, isCrossRepository, state: args.includes('open') ? 'OPEN' : 'MERGED' }];
+      });
+      const result = await listPulls('demo/repo', query, rest());
+      expect(query.mock.calls.every(([args]) => args.at(-1)!.split(',').includes('isCrossRepository'))).toBe(true);
+      expect(result.pulls).toMatchObject([{ state: 'OPEN', isCrossRepository }, { state: 'MERGED', isCrossRepository }]);
+    }
+  });
+
   it('retries denied check queries without check fields and refreshes metadata', async () => {
     const diagnostic = `GraphQL: ${denial()}, ${denial(1)}`;
     const query = vi.fn<Query>(async (args) => {

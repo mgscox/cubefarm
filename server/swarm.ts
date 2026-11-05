@@ -2122,7 +2122,7 @@ export class Swarm {
     }
     if (this.state.officeHeld || hasLabel(pr.labels, NEEDS_HUMAN)) return false;
     Object.assign(rec, step.set);
-    if (step.do === 'requeue' && isResearchBranch(pr.headRefName) && !rec.securityReview && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) {
+    if (step.do === 'requeue' && pr.isCrossRepository === false && isResearchBranch(pr.headRefName) && !rec.securityReview && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) {
       this.setQa(rec, { passedSha: pr.headSha, testedSha: pr.headSha, mergeNote: null, pendingSince: null }); // more research: still nothing to test
       return false;
     }
@@ -2443,7 +2443,7 @@ export class Swarm {
       if (prototypeIssueNumber(pr.headRefName) || ((pr.isDraft || !pr.headRefName.startsWith('swarm/')) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW))) continue;
       if (known) continue;
       const dev = this.state.agents.find((a) => (a.role === 'dev' || a.role === 'researcher') && a.task !== 'qa' && (a.prNumber === pr.number || (pr.isCrossRepository === false && a.branch === pr.headRefName)) && (a.repoId === repo.id || a.id === RESEARCHER_ID));
-      if (isResearchBranch(pr.headRefName) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) this.skipQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null, pr.headSha || null, pr.isCrossRepository);
+      if (pr.isCrossRepository === false && isResearchBranch(pr.headRefName) && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) this.skipQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null, pr.headSha || null, pr.isCrossRepository);
       else {
         const rec = this.queueQa(repo, pr.number, dev ?? null, pr.closesIssues[0] ?? null, pr.isCrossRepository);
         this.holdForSecurityReview(repo, rec, pr);
