@@ -19,6 +19,7 @@ import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
 import { issueHolder, duplicateIssueSessions, issueTaken } from './issueClaims.ts';
 import { orphanedQa } from './qaOwnership.ts';
+import { closedWork, closedWorkText, issueClosed, type ClosedWork } from './closedWork.ts';
 import { startTimeouts, stuckStarting } from './sessionStart.ts';
 import { withOperation } from './operation.ts';
 import { QA_RESUME_PROMPT, qaRetry } from './qaRetry.ts';
@@ -2350,6 +2351,7 @@ export class Swarm {
       const pulls = pullResult.value.pulls;
       rt.fetchedAt = started;
       this.reconcilePulls(repo, pulls);
+      await this.stopClosedWork(repo, issues.status === 'fulfilled' ? issues.value : null, pulls);
       await this.pruneUnlistedQa(repo, pulls);
       // Something was merged since the last look (by the office or anyone else): bring the folder up to date.
       const newest = pulls.reduce<string | null>((m, p) => (p.mergedAt && (!m || p.mergedAt > m) ? p.mergedAt : m), null);
@@ -2426,6 +2428,52 @@ export class Swarm {
     this.broadcast({ type: 'qaRemoved', repoId: rec.repoId, prNumber: rec.prNumber });
   }
 
+  /** Stop busy sessions whose issue closed or whose PR closed unmerged. A missing issue or PR is read back first. */
+  private async stopClosedWork(repo: PersistedRepo, issues: IssueInfo[] | null, pulls: PullInfo[]) {
+    const floor = {
+      pulls,
+      openIssues: issues && new Set(issues.map((i) => i.number)),
+      parkedPrs: new Set((repo.parkedBranches ?? []).map((p) => p.prNumber)),
+    };
+    for (const a of this.state.agents.filter((x) => x.repoId === repo.id)) {
+      let work = closedWork(a, floor);
+      if (!work) continue;
+      const generation = this.agentRt.get(a.id)?.generation;
+      if (work.kind === 'pr' && !pulls.some((p) => p.number === work!.number)) {
+        // Unlisted: read it, then ask again with it listed, so an open PR still lets a closed issue stop an issue task.
+        const state = await this.backend.prDetails(repo.fullName, work.number).then((d) => d.state, () => null);
+        if (!state) continue;
+        work = closedWork(a, { ...floor, pulls: [...pulls, { number: work.number, state }] });
+        if (!work) continue;
+      }
+      if (work.kind === 'issue' && !issueClosed(await this.backend.readIssue(repo.fullName, work.number).catch(() => null))) continue;
+      if (!this.state.agents.includes(a) || this.agentRt.get(a.id)?.generation !== generation) continue; // moved on meanwhile
+      this.endClosedWork(a, repo, work, `■ Stopped: ${closedWorkText(work)}. Ready for new work.`);
+      this.postMessage('office', `■ Stopped ${a.name} on ${repo.fullName}: ${closedWorkText(work)}.`);
+    }
+  }
+
+  /** End an agent's task on closed work: its session, its desk and the QA record it was testing or fixing. */
+  private endClosedWork(a: PersistedAgent, repo: PersistedRepo, work: ClosedWork, log: string, prState: 'CLOSED' | 'MERGED' = 'CLOSED') {
+    const rt = this.agentRt.get(a.id);
+    const session = rt?.session;
+    if (rt) rt.session = null;
+    const rec = work.kind === 'pr' && this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === work.number && !q.closed &&
+      ((q.status === 'testing' && q.qaAgentId === a.id) || (q.status === 'fixing' && q.devAgentId === a.id)));
+    if (rec) {
+      // A kept record (it holds a security review) must not look in progress, or it would read as orphaned QA.
+      Object.assign(rec, { status: 'queued', qaAgentId: null });
+      this.closeQaRecord(rec, prState);
+    }
+    this.appendLog(a, [{ kind: 'system', text: log }]);
+    this.clearTask(a); // revokes the session's callbacks and any desk preparation in flight
+    a.sessionId = null;
+    this.state.deferredResumes = this.state.deferredResumes.filter((id) => id !== a.id);
+    session?.stop();
+    rt?.terminal?.releaseIdle?.();
+    this.save();
+  }
+
   /**
    * The sync only lists open and recently merged PRs, so a record whose PR merged or closed a while ago never shows up
    * finished there. Ask GitHub about each one; a failed lookup keeps the record for the next sync. The first sync after
@@ -2444,6 +2492,14 @@ export class Swarm {
       removed = true;
     });
     if (removed) this.save();
+  }
+
+  /** Demo only: close an issue on the fake GitHub as if someone did it there, then sync to show its session stopping. */
+  async closeDemoIssue(repoId: string, number: number) {
+    if (!this.backend.demo) throw new HttpError(404, 'Closing issues this way is only available in the demo office');
+    const repo = this.repo(repoId);
+    await this.backend.closeIssue(repo.fullName, number, 'not planned', 'Closed in the demo.').catch((err) => { throw new HttpError(404, (err as Error).message); });
+    await this.syncRepo(repo.id);
   }
 
   async createIssue(repoId: string, title: string, body: string, assignTo?: string, specialty?: string) {
@@ -3158,6 +3214,7 @@ export class Swarm {
   private async prepareTask(a: PersistedAgent, repo: PersistedRepo, issue: IssueInfo, note?: string) {
     const research = a.role === 'researcher';
     const branch = a.branch!;
+    if (await this.closedBeforeStart(a, repo, { kind: 'issue', number: issue.number })) return;
     const cwd = await this.prepare(a, repo, {}, branch);
     if (!cwd) return;
 
@@ -3174,6 +3231,29 @@ export class Swarm {
       .join('\n');
 
     await this.startAgentSession(a, repo, cwd, prompt, this.buildSystemAppend(a, repo, cwd, branch));
+  }
+
+  /**
+   * Re-read the work just before its desk is prepared: it may have closed since the last sync. Returns true when the
+   * caller must not go on: the work is closed (the task is cleared), or the agent was removed or moved on to another
+   * task while GitHub answered. A failed read lets the work go ahead.
+   */
+  private async closedBeforeStart(a: PersistedAgent, repo: PersistedRepo, work: ClosedWork) {
+    const generation = this.agentRt.get(a.id)?.generation;
+    const state = await (work.kind === 'issue'
+      ? this.backend.readIssue(repo.fullName, work.number).then((i) => (issueClosed(i) ? 'CLOSED' : 'OPEN'))
+      : this.backend.prDetails(repo.fullName, work.number).then((d) => d.state)
+    ).catch(() => 'OPEN' as const);
+    if (!this.state.agents.includes(a) || a.status !== 'preparing' || this.agentRt.get(a.id)?.generation !== generation) return true;
+    if (state === 'OPEN') return false;
+    // Until the next sync, the scheduler must not hand the same closed work out again.
+    const rt = this.repoRt.get(repo.id);
+    if (rt && work.kind === 'issue') rt.issues = rt.issues.filter((i) => i.number !== work.number);
+    if (rt && work.kind === 'pr') rt.pulls = rt.pulls.map((p) => (p.number === work.number ? { ...p, state } : p));
+    const text = work.kind === 'issue' ? `issue #${work.number} is closed` : `PR #${work.number} is ${state === 'MERGED' ? 'merged' : 'closed'}`;
+    this.endClosedWork(a, repo, work, `⏹ Not starting: ${text}.`, state);
+    this.emitRepo(repo);
+    return true;
   }
 
   private async startAgentSession(
@@ -4068,6 +4148,7 @@ export class Swarm {
     );
     this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
     const generation = this.agentRt.get(dev.id)?.generation;
+    if (await this.closedBeforeStart(dev, repo, { kind: 'pr', number: rec.prNumber })) return;
     const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, headRef, { rec, task: 'fix', author });
     if (this.agentRt.get(dev.id)?.generation !== generation) return;
     if (!cwd) {

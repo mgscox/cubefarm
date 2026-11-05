@@ -2,7 +2,7 @@ import syncFs from 'node:fs';
 import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { CommandError, ghJson, run } from './exec.ts';
-import { branchAhead, listIssues } from './github.ts';
+import { branchAhead, listIssues, listPulls } from './github.ts';
 import { LOST_CONVERSATION, STUCK_MS } from './clis.ts';
 import { opencodeTurn } from './opencodeTranscript.ts';
 import { OPENCODE_IDLE_WITH_USAGE } from './fixtures/opencodeScreens.ts';
@@ -1513,6 +1513,7 @@ describe('CEO park_pr', () => {
     vi.spyOn(s, 'beginTask').mockImplementation(() => {});
     vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
     const session = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    Object.assign(s.state.agents[0], { status: 'preparing' }); // what the mocked beginTask would set
     // Restore the real implementation replaced by the scheduling fixture.
     const actual = new Swarm(s.backend) as unknown as Internals;
     await actual.runTask.call(s, s.state.agents[0], restored, issue(67));
@@ -3838,6 +3839,7 @@ describe('fixes across office restarts', () => {
     const fixing = s.runFix(dev, repo, rec);
     await Promise.resolve();
     expect(dev).toMatchObject({ status: 'preparing', task: 'fix', sessionId: null });
+    await vi.waitFor(() => expect(prepared).toBeTypeOf('function')); // after the open-PR check
     prepared('/fake-desk');
     await fixing;
     expect(start.mock.calls[0][5]).toBe('dev-session');
@@ -5004,5 +5006,239 @@ describe('approved Idea blockers', () => {
     expect(ready()).toEqual([60]);
     await swarm.assign('a1', 61);
     expect(runTask.mock.calls[0][2].number).toBe(61);
+  });
+});
+
+describe('closed work', () => {
+  type Closing = Omit<Internals, 'agentRt'> & {
+    stopClosedWork(repo: Repo, issues: IssueInfo[] | null, pulls: PullInfo[]): Promise<void>;
+    agentRt: Map<string, { log: { text: string }[]; session?: { stop(): void } | null }>;
+  };
+  let c: Closing;
+  let stop: Mock;
+  const closedPull = (number: number, state: PullInfo['state'] = 'CLOSED') => ({ number, state } as PullInfo);
+  const tracked = (number: number, state: 'OPEN' | 'CLOSED', labels: string[] = []): TrackedIssue => ({ repo: 'demo-co/pixel-todo', number, url: '', title: '', body: '', labels, state });
+  const rec = (patch: Partial<QaRec> = {}) => ({
+    repoId: repo.id, prNumber: 12, status: 'testing', round: 1, sessionFailures: 0, devAgentId: null, qaAgentId: 'a1',
+    summary: null, checks: [], commentUrl: null, mergeNote: null, updatedAt: 0, ...patch,
+  }) as QaRec;
+
+  beforeEach(() => {
+    c = s as unknown as Closing;
+    stop = vi.fn();
+    c.agentRt.get('a1')!.session = { stop };
+    Object.assign(s.state.agents[0], { status: 'working', task: 'issue', issueNumber: 7, branch: 'swarm/issue-7-ada', prNumber: null });
+  });
+  const log = () => c.agentRt.get('a1')!.log.map((e) => e.text).join('\n');
+
+  it('stops a busy developer whose issue closed and clears the desk', async () => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+    const messages = vi.spyOn(s, 'postMessage');
+    await c.stopClosedWork(repo, [issue(8)], []);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null, issueNumber: null, branch: null });
+    expect(log()).toContain('Stopped: issue #7 was closed');
+    expect(messages).toHaveBeenCalledWith('office', expect.stringContaining('Stopped Ada'));
+  });
+
+  it.each([['still open past the listing cap', tracked(7, 'OPEN')], ['held for publication', tracked(7, 'CLOSED', ['held-for-publication'])]])('leaves an issue %s', async (_, read) => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue(read);
+    await c.stopClosedWork(repo, [], []);
+    expect(stop).not.toHaveBeenCalled();
+    expect(s.state.agents[0]).toMatchObject({ status: 'working', issueNumber: 7 });
+  });
+
+  it('stops QA on a PR closed unmerged, keeping a record that holds a security review', async () => {
+    Object.assign(s.state.agents[0], { task: 'qa', prNumber: 12 });
+    const reviewed = rec({ securityReview: { reason: 'Auth', qaSha: 'sha' } } as Partial<QaRec>);
+    s.state.qa.push(reviewed, rec({ prNumber: 14, qaAgentId: 'q2' }));
+    await c.stopClosedWork(repo, null, [closedPull(12)]);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(s.state.qa[0]).toMatchObject({ prNumber: 12, closed: true, status: 'queued', qaAgentId: null, securityReview: { qaSha: null } });
+    expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
+  });
+
+  it('drops a fixing record without a security review', async () => {
+    Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+    s.state.qa.push(rec({ status: 'fixing', devAgentId: 'a1', qaAgentId: null }));
+    await c.stopClosedWork(repo, null, [closedPull(12)]);
+    expect(s.state.qa).toEqual([]);
+  });
+
+  it('leaves CEO-parked and merged PRs alone', async () => {
+    Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+    repo.parkedBranches = [{ issueNumber: 7, prNumber: 12, branch: 'swarm/issue-7-ada' }];
+    await c.stopClosedWork(repo, null, [closedPull(12)]);
+    repo.parkedBranches = [];
+    await c.stopClosedWork(repo, [], [closedPull(12, 'MERGED')]);
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  describe('on a sync, for a PR the open and merged lists leave out', () => {
+    let prState: PullInfo['state'] | Error;
+    // The production listPulls over gh's answers: open PRs and the newest merged ones, never a closed one.
+    const raw = (number: number, state: 'OPEN' | 'MERGED') => ({
+      number, title: '', url: '', headRefName: `feature/${number}`, headRefOid: 'sha', state, isDraft: false, mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN', reviewDecision: null, labels: [], closingIssuesReferences: [], createdAt: '',
+      mergedAt: state === 'MERGED' ? '2026-11-01' : null, additions: 0, deletions: 0, statusCheckRollup: [],
+    });
+    beforeEach(() => {
+      Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
+      Object.assign(s.repoRt.get(repo.id)!, { lastMergedAt: '2026-11-01' });
+      vi.spyOn(s.backend, 'listIssues').mockResolvedValue([]);
+      vi.spyOn(s.backend, 'listPulls').mockImplementation((name) => listPulls(name, async (args) => [raw(args.includes('open') ? 13 : 9, args.includes('open') ? 'OPEN' : 'MERGED')]));
+      prState = 'CLOSED';
+      vi.spyOn(s.backend, 'prDetails').mockImplementation(async (_name, number) => {
+        if (prState instanceof Error) throw prState;
+        return { number, state: prState } as Awaited<ReturnType<Backend['prDetails']>>;
+      });
+    });
+
+    it('confirms a QA session\'s PR closed, stops it and keeps the record that holds a security review', async () => {
+      Object.assign(s.state.agents[0], { task: 'qa', prNumber: 12 });
+      s.state.qa.push(rec({ securityReview: { reason: 'Auth', qaSha: 'sha' } } as Partial<QaRec>));
+      await swarm.syncRepo(repo.id);
+      expect(s.backend.prDetails).toHaveBeenCalledWith(repo.fullName, 12);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null, prNumber: null });
+      expect(s.state.qa.find((q) => q.prNumber === 12)).toMatchObject({ closed: true, status: 'queued', qaAgentId: null, securityReview: { qaSha: null } });
+      expect(log()).toContain('Stopped: PR #12 was closed without merging');
+    });
+
+    it('confirms a fix session\'s PR closed, stops it and drops its record', async () => {
+      Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+      s.state.qa.push(rec({ status: 'fixing', devAgentId: 'a1', qaAgentId: null }));
+      await swarm.syncRepo(repo.id);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
+      expect(s.state.qa.some((q) => q.prNumber === 12)).toBe(false);
+    });
+
+    it.each([['open', 'OPEN'], ['merged', 'MERGED'], ['unreadable', new Error('HTTP 502')]] as const)('leaves the session on a PR that is %s', async (_, state) => {
+      prState = state;
+      Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+      s.state.qa.push(rec({ status: 'fixing', devAgentId: 'a1', qaAgentId: null }));
+      await swarm.syncRepo(repo.id);
+      expect(stop).not.toHaveBeenCalled();
+      expect(s.state.agents[0]).toMatchObject({ status: 'working', task: 'fix', prNumber: 12 });
+      expect(s.state.qa[0]).toMatchObject({ prNumber: 12, status: 'fixing' });
+    });
+
+    it('stops a resumed issue session once its PR closed unmerged, though the issue is still open', async () => {
+      const session = { send: vi.fn(), stop: vi.fn() };
+      const starts = vi.spyOn(s.backend, 'startSession').mockReturnValue(session);
+      vi.spyOn(s.backend, 'deskHead').mockResolvedValue('base');
+      vi.mocked(s.backend.listIssues).mockResolvedValue([issue(7)]);
+      c.agentRt.get('a1')!.session = null;
+      Object.assign(s.state.agents[0], { status: 'done', task: 'issue', prNumber: 12, sessionId: 'dev-session', model: '', effort: '', cli: '' });
+      await swarm.message('a1', 'Carry on');
+      expect(starts).toHaveBeenCalledOnce();
+      expect(s.state.agents[0]).toMatchObject({ status: 'working', task: 'issue', prNumber: 12 });
+      await swarm.syncRepo(repo.id);
+      expect(s.backend.prDetails).toHaveBeenCalledWith(repo.fullName, 12);
+      expect(session.stop).toHaveBeenCalledOnce();
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null, issueNumber: null, prNumber: null });
+      expect(log()).toContain('Stopped: PR #12 was closed without merging');
+    });
+
+    it('still stops an issue task on a closed issue when its unlisted PR reads back open', async () => {
+      prState = 'OPEN';
+      vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+      Object.assign(s.state.agents[0], { prNumber: 12 });
+      await swarm.syncRepo(repo.id);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(log()).toContain('Stopped: issue #7 was closed');
+    });
+
+    it.each([['merged', 'MERGED'], ['unreadable', new Error('HTTP 502')]] as const)('leaves an issue task on a %s unlisted PR, even with its issue closed', async (_, state) => {
+      prState = state;
+      const read = vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+      Object.assign(s.state.agents[0], { prNumber: 12 });
+      await swarm.syncRepo(repo.id);
+      expect(read).not.toHaveBeenCalledWith(repo.fullName, 7);
+      expect(stop).not.toHaveBeenCalled();
+      expect(s.state.agents[0]).toMatchObject({ status: 'working', task: 'issue', issueNumber: 7 });
+    });
+
+    it('leaves a CEO-parked PR alone without reading it', async () => {
+      Object.assign(s.state.agents[0], { task: 'fix', prNumber: 12 });
+      repo.parkedBranches = [{ issueNumber: 7, prNumber: 12, branch: 'swarm/issue-7-ada' }];
+      await swarm.syncRepo(repo.id);
+      expect(s.backend.prDetails).not.toHaveBeenCalledWith(repo.fullName, 12);
+      expect(stop).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('before a desk is prepared', () => {
+    const actual = () => new Swarm(s.backend) as unknown as Internals;
+    beforeEach(() => {
+      Object.assign(repo, { defaultBranch: 'main', links: [] });
+      c.agentRt.get('a1')!.session = null;
+    });
+
+    it('refuses a closed issue and logs why', async () => {
+      vi.spyOn(s.backend, 'readIssue').mockResolvedValue(tracked(7, 'CLOSED'));
+      const prepare = vi.spyOn(s, 'prepare');
+      s.repoRt.get(repo.id)!.issues = [issue(7)];
+      Object.assign(s.state.agents[0], { status: 'preparing' });
+      await actual().runTask.call(s, s.state.agents[0], repo, issue(7));
+      expect(prepare).not.toHaveBeenCalled();
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
+      expect(s.repoRt.get(repo.id)!.issues).toEqual([]);
+      expect(log()).toContain('Not starting: issue #7 is closed');
+    });
+
+    it('goes ahead when the issue cannot be read', async () => {
+      vi.spyOn(s.backend, 'readIssue').mockRejectedValue(new Error('offline'));
+      const prepare = vi.spyOn(s, 'prepare').mockResolvedValue('');
+      Object.assign(s.state.agents[0], { status: 'preparing' });
+      await actual().runTask.call(s, s.state.agents[0], repo, issue(7));
+      expect(prepare).toHaveBeenCalledOnce();
+    });
+
+    it.each(['OPEN', 'CLOSED'] as const)('drops a start whose task was replaced while issue #7 read back %s', async (state) => {
+      let answer!: (issue: TrackedIssue) => void;
+      vi.spyOn(s.backend, 'readIssue').mockReturnValue(new Promise((resolve) => (answer = resolve)));
+      const prepare = vi.spyOn(s, 'prepare').mockResolvedValue('/desk');
+      const start = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+      const a = s.state.agents[0];
+      Object.assign(a, { status: 'preparing' });
+      const run = actual().runTask.call(s, a, repo, issue(7));
+      s.clearTask(a);
+      s.beginTask(a, { task: 'issue', issueNumber: 8, issueTitle: 'Issue 8', branch: 'swarm/issue-8-ada', prNumber: null }, 'Issue #8', 'Preparing');
+      answer(tracked(7, state));
+      await run;
+      expect(prepare).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
+      expect(a).toMatchObject({ status: 'preparing', task: 'issue', issueNumber: 8, branch: 'swarm/issue-8-ada' });
+      expect(log()).not.toContain('Not starting');
+    });
+
+    it('drops a start for an agent removed while its PR was read', async () => {
+      let answer!: (details: Awaited<ReturnType<Backend['prDetails']>>) => void;
+      vi.spyOn(s.backend, 'prDetails').mockReturnValue(new Promise((resolve) => (answer = resolve)));
+      const prepare = vi.spyOn(s, 'prepare').mockResolvedValue('/desk');
+      const record = rec({ status: 'failed', devAgentId: 'a1', qaAgentId: null });
+      s.state.qa.push(record);
+      const a = s.state.agents[0];
+      const run = s.runFix(a, repo, record);
+      await vi.waitFor(() => expect(s.backend.prDetails).toHaveBeenCalled());
+      s.state.agents = s.state.agents.filter((x) => x !== a);
+      answer({ state: 'OPEN' } as Awaited<ReturnType<Backend['prDetails']>>);
+      await run;
+      expect(prepare).not.toHaveBeenCalled();
+    });
+
+    it('refuses a fix for a closed PR and drops its record', async () => {
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ state: 'CLOSED' } as Awaited<ReturnType<Backend['prDetails']>>);
+      const prepare = vi.spyOn(s, 'prepare');
+      const record = rec({ status: 'failed', devAgentId: 'a1', qaAgentId: null });
+      s.state.qa.push(record);
+      await s.runFix(s.state.agents[0], repo, record);
+      expect(prepare).not.toHaveBeenCalled();
+      expect(s.state.qa).toEqual([]);
+      expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
+      expect(log()).toContain('Not starting: PR #12 is closed');
+    });
   });
 });
