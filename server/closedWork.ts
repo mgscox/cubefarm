@@ -22,14 +22,15 @@ export interface FloorWork {
 /**
  * The work a busy agent holds that is closed: its PR closed without merging, or (for an issue task) its issue gone
  * from the open list. The open list is capped, so an issue result is only a candidate: confirm it with issueClosed.
- * Merged PRs are left to the merge flow.
+ * The PR list holds only open and recently merged PRs, so a fix or QA task's PR missing from it is a candidate too:
+ * confirm its state with a read. Merged PRs are left to the merge flow.
  */
 export function closedWork(a: Holder, floor: FloorWork): ClosedWork | null {
   if ((a.status !== 'preparing' && a.status !== 'working') || a.role === 'ceo') return null;
   if (a.prNumber != null) {
     if (floor.parkedPrs.has(a.prNumber)) return null;
     const state = floor.pulls.find((p) => p.number === a.prNumber)?.state;
-    if (state === 'CLOSED') return { kind: 'pr', number: a.prNumber };
+    if (state === 'CLOSED' || (state == null && (a.task === 'fix' || a.task === 'qa'))) return { kind: 'pr', number: a.prNumber };
     if (state === 'MERGED') return null;
   }
   if (a.task === 'issue' && a.issueNumber != null && floor.openIssues && !floor.openIssues.has(a.issueNumber)) {

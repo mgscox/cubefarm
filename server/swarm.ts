@@ -2424,7 +2424,7 @@ export class Swarm {
     this.broadcast({ type: 'qaRemoved', repoId: rec.repoId, prNumber: rec.prNumber });
   }
 
-  /** Stop busy sessions whose issue closed or whose PR closed unmerged. A missing issue is read back first. */
+  /** Stop busy sessions whose issue closed or whose PR closed unmerged. A missing issue or PR is read back first. */
   private async stopClosedWork(repo: PersistedRepo, issues: IssueInfo[] | null, pulls: PullInfo[]) {
     const floor = {
       pulls,
@@ -2436,6 +2436,8 @@ export class Swarm {
       if (!work) continue;
       const generation = this.agentRt.get(a.id)?.generation;
       if (work.kind === 'issue' && !issueClosed(await this.backend.readIssue(repo.fullName, work.number).catch(() => null))) continue;
+      if (work.kind === 'pr' && !pulls.some((p) => p.number === work.number) &&
+        await this.backend.prDetails(repo.fullName, work.number).then((d) => d.state, () => null) !== 'CLOSED') continue;
       if (!this.state.agents.includes(a) || this.agentRt.get(a.id)?.generation !== generation) continue; // moved on meanwhile
       this.endClosedWork(a, repo, work, `■ Stopped: ${closedWorkText(work)}. Ready for new work.`);
       this.postMessage('office', `■ Stopped ${a.name} on ${repo.fullName}: ${closedWorkText(work)}.`);
@@ -3209,8 +3211,9 @@ export class Swarm {
   }
 
   /**
-   * Re-read the work just before its desk is prepared: it may have closed since the last sync. Closed work clears the
-   * task and returns true. A failed read lets the work go ahead; prepare() notices a task that moved on meanwhile.
+   * Re-read the work just before its desk is prepared: it may have closed since the last sync. Returns true when the
+   * caller must not go on: the work is closed (the task is cleared), or the agent was removed or moved on to another
+   * task while GitHub answered. A failed read lets the work go ahead.
    */
   private async closedBeforeStart(a: PersistedAgent, repo: PersistedRepo, work: ClosedWork) {
     const generation = this.agentRt.get(a.id)?.generation;
@@ -3218,7 +3221,8 @@ export class Swarm {
       ? this.backend.readIssue(repo.fullName, work.number).then((i) => (issueClosed(i) ? 'CLOSED' : 'OPEN'))
       : this.backend.prDetails(repo.fullName, work.number).then((d) => d.state)
     ).catch(() => 'OPEN' as const);
-    if (state === 'OPEN' || a.status !== 'preparing' || this.agentRt.get(a.id)?.generation !== generation) return false;
+    if (!this.state.agents.includes(a) || a.status !== 'preparing' || this.agentRt.get(a.id)?.generation !== generation) return true;
+    if (state === 'OPEN') return false;
     // Until the next sync, the scheduler must not hand the same closed work out again.
     const rt = this.repoRt.get(repo.id);
     if (rt && work.kind === 'issue') rt.issues = rt.issues.filter((i) => i.number !== work.number);
