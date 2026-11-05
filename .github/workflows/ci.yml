@@ -62,9 +62,10 @@ jobs:
         with:
           persist-credentials: false
 
+      # Pinned to Node 24: `playwright install` stalls after the download reaches 100% under Node 26.
       - uses: actions/setup-node@v5
         with:
-          node-version: 'lts/*'
+          node-version: '24'
           check-latest: true
       - run: npm ci
       - run: npx playwright install chromium
