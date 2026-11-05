@@ -45,7 +45,9 @@ export default defineConfig({
         ...(browser === 'chrome' ? { channel: 'chrome' } : {}),
         headless: true,
         viewport: { width: 800, height: 450 }, // fewer pixels for software WebGL to fill
-        launchOptions: { args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] },
+        // --disable-audio-output: sounds render to a fake stream, not the machine's speakers; on some Macs the real
+        // device makes Chrome log an AudioContext console error, which fails every test.
+        launchOptions: { args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--disable-audio-output'] },
       },
     },
   ],
