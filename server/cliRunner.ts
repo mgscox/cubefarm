@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cliStartupFailed, codexTurnThread, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, STUCK_MS, trustKey } from './clis.ts';
+import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cliStartupFailed, codexTurnThread, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, startupQuestionOnScreen, STUCK_MS, trustKey } from './clis.ts';
 import { terminalsAvailable, type Pty } from './ptyClient.ts';
 import { ALLOW } from './ptyProtocol.ts';
 import { localCliHost } from './localCliHost.ts';
@@ -394,6 +394,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let checkingIdle = false;
   let trustKeys = 0; // keys pressed on a folder-trust question (a few at most)
   let trustedAt = 0;
+  const pendingPrompts: string[] = [];
+  let promptUntil = 0;
 
   let reportedSessionId = opts.resumeSessionId ?? null;
   const cb: SessionCallbacks = { ...callbacks, sessionId: (id) => {
@@ -844,18 +846,77 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     bootTimer = setTimeout(() => void look(), HOOKLESS_LOOK_MS);
   };
 
+  const sendPrompt = (text: string) => {
+    const proc = live?.proc;
+    if (done || !proc) return;
+    busy();
+    turnError = null;
+    officePrompts.push(text.trim());
+    // Pasted, so newlines stay in the message instead of sending it early; then Enter.
+    const clean = text.replace(/\x1b\[20[01]~/g, '').replace(/\r\n?/g, '\n');
+    launched.push(clean.trim());
+    quietly(() => proc.write(`\x1b[200~${clean}\x1b[201~`));
+    setTimeout(() => quietly(() => live?.proc?.write('\r')), 150);
+  };
+
+  // Starting up: answer the folder-trust question for the office's own worktrees (the answer that trusts it), and
+  // say so when a CLI is waiting on something only the manager can do (signing in).
+  const watchStartup = () => {
+    if (screenTimer) return;
+    const until = Date.now() + BOOT_MS * 2;
+    screenTimer = setInterval(() => {
+      if (done || Date.now() > (pendingPrompts.length ? promptUntil : until)) {
+        clearInterval(screenTimer);
+        screenTimer = undefined;
+        if (!done && pendingPrompts.length) {
+          const error = `${label} is still showing a startup question after 2 minutes; follow-up was not sent.`;
+          term.note(`── ${error} ──`);
+          log([{ kind: 'error', text: error }]);
+          finish({ ok: false, text: lastText, errors: [error] });
+        }
+        return;
+      }
+      const screen = term.screen();
+      const question = startupQuestionOnScreen(screen, cli);
+      const review = question ? hookReviewKey(screen) : null;
+      const key = question && trustKeys < 12 && Date.now() - trustedAt > 3000 ? (trustKey(screen) ?? review) : null;
+      if (key === 'down') {
+        trustKeys += 1;
+        quietly(() => live?.proc?.write(term.appCursor ? '\x1bOB' : '\x1b[B'));
+      } else if (key === 'enter') {
+        trustKeys += 1;
+        trustedAt = Date.now(); // the question takes a moment to go: don't answer it twice
+        if (!review) log([{ kind: 'system', text: `✓ Trusted the worktree for ${label}.` }]);
+        else if (!hooksHinted) {
+          hooksHinted = true;
+          log([{ kind: 'system', text: `ℹ To see ${label}'s steps here, trust the office's hooks once: in this terminal, type /hooks and press t. Until then the office shows its task.` }]);
+        }
+        quietly(() => live?.proc?.write('\r'));
+      }
+      if (!nudged.has('login') && /Not logged in|run \/login|Select login method|Sign in with ChatGPT|Please login|Invalid API key/i.test(screen)) {
+        nudged.add('login');
+        log([{ kind: 'error', text: `⚠ ${label} needs you to sign in: open the terminal and sign in there, or run "${cli}" in a terminal of your own.` }]);
+      } else if (!nudged.has('setup') && !trustKey(screen) && Date.now() - trustedAt > 5000 && /Choose the text style|Press Enter to continue|Bypass Permissions mode|Settings Error/i.test(screen)) {
+        // First-run screens only the manager should answer: the CLI waits for them in the terminal.
+        nudged.add('setup');
+        log([{ kind: 'error', text: `⚠ ${label} is waiting on a setup screen: open the terminal to answer it.` }]);
+      }
+      if (pendingPrompts.length && !question) sendPrompt(pendingPrompts.shift()!);
+    }, 1000);
+  };
+
   const handle: SessionHandle = {
     send(text) {
-      const proc = live?.proc;
-      if (done || !proc) return;
-      busy();
-      turnError = null;
-      officePrompts.push(text.trim());
-      // Pasted, so newlines stay in the message instead of sending it early; then Enter.
-      const clean = text.replace(/\x1b\[20[01]~/g, '').replace(/\r\n?/g, '\n');
-      launched.push(clean.trim());
-      quietly(() => proc.write(`\x1b[200~${clean}\x1b[201~`));
-      setTimeout(() => quietly(() => live?.proc?.write('\r')), 150);
+      if (done || !live?.proc) return;
+      if (pendingPrompts.length || startupQuestionOnScreen(term.screen(), cli)) {
+        busy();
+        turnError = null;
+        if (!pendingPrompts.length) promptUntil = Date.now() + BOOT_MS * 2;
+        pendingPrompts.push(text);
+        watchStartup();
+        return;
+      }
+      sendPrompt(text);
     },
     stop() {
       finish({ ok: false, text: '', errors: ['Stopped by manager'] });
@@ -876,6 +937,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     else handle.send(opts.prompt);
     shotTimer = setInterval(collectShots, 2000);
     watchStuck();
+    watchStartup();
     if (opts.reattach) watchRecovery();
     else if (live.hookless) watchHookless(HOOKLESS_LOOK_MS, !live.transcriptBase);
     return handle;
@@ -931,35 +993,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       shotTimer = setInterval(collectShots, 2000);
       watchStuck();
 
-      // Starting up: answer the folder-trust question for the office's own worktrees (the answer that trusts it), and
-      // say so when a CLI is waiting on something only the manager can do (signing in).
-      screenTimer = setInterval(() => {
-        if (done || Date.now() - started > BOOT_MS * 2) return clearInterval(screenTimer);
-        const screen = term.screen();
-        const review = hookReviewKey(screen);
-        const key = trustKeys < 12 && Date.now() - trustedAt > 3000 ? (trustKey(screen) ?? review) : null;
-        if (key === 'down') {
-          trustKeys += 1;
-          quietly(() => p.write(term.appCursor ? '\x1bOB' : '\x1b[B'));
-        } else if (key === 'enter') {
-          trustKeys += 1;
-          trustedAt = Date.now(); // the question takes a moment to go: don't answer it twice
-          if (!review) log([{ kind: 'system', text: `✓ Trusted the worktree for ${label}.` }]);
-          else if (!hooksHinted) {
-            hooksHinted = true;
-            log([{ kind: 'system', text: `ℹ To see ${label}'s steps here, trust the office's hooks once: in this terminal, type /hooks and press t. Until then the office shows its task.` }]);
-          }
-          quietly(() => p.write('\r'));
-        }
-        if (!nudged.has('login') && /Not logged in|run \/login|Select login method|Sign in with ChatGPT|Please login|Invalid API key/i.test(screen)) {
-          nudged.add('login');
-          log([{ kind: 'error', text: `⚠ ${label} needs you to sign in: open the terminal and sign in there, or run "${cli}" in a terminal of your own.` }]);
-        } else if (!nudged.has('setup') && !trustKey(screen) && Date.now() - trustedAt > 5000 && /Choose the text style|Press Enter to continue|Bypass Permissions mode|Settings Error/i.test(screen)) {
-          // First-run screens only the manager should answer: the CLI waits for them in the terminal.
-          nudged.add('setup');
-          log([{ kind: 'error', text: `⚠ ${label} is waiting on a setup screen: open the terminal to answer it.` }]);
-        }
-      }, 1000);
+      watchStartup();
     };
     // Codex won't resume a thread the office archived (see codexThread): it's unarchived first.
     if (cli === 'codex' && opts.resumeSessionId) void host.codexThread('unarchive', opts.resumeSessionId).then(begin);
