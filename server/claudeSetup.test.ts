@@ -170,6 +170,19 @@ it('recognizes the installed Ink PTY cursor spacing and split ANSI sequences wit
   expect(claudeEnv({ SWARM_HOME: f.home }).CLAUDE_CODE_OAUTH_TOKEN === token).toBe(true);
 });
 
+it('recognizes the installed Ink PTY absolute column spacing and split ANSI sequences without exposing a terminal', async () => {
+  const f = fixture();
+  await f.auth.start();
+  f.data('\x1b[32m' + url + '\x1b[39m\r\nPaste\x1b[');
+  f.data('8Gcode\x1b[8Ghere\x1b[8Gif\x1b[8Gprompted >');
+  expect(f.auth.view().phase).toBe('awaiting-code');
+  await f.auth.submitCode(f.auth.view().flowId!, 'dummy-code-123');
+  f.data('Long-lived\x1b[8Gauthentication\x1b[8Gtoken\x1b[8Gcreated\x1b[8Gsuccessfully!\r\nYour\x1b[8GOAuth\x1b[8Gtoken\x1b[8G(valid\x1b[8Gfor\x1b[8G1\x1b[8Gyear):\r\n\x1b[32m' + token + '\x1b[39m\r\n');
+  f.exit(0);
+  await vi.waitFor(() => expect(f.auth.view().phase).toBe('complete'));
+  expect(claudeEnv({ SWARM_HOME: f.home }).CLAUDE_CODE_OAUTH_TOKEN === token).toBe(true);
+});
+
 it('refuses a temp root inside the checkout and never starts an auth process there', async () => {
   const f = fixture();
   vi.spyOn(os, 'tmpdir').mockReturnValue(process.cwd());

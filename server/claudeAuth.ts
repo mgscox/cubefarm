@@ -27,7 +27,7 @@ interface Flow {
   authorizationUrl: string | null;
   disposables: { dispose(): void }[];
 }
-const terminalText = (raw: string) => stripVTControlCharacters(raw.replace(/\x1b\[[0-9]*C/g, ' '));
+const terminalText = (raw: string) => stripVTControlCharacters(raw.replace(/\x1b\[[0-9]*[CG]/g, ' '));
 const demoUrl = 'https://claude.ai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference&code_challenge=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG&code_challenge_method=S256&state=demo0123456789abcdef';
 
 export class ClaudeAuthentication {
