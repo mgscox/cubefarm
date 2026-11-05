@@ -3493,8 +3493,8 @@ export class Swarm {
     const released = this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
     if (result.interrupted) this.interrupted(a);
 
-    if (result.errors.some((e) => e.includes('finished while the office restarted; result not collected'))) {
-      this.fail(a, result, 'restart recovery');
+    if (result.recoveryFailed) {
+      this.fail(a, result, 'session recovery');
       a.status = 'stopped'; // The outcome is unknown: don't automatically rerun the task after the error cooldown.
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
       if (rec) this.setQa(rec, { status: 'needs-human', qaAgentId: null, summary: a.lastError });

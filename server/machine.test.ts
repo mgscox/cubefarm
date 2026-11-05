@@ -606,6 +606,72 @@ describe('startCliSession on a host', () => {
     second.releaseIdle?.();
   });
 
+  it('keeps following a reattached Claude tool while its result is unavailable', async () => {
+    const meta = { agentId: 'ada', cli: 'claude', token: 'running-tool', dir: 'sessions/t', busy: true, resumeId: 'sess-1' };
+    const term = { ...terminal(), screen: () => 'Running E2E… (2m 1s)\nGalloping…\n❯\naccept edits on' } as unknown as AgentTerminal;
+    const h = { ...host(vi.fn()), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+    await reconnectClis(() => term, h);
+    const cb = claudeCallbacks();
+    const session = startCliSession({ ...opts, terminal: term, reattach: true }, cb, h);
+    handleHook(meta.token, { hook_event_name: 'PreToolUse', tool_use_id: 'e2e', tool_name: 'Bash', tool_input: { command: 'npm run test:e2e' } });
+    expect(pty.setMeta).toHaveBeenLastCalledWith(expect.objectContaining({ pendingTools: [['e2e', 'Bash']] }));
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(cb.finished).not.toHaveBeenCalled();
+    handleHook(meta.token, { hook_event_name: 'PostToolUse', tool_use_id: 'e2e', tool_name: 'Bash', tool_response: 'passed' });
+    handleHook(meta.token, { hook_event_name: 'Stop', last_assistant_message: 'QA passed' });
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'QA passed' }));
+    session.stop();
+  });
+
+  it('retains pending tools through reconnection and clears both successful and failed calls', async () => {
+    const first = claude(() => '❯', () => null, { agentId: 'ada' });
+    for (const id of ['first', 'second']) first.hook({ hook_event_name: 'PreToolUse', tool_use_id: id, tool_name: 'Bash' });
+    const meta = vi.mocked(pty.setMeta).mock.calls.at(-1)![0];
+    vi.clearAllTimers(); // the keeper retains tool evidence while the office reconnects
+    const term = { ...terminal(), screen: () => '❯' } as unknown as AgentTerminal;
+    const h = { ...host(vi.fn()), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+    await reconnectClis(() => term, h);
+    const cb = claudeCallbacks();
+    startCliSession({ ...opts, terminal: term, reattach: true }, cb, h);
+    handleHook(meta.token, { hook_event_name: 'PostToolUse', tool_use_id: 'first', tool_name: 'Bash', tool_response: 'passed' });
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(cb.finished).not.toHaveBeenCalled();
+    expect(pty.setMeta).toHaveBeenLastCalledWith(expect.objectContaining({ pendingTools: [['second', 'Bash']] }));
+    handleHook(meta.token, { hook_event_name: 'PostToolUseFailure', tool_use_id: 'second', tool_name: 'Bash', error: 'failed' });
+    expect(pty.setMeta).toHaveBeenLastCalledWith(expect.objectContaining({ pendingTools: [] }));
+    await vi.advanceTimersByTimeAsync(130_000);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, recoveryFailed: true }));
+  });
+
+  it('does not time out recovery while the terminal is still producing output', async () => {
+    const meta = { agentId: 'ada', cli: 'claude', token: 'output-only', dir: 'sessions/t', busy: true, resumeId: 'sess-1' };
+    const term = { ...terminal(), lastOutputAt: Date.now(), screen: () => 'Running E2E…\n❯' } as unknown as AgentTerminal;
+    const h = { ...host(vi.fn()), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+    await reconnectClis(() => term, h);
+    const cb = claudeCallbacks();
+    startCliSession({ ...opts, terminal: term, reattach: true }, cb, h);
+    for (let i = 0; i < 9; i++) {
+      term.lastOutputAt = Date.now();
+      await vi.advanceTimersByTimeAsync(20_000);
+    }
+    expect(cb.finished).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(130_000);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, recoveryFailed: true }));
+  });
+
+  it('reports a real CLI exit even when a reattached tool has not completed', async () => {
+    const meta = { agentId: 'ada', cli: 'claude', token: 'tool-exit', dir: 'sessions/t', busy: true, resumeId: 'sess-1', pendingTools: [['e2e', 'Bash']] };
+    const term = terminal();
+    const h = { ...host(vi.fn()), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+    await reconnectClis(() => term, h);
+    const cb = claudeCallbacks();
+    startCliSession({ ...opts, terminal: term, reattach: true }, cb, h);
+    vi.mocked(pty.onExit).mock.calls.at(-1)![0](1);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: [expect.stringMatching(/exited with code 1/)] }));
+    expect(vi.mocked(cb.finished).mock.calls[0][0].recoveryFailed).toBeUndefined();
+  });
+
   it('ends visibly when a restarted idle CLI has no readable result', async () => {
     const meta = { agentId: 'ada', cli: 'codex', token: 'lost', dir: 'sessions/t', busy: true, resumeId: null };
     const term = { ...terminal(), screen: () => 'Worked for 45m 38s\n› Ask anything' } as unknown as AgentTerminal;
@@ -614,7 +680,7 @@ describe('startCliSession on a host', () => {
     const cb = claudeCallbacks();
     startCliSession({ ...opts, cli: 'codex', terminal: term, reattach: true }, cb, h);
     await vi.advanceTimersByTimeAsync(120_000);
-    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: [expect.stringMatching(/finished while the office restarted; result not collected/)] }));
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, recoveryFailed: true, errors: [expect.stringMatching(/session could not be recovered.*after reconnecting/)] }));
   });
 
   it('cancels hookless completion when a prompt starts inside the finish grace period', async () => {

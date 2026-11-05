@@ -165,6 +165,8 @@ interface LiveCli {
   transcriptBase?: ClaudeTurn | null;
   /** Its reply was delivered, but the finish grace has not elapsed. */
   transcriptPending?: boolean;
+  /** Main-session tool calls whose completion hook has not arrived yet. */
+  pendingTools?: [string, string][];
 }
 const lives = new Map<AgentTerminal, LiveCli>();
 /** How to trust Codex's hooks was said once this run (Codex asks at the start of every session until they are). */
@@ -217,9 +219,10 @@ interface CliMeta {
   hookless?: boolean;
   transcriptBase?: ClaudeTurn | null;
   transcriptPending?: boolean;
+  pendingTools?: [string, string][];
 }
 
-const metaOf = (l: LiveCli): CliMeta => ({ agentId: l.agentId, cli: l.cli, token: l.token, dir: l.dir, resumeId: l.resumeId, busy: !!l.session || !!l.recoveringBusy, hookUrl: l.hookUrl, hookless: l.hookless, transcriptBase: l.transcriptBase, transcriptPending: l.transcriptPending });
+const metaOf = (l: LiveCli): CliMeta => ({ agentId: l.agentId, cli: l.cli, token: l.token, dir: l.dir, resumeId: l.resumeId, busy: !!l.session || !!l.recoveringBusy, hookUrl: l.hookUrl, hookless: l.hookless, transcriptBase: l.transcriptBase, transcriptPending: l.transcriptPending, pendingTools: l.pendingTools });
 const remember = (l: LiveCli) => l.proc?.setMeta(metaOf(l));
 
 /** A hook from a CLI's main session (not a subagent's, not its status line, which runs untrusted): its hooks reach the office. */
@@ -285,7 +288,7 @@ export async function reconnectClis(terminalFor: (agentId: string) => AgentTermi
       if (meta.cli === 'codex' && meta.resumeId) void host.codexThread('archive', meta.resumeId, h.exit === null ? new Promise((r) => setTimeout(r, 5000)) : undefined);
       continue;
     }
-    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, host, proc: host.adopt(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null, recoveringBusy: !!meta.busy, hookUrl: meta.hookUrl, hookless: meta.hookless === true, transcriptBase: meta.transcriptBase, transcriptPending: meta.transcriptPending };
+    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, host, proc: host.adopt(h), token: meta.token, dir: meta.dir, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null, recoveringBusy: !!meta.busy, hookUrl: meta.hookUrl, hookless: meta.hookless === true, transcriptBase: meta.transcriptBase, transcriptPending: meta.transcriptPending, pendingTools: meta.pendingTools };
     wire(l);
     waitAtPrompt(l, !meta.busy);
     // Resizing makes the CLI draw its whole screen again, over whatever the saved copy of the terminal missed.
@@ -358,7 +361,13 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const started = Date.now();
   let launchedAt = started;
   const statusLine = `🏢 cubefarm${opts.label ? ` · ${opts.label}` : ''}`;
-  const toolNames = new Map<string, string>();
+  const toolNames = new Map<string, string>(opts.reattach ? live?.pendingTools : []);
+  const rememberTools = () => {
+    if (live) {
+      live.pendingTools = [...toolNames];
+      remember(live);
+    }
+  };
   const officePrompts: string[] = []; // prompts the office typed, so the ones the manager typed are told apart
   const launched: string[] = []; // every prompt the CLI was given, as given (Codex: finds its main thread)
   let mainThread: string | null = live?.resumeId ?? opts.resumeSessionId ?? null;
@@ -462,6 +471,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
 
   /** A turn ended: finished, unless the CLI picks up another prompt within the grace period. */
   const turnEnded = (text: string) => {
+    toolNames.clear();
+    rememberTools();
     lastText = text;
     working = false;
     cb.tool(null);
@@ -564,6 +575,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
           busy();
           turns += 1;
           toolNames.set(String(b.tool_use_id ?? ''), name);
+          rememberTools();
           log([{ kind: 'tool', tool: name, text: `⏺ ${describeTool(opts.cwd, name, input)}` }, ...(name === 'TodoWrite' ? todoLines(input) : [])]);
           cb.tool(name);
           if (playwrightAction(name) === 'navigate' && typeof input.url === 'string') cb.browserUrl(input.url);
@@ -574,6 +586,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       case 'PostToolUseFailure': {
         if (sub) return {};
         const name = toolNames.get(String(b.tool_use_id ?? '')) ?? String(b.tool_name ?? '');
+        toolNames.delete(String(b.tool_use_id ?? ''));
+        rememberTools();
         const out = toolOutput(b.tool_response);
         // Codex's unnamed screenshots are collected from the browser's folder (its hooks may not be trusted yet).
         if (cli === 'claude') for (const img of out.images) cb.screenshot(Buffer.from(img.data, 'base64'), img.mime);
@@ -830,14 +844,15 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         recoveryIdleAt = null;
       } else if (live?.transcriptPending && lastText) {
         if (working) turnEnded(lastText);
-      } else if (Date.now() - heardAt < BOOT_MS || active) {
+      } else if (Date.now() - heardAt < BOOT_MS || active || toolNames.size > 0 || Date.now() - (term.lastOutputAt ?? 0) < BOOT_MS) {
+        // A silent tool may run for minutes; missing transcript evidence does not mean its CLI has stopped.
         recoveryIdleAt = null;
       } else {
         // A readable active transcript is enough to keep waiting. Missing evidence is bounded: a broken
         // link or an unreadable idle CLI must become a visible error instead of holding a desk forever.
         recoveryIdleAt ??= Date.now();
         if (Date.now() - recoveryIdleAt >= BOOT_MS) {
-          finish({ ok: false, text: '', errors: [`${label} finished while the office restarted; result not collected (transcript unavailable).`] }, true);
+          finish({ ok: false, text: '', errors: [`${label}'s session could not be recovered: no completion signal or readable transcript was available after reconnecting.`], recoveryFailed: true }, true);
           return;
         }
       }
