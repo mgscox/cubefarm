@@ -1,3 +1,4 @@
+import { claudeEnv } from '../bin/claudeAuth.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -333,11 +334,10 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
   input.push(opts.prompt);
 
   // Each agent must be a clean Claude Code instance on the subscription Claude Code is logged into.
-  // Drop API keys (they would switch billing to the API) and any CLAUDE_* / ANTHROPIC_* variables
+  // Drop API keys (they would switch billing to the API) and other CLAUDE_* / ANTHROPIC_* variables
   // inherited from a parent Claude Code session (base URL proxies, session sockets, effort overrides…).
   const env: Record<string, string | undefined> = {};
-  for (const [k, v] of Object.entries(projectEnv(process.env))) {
-    if (/^(ANTHROPIC_|CLAUDE)/i.test(k) && k !== 'CLAUDE_CONFIG_DIR') continue;
+  for (const [k, v] of Object.entries(claudeEnv(projectEnv(process.env)))) {
     env[k] = v;
   }
   env.CLAUDE_AGENT_SDK_CLIENT_APP = `cubefarm/${VERSION}`;

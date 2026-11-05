@@ -1,10 +1,11 @@
+import { ClaudeAuthentication, claudeAuthRouter } from './claudeAuth.ts';
 import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
-import { DEMO, HOST, PORT, STATE_FILE, WORKSPACE_ROOT, readConfigEnv } from './config.ts';
+import { DEMO, HOME_DIR, HOST, PORT, STATE_FILE, WORKSPACE_ROOT, readConfigEnv } from './config.ts';
 import { bindMessage, browserUrl, localUrl } from '../bin/officeNetwork.js';
 import { realBackend } from './backend.ts';
 import { handleHook, handleMcp, setOfficeUrl } from './cliRunner.ts';
@@ -31,6 +32,11 @@ app.post('/api/mcp/:token', express.json({ limit: '4mb' }), (req, res, next) => 
 app.all('/api/mcp/:token', (_req, res) => void res.status(405).set('Allow', 'POST').end());
 app.use('/mcp', mcpSettings ? managerMcpRouter(swarm, mcpSettings) : (_req, res) => { res.sendStatus(404); });
 app.use('/api/settings/mcp', managerMcpSettingsRouter(mcpSettings));
+const claudeAuthentication = new ClaudeAuthentication({
+  home: HOME_DIR, env: process.env, demo: DEMO,
+  origin: process.env.CUBEFARM_AUTH_ORIGIN, proxyAddress: process.env.CUBEFARM_AUTH_PROXY_ADDRESS,
+});
+app.use('/api/settings/claude', claudeAuthRouter(claudeAuthentication));
 app.use(express.json({ limit: '1mb' }));
 
 type Handler = (req: Request, res: Response) => Promise<unknown> | unknown;
@@ -238,8 +244,7 @@ const shutdown = (signal: string) => {
   closing = true;
   console.log(`\n  ${signal}: stopping floor previews…`);
   const force = setTimeout(() => process.exit(0), 15_000);
-  void swarm
-    .shutdown(signal === 'restart')
+  void Promise.all([claudeAuthentication.close(), swarm.shutdown(signal === 'restart')])
     .catch((err) => console.error(err))
     .finally(() => {
       clearTimeout(force);

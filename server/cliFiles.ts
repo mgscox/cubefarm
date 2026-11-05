@@ -1,3 +1,4 @@
+import { claudeEnv } from '../bin/claudeAuth.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -111,9 +112,8 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
   // Each agent must be a clean instance on the account its CLI is logged into: no API keys (they would switch Claude
   // Code's billing to the API) and nothing inherited from a Claude Code session the office itself was started from.
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(projectEnv(process.env))) {
+  for (const [k, v] of Object.entries(claudeEnv(projectEnv(process.env), { login: plan.cli !== 'claude' }))) {
     if (v === undefined) continue;
-    if (/^(ANTHROPIC_|CLAUDE)/i.test(k) && k !== 'CLAUDE_CONFIG_DIR') continue;
     if (/^(NO_COLOR|FORCE_COLOR|TERM_PROGRAM|TERM_PROGRAM_VERSION|CODEX_THREAD_ID|OPENCODE_CONFIG_CONTENT)$/i.test(k)) continue;
     env[k] = v;
   }

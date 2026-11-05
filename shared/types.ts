@@ -853,3 +853,17 @@ export interface PublicationView {
   createdAt: number;
   updatedAt: number;
 }
+
+/** Safe metadata only: raw CLI output, codes and tokens are never included. */
+export interface ClaudeAuthenticationView {
+  mode: 'browser' | 'manual-token';
+  source: 'demo' | 'saved' | 'startup' | 'cli' | 'unavailable';
+  expiresAt: null;
+  canManage: boolean;
+  demo: boolean;
+  phase: 'idle' | 'starting' | 'awaiting-code' | 'exchanging' | 'pending' | 'saving' | 'complete' | 'cancelled' | 'expired' | 'failed';
+  flowId: string | null;
+  flowExpiresAt: number | null;
+  setupCommand: string | null;
+  authorizationUrl: string | null;
+}

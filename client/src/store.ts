@@ -10,7 +10,7 @@ export type Agent = Omit<AgentView, 'log'>;
 export const isPublication = (p: PublicationView | null | undefined): p is PublicationView =>
   !!p && typeof p.proposalId === 'string' && Array.isArray(p.issues) && Array.isArray(p.snapshot?.issues);
 
-export type PhoneTab = 'chat' | 'hires' | 'company' | 'games';
+export type PhoneTab = 'chat' | 'hires' | 'company' | 'games' | 'settings';
 
 export type Overlay =
   | { kind: 'terminal'; agentId: string }
