@@ -7,6 +7,18 @@ import { describe, expect, it } from 'vitest';
 import { AgentTerminal } from './terminal.ts';
 
 describe('AgentTerminal', () => {
+  it('counts CLI output, but not office notes, as activity', () => {
+    const t = new AgentTerminal();
+    t.note('Starting a session');
+    expect(t.lastOutputAt).toBe(0);
+    t.write('Working');
+    const outputAt = t.lastOutputAt;
+    expect(outputAt).toBeGreaterThan(0);
+    t.note('The office nudged this session');
+    expect(t.lastOutputAt).toBe(outputAt);
+    t.dispose();
+  });
+
   it('keeps what was printed, so a late viewer sees the same screen', async () => {
     const t = new AgentTerminal();
     t.write('\x1b[32mhello\x1b[0m world\r\n');

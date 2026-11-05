@@ -99,6 +99,7 @@ export const realBackend: Backend = {
   containsCommit: github.containsCommit,
   deskAhead: workspace.deskAhead,
   deskHead: workspace.deskHead,
+  deskExists: workspace.deskExists,
   prDetails: github.prDetails,
   issueDetails: github.issueDetails,
   commentPull: github.commentPull,

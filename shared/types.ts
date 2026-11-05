@@ -83,6 +83,12 @@ export interface RequestedStart {
   restartPending: boolean;
 }
 
+/** Persisted per issue/PR so a quiet session's remedies survive retries, desk handoffs and office restarts. */
+export interface SessionRemedies {
+  nudgeAt?: number;
+  requeueAt?: number;
+}
+
 /** A closed placeholder PR whose branch can be reused when its issue becomes ready. */
 export interface ParkedBranch {
   issueNumber: number;
@@ -109,6 +115,7 @@ export interface RepoView {
   color: string; // accent color for the floor
   autoAssign: boolean;
   requestedStarts: RequestedStart[];
+  sessionRemedies?: Record<string, SessionRemedies>;
   parkedBranches: ParkedBranch[];
   noWorkEndings: NoWorkEnding[];
   autoMerge: boolean; // PRs merge themselves once QA passes and GitHub's checks are green

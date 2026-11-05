@@ -615,7 +615,7 @@ const demoResources = (profile = ''): MachineSample => ({
  * One starting with "old" too, but its cubefarm predates --update: the first try fails, as if the manager then updated
  * it by hand, so Look again moves it.
  */
-function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
+function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'deskExists' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
   let status: 'connecting' | 'online' | 'offline' = 'connecting';
   let running = 0;
   let telemetry: MachineTelemetry | null = null;
@@ -735,6 +735,7 @@ export function createDemoBackend(): Backend {
   const desks = (root: string) => ({
     mainDir: (fullName: string) => `${root}/${fullName}/main`,
     deskDir: (fullName: string, slug: string) => `${root}/${fullName}/desks/${slug}`,
+    deskExists: async (fullName: string, slug: string) => deskRepo.has(`${root}/${fullName}/desks/${slug}`),
     prepareDesk: async (fullName: string, base: { pr?: number }, slug: string, branch: string, note?: (text: string) => void) => {
       await new Promise((r) => setTimeout(r, 900));
       const dir = `${root}/${fullName}/desks/${slug}`;

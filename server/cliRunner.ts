@@ -540,6 +540,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     const event = String(b.hook_event_name ?? '');
     if (done) return event === 'PreToolUse' ? ALLOW : {};
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
+    if (event !== 'StatusLine') cb.activity?.();
     if (fromMain(b)) {
       heardAt = Date.now();
       stir();

@@ -19,7 +19,8 @@ import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
 import { issueHolder, duplicateIssueSessions, issueTaken } from './issueClaims.ts';
 import { orphanedQa } from './qaOwnership.ts';
-import { closedWork, closedWorkText, issueClosed, type ClosedWork } from './closedWork.ts';
+import { closedWork, closedWorkText, issueClosed, restartClosedWork, type ClosedWork } from './closedWork.ts';
+import { silentSession } from './watchdog.ts';
 import { startTimeouts, stuckStarting } from './sessionStart.ts';
 import { withOperation } from './operation.ts';
 import { QA_RESUME_PROMPT, qaRetry } from './qaRetry.ts';
@@ -106,6 +107,7 @@ interface PersistedRepo {
   color: string;
   autoAssign: boolean;
   requestedStarts: RequestedStart[];
+  sessionRemedies?: RepoView['sessionRemedies'];
   parkedBranches: ParkedBranch[];
   noWorkEndings: NoWorkEnding[];
   autoMerge: boolean; // PRs merge themselves once QA passes and GitHub's checks are green
@@ -150,7 +152,7 @@ interface PersistedAgent {
   turns: number;
   sessionId: string | null;
   sessionCli: AgentCli | null; // the CLI whose session sessionId is: only it can resume it
-  /** The one more session an issue that ended without a PR gets, held over Claude's usage pause: see holdRetry. */
+  /** A completion or silent-session retry, held over usage pauses and office closure. */
   heldRetry?: HeldRetry | null;
   issueStartHead?: string | null;
   lastError: string | null;
@@ -165,6 +167,7 @@ interface HeldRetry {
   issueNumber: number | null;
   ahead: number;
   why: string;
+  resume?: boolean;
 }
 
 /** A pull request's trip through QA. */
@@ -261,6 +264,7 @@ interface AgentRuntime {
   qaResume?: { cwd: string; systemAppend: string } | null; // the QA run's one resume for a missing report, until used
   deskMoved?: boolean; // the task's desk had to move off a removed box: its conversation can't be resumed
   boot?: AgentBoot | null; // a new CLI the office hasn't heard from (see SessionCallbacks.boot)
+  activityAt?: number;
 }
 
 interface RepoRuntime {
@@ -747,7 +751,7 @@ export class Swarm {
     const back: ReconnectedCli[] = await this.backend
       .reconnectClis((id) => {
         const a = this.state.agents.find((x) => x.id === id);
-        return a && a.role !== 'ceo' && a.id !== RESEARCHER_ID && a.id !== this.state.research.job?.agentId ? this.terminalFor(a) : null;
+        return a && !a.deskBox && a.role !== 'ceo' && a.id !== RESEARCHER_ID && a.id !== this.state.research.job?.agentId ? this.terminalFor(a) : null;
       })
       .catch((err) => {
         console.warn('could not reconnect to the terminal keeper', err);
@@ -772,7 +776,7 @@ export class Swarm {
     }
     for (const c of back) if (c.busy && !carryOn.some((a) => a.id === c.agentId)) this.agentRt.get(c.agentId)?.terminal?.releaseIdle?.();
     for (const r of this.state.repos) this.repoRt.set(r.id, { issues: [], pulls: [], lastSync: null, syncing: false, cloneStatus: 'pending', lastMergedAt: null, folderSync: null, merging: false });
-    for (const a of carryOn) this.reattachSession(a);
+    await Promise.all(carryOn.map((a) => this.reattachSession(a)));
     this.backend.hooksReady();
     for (const c of this.boxConns.values()) c.hooksReady();
 
@@ -897,6 +901,7 @@ export class Swarm {
       color: r.color,
       autoAssign: r.autoAssign,
       requestedStarts: r.requestedStarts,
+      sessionRemedies: r.sessionRemedies,
       parkedBranches: r.parkedBranches ?? [],
       noWorkEndings: r.noWorkEndings ?? [],
       autoMerge: r.autoMerge,
@@ -1506,11 +1511,11 @@ export class Swarm {
   }
 
   /** A box answered after the office started: agents whose CLI kept working there are followed again; other busy CLIs close. */
-  private boxBack(id: string, back: ReconnectedCli[]) {
+  private async boxBack(id: string, back: ReconnectedCli[]) {
     for (const c of back) {
       const a = this.state.agents.find((x) => x.id === c.agentId);
       const follow = !!a && a.status === 'stopped' && a.deskBox === id && !this.agentRt.get(a.id)?.session && followKeptCli({ ...a, status: 'working' }, c);
-      if (follow) this.reattachSession(a);
+      if (follow) await this.reattachSession(a);
       else if (c.busy) this.agentRt.get(c.agentId)?.terminal?.releaseIdle?.();
     }
     this.boxConns.get(id)?.hooksReady();
@@ -2428,6 +2433,26 @@ export class Swarm {
     this.broadcast({ type: 'qaRemoved', repoId: rec.repoId, prNumber: rec.prNumber });
   }
 
+  /** Check authoritative work state before following a kept CLI or resuming its conversation. */
+  private async closedOnRestart(a: PersistedAgent, repo: PersistedRepo) {
+    const rt = this.agentRt.get(a.id)!;
+    const generation = rt.generation;
+    const [prState, issue] = await Promise.all([
+      a.prNumber == null ? null : this.backend.prDetails(repo.fullName, a.prNumber).then((p) => p.state, () => null),
+      a.task !== 'issue' || a.issueNumber == null ? null : this.backend.readIssue(repo.fullName, a.issueNumber).catch(() => null),
+    ]);
+    if (!this.state.agents.includes(a) || rt.generation !== generation) return true;
+    const work = restartClosedWork(a, { prState, issue });
+    if (!work) return false;
+    const text = work.kind === 'pr' && prState === 'MERGED' ? `PR #${work.number} was merged` : closedWorkText(work);
+    this.endClosedWork(a, repo, work, `■ Not resuming: ${text}. Ready for new work.`, prState === 'MERGED' ? 'MERGED' : 'CLOSED');
+    const floor = this.repoRt.get(repo.id);
+    if (floor && work.kind === 'issue') floor.issues = floor.issues.filter((i) => i.number !== work.number);
+    if (floor && work.kind === 'pr') floor.pulls = floor.pulls.map((p) => p.number === work.number ? { ...p, state: prState! } : p);
+    this.emitRepo(repo);
+    return true;
+  }
+
   /** Stop busy sessions whose issue closed or whose PR closed unmerged. A missing issue or PR is read back first. */
   private async stopClosedWork(repo: PersistedRepo, issues: IssueInfo[] | null, pulls: PullInfo[]) {
     const floor = {
@@ -2823,9 +2848,14 @@ export class Swarm {
   }
 
   /** An agent whose CLI kept working through the office's restart: the office follows its session again. */
-  private reattachSession(a: PersistedAgent) {
+  private async reattachSession(a: PersistedAgent) {
     const repo = this.state.repos.find((r) => r.id === a.repoId);
     if (!repo) return;
+    const place = this.place(a, 'within');
+    if ('wait' in place || place.fellBack) {
+      a.status = 'stopped';
+      return;
+    }
     a.status = 'working';
     this.repairDuplicateIssues();
     if (a.status !== 'working') return;
@@ -2833,7 +2863,7 @@ export class Swarm {
     const starting = this.startAgentSession(a, repo, this.machineFor(a).deskDir(repo.fullName, this.agentSlug(a)), '', '', a.sessionId ?? undefined, undefined, 'reattach');
     const rt = this.agentRt.get(a.id);
     const generation = rt?.generation;
-    void starting.catch((err) => {
+    await starting.catch((err) => {
       if (!this.state.agents.includes(a) || rt?.generation !== generation) return;
       this.nextGeneration(a);
       const session = rt?.session;
@@ -3280,6 +3310,31 @@ export class Swarm {
     this.watchStart(a, job);
     const how = this.sessionRuntime(a, resumeSessionId);
     this.emitAgent(a);
+    // A typed prompt's hook needs synchronous admission; restart and programmatic resumes can await these reads.
+    if (mode === 'reattach' || (resumeSessionId && mode !== 'typed')) {
+      if (await this.closedOnRestart(a, repo)) return;
+      let exists: boolean;
+      try {
+        exists = await withOperation(rt.startWatch!.controller.signal, () => this.machineFor(a).deskExists(repo.fullName, this.agentSlug(a)));
+      } catch (err) {
+        if (!this.state.agents.includes(a) || rt.generation !== generation) return;
+        a.status = 'stopped';
+        a.lastError = `Could not check the desk on its machine: ${oneLine(err)}`;
+        this.emitAgent(a);
+        this.save();
+        throw err;
+      }
+      if (!this.state.agents.includes(a) || rt.generation !== generation || a.status !== 'working') return;
+      if (!exists) {
+        this.appendLog(a, [{ kind: 'system', text: '↺ The desk is missing on its machine. Back to the queue.' }]);
+        rt.terminal?.releaseIdle?.();
+        this.deferPrepared(a, repo);
+        return;
+      }
+      if (rt.terminal?.closing) await withOperation(rt.startWatch!.controller.signal, () => rt.terminal!.closing!);
+      if (!this.state.agents.includes(a) || rt.generation !== generation || a.status !== 'working') return;
+      if (mode !== 'reattach' && this.state.officeHeld) return this.deferPrepared(a, repo);
+    }
     if (a.task === 'issue' && mode !== 'reattach') {
       rt.starting = generation;
       a.issueStartHead = null;
@@ -3292,6 +3347,7 @@ export class Swarm {
       this.save();
     }
     let session: SessionHandle | undefined; // undefined while startSession runs, should a runner finish synchronously
+    rt.activityAt = Date.now();
     session = rt.session = this.machineFor(a).startSession(
       {
         cwd,
@@ -3312,7 +3368,12 @@ export class Swarm {
         ...how,
       },
       {
-        log: (entries) => { if (rt.generation === generation) this.appendLog(a, entries); },
+        activity: () => { if (rt.generation === generation) rt.activityAt = Date.now(); },
+        log: (entries) => {
+          if (rt.generation !== generation) return;
+          if (entries.length) rt.activityAt = Date.now();
+          this.appendLog(a, entries);
+        },
         tool: (name) => {
           if (rt.generation !== generation) return;
           if (rt.currentTool === name) return;
@@ -3550,7 +3611,18 @@ export class Swarm {
       }
       if (this.slotsFull()) return;
       a.heldRetry = null;
-      if (held.ahead > 0) this.finishPushedWork(a, repo, held.why, held.ahead);
+      if (held.resume) {
+        const starting = this.message(a.id, `The office ended your silent session. Check your worktree and continue the task; ${held.why}.`);
+        const generation = this.agentRt.get(a.id)?.generation;
+        void starting.catch((err) => {
+          if (!this.state.agents.includes(a) || this.agentRt.get(a.id)?.generation !== generation) return;
+          console.warn(`could not retry ${a.name}`, err);
+          a.status = 'stopped';
+          a.heldRetry = held;
+          this.emitAgent(a);
+          this.save();
+        });
+      } else if (held.ahead > 0) this.finishPushedWork(a, repo, held.why, held.ahead);
       else this.noPullRequest(a, repo, 0);
     }
   }
@@ -4339,6 +4411,47 @@ export class Swarm {
   }
 
   private scheduleOffset = 0;
+
+  /** Only active floor tasks: startup has its own deadlines, and lobby jobs have their own queues. */
+  private watchSilentSessions() {
+    if (this.officeUpdate.handedOver) return;
+    const now = Date.now();
+    for (const a of this.state.agents) {
+      const rt = this.agentRt.get(a.id)!;
+      const repo = this.state.repos.find((r) => r.id === a.repoId);
+      if (!repo || !rt || a.status !== 'working' || !rt.session) continue;
+      // Offline boxes may still be working. Wait for their hooks and terminal replay after reconnecting.
+      if (a.deskBox && this.boxConns.get(a.deskBox)?.state().status !== 'online') continue;
+      const key = a.task === 'issue' && a.issueNumber != null ? `issue:${a.issueNumber}` : a.prNumber != null ? `pr:${a.prNumber}` : null;
+      if (!key) continue;
+      const remedies = repo.sessionRemedies?.[key] ?? {};
+      const action = silentSession(now, Math.max(rt.activityAt ?? a.startedAt ?? now, rt.terminal?.lastOutputAt ?? 0), remedies);
+      if (!action) continue;
+      repo.sessionRemedies ??= {};
+      repo.sessionRemedies[key] = { ...remedies, [action === 'nudge' ? 'nudgeAt' : 'requeueAt']: now };
+      if (action === 'nudge') {
+        const text = 'The office has heard no session activity for 20 minutes. Check your task and continue, or report what is blocking you.';
+        this.appendLog(a, [{ kind: 'system', text: `⏱ ${text}` }]);
+        rt.session.send(text);
+      } else {
+        const session = rt.session;
+        this.nextGeneration(a); // Late completion and hook callbacks cannot change the requeued task.
+        rt.session = null;
+        rt.currentTool = null;
+        a.status = 'stopped';
+        a.endedAt = now;
+        this.appendLog(a, [{ kind: 'system', text: '↺ Still silent ten minutes after the office nudge. Ending this session and requeuing its work.' }]);
+        session.stop();
+        rt.terminal?.releaseIdle?.();
+        if (a.task === 'issue' && !a.prNumber && a.sessionId && a.branch) {
+          a.heldRetry = { issueNumber: a.issueNumber, ahead: 0, why: `finish issue #${a.issueNumber} and open its PR`, resume: true };
+          this.emitAgent(a);
+        } else this.deferPrepared(a, repo);
+      }
+      this.emitRepo(repo);
+      this.save();
+    }
+  }
   private issueFailures = new Map<string, number>(); // `${repoId}#${issue}` → failed sessions on it
   private blockerReadings = new Map<string, BlockerReading>(); // blockerKey → latest read of an approved prerequisite
   private nudged = new Set<string>(); // `${repoId}#${issue}`: its developer was asked once to finish the missing PR
@@ -4536,6 +4649,7 @@ export class Swarm {
   private schedule() {
     for (const p of this.state.proposals) if (p.prd.recordId && p.decision?.publication?.status === 'queued') this.handOffDecision(p);
     for (const a of this.state.agents) if (a.repoId && this.startStall(a)) this.failedStart(a);
+    this.watchSilentSessions();
     this.repairDuplicateIssues();
     this.reconcileOrphanedQa();
     this.syncBoxes();

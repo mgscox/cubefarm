@@ -510,3 +510,11 @@ export async function deskAhead(fullName: string, agentSlug: string, base: strin
 export function deskHead(fullName: string, agentSlug: string): Promise<string> {
   return git(['rev-parse', '--verify', 'HEAD'], { cwd: deskDir(fullName, agentSlug) });
 }
+
+/** A missing desk can be requeued; other disk errors must not cause its work to be discarded. */
+export async function deskExists(fullName: string, agentSlug: string): Promise<boolean> {
+  return fs.stat(deskDir(fullName, agentSlug)).then((s) => s.isDirectory(), (err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT') return false;
+    throw err;
+  });
+}

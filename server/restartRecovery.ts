@@ -21,7 +21,7 @@ export interface KeptCli {
 
 /** The office follows a CLI that kept working through the restart only when it is on the agent's current task. */
 export function followKeptCli(a: RestartAgent, cli: KeptCli | undefined): boolean {
-  if (!cli?.busy || a.status === 'preparing') return false;
+  if (!cli?.busy || !a.task || a.status === 'preparing') return false;
   return !(a.sessionId && cli.resumeId && cli.resumeId !== a.sessionId);
 }
 

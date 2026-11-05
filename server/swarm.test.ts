@@ -83,6 +83,8 @@ beforeEach(() => {
   s = swarm as unknown as Internals;
   vi.spyOn(s, 'save').mockImplementation(() => {});
   vi.spyOn(s, 'schedule').mockImplementation(() => {});
+  // These tests inject synthetic desks without preparing the demo backend's in-memory worktrees.
+  vi.spyOn(s.backend, 'deskExists').mockResolvedValue(true);
   repo = { id: 'r1', fullName: 'demo-co/pixel-todo', floor: 1, autoAssign: true, requestedStarts: [], preview: { command: null, env: {} } };
   s.state.repos.push(repo);
   s.state.agents.push({ id: 'a1', name: 'Ada', repoId: repo.id, role: 'dev', specialty: '', status: 'idle', task: null, issueNumber: null, desk: 0, endedAt: null });
@@ -361,13 +363,15 @@ describe('exclusive issue sessions', () => {
 
   it('does not let a stale reconnect rejection stop a replacement task', async () => {
     Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped' });
-    starts.mockImplementationOnce(() => { throw new Error('Runner unavailable'); });
+    let read!: (issue: TrackedIssue | null) => void;
+    vi.spyOn(s.backend, 'readIssue').mockImplementationOnce(() => new Promise((resolve) => { read = resolve; }));
     (s as unknown as { reattachSession(a: unknown): void }).reattachSession(other());
     s.clearTask(other());
     await swarm.assign('a2', 67);
+    read(null);
     await flush();
     expect(other()).toMatchObject({ status: 'working', issueNumber: 67, lastError: null });
-    expect(starts).toHaveBeenCalledTimes(2);
+    expect(starts).toHaveBeenCalledOnce();
   });
 
   it.each([true, false])('repairs duplicate sessions, preferring a linked PR then the older start (PR: %s)', async (linkedPr) => {
@@ -5124,7 +5128,7 @@ describe('closed work', () => {
       expect(s.state.qa[0]).toMatchObject({ prNumber: 12, status: 'fixing' });
     });
 
-    it('stops a resumed issue session once its PR closed unmerged, though the issue is still open', async () => {
+    it('clears a resumed issue before starting when its PR closed unmerged, though the issue is still open', async () => {
       const session = { send: vi.fn(), stop: vi.fn() };
       const starts = vi.spyOn(s.backend, 'startSession').mockReturnValue(session);
       vi.spyOn(s.backend, 'deskHead').mockResolvedValue('base');
@@ -5132,13 +5136,11 @@ describe('closed work', () => {
       c.agentRt.get('a1')!.session = null;
       Object.assign(s.state.agents[0], { status: 'done', task: 'issue', prNumber: 12, sessionId: 'dev-session', model: '', effort: '', cli: '' });
       await swarm.message('a1', 'Carry on');
-      expect(starts).toHaveBeenCalledOnce();
-      expect(s.state.agents[0]).toMatchObject({ status: 'working', task: 'issue', prNumber: 12 });
-      await swarm.syncRepo(repo.id);
+      expect(starts).not.toHaveBeenCalled();
       expect(s.backend.prDetails).toHaveBeenCalledWith(repo.fullName, 12);
-      expect(session.stop).toHaveBeenCalledOnce();
+      expect(session.stop).not.toHaveBeenCalled();
       expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null, issueNumber: null, prNumber: null });
-      expect(log()).toContain('Stopped: PR #12 was closed without merging');
+      expect(log()).toContain('Not resuming: PR #12 was closed without merging');
     });
 
     it('still stops an issue task on a closed issue when its unlisted PR reads back open', async () => {
@@ -5240,5 +5242,154 @@ describe('closed work', () => {
       expect(s.state.agents[0]).toMatchObject({ status: 'idle', task: null });
       expect(log()).toContain('Not starting: PR #12 is closed');
     });
+  });
+});
+
+describe('silent session recovery', () => {
+  type Recovery = Internals & { watchSilentSessions(): void; reattachSession(a: unknown): Promise<void> };
+  let recovery: Recovery;
+  let cb: SessionCallbacks;
+  let send: Mock;
+  let stop: Mock;
+  const dev = () => s.state.agents[0];
+  const minutes = (n: number) => vi.setSystemTime(Date.now() + n * 60_000);
+
+  beforeEach(async () => {
+    recovery = s as Recovery;
+    s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
+    Object.assign(repo, { defaultBranch: 'main', links: [] });
+    Object.assign(dev(), { model: '', effort: '', cli: '', costUsd: 0, turns: 0 });
+    s.runTask = (Swarm.prototype as unknown as Pick<Internals, 'runTask'>).runTask;
+    vi.spyOn(s, 'prepare').mockResolvedValue('/fake-desk');
+    vi.spyOn(s.backend, 'deskHead').mockResolvedValue('base');
+    send = vi.fn();
+    stop = vi.fn();
+    vi.spyOn(s.backend, 'startSession').mockImplementation((_opts, callbacks) => {
+      cb = callbacks;
+      return { send, stop };
+    });
+    setIssues(issue(66));
+    await swarm.assign('a1', 66);
+    await vi.advanceTimersByTimeAsync(0);
+    cb.sessionId('running-thread');
+  });
+
+  it('nudges once, then holds a retry with its conversation and ignores late completions', () => {
+    minutes(20);
+    recovery.watchSilentSessions();
+    recovery.watchSilentSessions();
+    expect(send).toHaveBeenCalledOnce();
+    minutes(10);
+    recovery.watchSilentSessions();
+    recovery.watchSilentSessions();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(dev()).toMatchObject({ status: 'stopped', sessionId: 'running-thread', branch: 'swarm/issue-66-ada', heldRetry: { issueNumber: 66, resume: true } });
+    expect(swarm.snapshot().repos[0].sessionRemedies?.['issue:66'].requeueAt).toBe(Date.now());
+    cb.finished({ ok: true, text: '', costUsd: 0, turns: 0, errors: [] });
+    expect(dev().status).toBe('stopped');
+  });
+
+  it.each(['hook', 'log', 'terminal'] as const)('recent %s activity postpones the nudge', (source) => {
+    minutes(19);
+    if (source === 'hook') cb.activity!();
+    if (source === 'log') cb.log([{ kind: 'tool', text: 'Working' }]);
+    if (source === 'terminal') Object.assign(s.agentRt.get('a1')!, { terminal: { lastOutputAt: Date.now() } });
+    minutes(1);
+    recovery.watchSilentSessions();
+    expect(send).not.toHaveBeenCalled();
+    minutes(19);
+    recovery.watchSilentSessions();
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it('requeues an issue without a conversation through requested starts even with auto assignment disabled', () => {
+    dev().sessionId = null;
+    repo.autoAssign = false;
+    minutes(20);
+    recovery.watchSilentSessions();
+    minutes(10);
+    recovery.watchSilentSessions();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(dev()).toMatchObject({ status: 'idle', task: null });
+    expect(repo.requestedStarts).toEqual([{ issueNumber: 66, preferredAgentId: 'a1', restartPending: true }]);
+  });
+
+  it.each(['CLOSED', 'MERGED'] as const)('clears a kept CLI on a %s PR before attaching to it', async (state) => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    Object.assign(dev(), { status: 'stopped', prNumber: 12 });
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ state } as Awaited<ReturnType<Backend['prDetails']>>);
+    vi.mocked(s.backend.startSession).mockClear();
+    await recovery.reattachSession(dev());
+    expect(s.backend.startSession).not.toHaveBeenCalled();
+    expect(dev()).toMatchObject({ status: 'idle', task: null, sessionId: null });
+  });
+
+  it('clears an issue closed during downtime before resuming it', async () => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    dev().status = 'stopped';
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ repo: repo.fullName, ...issue(66), state: 'CLOSED' });
+    vi.mocked(s.backend.startSession).mockClear();
+    await swarm.message('a1', 'Resume after restart');
+    expect(s.backend.startSession).not.toHaveBeenCalled();
+    expect(dev()).toMatchObject({ status: 'idle', task: null });
+  });
+
+  it('checks a box desk on its machine and reattaches there without local restoration', async () => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    Object.assign(dev(), { status: 'stopped', deskBox: 'box-1' });
+    const deskExists = vi.fn(async () => true);
+    const startSession = vi.fn((_opts: SessionOptions, callbacks: SessionCallbacks) => {
+      cb = callbacks;
+      return { send, stop };
+    });
+    const machine = { ...s.backend, deskExists, startSession };
+    const boxes = s as unknown as { boxConns: Map<string, unknown>; state: { boxes: { id: string }[] } };
+    boxes.state.boxes.push({ id: 'box-1' });
+    boxes.boxConns.set('box-1', { machine, state: () => ({ status: 'online', clis: [{ id: 'claude', installed: true }] }) });
+    vi.mocked(s.backend.startSession).mockClear();
+    vi.mocked(s.backend.deskExists).mockClear();
+    const prepare = vi.spyOn(s.backend, 'prepareDesk');
+    await recovery.reattachSession(dev());
+    expect(deskExists).toHaveBeenCalledOnce();
+    expect(startSession).toHaveBeenCalledWith(expect.objectContaining({ reattach: true }), expect.anything());
+    expect(s.backend.deskExists).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(s.backend.startSession).not.toHaveBeenCalled();
+    minutes(20);
+    cb.activity!();
+    recovery.watchSilentSessions();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('requeues a missing desk instead of resuming a conversation there', async () => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    dev().status = 'stopped';
+    vi.mocked(s.backend.deskExists).mockResolvedValue(false);
+    vi.mocked(s.backend.startSession).mockClear();
+    await swarm.message('a1', 'Resume after restart');
+    expect(s.backend.startSession).not.toHaveBeenCalled();
+    expect(dev()).toMatchObject({ status: 'idle', task: null });
+    expect(repo.requestedStarts).toEqual([{ issueNumber: 66, preferredAgentId: 'a1', restartPending: true }]);
+  });
+
+  it('admits a typed fix follow-up synchronously so its CLI does not reject the prompt', () => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    Object.assign(dev(), { status: 'done', task: 'fix', prNumber: 12 });
+    const terminal = (s as unknown as { terminalFor(a: unknown): AgentTerminal }).terminalFor(dev());
+    const read = vi.spyOn(s.backend, 'prDetails');
+    expect(terminal.onIdlePrompt!('Please finish this fix')).toBe(true);
+    expect(s.backend.startSession).toHaveBeenLastCalledWith(expect.objectContaining({ typed: true }), expect.anything());
+    expect(read).not.toHaveBeenCalled();
+    terminal.dispose();
+  });
+
+  it('keeps recovery details after a desk check fails instead of leaving a phantom worker', async () => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    dev().status = 'stopped';
+    vi.mocked(s.backend.deskExists).mockRejectedValue(new Error('box disconnected'));
+    vi.mocked(s.backend.startSession).mockClear();
+    await expect(swarm.message('a1', 'Resume after restart')).rejects.toThrow('box disconnected');
+    expect(dev()).toMatchObject({ status: 'stopped', task: 'issue', sessionId: 'running-thread', issueNumber: 66 });
+    expect(s.backend.startSession).not.toHaveBeenCalled();
   });
 });

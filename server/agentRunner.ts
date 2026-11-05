@@ -66,6 +66,8 @@ export interface SessionResult {
 }
 
 export interface SessionCallbacks {
+  /** Real session activity, including hooks forwarded from a box that do not produce a log entry. */
+  activity?(): void;
   log(entries: LogEntry[]): void;
   tool(name: string | null): void;
   /** The session to resume next time; null: there's none to resume (the next session starts a new one). */
@@ -391,6 +393,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
   };
 
   const handle = (msg: SDKMessage) => {
+    cb.activity?.();
     clearTimeout(emptyTurn);
     if (done && msg.type === 'assistant' && !stopped) {
       // The office already treated this session as finished and no longer follows it.

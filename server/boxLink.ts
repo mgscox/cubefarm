@@ -455,6 +455,7 @@ export function connectBox(opts: BoxOptions): BoxConnection {
     removeDesk: (fullName, slug) => link.call('removeDesk', fullName, slug),
     releaseDesk: (fullName, slug, port) => link.call('releaseDesk', fullName, slug, port),
     deskHead: (fullName, slug) => link.call('deskHead', fullName, slug),
+    deskExists: (fullName, slug) => link.call('deskExists', fullName, slug),
     deskAhead: (fullName, slug, base) => link.call('deskAhead', fullName, slug, base),
     startSession(o, cb): SessionHandle {
       if (o.terminal) return startCliSession(o, cb, link);

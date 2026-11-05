@@ -44,6 +44,16 @@ export function issueClosed(issue: Pick<TrackedIssue, 'state' | 'labels'> | null
   return issue?.state === 'CLOSED' && !issue.labels.includes(PUBLICATION_HOLD);
 }
 
+/** Restart reads include merged PRs too: no session should pick completed work up again. Failed reads stay unknown. */
+export function restartClosedWork(
+  a: Pick<Holder, 'task' | 'issueNumber' | 'prNumber'>,
+  work: { prState: PullInfo['state'] | null; issue: Pick<TrackedIssue, 'state' | 'labels'> | null },
+): ClosedWork | null {
+  if (a.prNumber != null && (work.prState === 'CLOSED' || work.prState === 'MERGED')) return { kind: 'pr', number: a.prNumber };
+  if (a.task === 'issue' && a.issueNumber != null && issueClosed(work.issue)) return { kind: 'issue', number: a.issueNumber };
+  return null;
+}
+
 export function closedWorkText(work: ClosedWork): string {
   return work.kind === 'issue' ? `issue #${work.number} was closed` : `PR #${work.number} was closed without merging`;
 }

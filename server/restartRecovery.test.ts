@@ -43,6 +43,7 @@ describe('followKeptCli', () => {
   it('leaves idle CLIs and missing ones alone', () => {
     expect(followKeptCli(fixing, { busy: false, resumeId: FIX_SESSION })).toBe(false);
     expect(followKeptCli(fixing, undefined)).toBe(false);
+    expect(followKeptCli({ ...fixing, task: null }, { busy: true, resumeId: FIX_SESSION })).toBe(false);
   });
 });
 
