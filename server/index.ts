@@ -16,6 +16,8 @@ import { isMainMcpOffice, ManagerMcpSettings, managerMcpSettingsRouter } from '.
 import { underLauncher } from './officeUpdate.ts';
 import { HttpError, Swarm } from './swarm.ts';
 import { allowUpgrade, officeHostnames } from './wsOrigin.ts';
+import { IMAGE_ROUTE } from './attachments.ts';
+import { imageRouter } from './imageRoutes.ts';
 
 const swarm = new Swarm(DEMO ? createDemoBackend() : realBackend);
 // Sessions the office picks back up while it starts need the address their CLIs call back on before it listens.
@@ -39,6 +41,7 @@ const claudeAuthentication = new ClaudeAuthentication({
   origin: process.env.CUBEFARM_AUTH_ORIGIN, proxyAddress: process.env.CUBEFARM_AUTH_PROXY_ADDRESS,
 });
 app.use('/api/settings/claude', claudeAuthRouter(claudeAuthentication));
+app.use(IMAGE_ROUTE, imageRouter());
 app.use(express.json({ limit: '1mb' }));
 
 type Handler = (req: Request, res: Response) => Promise<unknown> | unknown;
@@ -167,6 +170,7 @@ app.post('/api/agents/:id/assign', route((req) => swarm.assign(String(req.params
 app.post('/api/agents/:id/stop', route((req) => swarm.stopAgent(String(req.params.id))));
 app.post('/api/agents/:id/reset', route((req) => swarm.resetAgent(String(req.params.id))));
 app.post('/api/agents/:id/message', route((req) => swarm.message(String(req.params.id), str(req.body.text))));
+app.post('/api/agents/:id/image-prompt', route(async (req) => ({ text: await swarm.prepareImagePrompt(String(req.params.id), str(req.body.text)) })));
 app.get('/api/agents/:id/screen', (req, res) => {
   const shot = swarm.screenshot(String(req.params.id));
   if (!shot) return void res.status(404).end();

@@ -39,6 +39,20 @@ PRs opened by people, not agents, show up under **In QA** as "not tested yet", w
 
 You can message an agent at any time. While they're working, the message is injected into their live session. After a developer finishes, the message resumes their session, e.g. "the CI failed, please fix the lint errors".
 
+## Pasting images
+
+Paste a clipboard image into a message, Idea, issue description, feedback or brief. CubeFarm saves it in
+`<SWARM_HOME>/attachments/images` and inserts an HTTP link at the cursor. PNG, JPEG, GIF and WebP images up to
+8 MB each are supported. Wait for the upload to finish before sending; failed uploads leave the surrounding text intact.
+
+Images stay outside Git history and survive office restarts. When a prompt references one, the agent receives the
+path to a readable copy on its own machine. For remote agents the office sends the bytes over its existing SSH link,
+so the box does not need access to the browser's URL or the office's filesystem. Pasting directly into a live terminal
+also prepares the copy before inserting the link and path; it does not press Enter for you.
+
+Back up the attachments directory with the office state. Images have no automatic expiry, including uploads removed
+from an unsent draft. Links are served by this office; they are not public GitHub attachments for outside readers.
+
 ## QA testers
 
 - Every floor always has at least one QA tester: one is hired when a repo is connected, and the last one can't be let go. You can hire up to 3 per floor (manager's console → Team, or press `E` on an empty QA station).

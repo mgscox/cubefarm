@@ -103,6 +103,8 @@ type Shot = { data: Buffer; mime: string };
 
 /** Where a CLI runs: writes its files, starts it, and reads back what it leaves on disk. A box answers asynchronously. */
 export interface CliHost {
+  /** Make linked clipboard images available on this machine before delivering a follow-up prompt. */
+  preparePrompt?(text: string): string | Promise<string>;
   /** Throws (or rejects), with a message for the manager, when the CLI can't be prepared (not installed, files not written). */
   prepare(plan: CliPlan): PreparedCli | Promise<PreparedCli>;
   /** A file exists on this machine (a Claude Code transcript a hook names). */

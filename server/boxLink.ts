@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { images } from './attachments.ts';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { VERSION } from './config.ts';
 import { KeeperPty, terminalMessage } from './ptyClient.ts';
@@ -354,8 +355,14 @@ class BoxLink implements CliHost {
 
   // ---------- CliHost ----------
 
+  preparePrompt(text: string): string | Promise<string> {
+    const attachments = images.collect(text);
+    return attachments.length ? this.call<string>('preparePrompt', text, attachments) : text;
+  }
+
   async prepare(plan: CliPlan): Promise<PreparedCli> {
-    const { dir, prompt, hookUrl } = await this.call<{ dir: string; prompt: string; hookUrl?: string }>('prepare', plan);
+    const attachments = images.collect(`${plan.prompt}\n${plan.systemAppend}`);
+    const { dir, prompt, hookUrl } = await this.call<{ dir: string; prompt: string; hookUrl?: string }>('prepare', plan, attachments);
     this.launching.set(plan.token, Date.now());
     return {
       dir,

@@ -920,18 +920,36 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     }, 1000);
   };
 
+  let preparingPrompt: Promise<void> | null = null;
+  const deliverPrompt = (text: string) => {
+    if (done || !live?.proc) return;
+    if (pendingPrompts.length || startupQuestionOnScreen(term.screen(), cli)) {
+      busy();
+      turnError = null;
+      if (!pendingPrompts.length) promptUntil = Date.now() + BOOT_MS * 2;
+      pendingPrompts.push(text);
+      watchStartup();
+      return;
+    }
+    sendPrompt(text);
+  };
+  const promptFailed = (err: unknown) => finish({ ok: false, text: '', errors: [`Could not prepare attached images: ${(err as Error).message}`] });
   const handle: SessionHandle = {
     send(text) {
       if (done || !live?.proc) return;
-      if (pendingPrompts.length || startupQuestionOnScreen(term.screen(), cli)) {
-        busy();
-        turnError = null;
-        if (!pendingPrompts.length) promptUntil = Date.now() + BOOT_MS * 2;
-        pendingPrompts.push(text);
-        watchStartup();
-        return;
-      }
-      sendPrompt(text);
+      try {
+        const prepared = host.preparePrompt?.(text) ?? text;
+        if (typeof prepared === 'string' && !preparingPrompt) deliverPrompt(prepared);
+        else {
+          busy();
+          // Preserve follow-up order while SSH is copying images, including subsequent text-only messages.
+          const resolved = Promise.resolve(prepared);
+          void resolved.catch(() => undefined);
+          const next = (preparingPrompt ?? Promise.resolve()).then(() => resolved).then(deliverPrompt).catch(promptFailed);
+          preparingPrompt = next;
+          void next.then(() => { if (preparingPrompt === next) preparingPrompt = null; });
+        }
+      } catch (err) { promptFailed(err); }
     },
     stop() {
       finish({ ok: false, text: '', errors: ['Stopped by manager'] });

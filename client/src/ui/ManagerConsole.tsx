@@ -1,3 +1,5 @@
+import { MessageBox } from './MessageBox';
+import { PromptTextarea } from './PromptTextarea';
 import { ClaudeAuthenticationSettings } from './ClaudeAuthenticationSettings';
 import { issueWorkNote } from '../../../shared/issues';
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -246,7 +248,7 @@ function FloorBrief({ repo }: { repo: RepoView }) {
           Re-study
         </button>
       </div>
-      <textarea value={mission} onChange={(e) => setMission(e.target.value)} rows={2} autoCorrect="off" autoCapitalize="off" spellCheck={false} placeholder="Brief: what should this floor build next? The CEO turns it into issues and a team." />
+      <PromptTextarea value={mission} onValueChange={setMission} rows={2} autoCorrect="off" autoCapitalize="off" spellCheck={false} placeholder="Brief: what should this floor build next? The CEO turns it into issues and a team." />
       <div className="row">
         <button className="btn btn-small" disabled={mission === repo.mission} onClick={() => void attempt(() => api.updateRepo(repo.id, { mission }))}>
           Save brief
@@ -258,12 +260,12 @@ function FloorBrief({ repo }: { repo: RepoView }) {
       </div>
       <details className="small">
         <summary>QA brief{repo.qaBrief ? '' : ' (none yet)'}</summary>
-        <textarea
+        <PromptTextarea
           key={repo.qaBrief}
           rows={4}
           defaultValue={repo.qaBrief}
           placeholder="What QA testers must check on every PR for this project."
-          onBlur={(e) => e.target.value !== repo.qaBrief && void attempt(() => api.updateRepo(repo.id, { qaBrief: e.target.value }))}
+          onValueCommit={(text) => text !== repo.qaBrief && void attempt(() => api.updateRepo(repo.id, { qaBrief: text }))}
         />
       </details>
     </div>
@@ -359,7 +361,7 @@ function CeoTab() {
               void attempt(() => api.messageCeo(t));
             }}
           >
-            <input value={text} onChange={(e) => setText(e.target.value)} autoCorrect="off" autoCapitalize="off" spellCheck={false} placeholder={`Message ${ceo.name} (or press P anywhere for your phone)…`} />
+            <MessageBox value={text} onChange={setText} autoCorrect="off" autoCapitalize="off" spellCheck={false} placeholder={`Message ${ceo.name} (or press P anywhere for your phone)…`} />
             <button className="btn" disabled={!text.trim()}>
               Send
             </button>
@@ -610,12 +612,12 @@ function TeamTab() {
                             <option value="masculine">👨 He</option>
                           </select>
                         </label>
-                        <textarea
+                        <PromptTextarea
                           key={`b-${a.brief}`}
                           rows={3}
                           defaultValue={a.brief}
                           placeholder={`What ${a.name} owns on this project and how they should work. It's added to their instructions.`}
-                          onBlur={(e) => e.target.value !== a.brief && void attempt(() => api.updateAgent(a.id, { brief: e.target.value }))}
+                          onValueCommit={(text) => text !== a.brief && void attempt(() => api.updateAgent(a.id, { brief: text }))}
                         />
                       </td>
                     </tr>

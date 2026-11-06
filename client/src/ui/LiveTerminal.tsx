@@ -4,6 +4,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { TermClientMessage, TermServerMessage } from '../../../shared/types';
+import { api } from '../api';
+import { useStore } from '../store';
 
 // An agent's real terminal: their CLI's screen streamed from the office (/ws/term), and what you type sent back to it.
 // Opening it late shows everything so far: the office keeps a copy of each agent's screen and scrollback.
@@ -61,6 +63,7 @@ export function LiveTerminal({ agentId, className, idleHint = 'Not running · a 
     let running = false;
     let retry: number | undefined;
     let frame = 0;
+    let pastingImage = false;
     const send = (m: TermClientMessage) => {
       if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m));
     };
@@ -115,10 +118,38 @@ export function LiveTerminal({ agentId, className, idleHint = 'Not running · a 
 
     const input = term.onData((data) => send({ t: 'input', data }));
     // Esc belongs to the CLI (it interrupts Claude Code) while you're typing in the terminal, not to the panel.
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') e.stopPropagation();
+    const onBeforeKey = (e: KeyboardEvent) => {
+      if (pastingImage && e.key === 'Enter') {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
     };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') e.stopPropagation(); };
+    const onPaste = (e: ClipboardEvent) => {
+      const files = [...(e.clipboardData?.items ?? [])].filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+        .map((item) => item.getAsFile()).filter((file): file is File => file !== null);
+      if (!files.length) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (pastingImage) return;
+      pastingImage = true;
+      useStore.getState().pushToast('info', 'Saving image for the agent…');
+      void (async () => {
+        try {
+          const links: string[] = [];
+          for (const file of files) links.push(await api.uploadImage(file));
+          const prepared = await api.imagePrompt(agentId, links.join('\n'));
+          // A CLI without bracketed paste would treat newlines as Enter and submit the reference early.
+          if (!closed) term.paste(prepared.text.replace(/[\r\n]+/g, ' '));
+        } catch (err) {
+          if (!closed) useStore.getState().pushToast('error', err instanceof Error ? err.message : 'Image upload failed.');
+        } finally { pastingImage = false; }
+      })();
+    };
+    el.addEventListener('keydown', onBeforeKey, true);
     el.addEventListener('keydown', onKey);
+    el.addEventListener('paste', onPaste, true);
     const onFocus = () => setFocused(true);
     const onBlur = () => setFocused(false);
     term.textarea?.addEventListener('focus', onFocus);
@@ -136,7 +167,9 @@ export function LiveTerminal({ agentId, className, idleHint = 'Not running · a 
       cancelAnimationFrame(frame);
       ro.disconnect();
       input.dispose();
+      el.removeEventListener('keydown', onBeforeKey, true);
       el.removeEventListener('keydown', onKey);
+      el.removeEventListener('paste', onPaste, true);
       ws?.close();
       term.dispose();
     };

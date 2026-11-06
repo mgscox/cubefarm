@@ -11,6 +11,7 @@ import type { Backend } from './backend.ts';
 import type { BoxConnection, Machine } from './machine.ts';
 import { agentBox, boxCliCheckDue, boxSync, boxSyncText, startPlace, syncRetryDue, validDestination, type BoxStep, type BoxSyncState, type PersistedBox, type StartPlace } from './fleet.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
+import { images } from './attachments.ts';
 import type { ReconnectedCli } from './cliRunner.ts';
 import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, readConfigEnv, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, VERSION, WORKSPACE_ROOT } from './config.ts';
@@ -3121,6 +3122,12 @@ export class Swarm {
   }
 
   // ---------- terminals ----------
+
+  /** A bitmap pasted straight into a CLI needs its files on that CLI's machine before keystrokes arrive. */
+  async prepareImagePrompt(id: string, text: string): Promise<string> {
+    const host = this.machineFor(this.agent(id)).cliHost;
+    return await (host?.preparePrompt?.(text) ?? images.prompt(text));
+  }
 
   private async loadTerminal(agentId: string): Promise<AgentTerminal | null> {
     if (!(await fs.stat(terminalFile(agentId)).catch(() => null))) return null;

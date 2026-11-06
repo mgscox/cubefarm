@@ -1,3 +1,4 @@
+import { PromptTextarea } from './PromptTextarea';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import './prototype.css';
@@ -47,7 +48,7 @@ export function IssueForm({ repoId, agents, onDone }: { repoId: string; agents: 
       }}
     >
       <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Issue title, e.g. Add a dark mode toggle" autoFocus />
-      <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Describe what you want. Acceptance criteria help the developer and the QA tester a lot." rows={5} />
+      <PromptTextarea value={body} onValueChange={setBody} placeholder="Describe what you want. Acceptance criteria help the developer and the QA tester a lot." rows={5} />
       <div className="row">
         <select aria-label="Work type" value={prototype ? PROTOTYPE : 'implementation'} onChange={(e) => { setPrototype(e.target.value === PROTOTYPE); setAssignTo(''); }}>
           <option value="implementation">Implementation</option>
@@ -129,7 +130,7 @@ function PrototypeDecision({ card, repoId, autoAssign }: { card: KanbanCard; rep
       )}
       <label className="field">
         {decision === 'approve' ? 'Implementation scope and acceptance criteria' : 'What should the developer change?'}
-        <textarea value={body} onChange={(e) => setBody(e.target.value)} required rows={4} autoFocus={decision === 'revise'} />
+        <PromptTextarea value={body} onValueChange={setBody} required rows={4} autoFocus={decision === 'revise'} />
       </label>
       <div className="row">
         <button type="button" className="btn btn-small" disabled={busy} onClick={() => setDecision(null)}>Cancel</button>
