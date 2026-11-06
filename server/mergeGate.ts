@@ -24,7 +24,7 @@ export interface MergeRecord {
 /** Bookkeeping the caller writes onto the record as it is (it doesn't count as a change to the record). */
 export type MergeBookkeeping = Partial<Pick<MergeRecord, 'passedSha' | 'pendingSince' | 'alerted'>>;
 
-export type MergePull = Pick<PullInfo, 'isDraft' | 'mergeable' | 'mergeState' | 'headSha' | 'checks' | 'failedChecks' | 'pendingChecks'>;
+export type MergePull = Pick<PullInfo, 'isDraft' | 'mergeable' | 'mergeState' | 'headSha' | 'checks' | 'hasSuccessfulChecks' | 'failedChecks' | 'pendingChecks'>;
 
 /** What auto-merge does next with a QA-passed PR. */
 export type MergeStep = { set: MergeBookkeeping } & (
@@ -74,7 +74,7 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
     if (alert) set.alerted = true;
     return { do: 'wait', note: `waiting for checks: ${pr.pendingChecks.join(', ') || 'running'}`, alert, set };
   }
-  if (rec.ciRequired && pr.checks !== 'passing') {
+  if (rec.ciRequired && (pr.checks !== 'passing' || pr.hasSuccessfulChecks !== true)) {
     return { do: 'wait', note: 'waiting for passing GitHub checks to cover environment-blocked local validation', set };
   }
   set.pendingSince = null;

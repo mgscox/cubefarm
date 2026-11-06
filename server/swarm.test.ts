@@ -3283,7 +3283,7 @@ describe('company_status size', () => {
 describe('QA rounds', () => {
   const pull: PullInfo = {
     number: 13, title: 'Chaser', url: '', isCrossRepository: false, headRefName: 'swarm/13', state: 'OPEN',
-    isDraft: false, closesIssues: [], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'sha-1',
+    isDraft: false, closesIssues: [], checks: 'passing', hasSuccessfulChecks: true, mergeable: 'MERGEABLE', headSha: 'sha-1',
     reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
     mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
   };

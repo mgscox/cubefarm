@@ -58,7 +58,7 @@ export function demoPull(fullName: string, headRefName: string, fork: boolean): 
   const pull: PullInfo = {
     number, title: fork ? 'Outside contribution' : 'Desk PR', url: `https://github.com/${fullName}/pull/${number}`, headRefName, isCrossRepository: fork, state: 'OPEN',
     isDraft: false, mergeable: 'MERGEABLE', reviewDecision: null, closesIssues: [], createdAt: now(), mergedAt: null,
-    additions: 3, deletions: 1, checks: 'passing', headSha: fakeSha(), mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+    additions: 3, deletions: 1, checks: 'passing', hasSuccessfulChecks: true, headSha: fakeSha(), mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
   };
   repo.pulls.unshift(pull);
   return { pull, remove: () => { repo.pulls = repo.pulls.filter((p) => p !== pull); } };
@@ -126,10 +126,11 @@ export function demoCrossFloorProposal(a: string, b: string): ApprovedSnapshot {
 
 /** Fake CI: checks run for a while after every push, and now and then one fails so the fix loop shows. */
 function runChecks(pr: PullInfo, fail = Math.random() < 0.2) {
-  Object.assign(pr, { checks: 'pending', pendingChecks: ['CI', 'Vercel'], failedChecks: [] });
+  Object.assign(pr, { checks: 'pending', hasSuccessfulChecks: false, pendingChecks: ['CI', 'Vercel'], failedChecks: [] });
   setTimeout(() => {
     Object.assign(pr, {
       checks: fail ? 'failing' : 'passing',
+      hasSuccessfulChecks: !fail,
       pendingChecks: [],
       failedChecks: fail ? [{ name: 'CI', url: `${pr.url.split('/pull/')[0]}/actions/runs/${pr.number}` }] : [],
     });

@@ -10,6 +10,7 @@ const pull = (p: Partial<MergePull> = {}): MergePull => ({
   mergeState: 'CLEAN',
   headSha: 'abc123',
   checks: 'passing',
+  hasSuccessfulChecks: true,
   failedChecks: [],
   pendingChecks: [],
   ...p,
@@ -57,6 +58,10 @@ describe('mergeStep', () => {
   });
 
   describe('environment-blocked local validation', () => {
+    it.each([false, undefined])('requires successful check evidence when the rollup is passing (%s)', (hasSuccessfulChecks) => {
+      expect(mergeStep(pull({ hasSuccessfulChecks }), record({ ciRequired: true }), NOW, base).do).toBe('wait');
+      expect(mergeStep(pull({ hasSuccessfulChecks }), record(), NOW, base).do).toBe('merge');
+    });
     it.each(['none', 'pending', 'unavailable'] as const)('waits when GitHub checks are %s', (checks) => {
       expect(mergeStep(pull({ checks }), record({ ciRequired: true }), NOW, base).do).toBe('wait');
     });
