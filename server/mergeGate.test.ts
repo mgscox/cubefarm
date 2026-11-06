@@ -56,6 +56,20 @@ describe('mergeStep', () => {
     expect(mergeStep(pull({ checks: 'none' }), record(), NOW, base).do).toBe('merge');
   });
 
+  describe('environment-blocked local validation', () => {
+    it.each(['none', 'pending', 'unavailable'] as const)('waits when GitHub checks are %s', (checks) => {
+      expect(mergeStep(pull({ checks }), record({ ciRequired: true }), NOW, base).do).toBe('wait');
+    });
+
+    it('merges only the reviewed commit with passing CI', () => {
+      const rec = record({ ciRequired: true });
+      expect(mergeStep(pull(), rec, NOW, base).do).toBe('merge');
+      expect(mergeStep(pull({ headSha: 'unreviewed' }), rec, NOW, base).do).toBe('requeue');
+      expect(mergeStep(pull({ checks: 'failing' }), rec, NOW, base)).toMatchObject({ do: 'send-back', reason: 'checks' });
+      expect(mergeStep(pull({ mergeState: 'DIRTY' }), rec, NOW, base)).toMatchObject({ do: 'send-back', reason: 'conflict' });
+    });
+  });
+
   it('marks a QA-passed draft ready instead of waiting on it', () => {
     expect(mergeStep(pull({ isDraft: true }), record(), NOW, base)).toEqual({ do: 'ready', set: {} });
     expect(mergeStep(pull({ isDraft: true }), record({ passedSha: null }), NOW, base)).toEqual({ do: 'ready', set: { passedSha: pull().headSha } });

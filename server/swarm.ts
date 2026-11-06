@@ -188,6 +188,7 @@ interface QaRecord extends QaView {
   testedSha: string | null; // the head commit QA is testing
   passedSha: string | null; // the head commit QA signed off on: auto-merge merges exactly that
   failedSha: string | null; // the head commit QA last failed: re-testing it unchanged would fail again
+  ciRequired?: boolean; // environment-only local validation gaps require passing CI, even in repos with no checks
   fixCrashes: string[]; // developers whose fix session crashed since the last pushed fix, one entry per crash
   fixReason: FixReason | null; // why it was last sent back to a developer
   mergeFixes: number; // times it went back for failing checks or conflicts
@@ -437,6 +438,7 @@ const QA_SCHEMA = {
           name: { type: 'string' },
           result: { type: 'string', enum: ['pass', 'fail', 'skip'] },
           details: { type: 'string', description: 'What you did and what you observed.' },
+          failureKind: { type: 'string', enum: ['code', 'environment'], description: 'For failed checks: environment only when worker limits prevented validation and no code defect is known or suspected. Reproducible or unexplained failures use code.' },
         },
       },
     },
@@ -524,7 +526,7 @@ function parseReport(result: SessionResult, security = false): QaReport | null {
   return {
     verdict: r.verdict,
     summary: String(r.summary ?? ''),
-    checks: Array.isArray(r.checks) ? r.checks.map((c) => ({ name: String(c?.name ?? ''), result: c?.result === 'fail' ? 'fail' : c?.result === 'skip' || (security && c?.result !== 'pass') ? 'skip' : 'pass', details: String(c?.details ?? '') })) : [],
+    checks: Array.isArray(r.checks) ? r.checks.map((c) => ({ name: String(c?.name ?? ''), result: c?.result === 'fail' ? 'fail' : c?.result === 'skip' || (security && c?.result !== 'pass') ? 'skip' : 'pass', details: String(c?.details ?? ''), ...(c?.failureKind === 'code' || c?.failureKind === 'environment' ? { failureKind: c.failureKind } : {}) })) : [],
     commands: Array.isArray(r.commands) ? r.commands.map((c) => ({ command: String(c?.command ?? ''), result: String(c?.result ?? '') })) : [],
     screenshots: Array.isArray(r.screenshots) ? r.screenshots.map(String) : [],
     fixInstructions: r.fixInstructions ? String(r.fixInstructions) : undefined,
@@ -4015,6 +4017,7 @@ export class Swarm {
       '1. Read the PR description and the linked issue, and work out the acceptance criteria.',
       `2. Review the code as a careful reviewer would: git diff origin/${repo.defaultBranch}...HEAD. Look for bugs, unhandled errors and edge cases, security problems, leftover debug code, and new logic without tests.`,
       "3. Install dependencies if needed, then run the project's test suite, linters, type checks and build (whichever exist).",
+      'If worker limits (such as exhausted memory) prevent validation, distinguish them from code defects: mark only those failed checks failureKind=environment. Use this only with evidence that no code defect is known or suspected; reproducible or unexplained failures use code. The office records these local checks as skipped and requires green GitHub checks for the reviewed commit before merging an environment-only result. Do not request source changes just to satisfy a worker limitation.',
       repo.browserTesting
         ? `4. If the project has a UI, start it in the background on port ${this.port(a)} (reserved for you) and exercise the change in a real browser with the Playwright tools: navigate, click, type, resize to a phone size, try edge cases, and check the console for errors. Take a screenshot with browser_take_screenshot (no filename) of every important state: the screenshots are attached to the PR as evidence. Stop the server afterwards.`
         : '4. Exercise the changed behaviour directly (run the program, call the API, write a quick script).',
@@ -4226,6 +4229,15 @@ export class Swarm {
       return;
     }
 
+    // A worker limitation needs CI evidence, not developers pushing meaningless commits.
+    const failedChecks = report.checks.filter((c) => c.result === 'fail');
+    const environmentOnly = !security && report.checks.some((c) => c.result !== 'pass' && c.failureKind === 'environment') &&
+      failedChecks.every((c) => c.failureKind === 'environment');
+    if (environmentOnly) {
+      report.verdict = 'pass';
+      report.checks = report.checks.map((c) => c.result === 'fail' ? { ...c, result: 'skip' } : c);
+      report.summary += '\n\nLocal validation was blocked only by the worker environment; no code defect was reported. Merge requires passing GitHub checks for the reviewed commit. The incomplete local checks remain disclosed below.';
+    }
     // Keep the desk busy until the report is recorded: uploads/comments can outlast a scheduler tick.
     const sandboxIncomplete = security && report.verdict === 'incomplete';
     if (security) Object.assign(report, securityReportOutcome(report));
@@ -4358,6 +4370,7 @@ export class Swarm {
         ...(conflictFix ? { mergeFixes: rec.mergeFixes + 1 } : {}),
         passedSha: pass && !escalate ? rec.testedSha : null,
         failedSha: pass || incomplete ? null : rec.testedSha,
+        ...(!security ? { ciRequired: environmentOnly } : {}),
         securityReview: security && pass && rec.testedSha ? { ...review, approvedSha: rec.testedSha } : rec.securityReview,
         ...(security && pass ? { securityLabel: false } : {}), // the office removed it, not the manager
         mergeNote: escalate ? 'waiting for detailed security review' : incomplete ? report.summary : null,

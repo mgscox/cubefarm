@@ -351,6 +351,8 @@ export interface QaCheck {
   name: string;
   result: 'pass' | 'fail' | 'skip';
   details: string;
+  /** Only use environment when the worker prevented validation and no code defect is known or suspected. */
+  failureKind?: 'code' | 'environment';
 }
 
 /** Failed preparations for one PR task and head; kept across office restarts. */

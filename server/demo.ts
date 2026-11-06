@@ -398,6 +398,21 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
       return;
     }
     if (kind === 'qa') {
+      if (opts.prompt.includes('[environment]')) {
+        cb.finished({
+          ok: true, text: '', costUsd, turns, errors: [],
+          structured: {
+            verdict: 'fail', summary: 'The changed behavior passed; local validation stopped because the demo worker exhausted memory. No code defect was found.',
+            checks: [
+              { name: 'Changed behavior', result: 'pass', details: 'Acceptance criteria passed in the demo fixture.' },
+              { name: 'Local suite', result: 'fail', failureKind: 'environment', details: 'Simulated worker memory exhaustion.' },
+            ],
+            commands: [{ command: 'npm test', result: 'Interrupted by simulated worker memory exhaustion.' }],
+            screenshots: [],
+          },
+        });
+        return;
+      }
       // Most first rounds pass; some fail so the fix loop can be seen in action.
       const pass = round > 1 || Math.random() > 0.35;
       cb.log([{ kind: 'text', text: pass ? '● Everything checks out. Writing up the report.' : '● The toolbar overflows on a 375px screen. Failing this round.' }]);
