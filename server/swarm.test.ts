@@ -48,7 +48,7 @@ interface Internals {
   queueQa(repo: Repo, prNumber: number, dev: unknown, issueNumber: number | null): QaRec;
   runQa(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   runFix(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
-  recordFinished(agent: unknown, repo: Repo, result: SessionResult, generation: undefined, session: undefined): Promise<void>;
+  recordFinished(agent: unknown, repo: Repo, result: SessionResult, generation: number | undefined, session: undefined): Promise<void>;
   onQaFinished(agent: unknown, repo: Repo, result: SessionResult, released?: Promise<void>): Promise<void>;
   recordResearchFinished(agent: unknown, job: unknown, repo: Repo, fullName: string, result: SessionResult): Promise<void>;
   onIssueFinished(agent: unknown, repo: Repo, result: SessionResult, released: Promise<void>, generation: number | undefined): Promise<void>;
@@ -58,6 +58,7 @@ interface Internals {
   save(): void;
   schedule(): void;
   reconcilePulls(repo: Repo, pulls: PullInfo[]): void;
+  recoverDesks(): void;
   recover(agents: Record<string, unknown>[], preparing?: Set<unknown>): void;
   maybeHeartbeat(): void;
   startCeoWork(): void;
@@ -102,6 +103,190 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('automatic desk recovery', () => {
+  const a = () => s.state.agents[0];
+  const cooldown = async () => {
+    await vi.advanceTimersByTimeAsync(120_000);
+    s.recoverDesks();
+  };
+  beforeEach(() => {
+    vi.spyOn(s as unknown as { syncRepo(id: string): Promise<void> }, 'syncRepo').mockResolvedValue();
+    Object.assign(repo, { defaultBranch: 'main', links: [] });
+    Object.assign(a(), { model: '', effort: '', cli: '', deskBox: '' });
+    setIssues(issue(66), issue(67));
+  });
+
+  it('clears an expired error and stale task claim while retaining its cause', () => {
+    Object.assign(a(), { status: 'error', endedAt: Date.now() - 120_000, lastError: 'Box disconnected', task: 'issue', issueNumber: 66, prNumber: 13 });
+    s.recoverDesks();
+    expect(a()).toMatchObject({ status: 'idle', task: null, issueNumber: null, prNumber: null, lastError: 'Box disconnected', lastErrorAt: expect.any(Number) });
+    expect(JSON.parse(s.companyStatus()).floors[0].team[0]).toMatchObject({ status: 'idle', lastError: { message: 'Box disconnected', at: expect.any(Number) } });
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(a().lastError).toBe('Box disconnected');
+  });
+
+  it.each(['issue', 'qa', 'fix'] as const)('requeues office-stopped %s work without spending a QA round', async (task) => {
+    Object.assign(a(), { status: 'stopped', stoppedBy: 'office', endedAt: Date.now(), lastError: 'Office updated', task, issueNumber: 66, prNumber: task === 'issue' ? null : 13 });
+    s.state.qa.push({ repoId: repo.id, prNumber: 13, status: task === 'qa' ? 'testing' : 'fixing', round: 2, sessionFailures: 0, devAgentId: 'a1', qaAgentId: 'a1', summary: 'Existing findings', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 });
+    s.recover([a()]);
+    expect(a().status).toBe('error');
+    expect(s.startIssueWork(repo)).toBe(false);
+    await cooldown();
+    expect(a()).toMatchObject({ status: 'idle', task: null, issueNumber: null, prNumber: null });
+    if (task !== 'issue') expect(s.state.qa[0]).toMatchObject({ status: task === 'qa' ? 'queued' : 'failed', round: 2, sessionFailures: 0, summary: 'Existing findings' });
+  });
+
+  it('keeps manager Stop stopped through recovery ticks', async () => {
+    Object.assign(a(), { status: 'working', task: 'issue', issueNumber: 66 });
+    swarm.stopAgent('a1');
+    s.recover([a()]);
+    await cooldown();
+    expect(a()).toMatchObject({ status: 'stopped', stoppedBy: 'manager', issueNumber: 66 });
+    expect(s.startIssueWork(repo)).toBe(false);
+  });
+
+  it('honours manager Stop while an office retry is cooling down', async () => {
+    s.backend.demo = false;
+    Object.assign(a(), { status: 'stopped', stoppedBy: 'office', endedAt: Date.now(), task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', sessionId: 'old', prNumber: null });
+    s.recover([a()]);
+    swarm.stopAgent('a1');
+    await cooldown();
+    expect(a()).toMatchObject({ status: 'stopped', stoppedBy: 'manager', heldRetry: null });
+  });
+
+  it('requeues a legacy recovery-failed QA hold without spending a round', async () => {
+    Object.assign(a(), { status: 'stopped', stoppedBy: 'office', endedAt: Date.now() - 120_000, task: 'qa', prNumber: 13, lastError: 'Unreadable transcript' });
+    const rec = { repoId: repo.id, prNumber: 13, status: 'needs-human', round: 2, sessionFailures: 0, qaAgentId: null, devAgentId: 'a1', summary: 'Unreadable transcript', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 } as QaRec;
+    s.state.qa.push(rec);
+    s.recover([a()]);
+    s.recoverDesks();
+    expect(rec).toMatchObject({ status: 'queued', round: 2, sessionFailures: 0 });
+    expect(a()).toMatchObject({ status: 'idle', task: null });
+  });
+
+  it('retains a branch resume through cooldown and a full session limit', async () => {
+    s.backend.demo = false;
+    Object.assign(a(), { status: 'stopped', stoppedBy: 'office', endedAt: Date.now(), task: 'issue', issueNumber: 66, prNumber: null, branch: 'swarm/issue-66-ada', sessionId: 'session' });
+    s.recover([a()]);
+    expect(a()).toMatchObject({ heldRetry: { issueNumber: 66, resume: true } });
+    await cooldown();
+    expect(a()).toMatchObject({ status: 'idle', heldRetry: { issueNumber: 66 } });
+    expect(s.startIssueWork(repo)).toBe(false);
+  });
+
+  it.each(['worker', 'pull'] as const)('does not resume issue work already owned by another %s', async (owner) => {
+    s.backend.demo = false;
+    Object.assign(a(), { status: 'stopped', stoppedBy: 'office', endedAt: Date.now(), task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', sessionId: 'session' });
+    if (owner === 'worker') s.state.agents.push({ id: 'other', repoId: repo.id, role: 'dev', task: 'issue', issueNumber: 66, status: 'working' });
+    else s.repoRt.get(repo.id)!.pulls = [{ number: 13, state: 'OPEN', headRefName: 'swarm/issue-66-ada', closesIssues: [66] } as PullInfo];
+    s.recover([a()]);
+    await cooldown();
+    expect(a()).toMatchObject({ status: 'idle', task: null, heldRetry: null });
+    expect(s.state.agents.find((x) => x.id === 'other')?.status ?? 'working').toBe('working');
+  });
+
+  it('retries CLI startup with persisted backoff, then emits one actionable hold', async () => {
+    const post = vi.spyOn(s, 'postMessage');
+    for (const delay of [120_000, 600_000, 1_800_000, null]) {
+      Object.assign(a(), { status: 'working', task: 'issue', issueNumber: 66, costUsd: 0, turns: 0 });
+      const generation = (s.agentRt.get('a1') as unknown as { generation: number | undefined }).generation;
+      await s.recordFinished(a(), repo, { ok: false, startupFailed: true, text: '', errors: ['CLI executable temporarily unavailable'], costUsd: 0, turns: 0 }, generation, undefined);
+      const retry = a().startupRetry as { retryAt: number | null };
+      expect(retry.retryAt).toBe(delay === null ? null : Date.now() + delay);
+      expect(a()).toMatchObject({ startupFailed: true, task: null });
+      if (delay !== null) {
+        await vi.advanceTimersByTimeAsync(delay - 1);
+        s.recoverDesks();
+        expect(a().startupFailed).toBe(true);
+        await vi.advanceTimersByTimeAsync(1);
+        s.recoverDesks();
+        expect(a()).toMatchObject({ status: 'idle', startupFailed: false });
+        a().startupRetry = JSON.parse(JSON.stringify(a().startupRetry));
+      }
+    }
+    expect(post.mock.calls.filter(([, text]) => text.includes('Repair'))).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    s.recoverDesks();
+    expect(a().startupFailed).toBe(true);
+  });
+
+  it.each(['issue', 'qa', 'fix'] as const)('backs off a thrown %s CLI spawn without spending QA budget', async (task) => {
+    Object.assign(a(), { status: 'preparing', task, issueNumber: 66, prNumber: task === 'issue' ? null : 13, branch: 'swarm/issue-66-ada', sessionId: null });
+    const rec = { repoId: repo.id, prNumber: 13, status: task === 'qa' ? 'testing' : 'fixing', round: 1, sessionFailures: 0, devAgentId: 'a1', qaAgentId: 'a1', summary: 'Keep findings', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 } as QaRec;
+    if (task !== 'issue') s.state.qa.push(rec);
+    vi.spyOn(s.backend, 'startSession').mockImplementation(() => { throw new Error('spawn EAGAIN'); });
+    await s.startAgentSession(a(), repo, '/fake-desk', 'Continue', '');
+    expect(s.backend.startSession).toHaveBeenCalledOnce();
+    expect(a()).toMatchObject({ status: 'error', task: null, lastError: 'spawn EAGAIN', startupFailed: true, startupRetry: { failures: 1, retryAt: Date.now() + 120_000 } });
+    if (task !== 'issue') expect(rec).toMatchObject({ status: task === 'qa' ? 'queued' : 'failed', round: 1, sessionFailures: 0, summary: 'Keep findings' });
+  });
+
+  it.each([false, true])('checks for an existing PR during recovery without a session id (manager stops: %s)', async (stop) => {
+    Object.assign(a(), { status: 'error', task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', prNumber: null, sessionId: null });
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ ...issue(66), repo: repo.fullName, state: 'OPEN' });
+    let resolve!: (value: null) => void;
+    const lookup = vi.spyOn(s.backend, 'prForBranch').mockImplementation(() => new Promise<null>((r) => { resolve = r; }));
+    const start = vi.spyOn(s.backend, 'startSession').mockReturnValue({ send: vi.fn(), stop: vi.fn() });
+    const recover = (swarm.message as (id: string, text: string, typed: boolean, recovering: boolean) => Promise<void>)('a1', 'Recover', false, true);
+    await vi.waitFor(() => expect(lookup).toHaveBeenCalledOnce());
+    if (stop) swarm.stopAgent('a1');
+    resolve(null);
+    await recover;
+    expect(start).toHaveBeenCalledTimes(stop ? 0 : 1);
+    if (stop) expect(a()).toMatchObject({ status: 'stopped', stoppedBy: 'manager' });
+    else expect(start.mock.calls[0][0]).toMatchObject({ resumeSessionId: undefined });
+  });
+
+  it('keeps offline keeper work claimed until the box reconnects', async () => {
+    const f = s as unknown as { state: { boxes: { id: string }[] } };
+    f.state.boxes = [{ id: 'remote' }];
+    Object.assign(a(), { status: 'stopped', stoppedBy: 'office', task: 'qa', prNumber: 13, deskBox: 'remote', endedAt: Date.now() - 120_000 });
+    const rec = { repoId: repo.id, prNumber: 13, status: 'testing', round: 1, sessionFailures: 0, qaAgentId: 'a1', devAgentId: null, summary: '', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 } as QaRec;
+    s.state.qa.push(rec);
+    s.recover([a()]);
+    s.recoverDesks();
+    expect(a()).toMatchObject({ status: 'stopped', task: 'qa', prNumber: 13 });
+    expect(rec.status).toBe('testing');
+  });
+
+  it('revokes a late pre-update completion before preserving its branch retry', async () => {
+    s.backend.demo = false;
+    Object.assign(a(), { status: 'stopped', stoppedBy: 'office', endedAt: Date.now(), task: 'issue', issueNumber: 66, prNumber: null, branch: 'swarm/issue-66-ada', sessionId: 'old', costUsd: 0, turns: 0 });
+    const oldGeneration = (s.agentRt.get('a1') as unknown as { generation: number | undefined }).generation;
+    s.recover([a()]);
+    const before = JSON.stringify(a());
+    await s.recordFinished(a(), repo, { ok: false, text: '', errors: ['late callback'], costUsd: 0, turns: 1 }, oldGeneration, undefined);
+    expect(JSON.stringify(a())).toBe(before);
+  });
+
+  it.each(['qa', 'fix'] as const)('parks repeated office interruptions of %s with a reason and frees the desk', async (task) => {
+    const rec = { repoId: repo.id, prNumber: 13, status: task === 'qa' ? 'testing' : 'fixing', round: 2, sessionFailures: 0, qaAgentId: 'a1', devAgentId: 'a1', summary: 'Keep findings', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 } as QaRec;
+    s.state.qa.push(rec);
+    for (let n = 0; n < 3; n++) {
+      Object.assign(a(), { status: 'stopped', stoppedBy: 'office', endedAt: Date.now(), task, prNumber: 13, lastError: 'Recovery failed' });
+      Object.assign(rec, { status: task === 'qa' ? 'testing' : 'fixing', qaAgentId: 'a1' });
+      s.recover([a()]);
+      await cooldown();
+    }
+    expect(rec).toMatchObject({ status: 'needs-human', round: 2, sessionFailures: 0, summary: expect.stringContaining('failed this task 3 times') });
+    expect(a()).toMatchObject({ status: 'idle', task: null });
+  });
+
+  it('parks repeatedly interrupted work and frees the desk for another issue', async () => {
+    for (let n = 0; n < 3; n++) {
+      Object.assign(a(), { status: 'stopped', stoppedBy: 'office', endedAt: Date.now(), lastError: 'Keeper recovery failed', task: 'issue', issueNumber: 66 });
+      s.recover([a()]);
+      await cooldown();
+      a().taskFailures = JSON.parse(JSON.stringify(a().taskFailures));
+    }
+    repo.noWorkEndings = JSON.parse(JSON.stringify(repo.noWorkEndings));
+    expect(s.repoView(repo)).toMatchObject({ issues: [expect.objectContaining({ number: 66, stalled: expect.stringContaining('failed this task 3 times') }), expect.anything()] });
+    expect(a()).toMatchObject({ status: 'idle', task: null });
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(runTask).toHaveBeenLastCalledWith(a(), repo, expect.objectContaining({ number: 67 }), undefined);
+  });
 });
 
 describe('developer scores', () => {
@@ -673,7 +858,7 @@ describe('exclusive issue sessions', () => {
   it.each([true, false])('reconciles an errored held retry with a reconnecting CLI (linked reconnect: %s)', async (linked) => {
     Object.assign(dev(), { task: 'issue', issueNumber: 66, status: 'error', startedAt: 100, heldRetry: { issueNumber: 66, ahead: 1, why: 'cut off' } });
     Object.assign(other(), { task: 'issue', issueNumber: 66, status: 'stopped', startedAt: 200, prNumber: linked ? 13 : null, sessionId: 'kept-session', branch: 'swarm/issue-66-barbara' });
-    const loser = linked ? dev() : other();
+    const loser = dev();
     const stop = vi.fn();
     const releaseIdle = vi.fn();
     Object.assign(s.agentRt.get(String(loser.id))!, { session: { stop }, terminal: { write: vi.fn(), releaseIdle } });
@@ -686,14 +871,9 @@ describe('exclusive issue sessions', () => {
     expect(releaseIdle).toHaveBeenCalledOnce();
     expect(feed).toHaveBeenCalledWith('office', expect.stringContaining('duplicate session on #66'));
     expect(s.state.agents.filter((a) => a.issueNumber === 66 && (a.heldRetry || a.status === 'working'))).toHaveLength(1);
-    if (linked) {
-      expect(other()).toMatchObject({ status: 'working', prNumber: 13 });
-      expect(starts).toHaveBeenCalledOnce();
-      expect(starts.mock.calls[0][0].reattach).toBe(true);
-    } else {
-      expect(dev()).toMatchObject({ status: 'error', heldRetry: { issueNumber: 66 } });
-      expect(starts).not.toHaveBeenCalled();
-    }
+    expect(other()).toMatchObject({ status: 'working', prNumber: linked ? 13 : null });
+    expect(starts).toHaveBeenCalledOnce();
+    expect(starts.mock.calls[0][0].reattach).toBe(true);
   });
 
   it('handles a reconnect startup conflict without an unhandled rejection or phantom worker', async () => {
@@ -916,15 +1096,15 @@ describe('PR desk preparation recovery', () => {
     expect(agent.status).toBe('working');
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(stop).toHaveBeenCalledOnce();
-    expect(agent).toMatchObject({ status: 'idle', task: null, sessionId: null });
-    expect(rec).toMatchObject({ status: task === 'qa' ? 'queued' : 'failed', summary: 'Keep findings', preparation: { [task]: { failures: 1 } } });
-    if (task === 'fix') expect(rec.devAgentId).toBe('author');
+    expect(agent).toMatchObject({ status: 'error', task: null, sessionId: null });
+    expect(rec).toMatchObject({ status: task === 'qa' ? 'queued' : 'failed', summary: 'Keep findings' });
+    expect(agent).toMatchObject({ startupFailed: true, startupRetry: { failures: 1, retryAt: expect.any(Number) } });
     const callbacks = start.mock.calls[0][1];
     callbacks.sessionId('late-thread');
     callbacks.log([{ kind: 'text', text: 'late output' }]);
     callbacks.finished({ ok: true, text: '', errors: [], costUsd: 0, turns: 1 });
     await vi.advanceTimersByTimeAsync(0);
-    expect(agent).toMatchObject({ status: 'idle', task: null, sessionId: null, turns: 0 });
+    expect(agent).toMatchObject({ status: 'error', task: null, sessionId: null, turns: 0 });
     expect(s.agentRt.get('a1')!.log).not.toContainEqual(expect.objectContaining({ text: 'late output' }));
   });
 
@@ -1040,9 +1220,12 @@ describe('explicit issue starts across office restarts', () => {
     s.state = persisted;
     repo = persisted.repos[0];
     const a = persisted.agents[0];
+    const preparing = a.status === 'preparing';
     a.status = 'stopped';
+    a.endedAt = Date.now() - 120_000;
     runTask.mockClear();
-    s.recover([a]);
+    s.recover([a], preparing ? new Set([a]) : undefined);
+    s.recoverDesks();
   };
 
   it('keeps the issue, preferred desk and manager note while auto-assign remains off', async () => {
@@ -1052,7 +1235,7 @@ describe('explicit issue starts across office restarts', () => {
     restart();
     expect(repo.requestedStarts[0].restartPending).toBe(true);
     expect(events).toHaveBeenCalledWith({ type: 'repo', repo: expect.objectContaining({ requestedStarts: repo.requestedStarts }) });
-    expect(s.agentRt.get('a1')!.log).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining('Restarting #66 when a desk is free') })]));
+    expect(s.agentRt.get('a1')!.log).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining('Office interruption') })]));
     s.schedule();
     expect(runTask).toHaveBeenCalledExactlyOnceWith(s.state.agents[0], repo, issue(66), 'Finish the recovery fix');
     expect(repo.autoAssign).toBe(false);
@@ -1133,7 +1316,7 @@ describe('explicit issue starts across office restarts', () => {
     s.schedule();
     expect(runTask).toHaveBeenCalledExactlyOnceWith(s.state.agents[0], repo, issue(1), undefined);
     expect(repo.requestedStarts).toEqual([]); // automatic starts are not explicit requests
-    expect(s.agentRt.get('a1')!.log).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining('Back to the queue') })]));
+    expect(s.agentRt.get('a1')!.log).toEqual(expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining('Office interruption') })]));
   });
 
   it('does not start arbitrary backlog work when auto-assign is off', () => {
@@ -1143,12 +1326,13 @@ describe('explicit issue starts across office restarts', () => {
 
   it.each(['qa', 'fix'] as const)('keeps %s tasks on the existing pipeline recovery path', (task) => {
     const a = s.state.agents[0];
-    Object.assign(a, { task, status: 'stopped', issueNumber: 66, sessionId: null, branch: null });
+    Object.assign(a, { task, status: 'stopped', issueNumber: 66, prNumber: 13, sessionId: null, branch: null, endedAt: Date.now() - 120_000 });
     s.state.qa.push({
       repoId: repo.id, prNumber: 13, status: task === 'qa' ? 'testing' : 'fixing', round: 1, sessionFailures: 0,
       devAgentId: 'a1', qaAgentId: 'a1', summary: '', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0,
     });
     s.recover([a]);
+    s.recoverDesks();
     expect(s.state.qa[0].status).toBe(task === 'qa' ? 'queued' : 'failed');
     expect(repo.requestedStarts).toEqual([]);
     expect(a).toMatchObject({ status: 'idle', task: null });
@@ -1680,7 +1864,7 @@ describe('CEO park_pr', () => {
     Object.assign(s.agentRt.get('q1')!, { session: { stop } });
     expect(await s.officeTools().call('park_pr', args)).toContain("Stopped Grace's stuck starting task");
     expect(stop).toHaveBeenCalledOnce();
-    expect(tester).toMatchObject({ status: 'idle', task: null });
+    expect(tester).toMatchObject({ status: 'error', task: null });
     expect(pull.state).toBe('CLOSED');
   });
 
@@ -1996,7 +2180,7 @@ describe('CEO send_back_to_dev', () => {
     expect(JSON.parse(s.companyStatus()).floors[0].team.find((a: { id: string }) => a.id === 'q1').doing).toBe('stuck starting (16m, office)');
     expect(await send()).toContain("Stopped Grace's stuck starting task");
     expect(stop).toHaveBeenCalledOnce();
-    expect(tester).toMatchObject({ status: 'idle', task: null });
+    expect(tester).toMatchObject({ status: status === 'working' ? 'error' : 'idle', task: null });
     expect(s.state.qa[0]).toMatchObject({ status: 'failed', devAgentId: 'a1', qaAgentId: null, summary: 'Recovery loses work' });
     expect(s.startPipelineWork(repo)).toBe(true);
     await vi.advanceTimersByTimeAsync(0);
@@ -2653,22 +2837,24 @@ describe('a developer session that ends without a PR after pushing commits', () 
   });
 
 
-  it.each(['issue', 'qa', 'fix'])('surfaces an unreadable reconnected %s result without retrying or advancing the PR', async (task) => {
+  it.each(['issue', 'qa', 'fix'])('surfaces an unreadable reconnected %s result and requeues it after cooldown', async (task) => {
     const error = "Codex's session could not be recovered: no completion signal or readable transcript was available after reconnecting.";
     Object.assign(ada(), { task, prNumber: task === 'issue' ? null : 13 });
-    const rec = { repoId: repo.id, prNumber: 13, status: task === 'qa' ? 'testing' : 'fixing', qaAgentId: 'a1', summary: '', checks: [], round: 1 } as unknown as QaRec;
+    const rec = { repoId: repo.id, prNumber: 13, status: task === 'qa' ? 'testing' : 'fixing', qaAgentId: 'a1', devAgentId: 'a1', sessionFailures: 0, summary: '', checks: [], round: 1 } as unknown as QaRec;
     if (task !== 'issue') s.state.qa.push(rec);
     const before = sessions.length;
     expect(await end({ ...cut, errors: [error], recoveryFailed: true })).toBe(false);
     expect(sessions).toHaveLength(before);
     expect(ada()).toMatchObject({ status: 'stopped', lastError: error });
-    if (task !== 'issue') expect(rec).toMatchObject({ status: 'needs-human', summary: error, qaAgentId: null });
+    await vi.advanceTimersByTimeAsync(120_000);
+    s.recoverDesks();
+    if (task !== 'issue') expect(rec).toMatchObject({ status: task === 'qa' ? 'queued' : 'failed', sessionFailures: 0 });
     if (task === 'issue') {
       setIssues(issue(66));
-      expect(s.startIssueWork(repo)).toBe(false);
+      expect(ready()).toContain(66);
     }
     const status = JSON.parse(s.companyStatus());
-    expect(status.floors[0].team[0]).toMatchObject({ status: 'stopped', error });
+    expect(status.floors[0].team[0]).toMatchObject({ status: 'idle', lastError: { message: error, at: expect.any(Number) } });
   });
 
   const emptyEnding = async () => {
@@ -3123,7 +3309,7 @@ describe('a developer session that ends without a PR after pushing commits', () 
       f.state.agents.push(barbara);
       pauseEnds();
       expect(sessions).toHaveLength(1); // Barbara has the only slot
-      expect(ada()).toMatchObject({ status: 'error', heldRetry: { issueNumber: 66, ahead: 3 } });
+      expect(ada()).toMatchObject({ status: 'idle', heldRetry: { issueNumber: 66, ahead: 3 } });
       expect(f.issueTaken(repo, 66)).toBe(true);
       barbara.status = 'done';
       f.schedule();
@@ -3356,14 +3542,14 @@ describe('QA rounds', () => {
     expect(tester).toMatchObject({ status: 'error', startupFailed: true, lastError: expect.stringContaining('Error: X') });
     expect(s.agentRt.get('q1')!.log).toContainEqual(expect.objectContaining({ kind: 'error', text: expect.stringContaining('Error: X') }));
     expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'agent', agent: expect.objectContaining({ startupFailed: true }) }));
-    expect(rec).toMatchObject({ status: 'queued', sessionFailures: 0, qaAgentId: null, round: 1, summary: expect.stringContaining('Error: X') });
+    expect(rec).toMatchObject({ status: 'queued', sessionFailures: 0, qaAgentId: null, round: 1, summary: 'Broken' });
     await vi.advanceTimersByTimeAsync(5 * 60_000);
     const runQa = vi.spyOn(s, 'runQa').mockResolvedValue();
     expect(s.startPipelineWork(repo)).toBe(false);
     const next = addAgent('next', 'Nancy', replacement === 'tester' ? 'qa' : 'dev', 1);
     expect(s.startPipelineWork(repo)).toBe(true);
     expect(runQa).toHaveBeenCalledWith(next, repo, rec);
-    expect(() => s.beginTask(tester, {}, '', '')).toThrow(/Clear Poirot/);
+    expect(() => s.beginTask(tester, {}, '', '')).toThrow(/CLI is waiting/);
     swarm.resetAgent(String(tester.id));
     expect(tester.startupFailed).toBe(false);
     runQa.mockClear();
@@ -3378,7 +3564,7 @@ describe('QA rounds', () => {
     await crashCli(tester);
     s.reconcilePulls(repo, [{ ...pull, state: 'MERGED' }]);
     expect(tester).toMatchObject({ status: 'error', startupFailed: true, task: null, lastError: expect.stringContaining('Error: X') });
-    expect(() => s.beginTask(tester, {}, '', '')).toThrow(/Clear Poirot/);
+    expect(() => s.beginTask(tester, {}, '', '')).toThrow(/CLI is waiting/);
   });
 
   it('measures startup from the process launch, after slow box preparation', async () => {
@@ -4632,17 +4818,18 @@ describe('fixes across office restarts', () => {
     s.recover([dev], new Set([dev]));
     expect(message).not.toHaveBeenCalled();
     expect(s.state.qa[0].status).toBe('failed');
-    expect(dev).toMatchObject({ status: 'idle', task: null });
+    expect(dev).toMatchObject({ status: 'error', task: null });
   });
 
-  it('tells a resumed fix which PR, round and branch it was on', () => {
+  it('requeues a running fix with its original session and branch context', () => {
     const dev = s.state.agents[0];
     Object.assign(dev, { status: 'stopped', task: 'fix', prNumber: 45, branch: 'swarm/issue-12-ada', sessionId: 'fix-session' });
     s.state.qa.push(fixRec('fixing'));
     const message = vi.spyOn(swarm, 'message').mockResolvedValue(undefined as never);
     s.recover([dev]);
-    expect(message).toHaveBeenCalledExactlyOnceWith('a1', expect.stringContaining('fixing PR #45 after QA round 2'));
-    expect(message.mock.calls[0][1]).toContain('git push origin HEAD:swarm/issue-12-ada');
+    expect(message).not.toHaveBeenCalled();
+    expect(s.state.qa[0]).toMatchObject({ status: 'failed', devSessionId: 'dev-session' });
+    expect(dev).toMatchObject({ status: 'error', task: null });
   });
 });
 
@@ -5133,8 +5320,9 @@ describe('manual office closure', () => {
     Object.assign(ada(), { status: 'stopped', task: 'issue', issueNumber: 66, branch: 'swarm/issue-66-ada', sessionId: 'old-thread' });
     await swarm.closeOffice();
     s.recover([ada()]);
-    expect(f.state.deferredResumes).toEqual(['a1']);
+    expect(ada().heldRetry).toMatchObject({ resume: true, issueNumber: 66 });
     expect(sessions).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(120_000);
     await swarm.reopenOffice();
     vi.mocked(s.schedule).mockRestore();
     vi.spyOn(s, 'maybeHeartbeat').mockImplementation(() => {});
@@ -5162,19 +5350,20 @@ describe('manual office closure', () => {
     s.recover([ada()]);
     const parking = swarm.parkPr({ floor: 1, number: pull.number, reason: 'Park an unrelated placeholder' });
     await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(120_000);
     await swarm.reopenOffice();
     vi.mocked(s.schedule).mockRestore();
     vi.spyOn(s, 'maybeHeartbeat').mockImplementation(() => {});
     vi.spyOn(s, 'startCeoWork').mockImplementation(() => {});
     s.schedule();
     await drain();
-    expect(f.state.deferredResumes).toEqual(['a1']);
+    expect(ada().heldRetry).toMatchObject({ resume: true, issueNumber: 66 });
     expect(sessions).toHaveLength(0);
-    expect(ada()).toMatchObject({ status: 'stopped', issueNumber: 66 });
+    expect(ada()).toMatchObject({ status: 'idle', issueNumber: 66 });
 
     releaseParking();
     await parking;
-    expect(f.state.deferredResumes).toEqual(['a1']);
+    expect(ada().heldRetry).toMatchObject({ resume: true, issueNumber: 66 });
     const savedResumes: string[][] = [];
     vi.mocked(s.save).mockImplementation(() => savedResumes.push([...f.state.deferredResumes]));
     s.schedule();
