@@ -299,6 +299,9 @@ interface QaReport {
   screenshots: string[];
   fixInstructions?: string;
   securityReviewReason?: string;
+  validationGap?: 'none' | 'no-os-sandbox' | 'other';
+  normalGatesPassed?: boolean;
+  blockingFindings?: 'none' | 'confirmed' | 'needs_validation';
 }
 
 // ---------- flavour ----------
@@ -458,21 +461,46 @@ const QA_SCHEMA = {
 
 const SECURITY_SCHEMA = {
   ...QA_SCHEMA,
+  required: [...QA_SCHEMA.required, 'validationGap', 'normalGatesPassed', 'blockingFindings'],
   properties: {
     ...QA_SCHEMA.properties,
-    verdict: { type: 'string', enum: ['pass', 'fail', 'incomplete'], description: 'Pass only after a complete scoped audit. Fail for a confirmed blocking finding. Incomplete when required coverage or validation could not finish.' },
+    verdict: { type: 'string', enum: ['pass', 'fail', 'incomplete'], description: 'Pass after a scoped audit with no blocking findings and passing required checks. No OS sandbox alone is a disclosed limit when normal QA/CI gates passed. Fail for confirmed blocking findings; incomplete for other required coverage or validation gaps.' },
+    validationGap: { type: 'string', enum: ['none', 'no-os-sandbox', 'other'], description: 'Use no-os-sandbox only when the sole validation gap is unavailable OS sandbox execution. Other coverage or validation gaps use other.' },
+    normalGatesPassed: { type: 'boolean', description: 'True only with evidence that the floor QA brief and normal QA/CI gates passed for this PR revision. Record evidence in checks.' },
+    blockingFindings: { type: 'string', enum: ['none', 'confirmed', 'needs_validation'], description: 'Confirmed blocking findings fail. High/critical confirmed or needs_validation findings must fail or hold. Include source-grounded needs_validation candidates with potentially high/critical impact even when the audit skill leaves severity unassigned.' },
   },
 };
 const REQUIRED_AUDIT_CHECKS = ['Scoped audit coverage', 'validate-findings.cjs', 'validate-coverage-ledger.cjs'];
+const SANDBOX_LIMIT = 'dynamic validation not run: no OS sandbox on this desk';
 
-function auditCheckProblems(checks: QaCheck[]): string[] {
-  const problems = checks.filter((c) => c.result !== 'pass').map((c) => `${c.name} (${c.result})`);
+function auditCheckProblems(checks: QaCheck[], sandboxLimit = false): string[] {
+  const problems = checks.filter((c) => c.result !== 'pass' &&
+    !(sandboxLimit && c.name === 'Dynamic validation' && c.result === 'skip' && c.details.trim()))
+    .map((c) => `${c.name} (${c.result})`);
   for (const name of REQUIRED_AUDIT_CHECKS) {
     const matching = checks.filter((c) => c.name === name);
     if (!matching.length) problems.push(`${name} (missing)`);
     else if (!matching.some((c) => c.details.trim())) problems.push(`${name} (missing details)`);
   }
   return problems;
+}
+
+/** Only the desk's execution limit can be waived; source coverage and artifact validators still have to pass. */
+export function securityReportOutcome(report: QaReport): QaReport {
+  report = { ...report };
+  const sandboxOnly = report.validationGap === 'no-os-sandbox' && report.normalGatesPassed === true &&
+    report.blockingFindings === 'none' && !auditCheckProblems(report.checks, true).length;
+  if (report.validationGap === 'no-os-sandbox') report.summary += `\n\n${SANDBOX_LIMIT}`;
+  if (report.verdict === 'fail' || report.blockingFindings === 'confirmed') report.verdict = 'fail';
+  else if (report.blockingFindings === 'needs_validation' || report.validationGap === 'other') report.verdict = 'incomplete';
+  else if (sandboxOnly) report.verdict = 'pass';
+  else if (report.validationGap === 'no-os-sandbox' && report.verdict === 'pass') report.verdict = 'incomplete';
+  const problems = report.verdict === 'pass' ? auditCheckProblems(report.checks, sandboxOnly) : [];
+  if (problems.length) {
+    report.verdict = 'incomplete';
+    report.summary = `Required audit checks missing or not passing: ${problems.join(', ')}. ${report.summary}`;
+  }
+  return report;
 }
 
 function parseReport(result: SessionResult, security = false): QaReport | null {
@@ -500,6 +528,9 @@ function parseReport(result: SessionResult, security = false): QaReport | null {
     screenshots: Array.isArray(r.screenshots) ? r.screenshots.map(String) : [],
     fixInstructions: r.fixInstructions ? String(r.fixInstructions) : undefined,
     securityReviewReason: typeof r.securityReviewReason === 'string' ? r.securityReviewReason.trim().slice(0, 1000) : undefined,
+    validationGap: r.validationGap === 'none' || r.validationGap === 'no-os-sandbox' || r.validationGap === 'other' ? r.validationGap : undefined,
+    normalGatesPassed: r.normalGatesPassed === true,
+    blockingFindings: r.blockingFindings === 'none' || r.blockingFindings === 'confirmed' || r.blockingFindings === 'needs_validation' ? r.blockingFindings : undefined,
   };
 }
 
@@ -1000,6 +1031,7 @@ export class Swarm {
       mergeNote: q.mergeNote,
       checkRerunSha: q.checkRerunSha,
       checkRerunAt: q.checkRerunAt,
+      securitySandboxRetry: q.securitySandboxRetry,
       rerunNote: q.rerunNote,
       preparation: q.preparation,
       updatedAt: q.updatedAt,
@@ -3995,6 +4027,7 @@ export class Swarm {
       `Escalation reason: ${reason}`,
       ...(repo.qaBrief ? [`Floor QA brief:\n${repo.qaBrief}`] : []),
       'Leave target source and GitHub state intact. The office records your verdict and owns the merge hold.',
+      'No OS sandbox alone is a known desk limit: finish source review and artifact validation without running target code. If this is the only gap, no blocking finding exists, and normal QA/CI gates passed, return pass with validationGap=no-os-sandbox, normalGatesPassed=true, blockingFindings=none. Record gate evidence and "dynamic validation not run: no OS sandbox on this desk". High/critical confirmed or needs_validation findings still fail or hold; other coverage gaps remain incomplete.',
       playbook,
       ONE_TURN,
     ].join('\n\n');
@@ -4187,10 +4220,16 @@ export class Swarm {
     }
 
     // Keep the desk busy until the report is recorded: uploads/comments can outlast a scheduler tick.
-    const auditProblems = security && report.verdict === 'pass' ? auditCheckProblems(report.checks) : [];
-    if (auditProblems.length) {
+    const sandboxIncomplete = security && report.verdict === 'incomplete';
+    if (security) Object.assign(report, securityReportOutcome(report));
+    const sandboxOnly = security && report.verdict === 'pass' && report.validationGap === 'no-os-sandbox';
+    const alreadyRetried = rec?.securitySandboxRetry?.headSha === rec?.testedSha &&
+      rec?.securitySandboxRetry?.baseSha === review?.auditBaseSha;
+    const sandboxRetry = sandboxIncomplete && sandboxOnly && !alreadyRetried
+      ? this.available(repo, 'qa').find((tester) => tester.id !== a.id) : undefined;
+    if (sandboxRetry) {
       report.verdict = 'incomplete';
-      report.summary = `Required audit checks missing or not passing: ${auditProblems.join(', ')}. ${report.summary}`;
+      report.summary += `\n\nRetrying once on ${sandboxRetry.name}'s desk; no QA round charged.`;
     }
     let pass = report.verdict === 'pass';
     let incomplete = report.verdict === 'incomplete';
@@ -4236,7 +4275,8 @@ export class Swarm {
         }
       }
       if (gone()) return;
-      const outcome = () => qaOutcome({ pass, incomplete, escalate, security, qaRounds, mergeFixes: rec.mergeFixes }, conflict, MAX_QA_ROUNDS);
+      const outcome = () => sandboxRetry ? { status: 'queued' as const, conflictFix: false }
+        : qaOutcome({ pass, incomplete, escalate, security, qaRounds, mergeFixes: rec.mergeFixes }, conflict, MAX_QA_ROUNDS);
       try {
         if (security) {
           const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
@@ -4244,7 +4284,7 @@ export class Swarm {
           if (!isCurrentAudit(pr)) return handBackStaleAudit(pr);
         }
         this.appendLog(a, [{ kind: 'system', text: '📎 Uploading evidence and posting the QA report on the PR…' }]);
-        const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security, outcome().conflictFix);
+        const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security, outcome().conflictFix, !!sandboxRetry);
         if (gone()) return;
         commentUrl = (await this.backend.commentPull(repo.fullName, rec.prNumber, body)) || null;
         if (gone()) return;
@@ -4298,6 +4338,10 @@ export class Swarm {
       const findings = report.fixInstructions ?? report.checks.filter((c) => c.result === 'fail').map((c) => `${c.name}: ${c.details}`).join('\n');
       this.setQa(rec, {
         status: nextStatus,
+        ...(sandboxRetry && rec.testedSha && review?.auditBaseSha ? {
+          qaAgentId: null,
+          securitySandboxRetry: { headSha: rec.testedSha, baseSha: review.auditBaseSha, agentId: sandboxRetry.id },
+        } : {}),
         summary: report.summary,
         checks: report.checks,
         commentUrl: commentUrl ?? rec.commentUrl,
@@ -4321,6 +4365,7 @@ export class Swarm {
         pass ? 'success' : 'error',
         pass
           ? `✅ ${a.name} passed PR #${rec.prNumber}: ${nextAfterQa}`
+          : sandboxRetry ? `↻ Retrying PR #${rec.prNumber}'s security review on ${sandboxRetry.name}'s desk; no QA round charged.`
           : incomplete ? `⚠️ ${label} of PR #${rec.prNumber} is incomplete; merge remains held.`
           : nextStatus === 'needs-human'
             ? `❌ PR #${rec.prNumber} failed QA ${qaRounds} times and needs a human`
@@ -4339,7 +4384,7 @@ export class Swarm {
     this.toast('info', `PR #${rec.prNumber} is unchanged since QA failed it: ${human ? 'it needs a human' : 'back to a developer, no re-test'}`);
   }
 
-  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[], security = false, conflictFix = false) {
+  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[], security = false, conflictFix = false, sandboxRetry = false) {
     const pass = report.verdict === 'pass';
     const images: string[] = [];
     const evidence = shots.slice(-8);
@@ -4377,7 +4422,8 @@ export class Swarm {
     if (images.length) lines.push('', '### 📸 Evidence', '', ...images.flatMap((img) => [img, '']));
     else lines.push('', '_No browser screenshots were taken in this round._');
     const merge = repo.autoMerge ? "merges automatically once GitHub's checks pass" : 'ready for the manager to merge';
-    const next = security && pass ? 'audit result applies to the cited revision. CubeFarm verifies it before clearing the merge hold'
+    const next = sandboxRetry ? 'queued for one security review on another desk; no human action needed'
+      : security && pass ? 'audit result applies to the cited revision. CubeFarm verifies it before clearing the merge hold'
       : !security && pass && (report.securityReviewReason || rec.securityReview) ? 'waiting for detailed security review'
       : pass ? merge : conflictFix ? 'sent back to the developer to resolve the conflict and address QA findings'
       : report.verdict === 'incomplete' || rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes';
@@ -4691,8 +4737,11 @@ export class Swarm {
       return !hasLabel(pr?.labels, NEEDS_HUMAN) && !prepHeld(q.preparation?.[task], pr?.headSha ?? null, Date.now());
     }).sort((x, y) => x.updatedAt - y.updatedAt);
     for (const rec of waiting('queued', 'qa')) {
+      const retry = rec.securitySandboxRetry;
+      const retryPending = retry && retry.headSha === pulls.find((p) => p.number === rec.prNumber)?.headSha &&
+        testers.some((a) => a.id === retry.agentId);
       const tester =
-        testers[0] ??
+        retryPending ? testers.find((a) => a.id === retry.agentId) : testers[0] ??
         this.pickDev(
           repo,
           devs.filter((a) => a.id !== rec.devAgentId),

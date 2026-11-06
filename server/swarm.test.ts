@@ -13,10 +13,10 @@ import type { AgentTerminal } from './terminal.ts';
 import { createDemoBackend, demoApprovedProposal, demoForkPull, demoPull } from './demo.ts';
 import { newPublication } from './publication.ts';
 import type { TrackedIssue } from './github.ts';
-import { HttpError, Swarm } from './swarm.ts';
+import { HttpError, securityReportOutcome, Swarm } from './swarm.ts';
 import { VERSION } from './config.ts';
 import { operationSignal } from './operation.ts';
-import { CEO_ID, type ApprovedSnapshot, type IssueInfo, type PublicationView, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
+import { CEO_ID, type ApprovedSnapshot, type IssueInfo, type PublicationView, type QaCheck, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
 import { ceoSystemPrompt, type OfficeTools } from './ceo.ts';
 import { researcherSystemPrompt } from './research.ts';
 import { ONE_TURN } from './clis.ts';
@@ -4035,8 +4035,123 @@ describe('QA rounds', () => {
   });
 
   describe('detailed security review on a QA desk', () => {
-    const auditChecks = ['Scoped audit coverage', 'validate-findings.cjs', 'validate-coverage-ledger.cjs']
+    const auditChecks: QaCheck[] = ['Scoped audit coverage', 'validate-findings.cjs', 'validate-coverage-ledger.cjs']
       .map((name) => ({ name, result: 'pass', details: 'Complete for the assigned diff' }));
+
+    const sandboxReport = {
+      verdict: 'incomplete', summary: 'Source review found no blocking findings.',
+      validationGap: 'no-os-sandbox', normalGatesPassed: true, blockingFindings: 'none',
+      checks: [...auditChecks, { name: 'Dynamic validation', result: 'skip' as const, details: 'No OS sandbox on this desk.' }],
+    };
+    it.each([
+      ['no-os-sandbox', 'none', 'pass'],
+      ['other', 'none', 'incomplete'],
+      ['no-os-sandbox', 'confirmed', 'fail'],
+      ['no-os-sandbox', 'needs_validation', 'incomplete'],
+    ] as const)('normalizes %s with %s findings without mutating the report', (validationGap, blockingFindings, verdict) => {
+      const input = Object.freeze({ ...sandboxReport, verdict: 'incomplete' as const, validationGap, blockingFindings, commands: [], screenshots: [] });
+      const normalized = securityReportOutcome(input);
+      expect(normalized.verdict).toBe(verdict);
+      expect(input.verdict).toBe('incomplete');
+      expect(input.summary).toBe(sandboxReport.summary);
+    });
+    const securityDesk = async () => {
+      const tester = addAgent('q2', 'Morse', 'qa', 1);
+      Object.assign(tester, { cli: 'codex' });
+      const pr = { ...pull, labels: ['ready-for-review'], baseSha: 'base-1', body: '', isCrossRepository: false };
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue(pr);
+      vi.spyOn(s.backend, 'deskHead').mockResolvedValue(pr.headSha);
+      vi.spyOn(s, 'prepare').mockResolvedValue('/fake-desk');
+      const session = vi.spyOn(s, 'startAgentSession').mockImplementation((agent) => {
+        Object.assign(agent as object, { status: 'working', sessionId: 'qa-session' });
+      });
+      const comment = vi.spyOn(s.backend, 'commentPull');
+      vi.spyOn(s.backend, 'setSecurityReviewLabel').mockResolvedValue();
+      Object.assign(rec, { status: 'passed', passedSha: pull.headSha, testedSha: pull.headSha });
+      s.reconcilePulls(repo, [pr]);
+      await s.runQa(tester, repo, rec);
+      expect(rec).toHaveProperty('securityReview.auditBaseSha', 'base-1');
+      return { tester, comment, session };
+    };
+
+    it.each(['pass', 'incomplete'])('passes a Codex sandbox-only %s review without charging a QA round', async (verdict) => {
+      const { tester, comment, session } = await securityDesk();
+      expect(session.mock.calls[0][4]).toContain('No OS sandbox alone is a known desk limit');
+      await s.onQaFinished(tester, repo, result(true, { ...sandboxReport, verdict }));
+      expect(rec).toMatchObject({ status: 'passed', passedSha: pull.headSha, round: 2, retests: 0 });
+      expect(comment.mock.calls.at(-1)?.[2]).toContain('Security review report: ✅ Passed');
+      expect(comment.mock.calls.at(-1)?.[2]).toContain('dynamic validation not run: no OS sandbox on this desk');
+      expect(rec.summary).toContain('dynamic validation not run: no OS sandbox on this desk');
+    });
+
+    it('completes the demo backend security path with the disclosed sandbox limit', async () => {
+      const { tester, session, comment } = await securityDesk();
+      const finished = vi.fn();
+      const handle = s.backend.startSession({
+        cwd: '/fake-desk', prompt: String(session.mock.calls[0][3]), systemAppend: String(session.mock.calls[0][4]),
+        role: 'qa', model: 'demo', effort: 'low', browserTesting: false, additionalDirectories: [],
+      }, { log: vi.fn(), tool: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), sessionId: vi.fn(), finished });
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(finished).toHaveBeenCalledOnce();
+      handle.stop();
+      await s.onQaFinished(tester, repo, finished.mock.calls[0][0]);
+      expect(rec).toMatchObject({ status: 'passed', passedSha: pull.headSha });
+      expect(comment.mock.calls.at(-1)?.[2]).toContain('dynamic validation not run: no OS sandbox on this desk');
+    });
+
+    it.each(['available', 'stopped', 'startup failed', 'removed'])('retries a sandbox-only incomplete report once when the alternate is %s', async (availability) => {
+      const { tester, comment } = await securityDesk();
+      const alternate = addAgent('q3', 'Marple', 'qa', 2);
+      const events = vi.spyOn(s, 'broadcast');
+      await s.onQaFinished(tester, repo, result(true, sandboxReport));
+      expect(rec).toMatchObject({ status: 'queued', round: 2, retests: 0, passedSha: null,
+        securitySandboxRetry: { headSha: pull.headSha, baseSha: 'base-1', agentId: 'q3' } });
+      expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'qa', qa: expect.objectContaining({ securitySandboxRetry: expect.objectContaining({ agentId: 'q3' }) }) }));
+      expect(comment.mock.calls.at(-1)?.[2]).toContain('no human action needed');
+      expect(comment.mock.calls.at(-1)?.[2]).toContain('dynamic validation not run: no OS sandbox on this desk');
+      if (availability === 'stopped') alternate.status = 'stopped';
+      if (availability === 'startup failed') alternate.startupFailed = true;
+      if (availability === 'removed') s.state.agents = s.state.agents.filter((a) => a !== alternate);
+      const nextTester = availability === 'available' ? alternate : tester;
+      const run = vi.spyOn(s, 'runQa');
+      expect(s.startPipelineWork(repo)).toBe(true);
+      expect(run).toHaveBeenLastCalledWith(nextTester, repo, rec);
+      await run.mock.results.at(-1)?.value;
+      // The original tester is free, but this revision has already had its one environment retry.
+      await s.onQaFinished(nextTester, repo, result(true, sandboxReport));
+      expect(rec).toMatchObject({ status: 'passed', round: 2, retests: 0, passedSha: pull.headSha });
+      expect(comment.mock.calls.at(-1)?.[2]).toContain('Security review report: ✅ Passed');
+    });
+
+    it.each([
+      ['confirmed', 'high', 'failed'], ['confirmed', 'critical', 'failed'],
+      ['needs_validation', 'high', 'needs-human'], ['needs_validation', 'critical', 'needs-human'],
+    ])('holds a %s %s finding despite a sandbox limit', async (blockingFindings, severity, status) => {
+      const { tester, comment } = await securityDesk();
+      await s.onQaFinished(tester, repo, result(true, {
+        ...sandboxReport, verdict: 'pass', blockingFindings, summary: `${severity} boundary violation`,
+        fixInstructions: 'Enforce the tenant boundary before reading the record.',
+      }));
+      expect(rec).toMatchObject({ status, passedSha: null });
+      expect(comment.mock.calls.at(-1)?.[2]).not.toContain('Security review report: ✅ Passed');
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('requires a passing security review');
+    });
+
+    it.each(['other gap', 'QA gates failed', 'QA gates unknown', 'findings unknown', 'missing validator', 'skipped validator', 'extra gap', 'explicit failure'])('does not waive %s as a sandbox limit', async (gap) => {
+      const { tester } = await securityDesk();
+      const report = { ...sandboxReport, verdict: 'pass', normalGatesPassed: true as boolean | undefined,
+        blockingFindings: 'none' as string | undefined, checks: [...sandboxReport.checks] };
+      if (gap === 'other gap') report.validationGap = 'other';
+      if (gap === 'QA gates failed') report.normalGatesPassed = false;
+      if (gap === 'QA gates unknown') report.normalGatesPassed = undefined;
+      if (gap === 'findings unknown') report.blockingFindings = undefined;
+      if (gap === 'missing validator') report.checks = report.checks.filter((c) => c.name !== 'validate-findings.cjs');
+      if (gap === 'skipped validator') report.checks = report.checks.map((c) => c.name === 'validate-findings.cjs' ? { ...c, result: 'skip' } : c);
+      if (gap === 'extra gap') report.checks.push({ name: 'Unreviewed authentication path', result: 'skip', details: 'Not covered' });
+      if (gap === 'explicit failure') report.verdict = 'fail';
+      await s.onQaFinished(tester, repo, result(true, report));
+      expect(rec).toMatchObject({ status: gap === 'explicit failure' ? 'failed' : 'needs-human', passedSha: null, round: 2 });
+    });
 
     it('queues a labeled PR that already passed regular QA, even when automatic merge is off', () => {
       Object.assign(rec, { status: 'passed', passedSha: pull.headSha, testedSha: pull.headSha });

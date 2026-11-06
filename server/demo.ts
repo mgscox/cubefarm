@@ -386,8 +386,12 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
         ok: true, text: '', costUsd, turns, errors: [],
         structured: {
           verdict: 'pass', summary: 'The simulated scoped audit passed.',
-          checks: ['Scoped audit coverage', 'validate-findings.cjs', 'validate-coverage-ledger.cjs']
-            .map((name) => ({ name, result: 'pass', details: 'Passed in the demo fixture.' })),
+          validationGap: 'no-os-sandbox', normalGatesPassed: true, blockingFindings: 'none',
+          checks: [
+            ...['Scoped audit coverage', 'validate-findings.cjs', 'validate-coverage-ledger.cjs']
+              .map((name) => ({ name, result: 'pass', details: 'Passed in the demo fixture; normal QA/CI gates passed.' })),
+            { name: 'Dynamic validation', result: 'skip', details: 'No OS sandbox on this demo desk.' },
+          ],
           commands: [], screenshots: [],
         },
       });
