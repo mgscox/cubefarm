@@ -648,6 +648,13 @@ describe('screenshotFile', () => {
   });
 });
 
+describe('CEO triage tool summary', () => {
+  it('describes triage clearing only when explicitly requested', () => {
+    expect(describeTool('', 'mcp__office__route_issue', { floor: 1, number: 4, triaged: true })).toBe('🔀 route_issue #4 → floor 1 · mark triaged');
+    expect(describeTool('', 'mcp__office__route_issue', { floor: 1, number: 4, triaged: false })).not.toContain('mark triaged');
+  });
+});
+
 describe("Codex's file edits in the log", () => {
   it('names the files an apply_patch touches, and says when it worked', () => {
     const patch = '*** Begin Patch\n*** Add File: notes.txt\n+hi\n*** Update File: src/app.ts\n@@\n-a\n+b\n*** End Patch';

@@ -338,6 +338,23 @@ describe('planRoute (route_issue)', () => {
     expect(route({ issues, readyForHuman: true })).toMatchObject({ addLabels: [], removeLabels: [], summary: '#4 on floor 1: already ready-for-human, unchanged.' });
   });
 
+  it('clears triage labels alongside specialty, dependencies and the human gate', () => {
+    const issues = base.issues.map((i) => i.number === 4 ? { ...i, labels: [...i.labels, 'Needs-Triage', 'NEEDS-INFO', 'Ready-For-Human'] } : i);
+    expect(route({ issues, specialty: 'frontend', dependsOn: [6], readyForHuman: false, triaged: true })).toEqual({
+      addLabels: ['swarm:frontend'],
+      removeLabels: ['swarm:backend', 'Needs-Triage', 'NEEDS-INFO', 'Ready-For-Human'],
+      body: 'Depends on #6\n\nSome text',
+      summary: '#4 on floor 1: routed to frontend, marked triaged (removed Needs-Triage, NEEDS-INFO), ready-for-human removed, agents can start it, depends on #6.',
+    });
+  });
+
+  it('only removes triage labels when explicitly true', () => {
+    const issues = base.issues.map((i) => i.number === 4 ? { ...i, labels: [...i.labels, 'needs-triage', 'needs-info'] } : i);
+    expect(route({ issues, specialty: 'frontend' }).removeLabels).toEqual(['swarm:backend']);
+    expect(route({ issues, triaged: false })).toEqual({ addLabels: [], removeLabels: [], body: null, summary: '#4 on floor 1: triage unchanged.' });
+    expect(route({ triaged: true })).toEqual({ addLabels: [], removeLabels: [], body: null, summary: '#4 on floor 1: already triaged, unchanged.' });
+  });
+
   it('gates or ungates an issue in progress, saying the session keeps running', () => {
     expect(route({ inProgress: true, readyForHuman: true }).summary).toBe('#4 on floor 1: reserved for a person (ready-for-human); the current session keeps running.');
     const issues = base.issues.map((i) => i.number === 4 ? { ...i, labels: ['ready-for-human'] } : i);

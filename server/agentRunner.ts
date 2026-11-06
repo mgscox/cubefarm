@@ -270,7 +270,7 @@ export function describeOfficeTool(action: string, input: Record<string, unknown
     case 'request_research':
       return `📚 request_research "${clip(String(input.topic ?? ''), 70)}"${floor}`;
     case 'route_issue':
-      return `🔀 route_issue #${String(input.number ?? '?')}${floor}${input.specialty !== undefined ? ` · ${input.specialty || 'no specialty'}` : ''}${Array.isArray(input.depends_on) ? ` · depends on ${input.depends_on.map((n) => `#${n}`).join(', ') || 'nothing'}` : ''}${typeof input.ready_for_human === 'boolean' ? ` · ${input.ready_for_human ? 'gate for a person' : 'clear gate'}` : ''}`;
+      return `🔀 route_issue #${String(input.number ?? '?')}${floor}${input.specialty !== undefined ? ` · ${input.specialty || 'no specialty'}` : ''}${Array.isArray(input.depends_on) ? ` · depends on ${input.depends_on.map((n) => `#${n}`).join(', ') || 'nothing'}` : ''}${typeof input.ready_for_human === 'boolean' ? ` · ${input.ready_for_human ? 'gate for a person' : 'clear gate'}` : ''}${input.triaged === true ? ' · mark triaged' : ''}`;
   }
   return `🏢 ${action}(${clip(JSON.stringify(input), 120)})`;
 }
