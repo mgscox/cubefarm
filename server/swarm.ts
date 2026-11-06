@@ -6731,7 +6731,7 @@ export class Swarm {
   }
 
   /** Shared routing validation; parking has already reserved and checked its linked agents. */
-  private async planIssueRoute(x: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean }, inProgress?: boolean) {
+  private async planIssueRoute(x: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean; triaged?: boolean }, inProgress?: boolean) {
     const repo = this.floorRepo(x.floor);
     const issues = this.repoRt.get(repo.id)?.issues ?? [];
     const asked = [Number(x.number), ...(x.depends_on ?? []).map(Number)].filter((n) => !issues.some((i) => i.number === n));
@@ -6746,6 +6746,7 @@ export class Swarm {
       specialty: x.specialty,
       dependsOn: x.depends_on,
       readyForHuman: x.ready_for_human,
+      triaged: x.triaged,
       issues,
       closed: (n) => states.get(n) === 'CLOSED',
       inProgress: inProgress ?? this.issueTaken(repo, Number(x.number)),
@@ -6753,8 +6754,8 @@ export class Swarm {
     });
   }
 
-  /** Change an open issue's specialty, dependencies and/or ready-for-human gate (see planRoute for what is refused). */
-  private async routeIssue(x: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean }) {
+  /** Change an open issue's routing or preparation labels (see planRoute for what is refused). */
+  private async routeIssue(x: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean; triaged?: boolean }) {
     const repo = this.floorRepo(x.floor);
     const check = () => {
       if (this.repoRt.get(repo.id)?.parking) throw new HttpError(409, 'Wait until PR parking finishes');

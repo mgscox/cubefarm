@@ -1400,6 +1400,8 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
       }
       const close = text.match(/\bclose\s+(?:issue\s*)?#(\d+)\s+on\s+floor\s+(\d+)\s+because\s+([^\n]+)/i);
       if (close) return use('close_issue', { floor: Number(close[2]), number: Number(close[1]), reason: close[3].trim() });
+      const triage = text.match(/\btriage\s+(?:issue\s*)?#(\d+)\s+on\s+floor\s+(\d+)/i);
+      if (triage) return use('route_issue', { floor: Number(triage[2]), number: Number(triage[1]), triaged: true });
       const merge = text.match(/\bmerge\s+(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))\s+(?:because|with|reason)\s+([^\n]+)/i);
       if (merge) {
         const floor = merge[2] ? Number(merge[2]) : s.floors.find((f) => f.repo.toLowerCase() === merge[3].toLowerCase() || f.repo.split('/').pop()?.toLowerCase() === merge[3].toLowerCase())?.floor;

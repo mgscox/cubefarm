@@ -2556,6 +2556,60 @@ describe('ready-for-human issues', () => {
   });
 });
 
+describe('route_issue triaged', () => {
+  it('succeeds without editing when already triaged, and leaves draft titles blocked', async () => {
+    setIssues(issue(1), { ...issue(2), title: '[Draft] Still planning' });
+    const edit = vi.spyOn(s.backend, 'editIssue');
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 1, triaged: true })).toContain('already triaged, unchanged');
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 2, triaged: true })).toContain('already triaged, unchanged');
+    expect(edit).not.toHaveBeenCalled();
+    expect(await s.officeTools().call('start_issue', { floor: 1, number: 2 })).toContain('draft');
+  });
+
+  it('removes labels through the demo backend and keeps draft titles unchanged', async () => {
+    const number = await s.backend.createIssue(repo.fullName, '[Draft] Still planning', 'Body', ['Needs-Triage', 'needs-info', 'bug']);
+    Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
+    await swarm.syncRepo(repo.id);
+    expect(await s.officeTools().call('route_issue', { floor: 1, number, triaged: true })).toContain('marked triaged');
+    expect((await s.backend.listIssues(repo.fullName)).find((i) => i.number === number)).toMatchObject({ title: '[Draft] Still planning', body: 'Body', labels: ['bug'] });
+    const backlog = JSON.parse(s.companyStatus()).floors[0].backlog.find((i: { number: number }) => i.number === number);
+    expect(backlog.waitReason).toBe('draft');
+  });
+
+  it('lets the demo CEO triage an issue when the manager asks', async () => {
+    setIssues(issue(1, ['needs-triage']));
+    const edit = vi.spyOn(s.backend, 'editIssue').mockResolvedValue();
+    vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+    const finished = vi.fn();
+    const handle = createDemoBackend().startSession({ role: 'ceo', cwd: '', prompt: 'Manager asks:\nTriage #1 on floor 1',
+      systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools() },
+      { log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: expect.stringContaining('marked triaged') }));
+    expect(edit).toHaveBeenCalledWith(repo.fullName, 1, { body: undefined, addLabels: [], removeLabels: ['needs-triage'] });
+    handle.stop();
+  });
+
+  it.each([
+    ['needs-triage', 'needs triage'],
+    ['needs-info', 'waiting for info'],
+    ['NeEdS-TrIaGe', 'needs triage'],
+  ])('clears %s and lets start_issue run immediately, even with a stale refresh', async (label, reason) => {
+    setIssues(issue(1, [label, 'NEEDS-INFO', 'bug']));
+    const edit = vi.spyOn(s.backend, 'editIssue').mockResolvedValue();
+    const sync = vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+    const backlog = () => JSON.parse(s.companyStatus()).floors[0].backlog[0];
+    expect(backlog().waitReason).toBe(reason);
+    expect(await s.officeTools().call('start_issue', { floor: 1, number: 1 })).toContain(reason);
+    expect(await s.officeTools().call('route_issue', { floor: 1, number: 1, triaged: true })).toContain('marked triaged');
+    expect(edit).toHaveBeenCalledWith(repo.fullName, 1, { body: undefined, addLabels: [], removeLabels: [label, 'NEEDS-INFO'] });
+    expect(sync).toHaveBeenCalledWith(repo.id);
+    expect(backlog().waitReason).toBeUndefined();
+    expect(await s.officeTools().call('start_issue', { floor: 1, number: 1 })).toContain('started #1');
+    expect(runTask).toHaveBeenCalledOnce();
+  });
+});
+
 describe('a developer session that ends without a PR after pushing commits', () => {
   type Backend = ReturnType<typeof createDemoBackend>;
   type Fake = Internals & {

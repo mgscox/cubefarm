@@ -37,7 +37,7 @@ export interface OfficeHandlers {
   proposeLetGo(a: { agent_id: string; reason: string }): string;
   fileIssue(a: { floor: number; title: string; body: string; specialty?: string; ready_for_human?: boolean }): Promise<string>;
   closeIssue(a: { floor: number; number: number; reason: string }): Promise<string>;
-  routeIssue(a: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean }): Promise<string>;
+  routeIssue(a: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean; triaged?: boolean }): Promise<string>;
   connectFloor(a: { repo: string; auto_assign?: boolean; auto_merge?: boolean; reason: string }): Promise<string>;
   startIssue(a: StartIssueRequest): Promise<string>;
   rerunQa(a: { floor: number; number: number; note?: string }): Promise<string>;
@@ -296,13 +296,14 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
     ),
     tool(
       'route_issue',
-      'Fix the routing of an open issue instead of filing a duplicate: change its specialty, rewrite its "Depends on #N" line, set or clear its ready-for-human gate, or a mix. The rest of the body stays as it is.',
+      'Fix the routing of an open issue instead of filing a duplicate: change its specialty, rewrite its "Depends on #N" line, set or clear its ready-for-human gate, mark it triaged, or a mix. The rest of the body stays as it is. Clear needs-triage/needs-info only when the manager asks for that issue to be started or triaged; report it afterwards.',
       {
         floor: z.number().int(),
         number: z.number().int().positive().describe('The issue number'),
         specialty: z.string().max(24).optional().describe('Sets swarm:<specialty> and removes any other; "" for none. Someone on the floor, or a pending proposal, must have it.'),
         depends_on: z.array(z.number().int().positive()).max(10).optional().describe('Body dependencies; [] clears the body line. Native GitHub blockers remain. Human gates count as zero chain steps. Not for an issue in progress.'),
         ready_for_human: z.boolean().optional().describe('true adds the ready-for-human label (agents never start it; a running session keeps going), false removes it so agents can start it'),
+        triaged: z.boolean().optional().describe('true removes needs-triage and needs-info labels; false leaves them unchanged. Draft title prefixes stay unchanged.'),
       },
       (a) => run(() => h.routeIssue(a)),
     ),
@@ -433,6 +434,7 @@ export function ceoSystemPrompt(o: {
     '- Use send_back_to_dev on your own initiative for needs-human PRs with clear fixes (real QA defects, conflicts or failing checks); report the handoff to the manager afterwards.',
     '- Use park_pr on your own initiative only for placeholder/blocked PRs that cannot pass QA until upstream work ships; pass depends_on to hold their issues behind upstream issues or ready-for-human gates, then report to the manager.',
     '- Clear ready-for-human (route_issue ready_for_human false) only when the manager asks, or on an issue you gated yourself; report it afterwards.',
+    '- Clear needs-triage/needs-info (route_issue triaged true) only when the manager asks for that issue to be started or triaged; report it afterwards.',
     '- Use merge_pr only when the manager explicitly asks for that PR to be merged; include their instruction and any follow-up issues in the reason, and report afterwards. Use file_issue with ready_for_human for follow-ups reserved for a person.',
     '- Use rerun_qa only when the manager asks for a PR to be re-tested. First check it has new commits since the last QA; otherwise it needs a developer for fixes.',
     '- Titles are specific ("Three.js graphics engineer", not "Developer"). A specialty is a short lowercase slug ("graphics", "gameplay", "frontend", "backend", "content", "a11y", "devops"). Only route an issue to a specialty that someone on the floor has, or that you are proposing to hire.',
@@ -534,6 +536,7 @@ export interface RouteRequest {
   specialty?: string; // '' = no specialty
   dependsOn?: number[]; // [] = no dependencies
   readyForHuman?: boolean; // true adds the ready-for-human label, false removes it
+  triaged?: boolean; // only true removes needs-triage and needs-info
   issues: Pick<IssueInfo, 'number' | 'body' | 'labels' | 'nativeBlockers'>[]; // the floor's open issues
   closed: (n: number) => boolean; // for numbers that aren't open: closed, rather than unknown
   inProgress: boolean;
@@ -564,7 +567,7 @@ function waitsDepth(n: IssueRef, deps: Map<IssueRef, IssueRef[]>, gates: Set<Iss
 export function planRoute(r: RouteRequest): RoutePlan {
   const issue = r.issues.find((i) => i.number === r.number);
   if (!issue) throw new Error(r.closed(r.number) ? `#${r.number} is closed.` : `There is no open issue #${r.number} on floor ${r.floor}.`);
-  if (r.specialty === undefined && r.dependsOn === undefined && r.readyForHuman === undefined) throw new Error('Nothing to change: pass specialty, depends_on, ready_for_human or a mix.');
+  if (r.specialty === undefined && r.dependsOn === undefined && r.readyForHuman === undefined && r.triaged === undefined) throw new Error('Nothing to change: pass specialty, depends_on, ready_for_human, triaged or a mix.');
   const plan: RoutePlan = { addLabels: [], removeLabels: [], body: null, summary: '' };
   const done: string[] = [];
 
@@ -580,6 +583,12 @@ export function planRoute(r: RouteRequest): RoutePlan {
     if (label && !issue.labels.includes(label)) plan.addLabels = [label];
     done.push(slug ? `routed to ${slug}` : 'no specialty');
   }
+
+  if (r.triaged === true) {
+    const triage = issue.labels.filter((l) => /^(needs-triage|needs-info)$/i.test(l));
+    plan.removeLabels.push(...triage);
+    done.push(triage.length ? `marked triaged (removed ${triage.join(', ')})` : 'already triaged, unchanged');
+  } else if (r.triaged === false) done.push('triage unchanged');
 
   let labels = issue.labels;
   if (r.readyForHuman !== undefined) {
