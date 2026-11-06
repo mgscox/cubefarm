@@ -6,6 +6,7 @@ import { connectBox } from './boxLink.ts';
 import { encode, PTY_PROTOCOL, type ToHost } from './ptyProtocol.ts';
 import { withOperation } from './operation.ts';
 import type { BoxConnection } from './machine.ts';
+import { images, IMAGE_ROUTE } from './attachments.ts';
 
 vi.mock('node:child_process', async (original) => ({ ...await original<typeof import('node:child_process')>(), spawn: vi.fn() }));
 vi.mock('./machineHealth.ts', () => ({ monitorResources: () => () => {} }));
@@ -58,5 +59,30 @@ describe('remote desk cancellation', () => {
     await failed;
     expect(sent.at(-1)).toMatchObject({ op: 'cancelRpc' });
     expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  it('sends image bytes over SSH before resolving a remote follow-up prompt', async () => {
+    const name = images.save(Buffer.from('GIF89a image fixture'));
+    const text = `Look at http://localhost:1234${IMAGE_ROUTE}/${name}`;
+    const pending = box.machine.cliHost!.preparePrompt!(text);
+    const call = sent.find((m) => m.op === 'rpc' && m.method === 'preparePrompt') as Extract<ToHost, { op: 'rpc' }>;
+    expect(call.args).toEqual([text, [{ name, data: images.read(name).toString('base64') }]]);
+    child.stdout.write(encode({ op: 'rpcReply', rid: call.rid, ok: true, value: 'Read the file on the box' }));
+    expect(await pending).toBe('Read the file on the box');
+    expect(box.machine.cliHost!.preparePrompt!('text only')).toBe('text only');
+  });
+
+  it('includes images from both task and system instructions when starting a remote CLI', async () => {
+    const name = images.save(Buffer.from('GIF89a initial prompt fixture'));
+    const text = `See http://localhost:1234${IMAGE_ROUTE}/${name}`;
+    const pending = box.machine.cliHost!.prepare({
+      cli: 'codex', token: 'image-task', sessionId: 'image-session', cwd: 'remote-desk', prompt: text,
+      systemAppend: text, model: '', effort: '', name: 'Test', role: 'dev', additionalDirectories: [],
+      browserTesting: false, officeUrl: 'http://localhost:1234', officeTools: false,
+    });
+    const call = sent.find((m) => m.op === 'rpc' && m.method === 'prepare') as Extract<ToHost, { op: 'rpc' }>;
+    expect(call.args[1]).toEqual([{ name, data: images.read(name).toString('base64') }]);
+    child.stdout.write(encode({ op: 'rpcReply', rid: call.rid, ok: true, value: { dir: 'remote-session', prompt: 'remote prompt' } }));
+    expect(await pending).toMatchObject({ dir: 'remote-session', prompt: 'remote prompt' });
   });
 });

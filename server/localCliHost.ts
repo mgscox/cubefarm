@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { images } from './attachments.ts';
 import { recoverCliTurn } from './cliTranscript.ts';
 import { HOME_DIR, WORKSPACE_ROOT } from './config.ts';
 import { cliLabel, codexThread, readClaudeTurn } from './clis.ts';
@@ -16,7 +17,7 @@ function prepare(plan: CliPlan): PreparedCli {
   if (!terminalsAvailable) throw new Error(`Could not start ${label}: the terminal module could not be loaded on this machine.`);
   // Through the keeper, a hook waits while the office restarts instead of failing.
   const keeper = keeperHookUrl();
-  const launch = writeCliSession(plan, { url: keeper ?? plan.officeUrl, held: !!keeper });
+  const launch = writeCliSession({ ...plan, prompt: images.prompt(plan.prompt), systemAppend: images.prompt(plan.systemAppend) }, { url: keeper ?? plan.officeUrl, held: !!keeper });
   return {
     dir: launch.dir,
     prompt: launch.prompt,
@@ -32,6 +33,7 @@ function prepare(plan: CliPlan): PreparedCli {
 }
 
 export const localCliHost: CliHost = {
+  preparePrompt: (text) => images.prompt(text),
   prepare,
   hasFile: (file) => fs.existsSync(file),
   claudeTurn: (cwd, sessionId) => readClaudeTurn(cwd, sessionId),

@@ -1,3 +1,4 @@
+import { PromptTextarea } from './PromptTextarea';
 // The manager's approval card: one decision on the exact PRD + Issue Plan pair it displays.
 import { useState } from 'react';
 import type { IdeaView, ProposalAction, ProposalView } from '../../../shared/types';
@@ -161,7 +162,7 @@ export function ProposalCard({ idea, proposal, earlier, onLinkedIdea }: {
         mode ? (
           <form className="proposal-feedback" onSubmit={(e) => { e.preventDefault(); decide(mode); }}>
             <label className="field">{mode === 'refine' ? 'What should change?' : 'Why reject it? (optional)'}
-              <textarea rows={3} maxLength={5000} value={feedback} onChange={(e) => setFeedback(e.target.value)} required={mode === 'refine'} />
+              <PromptTextarea rows={3} maxLength={5000} value={feedback} onValueChange={setFeedback} required={mode === 'refine'} />
             </label>
             {mode === 'refine' && (
               <label className="toggle"><input type="checkbox" checked={wording} onChange={(e) => setWording(e.target.checked)} />Wording only (skip a fresh review)</label>

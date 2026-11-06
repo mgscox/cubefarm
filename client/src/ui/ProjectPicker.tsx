@@ -1,3 +1,4 @@
+import { PromptTextarea } from './PromptTextarea';
 import { useEffect, useMemo, useState } from 'react';
 import { api, type FloorOptions } from '../api';
 import { useStore } from '../store';
@@ -248,9 +249,9 @@ export function ProjectPicker({ onConnected, initial = 'folder' }: { onConnected
           </button>
         ))}
       </div>
-      <textarea
+      <PromptTextarea
         value={mission}
-        onChange={(e) => setMission(e.target.value)}
+        onValueChange={setMission}
         rows={2}
         placeholder={mode === 'new' ? 'What should the team build? e.g. A cozy 3D browser game where you run a tiny island bakery.' : 'Brief for the CEO (optional): what should the team work on next?'}
       />

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { images, type ImageAttachment } from './attachments.ts';
 import { recoverCliTurn } from './cliTranscript.ts';
 import type { AgentCli } from '../shared/types.ts';
 import { VERSION, WORKSPACE_ROOT } from './config.ts';
@@ -66,10 +67,16 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
     deskHead: (fullName, slug) => workspace.deskHead(str(fullName), str(slug)),
     deskExists: (fullName, slug) => workspace.deskExists(str(fullName), str(slug)),
     deskAhead: (fullName, slug, base) => workspace.deskAhead(str(fullName), str(slug), str(base)),
-    prepare(plan) {
+    preparePrompt(text, attachments) {
+      images.receive(attachments as ImageAttachment[]);
+      return images.prompt(str(text));
+    },
+    prepare(plan, attachments) {
+      if (attachments) images.receive(attachments as ImageAttachment[]);
       const now = Date.now();
       for (const [t, p] of prepared) if (now - p.at > PREPARED_MS) prepared.delete(t);
-      const cli = writeCliSession(plan as CliPlan, { url: ctx.hookUrl(), held: true });
+      const p = plan as CliPlan;
+      const cli = writeCliSession({ ...p, prompt: images.prompt(p.prompt), systemAppend: images.prompt(p.systemAppend) }, { url: ctx.hookUrl(), held: true });
       prepared.set((plan as CliPlan).token, { cli, at: now });
       return { dir: cli.dir, prompt: cli.prompt, hookUrl: `${ctx.hookUrl()}/api/hooks` };
     },

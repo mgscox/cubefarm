@@ -1,5 +1,6 @@
 import { claudeEnv } from '../bin/claudeAuth.js';
 import fs from 'node:fs';
+import { images } from './attachments.ts';
 import os from 'node:os';
 import path from 'node:path';
 import { query, type CanUseTool, type Options, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -333,7 +334,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
   let startup = ''; // what Claude Code said before it began (a resume with nothing to resume says so there)
   let begun = false;
 
-  input.push(opts.prompt);
+  input.push(images.prompt(opts.prompt));
 
   // Each agent must be a clean Claude Code instance on the subscription Claude Code is logged into.
   // Drop API keys (they would switch billing to the API) and other CLAUDE_* / ANTHROPIC_* variables
@@ -362,7 +363,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
     effort: opts.effort,
     // The manager's own setup (settings, skills, plugins, MCP servers, connectors), plus the office's servers below.
     settingSources: ['user', 'project', 'local'],
-    systemPrompt: { type: 'preset', preset: 'claude_code', append: opts.systemAppend },
+    systemPrompt: { type: 'preset', preset: 'claude_code', append: images.prompt(opts.systemAppend) },
     mcpServers,
     disallowedTools,
     resume: opts.resumeSessionId,
@@ -530,8 +531,9 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
 
   return {
     send(text) {
+      const prompt = images.prompt(text);
       pendingTurns += 1;
-      input.push(text);
+      input.push(prompt);
     },
     stop() {
       stopped = true;

@@ -1,11 +1,12 @@
 import { useLayoutEffect, useRef, type TextareaHTMLAttributes } from 'react';
+import { PromptTextarea } from './PromptTextarea';
 
 // The message box shared by the phone's CEO chat and the agent terminal: Enter sends,
 // Shift+Enter adds a line. It starts one line tall, grows to about six, then scrolls.
 // Put it in a <form> next to its Send button; Enter submits the form the same way
 // pressing Enter in a single-line input did, so a disabled Send button still blocks it.
 
-type Props = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'value' | 'onChange' | 'rows'> & {
+type Props = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, 'value' | 'defaultValue' | 'onChange' | 'rows'> & {
   value: string;
   onChange: (value: string) => void;
 };
@@ -22,7 +23,7 @@ export function MessageBox({ value, onChange, className, onKeyDown, ...rest }: P
   }, [value]);
 
   return (
-    <textarea
+    <PromptTextarea
       // Messages are full of repo names and identifiers ("cubefarm" isn't "cuneiform"); callers may turn these back on.
       autoCorrect="off"
       autoCapitalize="off"
@@ -33,7 +34,7 @@ export function MessageBox({ value, onChange, className, onKeyDown, ...rest }: P
       enterKeyHint="send"
       className={`msg-box ${className ?? ''}`}
       value={value}
-      onChange={(e) => onChange(e.target.value)}
+      onValueChange={onChange}
       onKeyDown={(e) => {
         onKeyDown?.(e);
         if (e.defaultPrevented || e.key !== 'Enter' || e.shiftKey) return;

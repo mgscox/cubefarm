@@ -27,6 +27,12 @@ export interface FloorOptions {
 }
 
 export const api = {
+  uploadImage: async (file: File): Promise<string> => {
+    const response = await fetch('/api/attachments/images', { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
+    const data = await response.json() as { path?: string; error?: string };
+    if (!response.ok || !data.path) throw new Error(data.error ?? 'Image upload failed.');
+    return new URL(data.path, location.origin).href;
+  },
   submitIdea: (input: IdeaInput) => call<IdeaView>('POST', '/api/ideas', input),
   replyToIdea: (id: string, answer: string) => call<IdeaView>('POST', `/api/ideas/${encodeURIComponent(id)}/reply`, { answer }),
   retryIdeaResearch: (id: string) => call<IdeaView>('POST', `/api/ideas/${encodeURIComponent(id)}/retry`),
@@ -94,6 +100,7 @@ export const api = {
   stop: (id: string) => call('POST', `/api/agents/${id}/stop`),
   reset: (id: string) => call('POST', `/api/agents/${id}/reset`),
   message: (id: string, text: string) => call('POST', `/api/agents/${id}/message`, { text }),
+  imagePrompt: (id: string, text: string) => call<{ text: string }>('POST', `/api/agents/${id}/image-prompt`, { text }),
   closeOffice: () => call('POST', '/api/office/close'),
   reopenOffice: () => call('POST', '/api/office/reopen'),
   updateSettings: (patch: Partial<SwarmSettings>) => call('PATCH', '/api/settings', patch),

@@ -1,3 +1,4 @@
+import { PromptTextarea } from './PromptTextarea';
 // Shared Idea intake and record presentation; workflow actions belong to their owning slices.
 import { useEffect, useState } from 'react';
 import type { IdeaRecordView, IdeaReviewCycleView, IdeaView, ProposalView } from '../../../shared/types';
@@ -126,7 +127,7 @@ export function IdeaDetail({ idea, records, proposals = [], prd, onLinkedIdea }:
           setBusy(true);
           void api.replyToIdea(idea.id, answer).then(() => setAnswer('')).catch(() => undefined).finally(() => setBusy(false));
         }}>
-          <label className="field">Reply to researcher<textarea required maxLength={10000} rows={3} value={answer} onChange={(e) => setAnswer(e.target.value)} /></label>
+          <label className="field">Reply to researcher<PromptTextarea required maxLength={10000} rows={3} value={answer} onValueChange={setAnswer} /></label>
           <button className="btn btn-good" disabled={busy || !connected || !answer.trim()}>Reply and resume research</button>
         </form>}
         {research.requests.map((r) => <details key={r.id} open={r.answer === undefined}>
@@ -219,9 +220,9 @@ export function IdeasTab({ initialIdea, initialPrd }: { initialIdea?: string; in
               <p className="small row wrap">Linked to <a href={ideaLink(linkedFrom)}>an archived Idea</a>, whose history carries over as context.
                 <button type="button" className="btn btn-ghost btn-small" onClick={() => setLinkedFrom(undefined)}>Unlink</button></p>
             )}
-            <label className="field">Short description <textarea required maxLength={2000} rows={3} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What would you like to improve?" /></label>
-            <label className="field">Links (optional, one per line)<textarea rows={2} value={links} onChange={(e) => setLinks(e.target.value)} placeholder="https://…" /></label>
-            <label className="field">Constraints (optional)<textarea maxLength={10000} rows={2} value={constraints} onChange={(e) => setConstraints(e.target.value)} /></label>
+            <label className="field">Short description <PromptTextarea required maxLength={2000} rows={3} value={description} onValueChange={setDescription} placeholder="What would you like to improve?" /></label>
+            <label className="field">Links (optional, one per line)<PromptTextarea rows={2} value={links} onValueChange={setLinks} placeholder="https://…" /></label>
+            <label className="field">Constraints (optional)<PromptTextarea maxLength={10000} rows={2} value={constraints} onValueChange={setConstraints} /></label>
             <fieldset className="idea-hints"><legend>Floor hints (optional)</legend>
               {repos.length === 0 && <p className="muted">You can submit before configuring any floors.</p>}
               {repos.map((repo) => <label className="toggle" key={repo.id}><input type="checkbox" checked={floorHints.includes(repo.id)} onChange={(e) => setFloorHints(e.target.checked ? [...floorHints, repo.id] : floorHints.filter((id) => id !== repo.id))} />{repo.fullName}</label>)}
