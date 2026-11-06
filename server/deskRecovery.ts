@@ -25,9 +25,10 @@ export function deskRecoveryDue(a: DeskRecovery & { status: AgentStatus; startup
 export function migrateDeskRecovery(a: DeskRecovery & { status: AgentStatus; startupFailed?: boolean; endedAt: number | null; lastError: string | null; logTail?: { kind: string; text: string }[] }, now: number, cli: string) {
   if (a.lastError) a.lastErrorAt ??= a.endedAt ?? now;
   if (a.status === 'stopped' && !a.stoppedBy) {
-    const tail = a.logTail?.at(-1);
+    const tail = a.logTail?.findLast((l) => (l.kind === 'manager' && /^[■▶]/.test(l.text)) ||
+      (l.kind === 'system' && l.text.startsWith('━━━')));
     a.stoppedBy = /stopped by manager|interrupted in the terminal/i.test(a.lastError ?? '') ||
-      (tail?.kind === 'manager' && /stopped|interrupted/i.test(tail.text)) ? 'manager' : 'office';
+      (tail?.kind === 'manager' && /^■ (?:Manager stopped|Interrupted)/i.test(tail.text)) ? 'manager' : 'office';
     a.endedAt ??= now;
   }
   if (a.startupFailed && !a.startupRetry) {

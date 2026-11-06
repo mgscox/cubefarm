@@ -30,6 +30,16 @@ describe('desk recovery policy', () => {
     migrateDeskRecovery(startup, 900000, 'Codex');
     expect(startup).toMatchObject({ startupRetry: { retryAt: 121000, failures: 1 } });
   });
+  it('preserves a legacy manager Stop when late CLI errors follow it, but ignores stops from earlier tasks', () => {
+    const stopped = { status: 'stopped' as const, endedAt: 1000, lastError: 'Recovery failed', logTail: [
+      { kind: 'manager', text: '■ Manager stopped this session.' }, { kind: 'error', text: 'Recovery failed' },
+    ] };
+    const nextTask = { ...stopped, logTail: [...stopped.logTail, { kind: 'system', text: '━━━ Issue #67 ━━━' }] };
+    migrateDeskRecovery(stopped, 500000, 'Codex');
+    migrateDeskRecovery(nextTask, 500000, 'Codex');
+    expect(stopped).toMatchObject({ stoppedBy: 'manager' });
+    expect(nextTask).toMatchObject({ stoppedBy: 'office' });
+  });
   it('counts failures on the same task and starts a new streak for different work', () => {
     expect(taskFailure({ key: 'r:qa:13', count: 2 }, 'r:qa:13').count).toBe(3);
     expect(taskFailure({ key: 'r:qa:13', count: 2 }, 'r:issue:66').count).toBe(1);
