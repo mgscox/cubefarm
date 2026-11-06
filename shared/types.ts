@@ -57,6 +57,8 @@ export interface PullInfo {
   additions: number;
   deletions: number;
   checks: 'pending' | 'passing' | 'failing' | 'none' | 'unavailable';
+  /** At least one completed check or commit status succeeded; skipped/neutral checks alone are insufficient. */
+  hasSuccessfulChecks?: boolean;
   headSha: string;
   baseSha?: string;
   baseRefName?: string;
@@ -351,6 +353,8 @@ export interface QaCheck {
   name: string;
   result: 'pass' | 'fail' | 'skip';
   details: string;
+  /** Only use environment when the worker prevented validation and no code defect is known or suspected. */
+  failureKind?: 'code' | 'environment';
 }
 
 /** Failed preparations for one PR task and head; kept across office restarts. */

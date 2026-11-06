@@ -10,6 +10,8 @@ export const CHECK_RERUN_GRACE_MS = 2 * 60_000;
 
 /** The parts of a QA record the merge gate reads. */
 export interface MergeRecord {
+  /** Local validation was blocked by the worker, so absent CI checks cannot satisfy the merge gate. */
+  ciRequired?: boolean;
   passedSha: string | null;
   mergeFixes: number;
   pendingSince: number | null;
@@ -22,7 +24,7 @@ export interface MergeRecord {
 /** Bookkeeping the caller writes onto the record as it is (it doesn't count as a change to the record). */
 export type MergeBookkeeping = Partial<Pick<MergeRecord, 'passedSha' | 'pendingSince' | 'alerted'>>;
 
-export type MergePull = Pick<PullInfo, 'isDraft' | 'mergeable' | 'mergeState' | 'headSha' | 'checks' | 'failedChecks' | 'pendingChecks'>;
+export type MergePull = Pick<PullInfo, 'isDraft' | 'mergeable' | 'mergeState' | 'headSha' | 'checks' | 'hasSuccessfulChecks' | 'failedChecks' | 'pendingChecks'>;
 
 /** What auto-merge does next with a QA-passed PR. */
 export type MergeStep = { set: MergeBookkeeping } & (
@@ -71,6 +73,9 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
     const alert = now - since > CHECKS_ALERT_MS && !rec.alerted;
     if (alert) set.alerted = true;
     return { do: 'wait', note: `waiting for checks: ${pr.pendingChecks.join(', ') || 'running'}`, alert, set };
+  }
+  if (rec.ciRequired && (pr.checks !== 'passing' || pr.hasSuccessfulChecks !== true)) {
+    return { do: 'wait', note: 'waiting for passing GitHub checks to cover environment-blocked local validation', set };
   }
   set.pendingSince = null;
   if (pr.mergeable === 'UNKNOWN') return { do: 'wait', note: 'GitHub is checking it can merge', set };

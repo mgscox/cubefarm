@@ -10,6 +10,7 @@ const pull = (p: Partial<MergePull> = {}): MergePull => ({
   mergeState: 'CLEAN',
   headSha: 'abc123',
   checks: 'passing',
+  hasSuccessfulChecks: true,
   failedChecks: [],
   pendingChecks: [],
   ...p,
@@ -54,6 +55,24 @@ describe('mergeStep', () => {
   it('merges a clean, green PR at the commit QA passed', () => {
     expect(mergeStep(pull(), record(), NOW, base)).toEqual({ do: 'merge', set: { pendingSince: null } });
     expect(mergeStep(pull({ checks: 'none' }), record(), NOW, base).do).toBe('merge');
+  });
+
+  describe('environment-blocked local validation', () => {
+    it.each([false, undefined])('requires successful check evidence when the rollup is passing (%s)', (hasSuccessfulChecks) => {
+      expect(mergeStep(pull({ hasSuccessfulChecks }), record({ ciRequired: true }), NOW, base).do).toBe('wait');
+      expect(mergeStep(pull({ hasSuccessfulChecks }), record(), NOW, base).do).toBe('merge');
+    });
+    it.each(['none', 'pending', 'unavailable'] as const)('waits when GitHub checks are %s', (checks) => {
+      expect(mergeStep(pull({ checks }), record({ ciRequired: true }), NOW, base).do).toBe('wait');
+    });
+
+    it('merges only the reviewed commit with passing CI', () => {
+      const rec = record({ ciRequired: true });
+      expect(mergeStep(pull(), rec, NOW, base).do).toBe('merge');
+      expect(mergeStep(pull({ headSha: 'unreviewed' }), rec, NOW, base).do).toBe('requeue');
+      expect(mergeStep(pull({ checks: 'failing' }), rec, NOW, base)).toMatchObject({ do: 'send-back', reason: 'checks' });
+      expect(mergeStep(pull({ mergeState: 'DIRTY' }), rec, NOW, base)).toMatchObject({ do: 'send-back', reason: 'conflict' });
+    });
   });
 
   it('marks a QA-passed draft ready instead of waiting on it', () => {

@@ -3283,7 +3283,7 @@ describe('company_status size', () => {
 describe('QA rounds', () => {
   const pull: PullInfo = {
     number: 13, title: 'Chaser', url: '', isCrossRepository: false, headRefName: 'swarm/13', state: 'OPEN',
-    isDraft: false, closesIssues: [], checks: 'passing', mergeable: 'MERGEABLE', headSha: 'sha-1',
+    isDraft: false, closesIssues: [], checks: 'passing', hasSuccessfulChecks: true, mergeable: 'MERGEABLE', headSha: 'sha-1',
     reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
     mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
   };
@@ -3528,6 +3528,73 @@ describe('QA rounds', () => {
     rec.testedSha = 'sha-1';
     await s.onQaFinished(tester, repo, result(true, failReport));
   };
+
+  it('does not send an environment-only validation failure to developers for a code fix', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: pull.headSha });
+    const phone = vi.spyOn(s, 'postMessage');
+    const comment = vi.spyOn(s.backend, 'commentPull');
+    await s.onQaFinished(tester, repo, result(true, {
+      verdict: 'fail',
+      summary: 'Changed behavior passed; no code defect found. Full suite interrupted by shared-worker memory exhaustion.',
+      checks: [{ name: 'Full regression suite', result: 'fail', failureKind: 'environment', details: 'Worker ran out of memory; focused retries and unchanged-base probes passed.' }],
+    }));
+    expect(['failed', 'fixing', 'needs-human']).not.toContain(rec.status);
+    expect(rec.failedSha).toBeNull();
+    expect(runFix).not.toHaveBeenCalled();
+    expect(phone).not.toHaveBeenCalled();
+    expect(comment.mock.calls.at(-1)?.[2]).toContain('Local validation was blocked only by the worker environment');
+    expect(rec).toMatchObject({ status: 'passed', passedSha: pull.headSha, ciRequired: true,
+      checks: [{ result: 'skip', failureKind: 'environment' }] });
+    const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+    expect(await s.advanceMerge(repo, rec, pull)).toBe(true);
+    expect(merge).toHaveBeenCalledWith(repo.fullName, pull.number, 'squash', pull.headSha);
+  });
+
+  it.each(['code', 'unclassified', 'invalid', 'security'] as const)('keeps %s failures in QA even when CI is green', async (kind) => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: pull.headSha });
+    if (kind === 'security') Object.assign(rec, { securityReview: { reason: 'Authorization', qaSha: pull.headSha, auditBaseSha: 'base-1' } });
+    await s.onQaFinished(tester, repo, result(true, {
+      verdict: 'fail', summary: 'Validation is blocked.',
+      checks: [
+        { name: 'Local suite', result: 'fail', failureKind: 'environment', details: 'Worker exhausted memory.' },
+        ...(kind === 'security' ? [] : [{ name: 'Feature behavior', result: 'fail', details: 'Still broken.',
+          ...(kind === 'unclassified' ? {} : { failureKind: kind === 'invalid' ? 'unknown' : 'code' }) }]),
+      ],
+    }));
+    expect(rec.status).not.toBe('passed');
+    expect(rec.passedSha).not.toBe(pull.headSha);
+  });
+
+  it('requires CI even when QA already marked an environment-blocked check skipped', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: pull.headSha });
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', summary: 'Source review passed.',
+      checks: [{ name: 'Local suite', result: 'skip', failureKind: 'environment', details: 'Worker exhausted memory.' }] }));
+    expect(rec).toMatchObject({ status: 'passed', ciRequired: true });
+    const merge = vi.spyOn(s.backend, 'mergePull');
+    expect(await s.advanceMerge(repo, rec, { ...pull, checks: 'none' })).toBe(false);
+    expect(merge).not.toHaveBeenCalled();
+  });
+
+  it('accepts the demo environment-only report through the same QA path', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: pull.headSha });
+    const finished = vi.fn();
+    const handle = s.backend.startSession({ cwd: '/fake-desk', role: 'qa', model: 'demo', effort: 'low',
+      prompt: 'Please test pull request #13: [environment]', systemAppend: '', browserTesting: false, additionalDirectories: [] },
+    { log: vi.fn(), tool: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), sessionId: vi.fn(), finished });
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(finished).toHaveBeenCalledOnce();
+    handle.stop();
+    await s.onQaFinished(tester, repo, finished.mock.calls[0][0]);
+    expect(rec).toMatchObject({ status: 'passed', ciRequired: true, passedSha: pull.headSha });
+  });
   it('charges each completed QA send-back to its responsible developer once per round', async () => {
     const tester = addAgent('q1', 'Grace', 'qa', 0);
     const replacement = addAgent('a2', 'Barbara', 'dev', 1);
@@ -3988,9 +4055,9 @@ describe('QA rounds', () => {
     });
 
     it('still forgets merge progress on a restart', async () => {
-      Object.assign(rec, { status: 'passed', passedSha: 'sha-1', mergeNote: 'waiting for checks: CI' });
+      Object.assign(rec, { status: 'passed', passedSha: 'sha-1', mergeNote: 'waiting for checks: CI', ciRequired: true });
       const [loaded] = await restartFromDisk();
-      expect(loaded).toMatchObject({ status: 'passed', mergeNote: null });
+      expect(loaded).toMatchObject({ status: 'passed', mergeNote: null, ciRequired: true });
     });
 
     it('defaults missing retry fields from older state files', async () => {
@@ -4097,6 +4164,13 @@ describe('QA rounds', () => {
       await s.onQaFinished(tester, repo, finished.mock.calls[0][0]);
       expect(rec).toMatchObject({ status: 'passed', passedSha: pull.headSha });
       expect(comment.mock.calls.at(-1)?.[2]).toContain('dynamic validation not run: no OS sandbox on this desk');
+    });
+
+    it('keeps the CI requirement from ordinary QA after a passing security audit', async () => {
+      const { tester } = await securityDesk();
+      Object.assign(rec, { ciRequired: true });
+      await s.onQaFinished(tester, repo, result(true, sandboxReport));
+      expect(rec).toMatchObject({ status: 'passed', ciRequired: true });
     });
 
     it.each(['available', 'stopped', 'startup failed', 'removed'])('retries a sandbox-only incomplete report once when the alternate is %s', async (availability) => {

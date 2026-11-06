@@ -311,6 +311,7 @@ function toPull(p: RawPull): PullInfo {
     additions: p.additions,
     deletions: p.deletions,
     checks: checksOf(p.statusCheckRollup),
+    hasSuccessfulChecks: (p.statusCheckRollup ?? []).some((c) => (c.status === 'COMPLETED' && c.conclusion === 'SUCCESS') || c.state === 'SUCCESS'),
     headSha: p.headRefOid,
     baseSha: p.baseRefOid,
     baseRefName: p.baseRefName,
@@ -394,7 +395,7 @@ export async function listPulls(fullName: string, query: BoardQuery<RawPull[]> =
             if (!checks) bySha.set(p.headRefOid, checks = restChecks(fullName, p.headRefOid, api));
             pulls[index] = toPull({ ...p, statusCheckRollup: await checks });
           } catch (error) {
-            pulls[index] = { ...toPull(p), checks: 'unavailable', failedChecks: [], pendingChecks: [] };
+            pulls[index] = { ...toPull(p), checks: 'unavailable', hasSuccessfulChecks: false, failedChecks: [], pendingChecks: [] };
             errors.push(`PR #${p.number}: ${error instanceof Error ? error.message : String(error)}`);
           }
         }

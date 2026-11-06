@@ -163,9 +163,20 @@ describe('optional PR checks', () => {
     const api = rest();
     const result = await listPulls('demo/repo', query, api);
     expect(query).toHaveBeenCalledTimes(2);
-    expect(result.pulls.every((p) => p.checks === 'passing')).toBe(true);
+    expect(result.pulls.every((p) => p.checks === 'passing' && p.hasSuccessfulChecks === true)).toBe(true);
     expect(result.checksError).toBeUndefined();
     expect(api).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ status: 'COMPLETED', conclusion: 'SKIPPED' }, false],
+    [{ status: 'COMPLETED', conclusion: 'NEUTRAL' }, false],
+    [{ status: 'IN_PROGRESS', conclusion: 'SUCCESS' }, false],
+    [{ state: 'SUCCESS' }, true],
+    [{ status: 'COMPLETED', conclusion: 'SUCCESS' }, true],
+  ] as const)('records successful GraphQL evidence separately: %j', async (check, hasSuccessfulChecks) => {
+    const query = vi.fn<Query>().mockResolvedValue([{ ...raw, statusCheckRollup: [check] }]);
+    expect((await listPulls('demo/repo', query, rest())).pulls[0].hasSuccessfulChecks).toBe(hasSuccessfulChecks);
   });
 
   it.each(['success', 'skipped', 'neutral'])('reads %s Actions runs as passing and permits QA-passed merges', async (conclusion) => {
@@ -176,6 +187,8 @@ describe('optional PR checks', () => {
     expect(api).toHaveBeenCalledWith(['api', 'repos/demo/repo/commits/abc/status?per_page=100&page=1']);
     expect(checksError?.match(/REST fallback in use/g)).toHaveLength(1);
     expect(mergeStep(pr, { passedSha: 'abc', mergeFixes: 0, pendingSince: null, mergeRetryAt: null, alerted: false, checkRerunSha: null, checkRerunAt: null }, 100, { base: 'main' }).do).toBe('merge');
+    expect(mergeStep(pr, { ciRequired: true, passedSha: 'abc', mergeFixes: 0, pendingSince: null, mergeRetryAt: null, alerted: false, checkRerunSha: null, checkRerunAt: null }, 100, { base: 'main' }).do)
+      .toBe(conclusion === 'success' ? 'merge' : 'wait');
   });
 
   it.each(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure'])('retries %s runs once, then sends them back with their URL', async (conclusion) => {
@@ -214,13 +227,13 @@ describe('optional PR checks', () => {
 
   it('reads standalone commit statuses when there are no Actions workflows', async () => {
     const api = rest([], [{ context: 'external CI', state: 'success', target_url: null }]);
-    expect((await listPulls('demo/repo', deniedQuery(), api)).pulls[0].checks).toBe('passing');
+    expect((await listPulls('demo/repo', deniedQuery(), api)).pulls[0]).toMatchObject({ checks: 'passing', hasSuccessfulChecks: true });
   });
 
   it('keeps unexpected commit status failures unavailable', async () => {
     const api = rest();
     api.mockResolvedValueOnce({ workflow_runs: [run()], total_count: 1 }).mockRejectedValueOnce(error('HTTP 500: server error'));
-    expect((await listPulls('demo/repo', deniedQuery(), api)).pulls[0].checks).toBe('unavailable');
+    expect((await listPulls('demo/repo', deniedQuery(), api)).pulls[0]).toMatchObject({ checks: 'unavailable', hasSuccessfulChecks: false });
   });
 
   it('isolates a failed REST request to its PR and retries it on the next sync', async () => {

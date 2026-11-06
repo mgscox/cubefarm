@@ -58,7 +58,7 @@ export function demoPull(fullName: string, headRefName: string, fork: boolean): 
   const pull: PullInfo = {
     number, title: fork ? 'Outside contribution' : 'Desk PR', url: `https://github.com/${fullName}/pull/${number}`, headRefName, isCrossRepository: fork, state: 'OPEN',
     isDraft: false, mergeable: 'MERGEABLE', reviewDecision: null, closesIssues: [], createdAt: now(), mergedAt: null,
-    additions: 3, deletions: 1, checks: 'passing', headSha: fakeSha(), mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+    additions: 3, deletions: 1, checks: 'passing', hasSuccessfulChecks: true, headSha: fakeSha(), mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
   };
   repo.pulls.unshift(pull);
   return { pull, remove: () => { repo.pulls = repo.pulls.filter((p) => p !== pull); } };
@@ -126,10 +126,11 @@ export function demoCrossFloorProposal(a: string, b: string): ApprovedSnapshot {
 
 /** Fake CI: checks run for a while after every push, and now and then one fails so the fix loop shows. */
 function runChecks(pr: PullInfo, fail = Math.random() < 0.2) {
-  Object.assign(pr, { checks: 'pending', pendingChecks: ['CI', 'Vercel'], failedChecks: [] });
+  Object.assign(pr, { checks: 'pending', hasSuccessfulChecks: false, pendingChecks: ['CI', 'Vercel'], failedChecks: [] });
   setTimeout(() => {
     Object.assign(pr, {
       checks: fail ? 'failing' : 'passing',
+      hasSuccessfulChecks: !fail,
       pendingChecks: [],
       failedChecks: fail ? [{ name: 'CI', url: `${pr.url.split('/pull/')[0]}/actions/runs/${pr.number}` }] : [],
     });
@@ -398,6 +399,21 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
       return;
     }
     if (kind === 'qa') {
+      if (opts.prompt.includes('[environment]')) {
+        cb.finished({
+          ok: true, text: '', costUsd, turns, errors: [],
+          structured: {
+            verdict: 'fail', summary: 'The changed behavior passed; local validation stopped because the demo worker exhausted memory. No code defect was found.',
+            checks: [
+              { name: 'Changed behavior', result: 'pass', details: 'Acceptance criteria passed in the demo fixture.' },
+              { name: 'Local suite', result: 'fail', failureKind: 'environment', details: 'Simulated worker memory exhaustion.' },
+            ],
+            commands: [{ command: 'npm test', result: 'Interrupted by simulated worker memory exhaustion.' }],
+            screenshots: [],
+          },
+        });
+        return;
+      }
       // Most first rounds pass; some fail so the fix loop can be seen in action.
       const pass = round > 1 || Math.random() > 0.35;
       cb.log([{ kind: 'text', text: pass ? '● Everything checks out. Writing up the report.' : '● The toolbar overflows on a 375px screen. Failing this round.' }]);
