@@ -14,7 +14,10 @@ local evidence. Do not contact deployed endpoints or external/shared services. R
 target-controlled code only inside the approved OS-enforced sandbox: no external
 network, empty allowlisted environment, read-only target and tools, scratch-only
 writes, and explicit low resource and wall-clock limits. If any control is unavailable,
-do not execute; retain the exact missing capability as a needs_validation blocker.
+do not execute; disclose the exact missing capability. Retain needs_validation
+when it blocks decisive evidence for a source-grounded candidate. Sandbox absence
+alone is a desk limit under the CubeFarm scoped PR security playbook; it does not
+create a finding or require an incomplete verdict when that policy's gates pass.
 Treat every scratch entry as target-controlled after execution. After the sandbox and
 all its processes terminate, only trusted parent-side code may promote a predeclared
 scratch-relative file, following the promotion procedure block included verbatim in

@@ -376,6 +376,7 @@ export interface QaView {
   mergeNote: string | null; // where auto-merge stands once QA passed, e.g. "waiting for checks: Vercel"
   checkRerunSha?: string | null; // head whose failed CI jobs the office already retried
   checkRerunAt?: number | null; // when that retry was requested, before GitHub refreshes its checks
+  securitySandboxRetry?: { headSha: string; baseSha: string; agentId: string }; // one alternate desk for this revision
   updatedAt: number;
 }
 
