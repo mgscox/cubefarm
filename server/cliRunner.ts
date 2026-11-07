@@ -377,6 +377,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   const warned = new Set<string>();
   let done = false;
   let costUsd = 0;
+  let costReported = false;
   let turns = opts.reattach && live?.transcriptPending ? 1 : 0;
   let lastText = opts.reattach && live?.transcriptPending ? live.transcriptBase?.text ?? '' : '';
   let turnError: string | null = null; // the turn failed (OpenCode reports errors separately from going idle)
@@ -464,7 +465,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       // The office blocks follow-ups until desk release finishes, starting in this callback.
       let completion: void | Promise<void>;
       try {
-        completion = cb.finished({ ...r, costUsd, turns });
+        completion = cb.finished({ ...r, costUsd, costReported, turns });
       } finally {
         if (term.allowInput === pauseInput) term.allowInput = allowInput;
       }
@@ -555,7 +556,10 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
 
   const onStatus = (b: Record<string, unknown>) => {
     const cost = Number((b.cost as { total_cost_usd?: unknown } | undefined)?.total_cost_usd);
-    if (Number.isFinite(cost)) costUsd = cost;
+    if (Number.isFinite(cost)) {
+      costUsd = cost;
+      costReported = true;
+    }
     const limits = (b.rate_limits ?? {}) as Record<string, { used_percentage?: unknown; resets_at?: unknown } | null>;
     for (const [type, l] of Object.entries(limits)) {
       const used = Number(l?.used_percentage);

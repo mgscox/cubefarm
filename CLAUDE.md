@@ -100,6 +100,8 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
 - `publication.ts`: publishing an approved Proposal's Issue Plan (Ideas): the recorded approval and progress persisted
   before GitHub writes, issues created held (`[Draft] ` title + `held-for-publication`) with a plan-entry marker, read
   back, then released; retries and restarts find a lost create by its marker. The demo's fixture approval is refused elsewhere.
+- `runHistory.ts`: every attempt at an issue or PR in `<SWARM_HOME>/run-history.json` (`docs/run-history.md`): outcome,
+  cause, usage and retention rules (pure) and the store; `swarm.ts` opens and ends attempts, `GET /api/run-history` exports them.
 - `backend.ts`: the `Backend` interface (everything touching GitHub, git, disk and sessions) and `realBackend`.
 - `demo.ts`: `createDemoBackend()`: fake GitHub, fake sessions (drawn into the agent's terminal in the terminal runtime), fake previews for `--demo`.
 - `github.ts`: all GitHub access through the `gh` CLI.

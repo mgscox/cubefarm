@@ -14,7 +14,7 @@ import { createDemoBackend, demoApprovedProposal, demoForkPull, demoPull } from 
 import { newPublication } from './publication.ts';
 import type { TrackedIssue } from './github.ts';
 import { HttpError, securityReportOutcome, Swarm } from './swarm.ts';
-import { VERSION } from './config.ts';
+import { RUN_HISTORY_FILE, STATE_FILE, VERSION } from './config.ts';
 import { operationSignal } from './operation.ts';
 import { CEO_ID, type ApprovedSnapshot, type IssueInfo, type PublicationView, type PrContributionView, type QaCheck, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
 import { ceoSystemPrompt, type OfficeTools } from './ceo.ts';
@@ -54,6 +54,7 @@ interface Internals {
   onIssueFinished(agent: unknown, repo: Repo, result: SessionResult, released: Promise<void>, generation: number | undefined): Promise<void>;
   onFixFinished(agent: unknown, repo: Repo, result: SessionResult): Promise<void>;
   postMessage(from: string, text: string): void;
+  sessionStarted(agent: unknown, how: { cli?: string }, mode: null): void;
   broadcast(event: ServerEvent): void;
   save(): void;
   schedule(): void;
@@ -196,6 +197,161 @@ describe('durable PR contribution workflow', () => {
       s.reconcilePulls(repo, [fixture.pull]);
       expect(swarm.snapshot().prContributions![0]).toMatchObject({ original: null, repairs: [] });
     } finally { fixture.remove(); }
+  });
+});
+
+describe('run history', () => {
+  beforeEach(() => {
+    s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
+    Object.assign(repo, { links: [], defaultBranch: 'main' });
+  });
+  const generation = (id: string) => (s.agentRt.get(id) as { generation?: number }).generation as never;
+  const ok: SessionResult = { ok: true, text: '', errors: [], turns: 7, costUsd: 0.5 };
+
+  it.each(['stop', 'clear', 'fire', 'close'] as const)('ends queued attempts when the manager chooses %s', async (action) => {
+    const events = vi.spyOn(s, 'broadcast');
+    const box = swarm.addBox('Attic', 'offline-attic');
+    await vi.advanceTimersByTimeAsync(1600);
+    swarm.updateAgent('a1', { box: box.id });
+    const number = await swarm.createIssue(repo.id, 'Queued work', '');
+    await swarm.assign('a1', number);
+    const pending = swarm.runHistory({ issue: number }).attempts[0];
+    expect(pending).toMatchObject({ outcome: null, times: { startedAt: null } });
+    if (action === 'stop') swarm.stopAgent('a1');
+    if (action === 'clear') swarm.resetAgent('a1');
+    if (action === 'fire') swarm.fireAgent('a1');
+    if (action === 'close') await swarm.closeDemoIssue(repo.id, number);
+    expect(repo.requestedStarts).toEqual([]);
+    expect(swarm.runHistory({ issue: number }).attempts[0]).toMatchObject({
+      id: pending.id,
+      times: { startedAt: null, endedAt: expect.any(Number) },
+      outcome: { result: action === 'clear' ? 'cleared' : action === 'close' ? 'closed' : 'stopped', cause: action === 'close' ? 'external' : 'manager' },
+    });
+    expect(swarm.snapshot().runAttempts).toEqual(expect.arrayContaining([expect.objectContaining({ id: pending.id, outcome: expect.any(Object) })]));
+    expect(events).toHaveBeenCalledWith({ type: 'runAttempt', attempt: expect.objectContaining({ id: pending.id, outcome: expect.any(Object) }) });
+  });
+
+  it('reuses a pending request and links its handoff when a desk becomes available', async () => {
+    const box = swarm.addBox('Attic', 'offline-attic');
+    await vi.advanceTimersByTimeAsync(1600);
+    swarm.updateAgent('a1', { box: box.id });
+    const number = await swarm.createIssue(repo.id, 'Wait for a desk', '');
+    await swarm.assign('a1', number);
+    const pending = swarm.runHistory({ issue: number }).attempts[0];
+    await swarm.assign('a1', number);
+    expect(swarm.runHistory({ issue: number }).attempts).toHaveLength(1);
+    expect(repo.requestedStarts[0].attemptId).toBe(pending.id);
+    swarm.updateAgent('a1', { box: '' });
+    await swarm.assign('a1', number);
+    const [started, waiting] = swarm.runHistory({ issue: number }).attempts;
+    expect(started).toMatchObject({ parentId: pending.id, outcome: null });
+    expect(waiting).toMatchObject({ id: pending.id, outcome: { result: 'superseded', cause: 'office' } });
+  });
+
+  it('keeps a successful repair joined to the review round it repaired', async () => {
+    const fixture = demoPull(repo.fullName, 'swarm/issue-66-ada', false);
+    try {
+      const ada = s.state.agents[0];
+      Object.assign(ada, { model: '', effort: '', cli: '' });
+      const pull = fixture.pull;
+      s.repoRt.get(repo.id)!.pulls = [pull];
+      const rec = s.queueQa(repo, pull.number, ada, 66);
+      Object.assign(rec, { status: 'failed', round: 1, fixReason: 'qa', fixInstructions: 'Fix overflow' });
+      vi.spyOn(s, 'prepare').mockResolvedValue('fake-desk');
+      vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+      vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+      await s.runFix(ada, repo, rec);
+      s.sessionStarted(ada, {}, null);
+      pull.headSha = 'repaired-sha';
+      await s.recordFinished(ada, repo, ok, generation('a1'), undefined);
+      expect(rec.round).toBe(2);
+      const repair = swarm.snapshot().prContributions![0].repairs[0];
+      expect(swarm.runHistory({ pr: pull.number }).attempts[0]).toMatchObject({
+        outcome: { result: 'repaired', cause: 'agent' },
+        review: { reviewId: repair.reviewId, round: 1, repairId: repair.id },
+        revisions: { start: repair.startingSha, submitted: 'repaired-sha' },
+      });
+    } finally { fixture.remove(); }
+  });
+
+  it('links a delivered PR, a worker-blocked QA retry and a no-PR run, and keeps them through merge and restart', async () => {
+    const fixture = demoPull(repo.fullName, 'swarm/issue-66-ada', false);
+    try {
+      const pull = fixture.pull;
+      const ada = s.state.agents[0];
+      Object.assign(ada, { model: '', effort: 'high', cli: '' });
+      s.beginTask(ada, { task: 'issue', issueNumber: 66, issueTitle: 'Feature', branch: pull.headRefName, prNumber: null, prUrl: null, sessionId: null }, 'Issue #66', 'Preparing…', { reason: 'auto', factors: { specialtyMatch: false } });
+      s.sessionStarted(ada, { cli: 'codex' }, null);
+      Object.assign(ada, { sessionId: 'ada-session' });
+      vi.advanceTimersByTime(1000);
+      pull.createdAt = new Date(Date.now()).toISOString();
+      await s.recordFinished(ada, repo, { ...ok, costReported: false }, generation('a1'), undefined);
+      const delivered = swarm.runHistory().attempts[0];
+      expect(delivered).toMatchObject({
+        task: 'issue', issueNumber: 66, prNumber: pull.number, parentId: null,
+        assignment: { reason: 'auto', factors: { specialtyMatch: false } },
+        runtime: { cli: 'codex', playbook: expect.stringMatching(/^developer@/) },
+        sessionIds: ['ada-session'], revisions: { submitted: pull.headSha },
+        usage: { sessions: 1, costUsd: null, turns: 7 }, runMs: 1000,
+        outcome: { result: 'delivered', cause: 'agent' },
+      });
+
+      // The first QA desk fails on the worker; the retry is its child.
+      s.state.agents.push({ id: 'q1', name: 'Sherlock', repoId: repo.id, role: 'qa', specialty: '', status: 'idle', task: null, desk: 0, endedAt: null });
+      s.agentRt.set('q1', { log: [], pending: [], terminal: null });
+      const tester = s.state.agents.at(-1)!;
+      const rec = s.state.qa.find((q) => q.prNumber === pull.number)!;
+      s.repoRt.get(repo.id)!.cloneStatus = 'ready';
+      vi.spyOn(s.backend, 'prepareDesk').mockRejectedValueOnce(new Error('ENOSPC: no space left on device')).mockResolvedValueOnce('qa-desk');
+      await s.runQa(tester, repo, rec);
+      vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+      await s.runQa(tester, repo, rec);
+      const [retry, blocked] = swarm.runHistory({ pr: pull.number }).attempts;
+      expect(blocked).toMatchObject({ task: 'qa', parentId: delivered.id, outcome: { result: 'prepare-failed', cause: 'worker', excerpt: expect.stringContaining('ENOSPC') }, review: { reviewId: rec.reviewId } });
+      expect(retry).toMatchObject({ task: 'qa', parentId: blocked.id, assignment: { reason: 'qa-queue' }, outcome: null });
+
+      // A run that never opened a PR goes back to the backlog.
+      vi.mocked(s.startAgentSession).mockRestore();
+      Object.assign(ada, { status: 'idle', task: null, prNumber: null });
+      vi.spyOn(s as unknown as { syncRepo(): Promise<void> }, 'syncRepo').mockResolvedValue();
+      s.beginTask(ada, { task: 'issue', issueNumber: 67, issueTitle: 'Other', branch: 'swarm/issue-67-ada', prNumber: null, prUrl: null, sessionId: null }, 'Issue #67', 'Preparing…');
+      s.sessionStarted(ada, {}, null);
+      await s.recordFinished(ada, repo, ok, generation('a1'), undefined);
+      expect(swarm.runHistory({ issue: 67 }).attempts).toEqual([expect.objectContaining({ assignment: { reason: 'manager', factors: {} }, prNumber: null, outcome: expect.objectContaining({ result: 'no-pr', cause: 'agent' }), usage: { sessions: 1, costUsd: 0.5, turns: 7 } })]);
+
+      // Merging the PR removes its QA card, not its history.
+      swarm.stopAgent('q1');
+      expect(swarm.runHistory({ pr: pull.number }).attempts[0].outcome).toMatchObject({ result: 'stopped', cause: 'manager' });
+      rec.status = 'passed';
+      s.reconcilePulls(repo, [{ ...pull, state: 'MERGED' }]);
+      expect(swarm.snapshot().qa).toHaveLength(0);
+      expect(swarm.runHistory({ pr: pull.number }).attempts.map((x) => x.prState)).toEqual(['MERGED', 'MERGED', 'MERGED']);
+
+      vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+      const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+      vi.spyOn(fs, 'rename').mockResolvedValue();
+      await s.writeState();
+      const written = (file: string) => String(write.mock.calls.find((c) => c[0] === `${file}.tmp`)![1]);
+      const persisted = { ...JSON.parse(written(STATE_FILE)), repos: [], agents: [] };
+      const files: Record<string, string> = { [STATE_FILE]: JSON.stringify(persisted), [RUN_HISTORY_FILE]: written(RUN_HISTORY_FILE) };
+      const fresh = new Swarm(createDemoBackend());
+      (fresh as unknown as Internals).backend.demo = false;
+      vi.spyOn(fresh as unknown as Internals, 'save').mockImplementation(() => {});
+      vi.spyOn(fs, 'readFile').mockImplementation(async (file) => files[String(file)] ?? Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' })));
+      await fresh.init();
+      const strip = (x: ReturnType<Swarm['runHistory']>['attempts'][number]) => ({ ...x, prState: undefined });
+      expect(fresh.runHistory().attempts.map(strip)).toEqual(swarm.runHistory().attempts.map(strip));
+      expect(fresh.runHistory({ pr: pull.number }).attempts[2].prState).toBe('MERGED');
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  it('records a manager stop while the desk is still being prepared', async () => {
+    const ada = s.state.agents[0];
+    s.beginTask(ada, { task: 'issue', issueNumber: 70, issueTitle: 'Stop me', branch: 'swarm/issue-70-ada', prNumber: null, prUrl: null, sessionId: null }, 'Issue #70', 'Preparing…');
+    swarm.stopAgent('a1');
+    expect(swarm.runHistory({ issue: 70 }).attempts[0].outcome).toMatchObject({ result: 'stopped', cause: 'manager' });
   });
 });
 
