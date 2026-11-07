@@ -85,6 +85,7 @@ describe('office tools', () => {
         if (a.number === 14) throw new Error('Open PR #15 closes #14. Merge or park that PR first.');
         return `closed #${a.number}: ${a.reason}`;
       },
+      commentIssue: async (a) => `commented on #${a.number}`,
       routeIssue: async () => '',
       connectFloor: async (a) => (connections.push(a), 'connected'),
       startIssue,
@@ -104,8 +105,18 @@ describe('office tools', () => {
   it('lists every tool the CEO relies on', async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'close_issue', 'company_status', 'connect_floor', 'file_issue', 'merge_pr', 'park_pr', 'propose_hire', 'propose_let_go', 'request_research', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
+    expect(tools.map((t) => t.name).sort()).toEqual(['agent_detail', 'close_issue', 'comment_issue', 'company_status', 'connect_floor', 'file_issue', 'merge_pr', 'park_pr', 'propose_hire', 'propose_let_go', 'request_research', 'rerun_qa', 'route_issue', 'send_back_to_dev', 'set_floor_profile', 'start_issue', 'update_job']);
     expect(tools.find((t) => t.name === 'connect_floor')?.description).toContain('Use ONLY when the manager explicitly asks for a repo to be added; report afterwards. Never on your own initiative.');
+    expect(tools.find((t) => t.name === 'comment_issue')?.description).toMatch(/requirements or context the manager asked for.*Never to restate the issue/);
+  });
+
+  it('validates comment arguments', async () => {
+    const { client } = await connect();
+    const args = { floor: 1, number: 13, body: 'Also cover the empty state.' };
+    expect(await client.callTool({ name: 'comment_issue', arguments: args })).toMatchObject({ content: [{ text: 'commented on #13' }] });
+    for (const invalid of [{ floor: 1, number: 13 }, { ...args, number: 0 }, { ...args, body: ' ' }, { ...args, body: 'x'.repeat(6001) }]) {
+      expect(await client.callTool({ name: 'comment_issue', arguments: invalid })).toMatchObject({ isError: true });
+    }
   });
 
   it('validates floor connection inputs and passes optional automation settings', async () => {

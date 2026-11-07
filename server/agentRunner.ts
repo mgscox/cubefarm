@@ -265,6 +265,8 @@ export function describeOfficeTool(action: string, input: Record<string, unknown
       return `👋 propose_let_go ${String(input.agent_id ?? '')}`;
     case 'file_issue':
       return `📝 file_issue "${clip(String(input.title ?? ''), 70)}"${floor}${input.specialty ? ` · ${input.specialty}` : ''}`;
+    case 'comment_issue':
+      return `💬 comment_issue #${String(input.number ?? '?')}${floor}`;
     case 'start_issue':
       return `▶ start_issue #${String(input.number ?? '?')}${floor}${input.agent ? ` · ${input.agent}` : ''}`;
     case 'rerun_qa':

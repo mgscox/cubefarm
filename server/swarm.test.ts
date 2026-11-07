@@ -653,6 +653,61 @@ describe('closing issues', () => {
   });
 });
 
+describe('commenting on issues', () => {
+  const args = { floor: 1, number: 66, body: 'Also handle empty titles.' };
+  const open = { ...issue(66), repo: 'demo-co/pixel-todo', state: 'OPEN' } as TrackedIssue;
+  beforeEach(() => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue(open);
+    vi.spyOn(s.backend, 'commentIssue').mockResolvedValue('https://github.com/demo-co/pixel-todo/issues/66#issuecomment-1');
+  });
+
+  it('posts on an open issue and says nobody was notified when no session runs on it', async () => {
+    const messages = vi.spyOn(s, 'postMessage');
+    const out = await s.officeTools().call('comment_issue', args);
+    expect(s.backend.commentIssue).toHaveBeenCalledWith(repo.fullName, 66, `Also handle empty titles.\n\n---\n_Added by Joi, the cubefarm CEO._\n\n${AGENT_COMMENT_MARKER}`);
+    expect(out).toContain('Commented on #66 on floor 1: https://github.com/demo-co/pixel-todo/issues/66#issuecomment-1.');
+    expect(out).toContain('nobody was notified');
+    expect(messages).toHaveBeenCalledWith('office', 'Joi commented on #66 (floor 1): Also handle empty titles.');
+  });
+
+  it('passes the comment into a running session on that issue', async () => {
+    const send = vi.fn();
+    Object.assign(s.state.agents[0], { task: 'issue', issueNumber: 66, status: 'working' });
+    Object.assign(s.agentRt.get('a1')!, { session: { send, stop: vi.fn() } });
+    const out = await s.officeTools().call('comment_issue', args);
+    expect(send).toHaveBeenCalledWith(expect.stringContaining('Also handle empty titles.'));
+    expect(out).toContain("Passed to Ada's running session.");
+  });
+
+  it('does not notify sessions on other issues', async () => {
+    const send = vi.fn();
+    Object.assign(s.state.agents[0], { task: 'issue', issueNumber: 67, status: 'working' });
+    Object.assign(s.agentRt.get('a1')!, { session: { send, stop: vi.fn() } });
+    expect(await s.officeTools().call('comment_issue', args)).toContain('nobody was notified');
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each([null, 'CLOSED'] as const)('refuses unavailable issues: %s', async (state) => {
+    vi.mocked(s.backend.readIssue).mockResolvedValue(state ? { ...open, state } : null);
+    expect(await s.officeTools().call('comment_issue', args)).toContain(state ? 'is closed' : 'Unknown issue');
+    expect(s.backend.commentIssue).not.toHaveBeenCalled();
+  });
+
+  it('comments through the demo CEO', async () => {
+    vi.mocked(s.backend.readIssue).mockRestore();
+    vi.mocked(s.backend.commentIssue).mockRestore();
+    const number = await s.backend.createIssue(repo.fullName, 'Work in progress', 'Build it');
+    setIssues(issue(number));
+    const finished = vi.fn();
+    const handle = s.backend.startSession({ role: 'ceo', cwd: '', prompt: `Manager asks:\nComment on #${number} on floor 1: Also export to CSV`,
+      systemAppend: '', model: '', effort: 'low', browserTesting: false, additionalDirectories: [], office: s.officeTools() },
+      { log: () => {}, tool: () => {}, sessionId: () => {}, browserUrl: () => {}, screenshot: () => {}, finished });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: expect.stringContaining(`Commented on #${number}`) }));
+    handle.stop();
+  });
+});
+
 describe('exclusive issue sessions', () => {
   let starts: Mock;
   const dev = () => s.state.agents[0];

@@ -47,6 +47,8 @@ export interface Backend extends Machine {
   prDetails(fullName: string, number: number): Promise<github.PrDetails>;
   qaCi: typeof github.qaCi;
   issueDetails(fullName: string, number: number): Promise<{ title: string; body: string }>;
+  /** Posts a comment on an issue; returns the comment's URL. */
+  commentIssue(fullName: string, number: number, body: string): Promise<string>;
   commentPull(fullName: string, number: number, body: string): Promise<string>;
   uploadEvidence(fullName: string, filePath: string, data: Buffer): Promise<string>;
   ensureClone(fullName: string): Promise<void>;
@@ -104,6 +106,7 @@ export const realBackend: Backend = {
   prDetails: github.prDetails,
   qaCi: github.qaCi,
   issueDetails: github.issueDetails,
+  commentIssue: github.commentIssue,
   commentPull: github.commentPull,
   uploadEvidence: github.uploadEvidence,
   ensureClone: workspace.ensureClone,

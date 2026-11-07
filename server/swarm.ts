@@ -623,6 +623,7 @@ export class Swarm {
       proposeLetGo: (a) => this.proposeLetGo(a),
       fileIssue: (a) => this.fileIssue(a),
       closeIssue: (a) => this.closeIssue(a),
+      commentIssue: (a) => this.commentIssue(a),
       routeIssue: (a) => this.routeIssue(a),
       connectFloor: (a) => this.connectFloor(a),
       startIssue: (a) => this.startIssue(a),
@@ -6839,6 +6840,28 @@ export class Swarm {
     rt.issues = rt.issues.filter((i) => i.number !== x.number);
     this.emitRepo(repo);
     return `Closed #${x.number} on floor ${repo.floor} as not planned: ${reason}`;
+  }
+
+  /** The CEO's comment on an open issue, also passed into any session working on that issue right now. */
+  private async commentIssue(x: { floor: number; number: number; body: string }) {
+    const repo = this.floorRepo(x.floor);
+    const body = String(x.body ?? '').trim();
+    if (!body || body.length > 6000) throw new Error('Give a comment of 1–6000 characters.');
+    const issue = await this.backend.readIssue(repo.fullName, x.number);
+    if (!issue) throw new Error(`Unknown issue #${x.number} on floor ${repo.floor}. Check company_status for open issues.`);
+    if (issue.state === 'CLOSED') throw new Error(`Issue #${x.number} is closed. File a new issue for the extra work.`);
+    const ceo = this.ceo().name;
+    const url = await this.backend.commentIssue(repo.fullName, x.number, `${body}\n\n---\n_Added by ${ceo}, the cubefarm CEO._\n\n${AGENT_COMMENT_MARKER}`);
+    const working = this.state.agents.filter((a) => a.repoId === repo.id && a.issueNumber === x.number && this.agentRt.get(a.id)?.session);
+    for (const a of working) {
+      this.appendLog(a, [{ kind: 'manager', text: `▶ ${ceo} added to #${x.number}` }]);
+      this.agentRt.get(a.id)!.session!.send(`${ceo}, the CEO, added this to issue #${x.number} (${url}) at the manager's request. Take it into account in your current work:\n\n${body}`);
+    }
+    this.postMessage('office', `${ceo} commented on #${x.number} (floor ${repo.floor}): ${body.length > 200 ? `${body.slice(0, 199).trimEnd()}…` : body}`);
+    const told = working.length
+      ? `Passed to ${working.map((a) => a.name).join(' and ')}'s running session${working.length > 1 ? 's' : ''}.`
+      : `No session is running on #${x.number}, so nobody was notified; agents see it when they next read the issue. To be sure a fix or QA round sees it, also put it in the note of send_back_to_dev or rerun_qa.`;
+    return `Commented on #${x.number} on floor ${repo.floor}: ${url || '(no URL returned)'}. ${told}`;
   }
 
   /** Explicit manager instruction through the CEO, pinned to the last QA head. */
