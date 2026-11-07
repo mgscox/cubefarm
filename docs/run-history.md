@@ -25,8 +25,12 @@ Each attempt records:
 - **Work**: repository, task (`issue`, `prototype`, `research`, `qa`, `fix`), the issue's `swarm:<specialty>`, issue
   and PR numbers, the QA `reviewId` and round, and for fixes the repair id from the PR's contribution history.
 - **Assignment**: why it went to this desk (`manager`, `ceo`, `requested`, `auto`, `qa-queue`, `repair`, `retry`,
-  `follow-up`, `resume`) and the routing factors the office had: specialty match, score, free developers and
-  specialists, how many issues it holds up, earlier crashes.
+  `follow-up`, `resume`) and the routing factors the office had: policy version, requested specialty, match or
+  fallback, relevant score, free developers and specialists, how many issues it holds up, earlier crashes.
+  `specialty-first-v2` ranks eligible developers by specialty, Authorship (new issues) or Repair (new repair owners),
+  ready/open specialty workload, then desk. Unlabelled work has no specialty preference. Explicit picks and eligible
+  same-agent continuations take precedence. `qa-workload-v1` uses QA eligibility and workload without developer scores.
+  Legacy points never rank assignments; older attempts retain the factors recorded by their office version.
 - **Runtime**: the CLI, model and effort the office asked for (a null model is the CLI's own default; the CLIs don't
   report the model they actually used), the playbook as `<name>@<sha256 prefix>` of its text, and the office version.
 - **Worker**: the box (or `office`) and its health at the start and end: status, CPU/memory/IO constraints and CPU.

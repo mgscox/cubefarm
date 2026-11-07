@@ -1,6 +1,6 @@
 // A floor's live attempts from the office's run history (docs/run-history.md), exportable as JSON.
 import { useMemo } from 'react';
-import { cost, duration, outcomeLabel, runtimeLabel, workLabel } from '../runHistory';
+import { assignmentLabel, cost, duration, outcomeLabel, runtimeLabel, workLabel } from '../runHistory';
 import { useStore } from '../store';
 
 export function RunHistory({ repoId }: { repoId: string }) {
@@ -46,7 +46,7 @@ export function RunHistory({ repoId }: { repoId: string }) {
                   <td>{workLabel(x)}</td>
                   <td>{x.task}</td>
                   <td>{x.agent.name}</td>
-                  <td>{x.assignment.reason}</td>
+                  <td title={String(x.assignment.factors.policyVersion ?? '')}>{assignmentLabel(x)}</td>
                   <td title={x.outcome?.excerpt}>{outcomeLabel(x)}</td>
                   <td>{duration(x.queueMs)}</td>
                   <td>{duration(x.runMs)}</td>

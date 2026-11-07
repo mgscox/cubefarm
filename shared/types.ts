@@ -6,7 +6,7 @@ export type AgentStatus =
   | 'working' // Claude Code session running
   | 'done' // finished, PR opened (or finished without one)
   | 'error' // session failed
-  | 'stopped'; // manager stopped it
+  | 'stopped'; // stoppedBy records whether scheduling can recover it
 
 export type LogKind = 'text' | 'tool' | 'result' | 'system' | 'error' | 'manager' | 'done' | 'thinking';
 
@@ -187,6 +187,7 @@ export interface NoWorkEnding {
   body: string;
   labels: string[];
   ownerCommentAt?: string;
+  reason?: string; // repeated failed sessions, retained until the brief changes
   retryAfterSync?: number; // no automatic retry until an issue refresh starts after this ending
 }
 
@@ -373,7 +374,15 @@ export type TermServerMessage =
 /** Browser to server: keystrokes go to the running CLI; the size is the viewer's fitted terminal. */
 export type TermClientMessage = { t: 'input'; data: string } | { t: 'resize'; cols: number; rows: number };
 
-export interface AgentView {
+/** Recovery state persists across office restarts and travels with agent snapshots/events. */
+export interface DeskRecovery {
+  stoppedBy?: 'manager' | 'office';
+  lastErrorAt?: number;
+  startupRetry?: { failures: number; retryAt: number | null; action: string | null };
+  taskFailures?: { key: string; count: number };
+}
+
+export interface AgentView extends DeskRecovery {
   id: string;
   name: string;
   repoId: string;
@@ -404,12 +413,13 @@ export interface AgentView {
   endedAt: number | null;
   costUsd: number;
   score: number; // legacy feedback: +2 per merged PR, -1 per QA send-back with eligible defect evidence
+  scores?: DeveloperScoresView; // developers only: Authorship and Repair from the score ledger
   turns: number;
   browserUrl: string | null;
   hasScreenshot: boolean;
   screenshotAt: number | null;
   lastError: string | null;
-  /** A launch crash keeps this desk out of scheduling until Clear desk. */
+  /** A launch crash waits until startupRetry, or for its named manager action. */
   startupFailed?: boolean;
   box: string | null; // their own box, overriding the floor's (null = the floor's)
   deskBox: string; // where their current task's desk and CLI are ('' = the office's machine)
@@ -497,6 +507,29 @@ export interface QaOutcomeView {
   commentUrl: string | null;
   corrections: { id: string; findingId: string; previousCorrectionId: string | null; actor: string; reason: string; classification: QaClassification; at: number }[];
   legacyPenalty?: { agentId: string; findingIds: string[]; active: boolean };
+}
+
+/** A developer's separate scores; `events` is the sample count behind each total. */
+export interface DeveloperScoresView {
+  authorship: { points: number; events: number };
+  repair: { points: number; events: number };
+  neutral: number; // recorded outcomes that scored nothing
+}
+
+/** One append-only score ledger entry. Corrections void or restore an earlier event instead of editing it. */
+export interface ScoreEventView {
+  id: string; // stable identity from the evidence: a replay never appends it twice
+  repoId: string;
+  prNumber: number;
+  agentId: string | null; // null: attribution unknown
+  name: string | null;
+  score: 'authorship' | 'repair' | null; // null: neutral history
+  points: number;
+  rule: 'merge' | 'original-defect' | 'repair-fix' | 'repair-regression' | 'neutral' | 'correction';
+  reason: string;
+  evidence: { outcomeId?: string; findingId?: string; attemptId?: string; sha?: string | null; correctionId?: string };
+  corrects?: { eventId: string; active: boolean };
+  at: number;
 }
 
 /** Failed preparations for one PR task and head; kept across office restarts. */
@@ -869,6 +902,7 @@ export interface WorldSnapshot {
   agents: AgentView[];
   qa: QaView[];
   prContributions?: PrContributionView[];
+  scoreEvents?: ScoreEventView[];
   runAttempts?: RunAttemptView[];
   qaOutcomes?: QaOutcomeView[];
   requests: HireRequestView[];
@@ -905,6 +939,7 @@ export type ServerEvent =
   | { type: 'qa'; qa: QaView }
   | { type: 'qaOutcome'; outcome: QaOutcomeView }
   | { type: 'prContribution'; contribution: PrContributionView }
+  | { type: 'scoreEvents'; events: ScoreEventView[] }
   | { type: 'runAttempt'; attempt: RunAttemptView }
   | { type: 'runAttemptsRemoved'; ids: string[] }
   | { type: 'qaRemoved'; repoId: string; prNumber: number }

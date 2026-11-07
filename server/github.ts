@@ -699,6 +699,12 @@ export async function issueDetails(fullName: string, number: number): Promise<{ 
   return { title: raw.title, body: raw.body ?? '' };
 }
 
+/** Posts a comment on an issue; returns the comment's URL. */
+export async function commentIssue(fullName: string, number: number, body: string): Promise<string> {
+  const out = await gh(['issue', 'comment', String(number), '-R', fullName, '--body-file', '-'], { input: body });
+  return out.match(/https:\/\/github\.com\/\S+/)?.[0] ?? '';
+}
+
 export async function commentPull(fullName: string, number: number, body: string): Promise<string> {
   const out = await gh(['pr', 'comment', String(number), '-R', fullName, '--body-file', '-'], { input: body });
   return out.match(/https:\/\/github\.com\/\S+/)?.[0] ?? '';
