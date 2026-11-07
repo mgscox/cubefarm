@@ -1,7 +1,7 @@
 import { createSdkMcpServer, tool, type McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { issueBlockers, forHuman, issueSpecialty, READY_FOR_HUMAN, RESEARCH, setDependsOn, type IssueRef } from '../shared/issues.ts';
-import type { AgentView, CeoJobKind, IssueInfo, PullInfo, QaView } from '../shared/types.ts';
+import type { AgentView, CeoJobKind, IssueInfo, PullInfo, QaView, PrContributionView } from '../shared/types.ts';
 import { PREVIEW_ENV_MAX_CHARS } from '../shared/previewEnv.ts';
 import { ONE_TURN } from './clis.ts';
 import type { FixReason } from './fixPlan.ts';
@@ -158,12 +158,16 @@ export function mergeableState(p: Pick<PullInfo, 'mergeable' | 'mergeState'>): '
 export function prStatusView(
   p: Pick<PullInfo, 'number' | 'title' | 'checks' | 'headSha' | 'mergeable' | 'mergeState' | 'failedChecks'>,
   q: PrQaState | undefined,
-  o: { maxQaRounds: number; agentName: (id: string) => string | null },
+  o: { maxQaRounds: number; agentName: (id: string) => string | null; contribution?: PrContributionView },
 ) {
   const tested = q?.testedSha ?? null;
   return {
     number: p.number,
     title: p.title,
+    ...(o.contribution && { contributions: {
+      original: o.contribution.original && { name: o.contribution.original.name, agentId: o.contribution.original.agentId, sha: short(o.contribution.original.submittedSha) },
+      repairs: o.contribution.repairs.map((r) => ({ name: r.name, agentId: r.agentId, reason: r.reason, startingSha: short(r.startingSha), submittedSha: short(r.submittedSha), reviewId: r.reviewId, commentUrl: r.commentUrl })),
+    } }),
     qa: q ? `${q.status}${q.round > 1 ? ` (round ${q.round})` : ''}` : 'not tested',
     checks: p.checks,
     ...(p.failedChecks.length && { ciFailedChecks: p.failedChecks.map((c) => c.name) }),

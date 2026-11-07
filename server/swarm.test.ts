@@ -16,7 +16,7 @@ import type { TrackedIssue } from './github.ts';
 import { HttpError, securityReportOutcome, Swarm } from './swarm.ts';
 import { VERSION } from './config.ts';
 import { operationSignal } from './operation.ts';
-import { CEO_ID, type ApprovedSnapshot, type IssueInfo, type PublicationView, type QaCheck, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
+import { CEO_ID, type ApprovedSnapshot, type IssueInfo, type PublicationView, type PrContributionView, type QaCheck, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
 import { ceoSystemPrompt, type OfficeTools } from './ceo.ts';
 import { researcherSystemPrompt } from './research.ts';
 import { ONE_TURN } from './clis.ts';
@@ -33,7 +33,7 @@ type Backend = ReturnType<typeof createDemoBackend>;
 type QaRec = QaView & { reviewId?: string; crossRepository?: boolean; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
 interface Internals {
   backend: Backend;
-  state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[]; feedbackEvents: Record<string, true> };
+  state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[]; prContributions: PrContributionView[]; feedbackEvents: Record<string, true> };
   writeState(): Promise<void>;
   repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string; issuesFetchedAt?: number }>;
   agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null; shots?: unknown[]; qaResume?: unknown }>;
@@ -286,6 +286,95 @@ describe('automatic desk recovery', () => {
     expect(a()).toMatchObject({ status: 'idle', task: null });
     expect(s.startIssueWork(repo)).toBe(true);
     expect(runTask).toHaveBeenLastCalledWith(a(), repo, expect.objectContaining({ number: 67 }), undefined);
+  });
+});
+
+describe('durable PR contribution workflow', () => {
+  beforeEach(() => {
+    s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
+    Object.assign(repo, { links: [], defaultBranch: 'main' });
+  });
+  it('keeps the original handoff and each repair through sync, cleanup and restart', async () => {
+    const fixture = demoPull(repo.fullName, 'swarm/issue-66-ada', false);
+    try {
+      const pull = fixture.pull;
+      pull.createdAt = new Date(Date.now()).toISOString();
+      const ada = s.state.agents[0];
+      Object.assign(ada, { task: 'issue', branch: pull.headRefName, startedAt: Date.now() - 1000, status: 'working', issueNumber: 66 });
+      const result = { ok: true, text: '', errors: [], turns: 0, costUsd: 0 };
+      await s.onIssueFinished(ada, repo, result, Promise.resolve(), undefined);
+      const original = { agentId: 'a1', name: 'Ada', submittedSha: pull.headSha, at: Date.now() };
+      expect(swarm.snapshot().prContributions).toEqual([expect.objectContaining({ original })]);
+      s.reconcilePulls(repo, [pull]);
+      s.reconcilePulls(repo, [pull]);
+      expect(swarm.snapshot().prContributions).toHaveLength(1);
+      expect(swarm.snapshot().prContributions![0].original).toEqual(original);
+
+      s.repoRt.get(repo.id)!.pulls = [pull];
+      const rec = s.state.qa[0];
+      Object.assign(rec, { status: 'failed', fixReason: 'qa', fixInstructions: 'Toolbar overflows', commentUrl: 'https://example.test/review/1' });
+      const barbara = { id: 'a2', name: 'Barbara', repoId: repo.id, role: 'dev', status: 'idle', desk: 1, specialty: '' };
+      s.state.agents.push(barbara);
+      s.agentRt.set('a2', { log: [], pending: [], terminal: null });
+      vi.spyOn(s, 'prepare').mockResolvedValue('fake-desk');
+      vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+      const details = await s.backend.prDetails(repo.fullName, pull.number);
+      vi.spyOn(s.backend, 'prDetails').mockImplementationOnce(async () => {
+        s.repoRt.get(repo.id)!.pulls = [{ ...pull, headSha: 'stale-before-preflight' }];
+        return details;
+      });
+      await s.runFix(barbara, repo, rec);
+      const startingSha = pull.headSha;
+      pull.headSha = 'barbara-fix';
+      await s.onFixFinished(barbara, repo, result);
+      Object.assign(rec, { status: 'failed', fixReason: 'conflict', fixInstructions: 'Resolve main conflict' });
+      await s.runFix(ada, repo, rec);
+      pull.headSha = 'ada-fix';
+      await s.onFixFinished(ada, repo, result);
+      const history = swarm.snapshot().prContributions![0];
+      expect(history.original).toEqual(original);
+      expect(history.repairs).toEqual([
+        expect.objectContaining({ agentId: 'a2', reason: 'qa', startingSha, submittedSha: 'barbara-fix', commentUrl: 'https://example.test/review/1', findings: 'Toolbar overflows' }),
+        expect.objectContaining({ agentId: 'a1', reason: 'conflict', startingSha: 'barbara-fix', submittedSha: 'ada-fix', findings: 'Resolve main conflict' }),
+      ]);
+      Object.assign(ada, { sessionId: 'followup-session', status: 'done' });
+      s.repoRt.get(repo.id)!.pulls = [{ ...pull }];
+      await swarm.message('a1', 'Also fix the review follow-up');
+      pull.headSha = 'followup-fix';
+      await s.onFixFinished(ada, repo, result);
+      expect(swarm.snapshot().prContributions![0].repairs).toHaveLength(3);
+      expect(swarm.snapshot().prContributions![0].repairs[2]).toMatchObject({ agentId: 'a1', startingSha: 'ada-fix', submittedSha: 'followup-fix', findings: 'Also fix the review follow-up' });
+      const finalHistory = swarm.snapshot().prContributions![0];
+      s.reconcilePulls(repo, [{ ...pull, state: 'MERGED' }]);
+      expect(swarm.snapshot().qa).toHaveLength(0);
+      expect(swarm.snapshot().prContributions![0]).toEqual({ ...finalHistory, state: 'MERGED' });
+
+      vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+      const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+      vi.spyOn(fs, 'rename').mockResolvedValue();
+      await s.writeState();
+      const persisted = JSON.parse(String(write.mock.calls.at(-1)![1]));
+      Object.assign(persisted, { repos: [], agents: [] });
+      const fresh = new Swarm(createDemoBackend());
+      const restored = fresh as unknown as Internals;
+      restored.backend.demo = false;
+      vi.spyOn(restored, 'save').mockImplementation(() => {});
+      vi.spyOn(fs, 'readFile').mockResolvedValueOnce(JSON.stringify(persisted));
+      await fresh.init();
+      expect(fresh.snapshot().prContributions).toEqual(swarm.snapshot().prContributions);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  it('does not infer authorship from sync, manual QA or legacy QA owners', () => {
+    const fixture = demoPull(repo.fullName, 'swarm/issue-66-ada', false);
+    try {
+      Object.assign(s.state.agents[0], { branch: fixture.pull.headRefName, prNumber: fixture.pull.number });
+      s.queueQa(repo, fixture.pull.number, s.state.agents[0], 66);
+      s.reconcilePulls(repo, [fixture.pull]);
+      expect(swarm.snapshot().prContributions![0]).toMatchObject({ original: null, repairs: [] });
+    } finally { fixture.remove(); }
   });
 });
 
@@ -6475,6 +6564,26 @@ describe('silent session recovery', () => {
     expect(terminal.onIdlePrompt!('Please finish this fix')).toBe(true);
     expect(s.backend.startSession).toHaveBeenLastCalledWith(expect.objectContaining({ typed: true }), expect.anything());
     expect(read).not.toHaveBeenCalled();
+    terminal.dispose();
+  });
+
+  it.each(['cached-head', null])('records a typed fix follow-up synchronously with starting SHA %s', async (headSha) => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    Object.assign(dev(), { status: 'done', task: 'fix', prNumber: 12 });
+    s.queueQa(repo, 12, dev(), 66);
+    if (headSha) s.repoRt.get(repo.id)!.pulls = [{ number: 12, headSha } as PullInfo];
+    const terminal = (s as unknown as { terminalFor(a: unknown): AgentTerminal }).terminalFor(dev());
+    const read = vi.spyOn(s.backend, 'prDetails');
+    vi.mocked(s.backend.startSession).mockClear();
+
+    expect(terminal.onIdlePrompt!('Please finish this fix')).toBe(true);
+    expect(s.backend.startSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ typed: true }), expect.anything());
+    expect(read).not.toHaveBeenCalled();
+    expect(s.state.prContributions).toHaveLength(1);
+    expect(s.state.prContributions[0].repairs).toHaveLength(1);
+    expect(s.state.prContributions[0].repairs[0]).toMatchObject({ agentId: 'a1', startingSha: headSha, findings: 'Please finish this fix' });
+    await Promise.resolve();
+    expect(s.state.prContributions[0].repairs).toHaveLength(1);
     terminal.dispose();
   });
 

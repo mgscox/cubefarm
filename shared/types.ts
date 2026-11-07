@@ -67,6 +67,30 @@ export interface PullInfo {
   pendingChecks: string[];
 }
 
+/** PR contributions outlive active QA cards and retain names after a desk is removed. */
+export interface PrContributionView {
+  repoId: string;
+  prNumber: number;
+  title: string;
+  url: string;
+  state: PullInfo['state'];
+  original: { agentId: string; name: string; submittedSha: string; at: number } | null;
+  repairs: {
+    id: string;
+    agentId: string;
+    name: string;
+    reason: string;
+    startingSha: string | null;
+    submittedSha: string | null;
+    reviewId: string;
+    round: number;
+    commentUrl: string | null;
+    findings: string | null;
+    startedAt: number;
+    finishedAt: number | null;
+  }[];
+}
+
 export interface PullRefresh {
   pulls: PullInfo[];
   checksError?: string; // diagnostic details from optional check enrichment
@@ -381,7 +405,7 @@ export interface QaView {
   round: number; // 1-based QA round
   preparation?: Partial<Record<'qa' | 'fix', DeskPreparation>>;
   rerunNote?: { round: number; text: string }; // manager's instructions for one QA round
-  devAgentId: string | null; // who wrote it (null for PRs opened outside the swarm)
+  devAgentId: string | null; // current developer responsible for the PR; original authorship lives in contributions
   qaAgentId: string | null; // who is testing / last tested it
   summary: string | null; // latest QA summary
   checks: QaCheck[];
@@ -735,6 +759,7 @@ export interface WorldSnapshot {
   repos: RepoView[];
   agents: AgentView[];
   qa: QaView[];
+  prContributions?: PrContributionView[];
   requests: HireRequestView[];
   ceo: CeoInfo;
   research: ResearchInfo;
@@ -767,6 +792,7 @@ export type ServerEvent =
   | { type: 'log'; agentId: string; lines: LogLine[] }
   | { type: 'screen'; agentId: string; url: string | null; at: number }
   | { type: 'qa'; qa: QaView }
+  | { type: 'prContribution'; contribution: PrContributionView }
   | { type: 'qaRemoved'; repoId: string; prNumber: number }
   | { type: 'settings'; settings: SwarmSettings }
   | { type: 'request'; request: HireRequestView }
