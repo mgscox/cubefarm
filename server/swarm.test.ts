@@ -355,6 +355,72 @@ describe('run history', () => {
   });
 });
 
+describe('lessons', () => {
+  beforeEach(() => s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null }));
+  const report = (pass: boolean): SessionResult => ({ ok: true, text: '', errors: [], costUsd: 0, turns: 1, structured: pass
+    ? { verdict: 'pass', summary: 'Wraps now.', checks: [{ name: 'Mobile layout (375px)', result: 'pass', details: 'Layout wraps correctly' }] }
+    : { verdict: 'fail', summary: 'Toolbar overflows.', checks: [{ name: 'Mobile layout (375px)', result: 'fail', failureKind: 'code', findingKey: 'toolbar-overflow', confirmed: true,
+      details: 'Toolbar overflows at 375px; the base wraps. Authorization: Bearer abcdefghijklmnop' }] } });
+
+  it('turns a regression confirmed on two PRs into an approved lesson that survives a restart', async () => {
+    const tester = swarm.hireAgent(repo.id, { name: 'Quinn', role: 'qa' });
+    const testerRecord = s.state.agents.find((a) => a.id === tester.id)!;
+    const review = async (prNumber: number, round: number, pass: boolean) => {
+      const headSha = `head-${prNumber}-${round}`;
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...demoPull(repo.fullName, `swarm/issue-${prNumber}`, false).pull, number: prNumber, headSha, baseSha: 'base', state: 'OPEN', body: '', isCrossRepository: false } as never);
+      s.state.qa = s.state.qa.filter((q) => q.prNumber !== prNumber);
+      s.state.qa.push({ repoId: repo.id, prNumber, reviewId: `review-${prNumber}`, crossRepository: false, status: 'testing', round, retests: 0, sessionFailures: 0,
+        testedSha: headSha, passedSha: null, devAgentId: 'a1', qaAgentId: tester.id, summary: null, checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 });
+      Object.assign(testerRecord, { task: 'qa', status: 'working', prNumber });
+      await s.onQaFinished(testerRecord, repo, report(pass));
+      vi.advanceTimersByTime(1000);
+    };
+    await review(21, 1, false);
+    await review(21, 2, true);
+    await review(22, 1, false);
+    await review(22, 2, true);
+
+    const { recurringFindings } = await import('../shared/lessons.ts');
+    const [suggestion] = recurringFindings(swarm.snapshot().qaOutcomes!, []);
+    expect(suggestion).toMatchObject({ key: 'toolbar-overflow', kind: 'agent', fix: { prNumber: 22 } });
+    const events = vi.spyOn(s, 'broadcast');
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+    vi.spyOn(fs, 'rename').mockResolvedValue();
+    const lesson = await swarm.draftLesson(repo.id, {
+      kind: 'agent', specialty: 'frontend', title: 'Check the toolbar at 375px', guidance: 'Load the page at 375px before handing off.',
+      sources: suggestion.findings.map((f) => ({ qaOutcomeId: f.qaOutcomeId, findingId: f.findingId })),
+      verification: { kind: 'fix', qaOutcomeId: suggestion.fix!.qaOutcomeId },
+    });
+    expect(lesson.versions[0].sources.map((x) => x.summary).join(' ')).not.toContain('abcdefghijklmnop');
+    expect(swarm.lessons({ repoId: repo.id }).lessons).toEqual([]);
+    await swarm.reviewLesson(lesson.id, { action: 'approve', reason: 'Seen twice.' });
+    expect(events).toHaveBeenLastCalledWith({ type: 'lesson', lesson: expect.objectContaining({ id: lesson.id }) });
+    expect(swarm.lessons({ repoId: repo.id, specialty: 'frontend' }).lessons).toMatchObject([{ id: lesson.id, version: 1, approvedBy: 'manager', revisions: ['head-21-1', 'head-22-1', 'head-22-2'] }]);
+    expect(swarm.lessons({ repoId: repo.id, specialty: 'server' }).lessons).toEqual([]);
+    await expect(swarm.reviewLesson(lesson.id, { action: 'approve' })).rejects.toMatchObject({ status: 409 });
+
+    const persisted = String(write.mock.calls.findLast((c) => c[0] === `${STATE_FILE}.tmp`)![1]);
+    const fresh = new Swarm(createDemoBackend());
+    (fresh as unknown as Internals).backend.demo = false;
+    vi.spyOn(fresh as unknown as Internals, 'save').mockImplementation(() => {});
+    vi.spyOn(fs, 'readFile').mockImplementation(async (file) => String(file) === STATE_FILE ? persisted : Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' })));
+    await fresh.init();
+    expect(fresh.snapshot().lessons).toEqual(swarm.snapshot().lessons);
+    expect(fresh.lessons({ repoId: repo.id }).lessons.map((l) => l.id)).toEqual([lesson.id]);
+  });
+
+  it('undoes a lesson change the office could not save', async () => {
+    s.state.qaOutcomes.push({ id: 'pass', repoId: repo.id, prNumber: 5, verdict: 'pass', findings: [], corrections: [], attemptId: 'pass', round: 1, summary: 'ok', headSha: 'h', commentUrl: null } as never);
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    vi.spyOn(fs, 'writeFile').mockRejectedValue(new Error('EACCES'));
+    await expect(swarm.draftLesson(repo.id, { kind: 'agent', title: 'T', guidance: 'G', sources: [{ url: 'https://example.com/ci/1', summary: 'CI log' }], verification: { kind: 'fix', qaOutcomeId: 'pass' } }))
+      .rejects.toThrow('EACCES');
+    expect(swarm.snapshot().lessons).toEqual([]);
+    await expect(swarm.draftLesson('nope', {})).rejects.toMatchObject({ status: 404 });
+  });
+});
+
 describe('developer scores', () => {
   const pull: PullInfo = {
     number: 13, title: 'Feature', url: '', headRefName: 'swarm/issue-66-ada', isCrossRepository: false, state: 'MERGED',

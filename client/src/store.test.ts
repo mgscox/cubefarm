@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PrContributionView, RepoView, RunAttemptView } from '../../shared/types';
+import type { LessonView, PrContributionView, RepoView, RunAttemptView } from '../../shared/types';
 import { kanbanFor, useStore, type Agent } from './store';
 
 // Audio is a browser boundary; these tests exercise incoming office events in Node.
@@ -25,6 +25,16 @@ it('updates live run history and removes attempts pruned by the office', () => {
   expect(useStore.getState().runAttempts).toEqual([{ ...attempt, outcome: { result: 'no-change', cause: 'agent' } }]);
   apply({ type: 'runAttemptsRemoved', ids: [attempt.id] });
   expect(useStore.getState().runAttempts).toEqual([]);
+});
+
+it('adds a lesson and replaces it as its review history grows', () => {
+  useStore.setState({ lessons: [] });
+  const apply = useStore.getState().apply;
+  const lesson = { id: 'lesson-1', repoId: 'r', versions: [], reviews: [] } as LessonView;
+  const approved = { ...lesson, reviews: [{ id: 'r1', version: 1, action: 'approved' as const, actor: 'manager', reason: '', at: 1 }] };
+  apply({ type: 'lesson', lesson });
+  apply({ type: 'lesson', lesson: approved });
+  expect(useStore.getState().lessons).toEqual([approved]);
 });
 
 it('keeps PR contributions after QA cleanup and replaces repeated history events', () => {

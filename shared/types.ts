@@ -490,6 +490,61 @@ export interface QaOutcomeView {
   legacyPenalty?: { agentId: string; findingIds: string[]; active: boolean };
 }
 
+/** Agent-quality guidance (from code findings) or operational guidance (from worker findings), never mixed. */
+export type LessonKind = 'agent' | 'operational';
+
+/**
+ * A lesson's link to its evidence. The summary is redacted and bounded, and stays when the QA outcome, attempt or
+ * external artifact behind it is pruned or expires. No logs, prompts, transcripts or screenshots.
+ */
+export interface LessonSource {
+  kind: 'finding' | 'attempt' | 'link';
+  /** The finding id, the attempt id, or the URL. */
+  ref: string;
+  qaOutcomeId: string | null;
+  prNumber: number | null;
+  sha: string | null; // the revision it was observed at
+  classification: QaClassification | null; // findings: after corrections
+  url: string | null;
+  summary: string;
+}
+
+/** One reviewable version of a lesson. */
+export interface LessonVersion {
+  version: number;
+  title: string;
+  /** The proposed checklist or playbook guidance. */
+  guidance: string;
+  kind: LessonKind;
+  specialty: string | null; // null: every specialty on the floor
+  sources: LessonSource[];
+  /** The verified fix or regression test, and the passing review or attempt that verified it. */
+  verification: { kind: 'fix' | 'regression-test'; test: string | null; evidence: LessonSource };
+  /** Source revisions: where the findings were seen and where the fix was verified. */
+  revisions: string[];
+  author: string;
+  at: number;
+}
+
+export type LessonReviewAction = 'drafted' | 'revised' | 'approved' | 'revision-requested' | 'rejected' | 'superseded';
+
+/** A lesson on one floor: its versions and an append-only review history. */
+export interface LessonView {
+  id: string;
+  repoId: string;
+  versions: LessonVersion[];
+  reviews: { id: string; version: number; action: LessonReviewAction; actor: string; reason: string; at: number; supersededBy?: string }[];
+}
+
+/** GET /api/lessons: approved, applicable lesson versions only, for maintainers and evaluations. */
+export interface LessonExport {
+  format: 'cubefarm-lessons';
+  version: 1;
+  generatedAt: number;
+  filter: { repoId: string | null; specialty: string | null };
+  lessons: (LessonVersion & { id: string; repoId: string; approvedAt: number; approvedBy: string })[];
+}
+
 /** Failed preparations for one PR task and head; kept across office restarts. */
 export interface DeskPreparation {
   headSha: string | null;
@@ -862,6 +917,7 @@ export interface WorldSnapshot {
   prContributions?: PrContributionView[];
   runAttempts?: RunAttemptView[];
   qaOutcomes?: QaOutcomeView[];
+  lessons?: LessonView[];
   requests: HireRequestView[];
   ceo: CeoInfo;
   research: ResearchInfo;
@@ -895,6 +951,7 @@ export type ServerEvent =
   | { type: 'screen'; agentId: string; url: string | null; at: number }
   | { type: 'qa'; qa: QaView }
   | { type: 'qaOutcome'; outcome: QaOutcomeView }
+  | { type: 'lesson'; lesson: LessonView }
   | { type: 'prContribution'; contribution: PrContributionView }
   | { type: 'runAttempt'; attempt: RunAttemptView }
   | { type: 'runAttemptsRemoved'; ids: string[] }
