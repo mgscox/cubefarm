@@ -9,7 +9,7 @@ import { encode, keeperBuild, localHookAnswer, PTY_PROTOCOL, readMessages, type 
 // The office's terminal keeper: a small process of its own that runs the agents' CLIs in pseudo-terminals, so they
 // keep working while the office restarts (an update, a crash, a code change in development). The office connects over
 // a local socket (one office at a time), starts and drives CLIs through it and, when it comes back, picks up the ones
-// still running. The CLIs' hooks come in here too and wait while the office is away, so none is lost and none fails.
+// still running. The CLIs' hooks come in here too; tool approvals are answered here even while the office is away.
 //
 // node ptyHost.js launch <socket> <secret file>   starts a keeper outside the caller's process tree, then exits
 // node ptyHost.js serve <socket> <secret file>    is the keeper
@@ -186,11 +186,13 @@ const hooks = http.createServer((req, res) => {
       // not JSON: an empty hook
     }
     const rid = nextRid++;
-    const local = isBox ? localHookAnswer(body, statusLines.get(token)) : undefined;
+    // Local keepers must approve tools through long restarts too: their old timeout returned {} and left a dialog.
+    const preTool = (body as { hook_event_name?: unknown } | null)?.hook_event_name === 'PreToolUse';
+    const local = isBox || preTool ? localHookAnswer(body, statusLines.get(token)) : undefined;
     if (local) {
-      // The office can't look at this disk: it's told whether the transcript the hook names is there yet.
+      // A remote office can't look at this disk: tell it whether the transcript exists yet.
       const b = body as Record<string, unknown>;
-      if (typeof b.transcript_path === 'string') b.cubefarm_transcript = fs.existsSync(b.transcript_path);
+      if (isBox && typeof b.transcript_path === 'string') b.cubefarm_transcript = fs.existsSync(b.transcript_path);
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(local));
       waiting.set(rid, { token, body, res: null, sent: false });
       if (waiting.size > FORWARD_MAX) {

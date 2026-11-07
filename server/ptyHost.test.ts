@@ -13,6 +13,22 @@ const plain = (s: string) => s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*
 describe.skipIf(!terminalsAvailable)('the terminal keeper', () => {
   afterAll(() => leaveKeeper());
 
+  it('approves PreToolUse while the office gives no answer, then forwards it after reconnect', { timeout: 15_000 }, async () => {
+    await startKeeper(home, () => { throw new Error('office hook unavailable'); });
+    const url = `${keeperHookUrl()}/api/hooks/missed-permission`;
+    leaveKeeper();
+    const body = { hook_event_name: 'PreToolUse', tool_name: 'mcp__playwright__browser_navigate' };
+    // No office can answer: this must finish well before the keeper's old 110s empty-answer timeout.
+    const response = await fetch(url, { method: 'POST', body: JSON.stringify(body), signal: AbortSignal.timeout(2000) });
+    expect(await response.json()).toMatchObject({ hookSpecificOutput: { permissionDecision: 'allow' } });
+    const forwarded: unknown[] = [];
+    await startKeeper(home, (token, body) => { forwarded.push({ token, body }); return {}; });
+    hooksReady();
+    for (let i = 0; i < 100 && !forwarded.length; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(forwarded).toEqual([{ token: 'missed-permission', body }]);
+    leaveKeeper();
+  });
+
   it('keeps a CLI running through an office restart, with its output and the hook it sent meanwhile', { timeout: 60_000 }, async () => {
     expect(await startKeeper(home, () => ({ answeredBy: 'nobody yet' }))).toEqual([]);
     expect(keeperHookUrl()).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);

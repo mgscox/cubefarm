@@ -7,6 +7,8 @@ import { encode, PTY_PROTOCOL, type ToHost } from './ptyProtocol.ts';
 import { withOperation } from './operation.ts';
 import type { BoxConnection } from './machine.ts';
 import { images, IMAGE_ROUTE } from './attachments.ts';
+import { NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
+import type { AgentTerminal } from './terminal.ts';
 
 vi.mock('node:child_process', async (original) => ({ ...await original<typeof import('node:child_process')>(), spawn: vi.fn() }));
 vi.mock('./machineHealth.ts', () => ({ monitorResources: () => () => {} }));
@@ -84,5 +86,35 @@ describe('remote desk cancellation', () => {
     expect(call.args[1]).toEqual([{ name, data: images.read(name).toString('base64') }]);
     child.stdout.write(encode({ op: 'rpcReply', rid: call.rid, ok: true, value: { dir: 'remote-session', prompt: 'remote prompt' } }));
     expect(await pending).toMatchObject({ dir: 'remote-session', prompt: 'remote prompt' });
+  });
+
+  it('recovers a missed Claude approval over the box transport and continues the remote session', async () => {
+    let screen = '';
+    const term = { cols: 120, rows: 32, bind: vi.fn(), note: vi.fn(), write: (s: string) => { screen = s; }, screen: () => screen } as unknown as AgentTerminal;
+    const cb = { log: vi.fn(), tool: vi.fn(), sessionId: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), finished: vi.fn() };
+    const session = box.machine.startSession({
+      cwd: 'remote-desk', cli: 'claude', terminal: term, prompt: 'Test the preview', systemAppend: '',
+      model: '', effort: 'medium', role: 'qa', browserTesting: true, additionalDirectories: [],
+    }, cb);
+    const prepare = sent.find((m) => m.op === 'rpc' && m.method === 'prepare') as Extract<ToHost, { op: 'rpc' }>;
+    child.stdout.write(encode({ op: 'rpcReply', rid: prepare.rid, ok: true, value: { dir: 'remote-session', prompt: 'Test the preview', hookUrl: 'http://127.0.0.1:12345/api/hooks' } }));
+    await vi.advanceTimersByTimeAsync(0);
+    const launch = sent.find((m) => m.op === 'launch') as Extract<ToHost, { op: 'launch' }>;
+    child.stdin.on('data', (line: Buffer) => {
+      const message = JSON.parse(line.toString()) as ToHost;
+      if (message.op !== 'write' || message.id !== launch.id || message.data !== '\r') return;
+      child.stdout.write(encode({ op: 'data', id: launch.id, data: '❯' }));
+      child.stdout.write(encode({ op: 'hook', rid: 991, token: launch.token, body: { hook_event_name: 'Stop', last_assistant_message: 'Preview checked' } }));
+    });
+    // A missing hook produces a permission dialog on the remote PTY, carried to the office over SSH.
+    await vi.advanceTimersByTimeAsync(121_000);
+    child.stdout.write(encode({ op: 'data', id: launch.id, data: NAVIGATE_PERMISSION }));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(sent.filter((m) => m.op === 'write')).toEqual([{ op: 'write', id: launch.id, data: '\r' }]);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(cb.finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: 'Preview checked' }));
+    expect(sent).toContainEqual({ op: 'hookReply', rid: 991, answer: {} });
+    expect(cb.log.mock.calls.flat(2)).toContainEqual({ kind: 'system', text: 'Approved playwright — Navigate to a URL (hook missed)' });
+    session.stop();
   });
 });

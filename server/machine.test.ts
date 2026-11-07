@@ -3,6 +3,7 @@ import { planCli, type CliHost } from './machine.ts';
 import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
 import { STUCK_MS, type ClaudeTurn } from './clis.ts';
 import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
+import { CONSOLE_PERMISSION, NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
 import type { SessionCallbacks, SessionOptions } from './agentRunner.ts';
 import type { AgentTerminal } from './terminal.ts';
 
@@ -104,6 +105,101 @@ describe('startCliSession on a host', () => {
   });
   const errors = (cb: SessionCallbacks) => vi.mocked(cb.log).mock.calls.flat(2).filter((e) => e.kind === 'error').map((e) => e.text);
   const turn = (t: Partial<ClaudeTurn>): ClaudeTurn => ({ bytes: 100, ended: false, mark: '', text: '', ...t });
+
+  it.each([CONSOLE_PERMISSION, NAVIGATE_PERMISSION])('continues an MCP tool after its hook gets no answer: %s', async (dialog) => {
+    let screen = '';
+    const c = claude(() => screen, () => null);
+    // A lost hook: no callback arrives for longer than either configured hook timeout.
+    await vi.advanceTimersByTimeAsync(121_000);
+    screen = dialog;
+    pty.write.mockClear();
+    pty.write.mockImplementationOnce((key: string) => {
+      expect(key).toBe('\r');
+      screen = '❯';
+      c.hook({ hook_event_name: 'PostToolUse', tool_name: 'mcp__playwright__browser_navigate', tool_response: 'Navigated' });
+      c.hook({ hook_event_name: 'Stop', last_assistant_message: 'Tool continued' });
+    });
+    await vi.advanceTimersByTimeAsync(34_000);
+    expect(pty.write).toHaveBeenCalledExactlyOnceWith('\r');
+    expect(c.cb.finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: 'Tool continued' }));
+    expect(vi.mocked(c.cb.log).mock.calls.flat(2)).toContainEqual(expect.objectContaining({ text: expect.stringMatching(/^Approved playwright — .+ \(hook missed\)$/) }));
+    c.session.stop();
+  });
+
+  it.each([false, true])('selects one-time approval from No, waiting for redraws (app cursor: %s)', async (appCursor) => {
+    let screen = NAVIGATE_PERMISSION.replace('❯ 1.', '  1.').replace('  3. No', '❯ 3. No');
+    const c = claude(() => screen, () => null);
+    Object.assign(c.term, { appCursor });
+    pty.write.mockClear();
+    await vi.advanceTimersByTimeAsync(30_000);
+    const up = appCursor ? '\x1bOA' : '\x1b[A';
+    expect(pty.write.mock.calls).toEqual([[up]]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write).toHaveBeenCalledTimes(1); // no second key on an unchanged screen
+    screen = screen.replace('❯ 3.', '  3.').replace('  2.', '❯ 2.');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write.mock.calls).toEqual([[up], [up]]);
+    screen = NAVIGATE_PERMISSION;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write.mock.calls).toEqual([[up], [up], ['\r']]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write).toHaveBeenCalledTimes(3);
+    screen += '\n❯ new input';
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write).toHaveBeenCalledTimes(3);
+    c.session.stop();
+  });
+
+  it('approves successive identical dialogs even if both hooks are lost between screen polls', async () => {
+    const c = claude(() => CONSOLE_PERMISSION, () => null);
+    pty.write.mockClear();
+    Object.assign(c.term, { lastOutputAt: Date.now() });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write).toHaveBeenCalledExactlyOnceWith('\r');
+    // First tool finishes; the next call draws an identical dialog before the next watcher poll.
+    Object.assign(c.term, { lastOutputAt: Date.now() });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write.mock.calls).toEqual([['\r'], ['\r']]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write).toHaveBeenCalledTimes(2);
+    c.session.stop();
+  });
+
+  it('recovers a missed approval in a CLI adopted after the office restarts', async () => {
+    let screen = CONSOLE_PERMISSION;
+    const meta = { agentId: 'ada', cli: 'claude', token: 'missed-restart', dir: 'sessions/t', busy: true, resumeId: 'sess-1' };
+    const term = { ...terminal(), screen: () => screen } as unknown as AgentTerminal;
+    const h = { ...host(vi.fn()), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta }] };
+    await reconnectClis(() => term, h);
+    const cb = callbacks();
+    const session = startCliSession({ ...opts, terminal: term, reattach: true, resumeSessionId: 'sess-1' }, cb, h);
+    pty.write.mockClear();
+    pty.write.mockImplementationOnce(() => {
+      screen = '❯';
+      handleHook(meta.token, { hook_event_name: 'Stop', last_assistant_message: 'Continued after restart' });
+    });
+    await vi.advanceTimersByTimeAsync(34_000);
+    expect(pty.write).toHaveBeenCalledExactlyOnceWith('\r');
+    expect(cb.finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: 'Continued after restart' }));
+    session.stop();
+  });
+
+  it('leaves disallowed built-ins, stale dialog text, login and setup screens unanswered', async () => {
+    let screen = '';
+    const c = claude(() => screen, () => null, { role: 'ceo' });
+    pty.write.mockClear();
+    for (const next of [
+      ...['Bash', 'PowerShell', 'NotebookEdit', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'].map((tool) => `${tool}\nDo you want to proceed?\n❯ 1. Yes\nEsc to cancel · Tab to amend`),
+      `${NAVIGATE_PERMISSION}\n❯ current input`,
+      'Select login method\n❯ 1. Sign in',
+      'Choose the text style\n❯ 1. Dark mode',
+    ]) {
+      screen = next;
+      await vi.advanceTimersByTimeAsync(30_000);
+    }
+    expect(pty.write).not.toHaveBeenCalled();
+    c.session.stop();
+  });
 
   const startupMenus = [
     { cli: 'claude' as const, question: 'Do you trust this folder?', no: '❯ No, exit\n  Yes, I trust this folder', yes: '  No, exit\n❯ Yes, I trust this folder' },

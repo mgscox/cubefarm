@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cliStartupFailed, codexTurnThread, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, startupQuestionOnScreen, STUCK_MS, trustKey } from './clis.ts';
+import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cliStartupFailed, codexTurnThread, hookReviewKey, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, startupQuestionOnScreen, STUCK_MS, trustKey } from './clis.ts';
 import { terminalsAvailable, type Pty } from './ptyClient.ts';
 import { ALLOW } from './ptyProtocol.ts';
 import { localCliHost } from './localCliHost.ts';
@@ -401,6 +401,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   };
   const nudged = new Set<string>();
   let checkingIdle = false;
+  let permissionScreen = '';
+  let permissionOutputAt = 0;
   let trustKeys = 0; // keys pressed on a folder-trust question (a few at most)
   let trustedAt = 0;
   const pendingPrompts: string[] = [];
@@ -800,6 +802,18 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     stuckTimer = setInterval(async () => {
       if (done || !live?.proc || checkingIdle) return;
       const screen = term.screen();
+      const permission = cli === 'claude' && working ? officePermission(screen) : null;
+      if (!permission) permissionScreen = '';
+      else {
+        if (screen !== permissionScreen || (term.lastOutputAt ?? 0) !== permissionOutputAt) {
+          permissionScreen = screen; // wait for a redraw before sending another key
+          permissionOutputAt = term.lastOutputAt ?? 0;
+          stir();
+          if (permission.key === 'enter') log([{ kind: 'system', text: `Approved ${permission.tool} (hook missed)` }]);
+          quietly(() => live?.proc?.write(permission.key === 'enter' ? '\r' : term.appCursor ? '\x1bOA' : '\x1b[A'));
+          return;
+        }
+      }
       const idle = cli === 'codex' ? idleStuck.look(screen, working) : null;
       const option = working ? stuck.look(screen) : null;
       const openIdle = cli === 'opencode' ? idleStuck.look(screen, working) : null;
