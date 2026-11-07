@@ -64,6 +64,19 @@ function expectProjectEnv(env: NodeJS.ProcessEnv | undefined) {
   expect(env!.npm_config_registry).toBe('https://registry.npmjs.org/');
 }
 
+it('preapproves only office MCP namespaces in Claude session settings when hooks are unreachable', () => {
+  const terminal = { cols: 120, rows: 32, note: vi.fn(), bind: vi.fn() } as unknown as AgentTerminal;
+  const session = startCliSession({ ...opts, cli: 'claude', terminal }, callbacks);
+  try {
+    const call = vi.mocked(fs.writeFileSync).mock.calls.find(([file]) => String(file).endsWith('settings.json'))!;
+    const settings = JSON.parse(String(call[1]));
+    expect(settings.permissions.allow).toEqual(['mcp__playwright__*', 'mcp__office__*']);
+    expect(settings.hooks.PreToolUse[0].hooks[0]).toMatchObject({ type: 'http', timeout: 30 });
+  } finally {
+    session.stop();
+  }
+});
+
 describe.each(['npm_config_allow_scripts', 'NPM_CONFIG_ALLOW_SCRIPTS', 'Npm_Config_Allow_Scripts'])('%s', (key) => {
   beforeEach(() => vi.stubEnv(key, 'esbuild,acorn'));
 
