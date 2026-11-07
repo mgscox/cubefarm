@@ -20,6 +20,12 @@ describe('kanbanFor', () => {
     expect(kanbanFor(repo, [], qa(null)).blocked[0].note).toBe('⚠️ needs you');
   });
 
+  it('says why a queued PR is being retried', () => {
+    const note = 'QA desk ran out of memory (free 0.8 GB, swap 0 B, 204 tests cancelled); not charged a round; retrying once';
+    expect(kanbanFor(repo, [], qa(note, 'queued')).qa[0].note).toBe(`waiting for QA · round 2 · ${note}`);
+    expect(kanbanFor(repo, [], qa(note, 'passed')).ready[0].note).toBe(`QA ✓ · ${note}`);
+  });
+
   it('separates triage and human intervention from To do', () => {
     const issue = (number: number, labels: string[]): IssueInfo => ({ number, labels, title: `Issue ${number}`, url: '', body: '', createdAt: '' });
     const issues = [issue(1, ['Needs-Triage']), issue(2, []), issue(3, ['needs-triage', 'Needs-Human']), issue(12, [])];

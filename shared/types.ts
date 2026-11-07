@@ -377,14 +377,23 @@ export interface QaCheck {
   name: string;
   result: 'pass' | 'fail' | 'skip';
   details: string;
-  /** Only use environment when the worker prevented validation and no code defect is known or suspected. */
-  failureKind?: 'code' | 'environment';
+  /** Only use environment when the worker prevented validation and no code defect is known or suspected; resources when it ran out of memory. */
+  failureKind?: 'code' | 'environment' | 'resources';
+  /** For resources: what the desk showed when the run died. */
+  resources?: QaResources;
   /** Reuse this defect key when re-reviewing the same revision. */
   findingKey?: string;
   /** Confirmed by reproduction/source evidence in details; unexplained failures stay unconfirmed. */
   confirmed?: boolean;
   /** Verified contribution that introduced the defect, not merely the currently tested head. */
   introducedBySha?: string;
+}
+
+export interface QaResources {
+  freeMemory?: string;
+  swap?: string;
+  load?: string;
+  cancelled?: number; // tests cancelled or killed
 }
 
 export type QaClassification = 'code' | 'worker' | 'inconclusive';

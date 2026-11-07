@@ -406,7 +406,8 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
             verdict: 'fail', summary: 'The changed behavior passed; local validation stopped because the demo worker exhausted memory. No code defect was found.',
             checks: [
               { name: 'Changed behavior', result: 'pass', details: 'Acceptance criteria passed in the demo fixture.' },
-              { name: 'Local suite', result: 'fail', failureKind: 'environment', details: 'Simulated worker memory exhaustion.' },
+              { name: 'Local suite', result: 'fail', failureKind: 'resources', details: 'Simulated worker memory exhaustion: the suite was cancelled, not timed out.',
+                resources: { freeMemory: '0.8 GB', swap: '0 B', load: '61', cancelled: 204 } },
             ],
             commands: [{ command: 'npm test', result: 'Interrupted by simulated worker memory exhaustion.' }],
             screenshots: [],

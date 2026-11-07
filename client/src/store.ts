@@ -593,7 +593,7 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
       agent: status === 'testing' ? tester : dev,
       note:
         status === 'queued'
-          ? `waiting for QA${rec && rec.round > 1 ? ` · round ${rec.round}` : ''}`
+          ? `waiting for QA${rec && rec.round > 1 ? ` · round ${rec.round}` : ''}${rec?.mergeNote ? ` · ${rec.mergeNote}` : ''}`
           : status === 'testing'
             ? `🔍 testing · round ${rec!.round}`
             : status === 'failed'
