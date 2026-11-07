@@ -4,16 +4,19 @@ import type { AgentRole } from '../shared/types.ts';
 /** `crossRepository`: the PR came from a fork; only a PR confirmed to be from the floor's own repo scores. */
 export type FeedbackEvent = { repoId: string; prNumber: number; devAgentId: string | null; crossRepository?: boolean } & (
   | { kind: 'merged' }
-  | { kind: 'qa-send-back'; reviewId: string; round: number }
+  | { kind: 'qa-send-back'; reviewId: string; round: number; findingIds?: string[] }
 );
 
-/** Only the recorded developer receives feedback, for their own repo's PR; a merge or QA round can count once. */
+/** Legacy penalties require eligible finding IDs; retries of the same findings are neutral. */
 export function developerFeedback(
   event: FeedbackEvent,
   developer: { id: string; repoId: string; role: AgentRole; score?: number } | undefined,
   recorded: Record<string, true>,
-): { key: string; score: number } | null {
-  const key = `${event.repoId}#${event.prNumber}:${event.kind}${event.kind === 'qa-send-back' ? `:${event.reviewId}:${event.round}` : ''}`;
-  if (recorded[key] || event.crossRepository !== false || !developer || developer.id !== event.devAgentId || developer.role !== 'dev' || developer.repoId !== event.repoId) return null;
-  return { key, score: (developer.score ?? 0) + (event.kind === 'merged' ? 2 : -1) };
+): { key: string; keys: string[]; score: number } | null {
+  const prefix = `${event.repoId}#${event.prNumber}:${event.kind}`;
+  const keys = (event.kind === 'merged' ? [prefix] : (event.findingIds ?? []).map((id) => `${prefix}:${id}`)).filter((key) => !recorded[key]);
+  const key = keys[0];
+  if (!key) return null;
+  if (event.crossRepository !== false || !developer || developer.id !== event.devAgentId || developer.role !== 'dev' || developer.repoId !== event.repoId) return null;
+  return { key, keys, score: (developer.score ?? 0) + (event.kind === 'merged' ? 2 : -1) };
 }

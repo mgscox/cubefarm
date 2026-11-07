@@ -1,3 +1,4 @@
+import { QaHistory } from './QaHistory';
 import { PrContributions } from './PrContributions';
 import { PromptTextarea } from './PromptTextarea';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -285,6 +286,7 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
           ))}
         </details>
       )}
+      <QaHistory repoId={repoId} />
       <div className="kanban">
         {column(
           '📋 Backlog',

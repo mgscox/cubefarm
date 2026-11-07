@@ -27,6 +27,8 @@ export interface FloorOptions {
 }
 
 export const api = {
+  correctQaFinding: (id: string, findingId: string, classification: import('../../shared/types').QaClassification, reason: string) =>
+    call('POST', `/api/qa-outcomes/${encodeURIComponent(id)}/corrections`, { findingId, classification, reason, actor: 'manager' }),
   uploadImage: async (file: File): Promise<string> => {
     const response = await fetch('/api/attachments/images', { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
     const data = await response.json() as { path?: string; error?: string };

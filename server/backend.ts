@@ -45,6 +45,7 @@ export interface Backend extends Machine {
   branchAhead(fullName: string, base: string, branch: string): Promise<number>;
   containsCommit(fullName: string, headSha: string, requiredSha: string): Promise<boolean>;
   prDetails(fullName: string, number: number): Promise<github.PrDetails>;
+  qaCi: typeof github.qaCi;
   issueDetails(fullName: string, number: number): Promise<{ title: string; body: string }>;
   commentPull(fullName: string, number: number, body: string): Promise<string>;
   uploadEvidence(fullName: string, filePath: string, data: Buffer): Promise<string>;
@@ -101,6 +102,7 @@ export const realBackend: Backend = {
   deskHead: workspace.deskHead,
   deskExists: workspace.deskExists,
   prDetails: github.prDetails,
+  qaCi: github.qaCi,
   issueDetails: github.issueDetails,
   commentPull: github.commentPull,
   uploadEvidence: github.uploadEvidence,
