@@ -4475,6 +4475,32 @@ describe('QA rounds', () => {
       expect(merge).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'squash', 'sha-1');
     });
 
+    it.each(['explicit fail', 'confirmed finding'] as const)('keeps a posted %s audit blocked when a later revision read fails', async (variant) => {
+      const { tester, comment } = await securityDesk();
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+      let posted = false;
+      let failedRead = false;
+      comment.mockImplementation(async () => { posted = true; return 'comment-url'; });
+      const pr = { ...pull, labels: ['ready-for-review'], baseSha: 'base-1', body: '', isCrossRepository: false };
+      vi.mocked(s.backend.prDetails).mockImplementation(async () => {
+        if (posted && !failedRead) {
+          failedRead = true;
+          throw new Error('HTTP 502');
+        }
+        return pr;
+      });
+      await s.onQaFinished(tester, repo, result(true, {
+        ...sandboxReport, checks: auditChecks, validationGap: 'none', summary: 'Tenant boundary bypass',
+        ...(variant === 'explicit fail' ? { verdict: 'fail' } : { verdict: 'pass', blockingFindings: 'confirmed' }),
+      }));
+      expect(failedRead).toBe(true);
+      expect(rec).toMatchObject({ status: 'needs-human', testedSha: 'sha-1', failedSha: 'sha-1', commentUrl: 'comment-url' });
+      s.repoRt.get(repo.id)!.pulls = [{ ...pull, labels: ['ready-for-review'] }];
+      await expect(swarm.mergePr({ floor: repo.floor, number: 13, reason: 'Manager requested merge' })).rejects.toMatchObject({ status: 409 });
+      expect(merge).not.toHaveBeenCalled();
+    });
+
     it('queues a labeled PR that already passed regular QA, even when automatic merge is off', () => {
       Object.assign(rec, { status: 'passed', passedSha: pull.headSha, testedSha: pull.headSha });
       s.reconcilePulls(repo, [{ ...pull, labels: ['ready-for-review'] }]);

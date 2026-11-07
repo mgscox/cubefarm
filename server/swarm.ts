@@ -4557,7 +4557,8 @@ export class Swarm {
         fixReason: pass || incomplete ? null : conflictFix ? 'conflict' : 'qa',
         ...(conflictFix ? { mergeFixes: rec.mergeFixes + 1 } : {}),
         passedSha: pass && !escalate ? rec.testedSha : null,
-        failedSha: pass || incomplete ? null : rec.testedSha,
+        // The report's own verdict, even if a later read left the workflow incomplete: a manager override must not see a pass.
+        failedSha: report.verdict === 'fail' ? rec.testedSha : null,
         ...(!security ? { ciRequired: environmentOnly } : {}),
         securityReview: security && pass && rec.testedSha ? { ...review, approvedSha: rec.testedSha } : rec.securityReview,
         ...(security && pass ? { securityLabel: false } : {}), // the office removed it, not the manager
