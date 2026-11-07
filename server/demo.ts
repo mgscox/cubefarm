@@ -1011,6 +1011,10 @@ export function createDemoBackend(): Backend {
       const i = repos.get(fullName)?.issues.find((x) => x.number === number);
       return { title: i?.title ?? `Issue #${number}`, body: i?.body ?? '' };
     },
+    commentIssue: async (fullName, number) => {
+      if (!repos.get(fullName)?.issues.some((i) => i.number === number)) throw new Error(`Unknown issue #${number}`);
+      return `https://github.com/${fullName}/issues/${number}#issuecomment-${Date.now()}`;
+    },
     commentPull: async (fullName, number) => `https://github.com/${fullName}/pull/${number}#issuecomment-${Date.now()}`,
     uploadEvidence: async (fullName, filePath) => `https://github.com/${fullName}/raw/swarm-qa-evidence/${filePath}`,
     ensureClone: async () => new Promise((r) => setTimeout(r, 400)),
@@ -1448,6 +1452,8 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
       }
       const close = text.match(/\bclose\s+(?:issue\s*)?#(\d+)\s+on\s+floor\s+(\d+)\s+because\s+([^\n]+)/i);
       if (close) return use('close_issue', { floor: Number(close[2]), number: Number(close[1]), reason: close[3].trim() });
+      const comment = text.match(/\bcomment\s+on\s+(?:issue\s*)?#(\d+)\s+on\s+floor\s+(\d+):\s*([\s\S]+)/i);
+      if (comment) return use('comment_issue', { floor: Number(comment[2]), number: Number(comment[1]), body: comment[3].trim().slice(0, 6000) });
       const triage = text.match(/\btriage\s+(?:issue\s*)?#(\d+)\s+on\s+floor\s+(\d+)/i);
       if (triage) return use('route_issue', { floor: Number(triage[2]), number: Number(triage[1]), triaged: true });
       const merge = text.match(/\bmerge\s+(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))\s+(?:because|with|reason)\s+([^\n]+)/i);
