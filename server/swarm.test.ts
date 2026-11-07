@@ -13,7 +13,7 @@ import type { AgentTerminal } from './terminal.ts';
 import { createDemoBackend, demoApprovedProposal, demoForkPull, demoPull } from './demo.ts';
 import { newPublication } from './publication.ts';
 import type { TrackedIssue } from './github.ts';
-import { HttpError, securityReportOutcome, Swarm } from './swarm.ts';
+import { HttpError, resourceNote, resourceOnlyAudit, securityReportOutcome, Swarm } from './swarm.ts';
 import { RUN_HISTORY_FILE, STATE_FILE, VERSION } from './config.ts';
 import { operationSignal } from './operation.ts';
 import { CEO_ID, type ApprovedSnapshot, type IssueInfo, type PublicationView, type PrContributionView, type QaCheck, type QaView, type PullInfo, type RequestedStart, type ParkedBranch, type ServerEvent } from '../shared/types.ts';
@@ -3956,6 +3956,19 @@ describe('QA rounds', () => {
     expect(merge).not.toHaveBeenCalled();
   });
 
+  it('treats a resource-only QA failure like an environment one, without charging a round', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: pull.headSha });
+    const { round, retests } = rec;
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'fail', summary: 'Feature works; suite cancelled.',
+      checks: [{ name: 'Local suite', result: 'fail', failureKind: 'resources', details: 'Cancelled under memory pressure.',
+        resources: { freeMemory: '0.8 GB', swap: '0 B', cancelled: 204 } }] }));
+    expect(rec).toMatchObject({ status: 'passed', ciRequired: true, passedSha: pull.headSha, round, retests,
+      mergeNote: 'QA desk ran out of memory (free 0.8 GB, swap 0 B, 204 tests cancelled); not charged a round' });
+    expect(rec.summary).not.toMatch(/timed out/);
+  });
+
   it('accepts the demo environment-only report through the same QA path', async () => {
     const tester = addAgent('q1', 'Grace', 'qa', 0);
     Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
@@ -4570,6 +4583,70 @@ describe('QA rounds', () => {
       await s.onQaFinished(nextTester, repo, result(true, sandboxReport));
       expect(rec).toMatchObject({ status: 'passed', round: 2, retests: 0, passedSha: pull.headSha });
       expect(comment.mock.calls.at(-1)?.[2]).toContain('Security review report: ✅ Passed');
+    });
+
+    describe('when the desk runs out of memory', () => {
+      const oom: QaCheck = { name: 'Dynamic validation', result: 'skip', failureKind: 'resources', details: 'Suite cancelled under memory pressure.',
+        resources: { freeMemory: '0.8 GB', swap: '0 B', load: '61', cancelled: 204 } };
+      const oomReport = { ...sandboxReport, verdict: 'incomplete', validationGap: 'other',
+        checks: [...auditChecks.filter((c) => c.name !== 'validate-findings.cjs'), { ...oom, name: 'validate-findings.cjs' }, oom] };
+      const note = 'QA desk ran out of memory (free 0.8 GB, swap 0 B, load 61, 204 tests cancelled); not charged a round';
+
+      it('recognizes resource-only audits and words them as such', () => {
+        const report = { ...oomReport, verdict: 'incomplete' as const, validationGap: 'other' as const, blockingFindings: 'none' as const, commands: [], screenshots: [] };
+        expect(resourceOnlyAudit(report)).toBe(true);
+        expect(resourceOnlyAudit({ ...report, blockingFindings: 'needs_validation' })).toBe(false);
+        expect(resourceOnlyAudit({ ...report, checks: [...report.checks, { name: 'Auth', result: 'fail', failureKind: 'code', details: 'Bypass' }] })).toBe(false);
+        expect(resourceOnlyAudit({ ...report, checks: report.checks.filter((c) => c.name !== 'Scoped audit coverage') })).toBe(false);
+        expect(resourceNote(report.checks)).toBe(note);
+        expect(resourceNote([{ ...oom, resources: undefined }])).toBe('QA desk ran out of memory; not charged a round');
+      });
+
+      it('retries once without charging a round, then needs green checks instead of a human', async () => {
+        const { tester, comment } = await securityDesk();
+        const alternate = addAgent('q3', 'Marple', 'qa', 2);
+        await s.onQaFinished(tester, repo, result(true, oomReport));
+        expect(rec).toMatchObject({ status: 'queued', round: 2, retests: 0, passedSha: null, failedSha: null,
+          resourceRetry: { headSha: pull.headSha, agentId: 'q2' }, mergeNote: `${note}; retrying once` });
+        expect(comment.mock.calls.at(-1)?.[2]).toContain('no QA round charged');
+        expect(comment.mock.calls.at(-1)?.[2]).not.toMatch(/timed out/);
+        const run = vi.spyOn(s, 'runQa');
+        expect(s.startPipelineWork(repo)).toBe(true);
+        expect(run).toHaveBeenLastCalledWith(alternate, repo, rec);
+        await run.mock.results.at(-1)?.value;
+        await s.onQaFinished(alternate, repo, result(true, oomReport));
+        expect(rec).toMatchObject({ status: 'passed', round: 2, retests: 0, passedSha: pull.headSha, ciRequired: true, mergeNote: note });
+        expect(rec).toHaveProperty('securityReview.approvedSha', pull.headSha);
+        const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+        expect(await s.advanceMerge(repo, rec, { ...pull, state: 'OPEN', checks: 'none', hasSuccessfulChecks: false })).toBe(false);
+        expect(rec.mergeNote).toBe('waiting for passing GitHub checks to cover environment-blocked local validation');
+        expect(merge).not.toHaveBeenCalled();
+        // The office removed the security label when the review passed.
+        vi.mocked(s.backend.prDetails).mockResolvedValue({ ...pull, baseSha: 'base-1', body: '', isCrossRepository: false });
+        expect(await s.advanceMerge(repo, rec, { ...pull, state: 'OPEN', checks: 'passing', hasSuccessfulChecks: true })).toBe(true);
+        expect(merge).toHaveBeenCalled();
+      });
+
+      it("waits for the floor's other QA session rather than retry on the same desk beside it", async () => {
+        const { tester } = await securityDesk();
+        await s.onQaFinished(tester, repo, result(true, oomReport));
+        const busy = addAgent('q3', 'Marple', 'qa', 2);
+        Object.assign(busy, { status: 'working', task: 'qa', prNumber: 99 });
+        const run = vi.spyOn(s, 'runQa');
+        expect(s.startPipelineWork(repo)).toBe(false);
+        Object.assign(busy, { status: 'done' });
+        expect(s.startPipelineWork(repo)).toBe(true);
+        expect(run).toHaveBeenLastCalledWith(busy, repo, rec);
+      });
+
+      it('still fails a code defect found in the same run', async () => {
+        const { tester } = await securityDesk();
+        await s.onQaFinished(tester, repo, result(true, { ...oomReport, verdict: 'fail', blockingFindings: 'confirmed',
+          checks: [...oomReport.checks, { name: 'Tenant boundary', result: 'fail', failureKind: 'code', details: 'Reads another tenant.' }],
+          fixInstructions: 'Check the tenant.' }));
+        expect(rec).toMatchObject({ status: 'failed', passedSha: null });
+        expect(rec).not.toHaveProperty('resourceRetry');
+      });
     });
 
     it.each([
