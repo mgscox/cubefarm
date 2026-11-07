@@ -613,6 +613,7 @@ export async function branchAhead(fullName: string, base: string, branch: string
 export interface PrDetails {
   number: number;
   title: string;
+  createdAt?: string;
   labels?: string[];
   body: string;
   url: string;
@@ -632,6 +633,7 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
   const raw = await ghJson<{
     number: number;
     title: string;
+    createdAt: string;
     labels: { name: string }[];
     body: string;
     url: string;
@@ -645,10 +647,11 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     state: PrDetails['state'];
     mergeable: string;
     mergeStateStatus: string;
-  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,labels,body,url,headRefName,headRefOid,baseRefOid,baseRefName,isDraft,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
+  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,createdAt,labels,body,url,headRefName,headRefOid,baseRefOid,baseRefName,isDraft,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
   return {
     number: raw.number,
     title: raw.title,
+    createdAt: raw.createdAt,
     labels: (raw.labels ?? []).map((label) => label.name),
     body: raw.body ?? '',
     url: raw.url,

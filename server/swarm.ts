@@ -17,6 +17,7 @@ import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, readConfigEnv, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, VERSION, WORKSPACE_ROOT } from './config.ts';
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type MergePrRequest, type OfficeTools, type ParkPrRequest, type ResearchRequest, type StartIssueRequest } from './ceo.ts';
 import { developerFeedback, type FeedbackEvent } from './feedback.ts';
+import { submittedContribution, finishedContribution } from './prContributions.ts';
 import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
 import { issueHolder, duplicateIssueSessions, issueTaken } from './issueClaims.ts';
@@ -53,7 +54,7 @@ import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isPrototypeIssue, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, PROTOTYPE_BRANCH, prototypeIssueNumber, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
-import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView } from '../shared/types.ts';
+import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView, type PrContributionView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
 import { COMPANY_RESEARCH_DOCS, isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
 import type {
@@ -175,6 +176,7 @@ interface HeldRetry {
 
 /** A pull request's trip through QA. */
 interface QaRecord extends QaView {
+  repairAttemptId?: string;
   reviewId: string; // distinguish QA cycles when a closed PR is reopened
   crossRepository?: boolean; // from a fork: never scores an office developer (unknown on records saved before it existed)
   closed?: boolean; // Keep the security requirement if this PR is reopened.
@@ -230,6 +232,7 @@ interface Persisted {
   agents: PersistedAgent[];
   feedbackEvents: Record<string, true>;
   qa: QaRecord[];
+  prContributions: PrContributionView[];
   requests: HireRequestView[];
   ceo: CeoState;
   research: ResearchState;
@@ -569,6 +572,7 @@ export class Swarm {
     agents: [],
     feedbackEvents: {},
     qa: [],
+    prContributions: [],
     requests: [],
     ceo: { queue: [], job: null, lastReviewAt: null, lastFingerprint: null },
     research: { queue: [], job: null, done: [] },
@@ -732,6 +736,7 @@ export class Swarm {
           deskBox: typeof a.deskBox === 'string' ? a.deskBox : '',
         })),
         feedbackEvents: loaded.feedbackEvents ?? {},
+        prContributions: loaded.prContributions ?? [],
         qa: (loaded.qa ?? []).map((q) => ({
           ...q,
           reviewId: q.reviewId ?? crypto.randomUUID(),
@@ -1053,6 +1058,7 @@ export class Swarm {
       settings: this.state.settings,
       repos: this.state.repos.map((r) => this.repoView(r)),
       agents: this.state.agents.map((a) => this.agentView(a, true)),
+      prContributions: this.state.prContributions,
       qa: this.state.qa.filter((q) => !q.closed).map((q) => this.qaView(q)),
       requests: this.state.requests,
       ceo: this.ceoInfo(),
@@ -1116,6 +1122,20 @@ export class Swarm {
   private setQa(rec: QaRecord, patch: Partial<QaRecord>) {
     Object.assign(rec, patch, { updatedAt: Date.now() });
     this.broadcast({ type: 'qa', qa: this.qaView(rec) });
+    this.save();
+  }
+
+  private contribution(repoId: string, pr: Pick<PrDetails, 'number' | 'title' | 'url' | 'state'>): PrContributionView {
+    return this.state.prContributions.find((h) => h.repoId === repoId && h.prNumber === pr.number) ??
+      { repoId, prNumber: pr.number, title: pr.title, url: pr.url, state: pr.state, original: null, repairs: [] };
+  }
+
+  private setContribution(history: PrContributionView) {
+    const index = this.state.prContributions.findIndex((h) => h.repoId === history.repoId && h.prNumber === history.prNumber);
+    if (index >= 0 && JSON.stringify(this.state.prContributions[index]) === JSON.stringify(history)) return;
+    if (index < 0) this.state.prContributions.push(history);
+    else this.state.prContributions[index] = history;
+    this.broadcast({ type: 'prContribution', contribution: history });
     this.save();
   }
 
@@ -2440,6 +2460,7 @@ export class Swarm {
 
   /** Keep agents and QA records in step with what happened to PRs on GitHub. */
   private reconcilePulls(repo: PersistedRepo, pulls: PullInfo[]) {
+    for (const pr of pulls) this.setContribution({ ...this.contribution(repo.id, pr), title: pr.title, url: pr.url, state: pr.state });
     for (const pr of pulls.filter((p) => p.state === 'MERGED')) {
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === pr.number);
       const owner = this.state.agents.find((a) => a.id === rec?.devAgentId && a.role === 'dev' && a.repoId === repo.id);
@@ -2492,6 +2513,8 @@ export class Swarm {
   }
 
   private closeQaRecord(rec: QaRecord, state: 'CLOSED' | 'MERGED') {
+    const history = this.state.prContributions.find((h) => h.repoId === rec.repoId && h.prNumber === rec.prNumber);
+    if (history) this.setContribution({ ...history, state });
     if (state === 'MERGED') this.recordFeedback({ kind: 'merged', ...rec });
     const review = rec.securityReview;
     if (state === 'CLOSED' && review) {
@@ -3379,7 +3402,11 @@ export class Swarm {
     const generation = this.agentRt.get(a.id)?.generation;
     const state = await (work.kind === 'issue'
       ? this.backend.readIssue(repo.fullName, work.number).then((i) => (issueClosed(i) ? 'CLOSED' : 'OPEN'))
-      : this.backend.prDetails(repo.fullName, work.number).then((d) => d.state)
+      : this.backend.prDetails(repo.fullName, work.number).then((d) => {
+        const pull = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === work.number);
+        if (pull) pull.headSha = d.headSha;
+        return d.state;
+      })
     ).catch(() => 'OPEN' as const);
     if (!this.state.agents.includes(a) || a.status !== 'preparing' || this.agentRt.get(a.id)?.generation !== generation) return true;
     if (state === 'OPEN') return false;
@@ -3708,6 +3735,7 @@ export class Swarm {
         a.prNumber = pr.number;
         a.prUrl = pr.url;
         crossRepository = false;
+        this.setContribution(submittedContribution(this.contribution(repo.id, pr), pr, a, Date.now()));
       }
     }
 
@@ -4497,6 +4525,7 @@ export class Swarm {
     this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
     const generation = this.agentRt.get(dev.id)?.generation;
     if (await this.closedBeforeStart(dev, repo, { kind: 'pr', number: rec.prNumber })) return;
+    this.startRepairContribution(dev, repo, rec, this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headSha ?? null);
     const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, headRef, { rec, task: 'fix', author });
     if (this.agentRt.get(dev.id)?.generation !== generation) return;
     if (!cwd) {
@@ -4544,12 +4573,27 @@ export class Swarm {
     await this.startAgentSession(dev, repo, cwd, prompt, this.buildSystemAppend(dev, repo, cwd, headRef, { pr: rec.prNumber, headRef }), resume);
   }
 
+  private startRepairContribution(dev: PersistedAgent, repo: PersistedRepo, rec: QaRecord, startingSha: string | null, findings = rec.fixInstructions ?? rec.summary) {
+    const pull = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber);
+    const history = this.contribution(repo.id, pull ?? { number: rec.prNumber, title: `PR #${rec.prNumber}`, url: '', state: 'OPEN' });
+    const attemptId = crypto.randomUUID();
+    this.setContribution({ ...history, repairs: [...history.repairs, {
+      id: attemptId, agentId: dev.id, name: dev.name, reason: rec.fixReason ?? 'qa',
+      startingSha, submittedSha: null,
+      reviewId: rec.reviewId, round: rec.round, commentUrl: rec.commentUrl,
+      findings, startedAt: Date.now(), finishedAt: null,
+    }] });
+    this.setQa(rec, { repairAttemptId: attemptId });
+  }
+
   private async onFixFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult) {
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
     const generation = this.agentRt.get(a.id)?.generation;
-    // Did it push anything? A checks fix may only re-run a flaky check, so only the other fixes are asked.
-    const head = rec && result.ok && a.status !== 'stopped' && rec.fixReason !== 'checks' ? await this.prHead(a, repo, rec.prNumber) : null;
+    const attemptId = rec?.repairAttemptId;
+    const head = rec && a.status !== 'stopped' && (attemptId || (result.ok && rec.fixReason !== 'checks')) ? await this.prHead(a, repo, rec.prNumber) : null;
     if (!this.state.agents.includes(a) || this.officeUpdate.handedOver || this.agentRt.get(a.id)?.generation !== generation) return; // the task moved on meanwhile
+    const history = this.state.prContributions.find((h) => h.repoId === repo.id && h.prNumber === a.prNumber);
+    if (history && attemptId) this.setContribution(finishedContribution(history, attemptId, a.id, head, Date.now()));
     const devs = this.state.agents.filter((x) => x.repoId === repo.id && x.role === 'dev').length;
     if (a.status === 'stopped') {
       if (rec?.status === 'fixing') this.setQa(rec, { status: 'failed' });
@@ -4632,6 +4676,14 @@ export class Swarm {
     a.startedAt = Date.now();
     if (a.task === null) a.task = 'issue';
     const fixing = a.task === 'fix' && a.prNumber ? { pr: a.prNumber, headRef: a.branch } : undefined;
+    if (fixing) {
+      const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
+      if (rec) {
+        // Typed prompts need synchronous admission before the CLI hook returns.
+        const head = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headSha ?? null;
+        this.startRepairContribution(a, repo, rec, head, text);
+      }
+    }
     await this.startAgentSession(a, repo, cwd, text, this.buildSystemAppend(a, repo, cwd, a.branch, fixing), a.sessionId, undefined, typed ? 'typed' : null);
   }
 
@@ -6446,7 +6498,7 @@ export class Swarm {
           }),
           pullRequests: rt.pulls
             .filter((p) => p.state === 'OPEN')
-            .map((p) => prStatusView(p, this.state.qa.find((x) => x.repoId === r.id && x.prNumber === p.number), { maxQaRounds: MAX_QA_ROUNDS, agentName })),
+            .map((p) => prStatusView(p, this.state.qa.find((x) => x.repoId === r.id && x.prNumber === p.number), { maxQaRounds: MAX_QA_ROUNDS, agentName, contribution: this.state.prContributions.find((h) => h.repoId === r.id && h.prNumber === p.number) })),
           mergedRecently: rt.pulls.filter((p) => p.state === 'MERGED').slice(0, full ? undefined : 5).map((p) => `#${p.number} ${p.title}`),
         };
       });

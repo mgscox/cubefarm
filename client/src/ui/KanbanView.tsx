@@ -1,3 +1,4 @@
+import { PrContributions } from './PrContributions';
 import { PromptTextarea } from './PromptTextarea';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -147,6 +148,7 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
   const repo = useStore((s) => s.repos.find((r) => r.id === repoId));
   const allAgents = useStore((s) => s.agents);
   const qaRecords = useStore((s) => s.qa);
+  const contributions = useStore((s) => s.prContributions);
   const openOverlay = useStore((s) => s.openOverlay);
   const agents = useMemo(() => agentsOnRepo(allAgents, repoId), [allAgents, repoId]);
   const cols = useMemo(() => (repo ? kanbanFor(repo, agents, qaRecords) : null), [repo, agents, qaRecords]);
@@ -227,6 +229,7 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
               {c.title}
             </div>
             {render(c)}
+            {c.prNumber && <PrContributions history={contributions.find((h) => h.repoId === repoId && h.prNumber === c.prNumber)} />}
           </div>
         ))}
       </div>
@@ -271,6 +274,17 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
       {repo.syncError && <div className="term-error">⚠️ {repo.syncError}</div>}
       {showForm && <IssueForm repoId={repo.id} agents={devs} onDone={() => setShowForm(false)} />}
 
+      {contributions.some((h) => h.repoId === repoId && (h.state === 'CLOSED' || !repo.pulls.some((p) => p.number === h.prNumber))) && (
+        <details>
+          <summary>Archived PR contributions</summary>
+          {contributions.filter((h) => h.repoId === repoId && (h.state === 'CLOSED' || !repo.pulls.some((p) => p.number === h.prNumber))).map((h) => (
+            <div key={h.prNumber} className="kcard">
+              <a href={h.url} target="_blank" rel="noreferrer">PR #{h.prNumber}: {h.title}</a> · {h.state.toLowerCase()}
+              <PrContributions history={h} />
+            </div>
+          ))}
+        </details>
+      )}
       <div className="kanban">
         {column(
           '📋 Backlog',
