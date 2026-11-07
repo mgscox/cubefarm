@@ -6429,6 +6429,39 @@ describe('closed work', () => {
   });
 });
 
+describe('silent QA and fix loop guard', () => {
+  it.each(['qa', 'fix'] as const)('counts each silent %s stop once and parks the third, freeing the desk', async (task) => {
+    const recovery = s as Internals & { watchSilentSessions(): void };
+    const a = s.state.agents[0];
+    Object.assign(a, { role: task === 'qa' ? 'qa' : 'dev', deskBox: '', cli: '' });
+    const rec = { repoId: repo.id, prNumber: 13, issueNumber: 66, status: task === 'qa' ? 'queued' : 'failed', round: 2, sessionFailures: 0, qaAgentId: null, devAgentId: task === 'fix' ? 'a1' : 'author', summary: 'Keep findings', checks: [], commentUrl: null, mergeNote: null, updatedAt: 0, fixCrashes: [] } as unknown as QaRec;
+    s.state.qa.push(rec);
+    const stop = vi.fn();
+    const start = async (agent: unknown, _repo: Repo, r: unknown) => {
+      Object.assign(agent as object, { status: 'working', task, prNumber: 13, startedAt: Date.now(), sessionId: 'thread' });
+      Object.assign(r as object, task === 'qa' ? { status: 'testing', qaAgentId: 'a1' } : { status: 'fixing', devAgentId: 'a1' });
+      Object.assign(s.agentRt.get('a1')!, { session: { send: vi.fn(), stop } });
+    };
+    vi.spyOn(s, task === 'qa' ? 'runQa' : 'runFix').mockImplementation(start);
+    for (let n = 1; n <= 3; n++) {
+      expect(s.startPipelineWork(repo)).toBe(true);
+      vi.setSystemTime(Date.now() + 60 * 60_000);
+      recovery.watchSilentSessions();
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      recovery.watchSilentSessions();
+      expect(stop).toHaveBeenCalledTimes(n);
+      expect(a.taskFailures).toEqual({ key: `r1:${task}:13`, count: n });
+      vi.setSystemTime(Date.now() + 2 * 60_000);
+      s.recoverDesks();
+      expect(a.taskFailures).toEqual({ key: `r1:${task}:13`, count: n });
+      if (n < 3) expect(rec).toMatchObject({ status: task === 'qa' ? 'queued' : 'failed', sessionFailures: 0 });
+    }
+    expect(rec).toMatchObject({ status: 'needs-human', round: 2, sessionFailures: 0, summary: expect.stringContaining('failed this task 3 times') });
+    expect(a).toMatchObject({ status: 'idle', task: null, prNumber: null });
+    expect(s.startPipelineWork(repo)).toBe(false);
+  });
+});
+
 describe('silent session recovery', () => {
   type Recovery = Internals & { watchSilentSessions(): void; reattachSession(a: unknown): Promise<void> };
   let recovery: Recovery;
@@ -6467,10 +6500,35 @@ describe('silent session recovery', () => {
     recovery.watchSilentSessions();
     recovery.watchSilentSessions();
     expect(stop).toHaveBeenCalledOnce();
-    expect(dev()).toMatchObject({ status: 'stopped', sessionId: 'running-thread', branch: 'swarm/issue-66-ada', heldRetry: { issueNumber: 66, resume: true } });
+    expect(dev()).toMatchObject({ status: 'error', sessionId: 'running-thread', branch: 'swarm/issue-66-ada', heldRetry: { issueNumber: 66, resume: true } });
     expect(swarm.snapshot().repos[0].sessionRemedies?.['issue:66'].requeueAt).toBe(Date.now());
     cb.finished({ ok: true, text: '', costUsd: 0, turns: 0, errors: [] });
-    expect(dev().status).toBe('stopped');
+    expect(dev().status).toBe('error');
+  });
+
+  it('counts each silent issue stop once through cooldown and resume, then parks the third', async () => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ repo: repo.fullName, ...issue(66), state: 'OPEN' });
+    const held = s as unknown as { runHeldRetries(): void };
+    const silence = () => {
+      minutes(60);
+      recovery.watchSilentSessions();
+      minutes(10);
+      recovery.watchSilentSessions();
+    };
+    for (const count of [1, 2]) {
+      silence();
+      expect(dev()).toMatchObject({ status: 'error', heldRetry: { issueNumber: 66, resume: true }, taskFailures: { count } });
+      minutes(2);
+      s.recoverDesks();
+      expect(dev()).toMatchObject({ status: 'idle', taskFailures: { count } });
+      held.runHeldRetries();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dev()).toMatchObject({ status: 'working', task: 'issue', issueNumber: 66, taskFailures: { count } });
+    }
+    silence();
+    expect(stop).toHaveBeenCalledTimes(3);
+    expect(dev()).toMatchObject({ status: 'idle', task: null, heldRetry: null, taskFailures: { count: 3 } });
+    expect(repo.noWorkEndings).toEqual([expect.objectContaining({ issueNumber: 66, reason: expect.stringContaining('failed this task 3 times') })]);
   });
 
   it.each(['hook', 'log', 'terminal'] as const)('recent %s activity postpones the nudge', (source) => {
@@ -6494,8 +6552,10 @@ describe('silent session recovery', () => {
     minutes(10);
     recovery.watchSilentSessions();
     expect(stop).toHaveBeenCalledOnce();
-    expect(dev()).toMatchObject({ status: 'idle', task: null });
+    expect(dev()).toMatchObject({ status: 'idle', task: null, taskFailures: { count: 1 } });
     expect(repo.requestedStarts).toEqual([{ issueNumber: 66, preferredAgentId: 'a1', restartPending: true }]);
+    expect(s.startIssueWork(repo)).toBe(true);
+    expect(dev()).toMatchObject({ task: 'issue', issueNumber: 66, taskFailures: { count: 1 } });
   });
 
   it.each(['CLOSED', 'MERGED'] as const)('clears a kept CLI on a %s PR before attaching to it', async (state) => {

@@ -3207,7 +3207,8 @@ export class Swarm {
     if (!explicit && (issueWaitReason(this.workIssue(repo, issue), new Set(this.repoRt.get(repo.id)!.issues.map((i) => i.number))) || noWorkCoolingDown(repo.noWorkEndings?.find((r) => r.issueNumber === issueNumber), this.repoRt.get(repo.id)!.issuesFetchedAt))) throw new HttpError(409, `#${issueNumber} is not ready for automatic work`);
     this.checkIssueClaim(a, issueNumber);
     if (explicit) {
-      a.taskFailures = undefined;
+      // The office restarting an interrupted request keeps its loop-guard count; a manager's new start clears it.
+      if (!repo.requestedStarts.some((r) => r.issueNumber === issueNumber && r.preferredAgentId === a.id && r.restartPending)) a.taskFailures = undefined;
       this.setNoWorkEndings(repo, (repo.noWorkEndings ?? []).filter((r) => r.issueNumber !== issueNumber));
       this.issueFailures.delete(`${repo.id}#${issueNumber}`);
       const parent = issueParent(issue);
@@ -4919,19 +4920,21 @@ export class Swarm {
         this.nextGeneration(a); // Late completion and hook callbacks cannot change the requeued task.
         rt.session = null;
         rt.currentTool = null;
-        a.status = 'stopped';
-        a.stoppedBy = 'office';
+        // Counted here, so 'error' (not an office stop) keeps the cooldown recovery from counting it again.
+        a.status = 'error';
         a.endedAt = now;
+        a.lastError = 'Session went silent after the office nudge';
+        a.lastErrorAt = now;
         this.appendLog(a, [{ kind: 'system', text: '↺ Still silent ten minutes after the office nudge. Ending this session and requeuing its work.' }]);
         session.stop();
         rt.terminal?.releaseIdle?.();
-        if (a.task === 'issue' && !a.prNumber && a.sessionId && a.branch) {
-          this.recordTaskFailure(a);
-          if (!this.parkFailedTask(a, repo)) {
+        this.recordTaskFailure(a);
+        if (!this.parkFailedTask(a, repo)) {
+          if (a.task === 'issue' && !a.prNumber && a.sessionId && a.branch) {
             a.heldRetry = { issueNumber: a.issueNumber, ahead: 0, why: `finish issue #${a.issueNumber} and open its PR`, resume: true };
             this.emitAgent(a);
-          }
-        } else this.deferPrepared(a, repo);
+          } else this.deferPrepared(a, repo);
+        }
       }
       this.emitRepo(repo);
       this.save();
