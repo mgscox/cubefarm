@@ -156,7 +156,7 @@ export function TerminalView({ agentId }: { agentId: string }) {
         {agent.turns > 0 && <span className="muted">{agent.turns} turns</span>}
         {agent.costUsd > 0 && <span className="muted" title="API-equivalent cost reported by the coding agent; subscription usage is billed by plan">≈${agent.costUsd.toFixed(2)}</span>}
       </div>
-      {agent.lastError && agent.status !== 'working' && <div className="term-error">⚠️ {agent.lastError}</div>}
+      {agent.lastError && (agent.status === 'error' || agent.status === 'stopped') && <div className="term-error">⚠️ {agent.lastError}</div>}
       {agent.brief && (
         <details className="small job-brief">
           <summary>Job description{agent.hiredBy === 'ceo' ? ' (from the CEO)' : ''}</summary>

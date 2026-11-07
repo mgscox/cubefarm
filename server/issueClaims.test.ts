@@ -69,13 +69,13 @@ describe('issue claims', () => {
     expect(duplicateIssueSessions([unknown, older, tied])).toEqual([{ keep: older, stop: tied }, { keep: older, stop: unknown }]);
   });
 
-  it.each([true, false])('repairs held retries with the same PR/oldest priority (linked reconnect: %s)', (linked) => {
+  it.each([true, false])('keeps a running session ahead of a held retry (linked reconnect: %s)', (linked) => {
     const held = { ...agent('held'), status: 'error' as const, heldRetry: {}, startedAt: 100 };
     const reconnect = { ...agent('reconnect'), prNumber: linked ? 13 : null, startedAt: 200 };
     expect(duplicateIssueSessions([
       held, reconnect, { ...held, id: 'qa', task: 'qa' },
       { ...held, id: 'floor', repoId: 'r2' }, { ...held, id: 'issue', issueNumber: 67 },
       { ...held, id: 'unassigned', issueNumber: null }, { ...held, id: 'no-task', task: null },
-    ])).toEqual([linked ? { keep: reconnect, stop: held } : { keep: held, stop: reconnect }]);
+    ])).toEqual([{ keep: reconnect, stop: held }]);
   });
 });

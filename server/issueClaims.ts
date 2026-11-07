@@ -36,12 +36,12 @@ export function issueHolder<T extends IssueClaim>(agents: T[], repoId: string, i
   return agents.find((a) => a.id !== except && a.repoId === repoId && a.issueNumber === issueNumber && holdsIssue(a));
 }
 
-/** Keep a linked PR's session, otherwise the oldest start; ties retain the existing order. */
+/** Keep a running session before a held retry, then a linked PR or the oldest start. */
 export function duplicateIssueSessions<T extends IssueClaim>(agents: T[]): { keep: T; stop: T }[] {
   const holders = new Map<string, T>();
   const duplicates: { keep: T; stop: T }[] = [];
   const ordered = agents.filter(holdsIssue)
-    .sort((a, b) => Number(b.prNumber != null) - Number(a.prNumber != null) || (a.startedAt ?? Infinity) - (b.startedAt ?? Infinity));
+    .sort((a, b) => Number(busy(b)) - Number(busy(a)) || Number(b.prNumber != null) - Number(a.prNumber != null) || (a.startedAt ?? Infinity) - (b.startedAt ?? Infinity));
   for (const a of ordered) {
     const key = `${a.repoId}#${a.issueNumber}`;
     const keep = holders.get(key);

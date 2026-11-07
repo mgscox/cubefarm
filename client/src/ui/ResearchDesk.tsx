@@ -78,7 +78,7 @@ export function ResearchDesk() {
       {!working && info.queue.length > 0 && usage.state !== 'normal' && (
         <div className="muted small">⏸ Claude's usage is {usage.state === 'paused' ? 'at its limit' : 'running high'}, so new research waits, like new issues do.</div>
       )}
-      {agent.lastError && agent.status !== 'working' && <div className="term-error">⚠️ {agent.lastError}</div>}
+      {agent.lastError && (agent.status === 'error' || agent.status === 'stopped') && <div className="term-error">⚠️ {agent.lastError}</div>}
       {agent.terminal ? (
         <LiveTerminal agentId={agent.id} />
       ) : (
