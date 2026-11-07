@@ -1,0 +1,41 @@
+import { expect, test } from '@playwright/test';
+import type { PlaybookEvaluation } from '../shared/types';
+
+test('a pinned demo evaluation retains evidence and compares small live cohorts', async ({ page, request, baseURL }, testInfo) => {
+  await page.route((url) => !url.href.startsWith(baseURL!) && !url.protocol.startsWith('data'), (route) => route.fulfill({ status: 200, body: '' }));
+  await page.addInitScript(() => localStorage.setItem('cubefarm:mode', 'dashboard'));
+  const state = await (await request.get('/api/state')).json();
+  const repo = state.repos[0];
+  const open = async () => {
+    await page.goto('/');
+    await page.getByRole('navigation', { name: 'Floors' }).getByRole('button', { name: new RegExp(repo.fullName) }).click();
+    await page.getByRole('button', { name: 'Kanban', exact: true }).click();
+    await page.locator('.evaluations > summary').click();
+  };
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await open();
+  const panel = page.locator('.evaluations');
+  const response = page.waitForResponse((r) => r.url().endsWith('/evaluations/demo'));
+  await panel.getByRole('button', { name: 'Run pinned demo evaluation' }).click();
+  const saved = await (await response).json() as PlaybookEvaluation;
+  expect(saved.cases[0]).toMatchObject({ baseResult: 'no', candidateResult: 'yes', comparable: true });
+  await expect(panel).toContainText('toolbar-375px: base no → candidate yes');
+  await expect(panel).toContainText('Artifact link missing; structured result retained');
+  await expect(panel).toContainText('1/1');
+  await expect(panel).toContainText('small sample');
+  await expect(panel).toContainText('2 unknown');
+  const exportResponse = await request.get(`/api/evaluations?repoId=${encodeURIComponent(repo.id)}&download=1`);
+  expect((await exportResponse.json()).evaluations).toContainEqual(saved);
+  await panel.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('playbook-evaluation.png'), fullPage: true });
+  await open();
+  await expect(panel).toContainText(saved.id);
+  await panel.getByText('Compare recorded runs', { exact: true }).click();
+  await panel.getByLabel('Reviewed lesson').selectOption(saved.lesson.id);
+  await panel.getByLabel('Pinned case ID').fill('toolbar-375px-recheck');
+  await panel.getByLabel('Expected behavior').fill('Toolbar buttons stay reachable at 375px.');
+  await panel.getByLabel('Base attempt').selectOption(saved.cases[0].base.attemptId);
+  await panel.getByLabel('Candidate attempt').selectOption(saved.cases[0].candidate.attemptId);
+  await panel.getByRole('button', { name: 'Save evaluation', exact: true }).click();
+  await expect(panel).toContainText('toolbar-375px-recheck: base no → candidate yes');
+});

@@ -38,6 +38,8 @@ export interface FloorOptions {
 }
 
 export const api = {
+  evaluatePlaybook: (repoId: string, input: unknown) => call('POST', `${r(repoId)}/evaluations`, input),
+  demoPlaybookEvaluation: (repoId: string) => call('POST', `${r(repoId)}/evaluations/demo`),
   correctQaFinding: (id: string, findingId: string, classification: import('../../shared/types').QaClassification, reason: string) =>
     call('POST', `/api/qa-outcomes/${encodeURIComponent(id)}/corrections`, { findingId, classification, reason, actor: 'manager' }),
   draftLesson: (repoId: string, input: LessonInput) => call<LessonView>('POST', `${r(repoId)}/lessons`, input),

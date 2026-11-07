@@ -173,6 +173,12 @@ app.get('/api/run-history', route((req, res) => {
   if (req.query.download) res.attachment(`cubefarm-run-history${filter.repoId ? `-${filter.repoId.replace(/[^\w.-]+/g, '-')}` : ''}.json`);
   return swarm.runHistory(filter);
 }));
+app.post('/api/repos/:repo/evaluations/demo', route((req) => swarm.demoPlaybookEvaluation(repoId(req))));
+app.get('/api/evaluations', route((req, res) => {
+  if (req.query.download) res.attachment('cubefarm-evaluations.json');
+  return swarm.evaluationExport(str(req.query.repoId) || undefined);
+}));
+app.post('/api/repos/:repo/evaluations', route((req) => swarm.evaluatePlaybook(repoId(req), req.body ?? {})));
 app.get('/api/lessons', route((req, res) => {
   const filter = { repoId: str(req.query.repoId) || undefined, specialty: str(req.query.specialty) || undefined };
   if (req.query.download) res.attachment(`cubefarm-lessons${filter.repoId ? `-${filter.repoId.replace(/[^\w.-]+/g, '-')}` : ''}.json`);

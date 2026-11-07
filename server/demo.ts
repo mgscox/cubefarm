@@ -1,3 +1,6 @@
+import type { QaOutcomeView, RunAttemptView } from '../shared/types.ts';
+import { draftLesson, reviewLesson } from './lessons.ts';
+import { playbookVersion } from './runHistory.ts';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -1628,4 +1631,44 @@ export function createDemoTelegram(): import('./telegram.ts').TelegramTransport 
     },
   };
   return fake;
+}
+
+/** A pinned viewport regression, its candidate replay, and small live cohorts; no sessions or external artifacts. */
+export function demoEvaluation(repoId: string, at = Date.now()) {
+  const prefix = `eval-${crypto.randomUUID()}`;
+  const basePlaybook = playbookVersion('developer', 'Check desktop layout.')!;
+  const candidatePlaybook = playbookVersion('developer', 'Check desktop and 375px toolbar layout.')!;
+  const run = (id: string, pr: number, candidate: boolean, patch: Partial<RunAttemptView> = {}): RunAttemptView => ({
+    id: `${prefix}-${id}`, parentId: null, repoId, repo: repoId, task: 'issue', specialty: 'frontend', issueNumber: pr - 10, prNumber: pr,
+    agent: { id: 'demo-eval-dev', name: 'Demo developer', role: 'dev', specialty: 'frontend' }, assignment: { reason: 'manager', factors: {} },
+    runtime: { cli: 'codex', model: null, effort: 'high', playbook: candidate ? candidatePlaybook : basePlaybook, office: 'demo-evaluation-v1' },
+    worker: { box: '', name: 'office', healthAtStart: null, healthAtEnd: null }, revisions: { start: 'base', submitted: `head-${pr}` },
+    sessionIds: [], review: null, times: { assignedAt: at - 100, startedAt: at - 90, endedAt: at - 80 },
+    usage: { sessions: 0, costUsd: 0, turns: 0 }, events: [], outcome: { result: 'delivered', cause: 'agent' }, ...patch,
+  });
+  const qa = (id: string, pr: number, patch: Partial<QaOutcomeView> = {}): QaOutcomeView => ({
+    id: `${prefix}-${id}`, repoId, prNumber: pr, reviewId: `${prefix}-review-${pr}`, round: 1, attemptId: `${prefix}-qa-${pr}`,
+    reviewer: { agentId: 'demo-eval-qa', name: 'Demo QA' }, startedAt: at - 70, finishedAt: at - 60, baseSha: 'base', headSha: `head-${pr}`,
+    revision: 'exact', classification: 'pass', observed: null, verdict: 'pass', summary: 'The toolbar buttons are reachable at 375px.',
+    checks: [], commands: [], findings: [], worker: { boxId: null, from: null, to: null, telemetry: null }, terminalReason: null, ci: null,
+    commentUrl: null, corrections: [], ...patch,
+  });
+  const defect = { id: `${prefix}-finding`, key: 'toolbar-overflow', check: '375px toolbar', classification: 'code' as const,
+    evidence: 'The toolbar overflows at 375px; the base wraps.', confirmed: true, attributableTo: null };
+  const outcomes = [qa('before', 9001, { verdict: 'fail', classification: 'code', findings: [defect], summary: defect.evidence }), qa('candidate', 9002),
+    qa('repair', 9001, { round: 2, headSha: 'fixed', startedAt: at - 20, finishedAt: at - 10 })];
+  const attempts = [run('base', 9001, false), run('candidate', 9002, true),
+    run('fix', 9001, true, { task: 'fix', revisions: { start: 'head-9001', submitted: 'fixed' },
+      times: { assignedAt: at - 50, startedAt: at - 45, endedAt: at - 30 }, outcome: { result: 'repaired', cause: 'agent' } }),
+    run('worker', 9003, true, { outcome: { result: 'start-failed', cause: 'worker' }, revisions: { start: null, submitted: null } }),
+    run('pending', 9004, true, { outcome: null, times: { assignedAt: at - 5, startedAt: null, endedAt: null } }),
+    run('unknown', 9005, true, { outcome: { result: 'failed', cause: 'unknown' }, revisions: { start: null, submitted: null } })];
+  const lesson = draftLesson({ kind: 'agent', specialty: 'frontend', title: 'Check the toolbar at 375px',
+    guidance: 'Before handing off, check that every toolbar button is reachable at 375px.',
+    sources: [{ qaOutcomeId: outcomes[0].id, findingId: defect.id }], verification: { kind: 'regression-test', test: 'toolbar at 375px', qaOutcomeId: outcomes[2].id } },
+  { repoId, outcomes, attempts }, 'demo reviewer', at);
+  reviewLesson(lesson, { action: 'approve', reason: 'Pinned regression and independent QA verify the recovery.' }, [lesson], 'demo reviewer', at);
+  return { attempts, outcomes, lesson, input: { lessonId: lesson.id, basePlaybook, candidatePlaybook, cases: [{ id: 'toolbar-375px',
+    expectedBehavior: 'All toolbar buttons are reachable at 375px on the first QA pass.', metric: 'firstPassQa', expected: true,
+    baseAttemptId: attempts[0].id, candidateAttemptId: attempts[1].id }] } };
 }

@@ -61,6 +61,7 @@ interface State {
   screens: Record<string, number>; // agentId -> screenshot timestamp (cache buster)
   qaOutcomes: import('../../shared/types').QaOutcomeView[];
   lessons: import('../../shared/types').LessonView[];
+  evaluations: NonNullable<WorldSnapshot['evaluations']>;
   scoreEvents: import('../../shared/types').ScoreEventView[];
   prContributions: PrContributionView[];
   runAttempts: NonNullable<WorldSnapshot['runAttempts']>;
@@ -179,6 +180,7 @@ export const useStore = create<State>((set, get) => ({
   qa: {},
   qaOutcomes: [],
   lessons: [],
+  evaluations: [],
   scoreEvents: [],
   prContributions: [],
   runAttempts: [],
@@ -239,6 +241,7 @@ export const useStore = create<State>((set, get) => ({
           qa,
           qaOutcomes: d.qaOutcomes ?? [],
           lessons: d.lessons ?? [],
+          evaluations: d.evaluations ?? [],
           scoreEvents: d.scoreEvents ?? [],
           prContributions: d.prContributions ?? [],
           runAttempts: d.runAttempts ?? [],
@@ -315,6 +318,10 @@ export const useStore = create<State>((set, get) => ({
       }
       case 'qaOutcome': {
         set({ qaOutcomes: [...get().qaOutcomes.filter((o) => o.id !== ev.outcome.id), ev.outcome] });
+        break;
+      }
+      case 'evaluation': {
+        set({ evaluations: [...get().evaluations.filter((e) => e.id !== ev.evaluation.id), ev.evaluation] });
         break;
       }
       case 'lesson': {
