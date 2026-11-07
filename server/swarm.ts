@@ -44,6 +44,7 @@ import { currentRound, nextStep, pickReviewers, promote, recordReview, REVIEW_FO
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { qaOutcome } from './qaOutcome.ts';
 import { qaFindings, workerSnapshot } from './qaEvidence.ts';
+import { deriveScoreEvents, projectScores, reconcileScores, SCORE_LEDGER_VERSION, ZERO_SCORES, type ScoreLedger } from './scores.ts';
 import { scoringFindings } from '../shared/qaEvidence.ts';
 import { lessonExport } from '../shared/lessons.ts';
 import { draftLesson, reviewLesson, reviseLesson } from './lessons.ts';
@@ -59,7 +60,7 @@ import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isPrototypeIssue, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, PROTOTYPE_BRANCH, prototypeIssueNumber, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
-import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView, type PrContributionView, type RunAssignReason, type RunAttemptView, type RunHistoryExport, type QaOutcomeView, type QaClassification, type LessonExport, type LessonView } from '../shared/types.ts';
+import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView, type PrContributionView, type RunAssignReason, type RunAttemptView, type RunHistoryExport, type QaOutcomeView, type QaClassification, type DeveloperScoresView, type LessonExport, type LessonView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
 import { COMPANY_RESEARCH_DOCS, isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
 import type {
@@ -93,6 +94,7 @@ import type {
   PullInfo,
   ParkedBranch,
   QaCheck,
+  QaResources,
   QaView,
   RepoView,
   RequestedStart,
@@ -199,6 +201,7 @@ interface QaRecord extends QaView {
   passedSha: string | null; // the head commit QA signed off on: auto-merge merges exactly that
   failedSha: string | null; // the head commit QA last failed: re-testing it unchanged would fail again
   ciRequired?: boolean; // environment-only local validation gaps require passing CI, even in repos with no checks
+  resourceRetry?: { headSha: string; agentId: string }; // the one uncharged retry after the desk ran out of memory on this revision
   fixCrashes: string[]; // developers whose fix session crashed since the last pushed fix, one entry per crash
   fixReason: FixReason | null; // why it was last sent back to a developer
   mergeFixes: number; // times it went back for failing checks or conflicts
@@ -249,6 +252,7 @@ interface Persisted {
   prContributions: PrContributionView[];
   qaOutcomes: QaOutcomeView[];
   lessons: LessonView[];
+  scoreLedger: ScoreLedger;
   requests: HireRequestView[];
   ceo: CeoState;
   research: ResearchState;
@@ -462,7 +466,18 @@ const QA_SCHEMA = {
           findingKey: { type: 'string', description: 'Stable short defect key; reuse for the same defect on an unchanged revision.' },
           confirmed: { type: 'boolean', description: 'True only for a confirmed defect with reproduction or source evidence in details.' },
           introducedBySha: { type: 'string', description: 'Contribution SHA proven to introduce the defect (e.g. head fails and base passes). Omit when attribution is unknown.' },
-          failureKind: { type: 'string', enum: ['code', 'environment'], description: 'For failed checks: environment only when worker limits prevented validation and no code defect is known or suspected. Reproducible or unexplained failures use code.' },
+          failureKind: { type: 'string', enum: ['code', 'environment', 'resources'], description: 'For failed or skipped checks: environment only when worker limits prevented validation and no code defect is known or suspected; resources when the run was cancelled or killed because the desk ran out of memory or swap (not a timeout). Reproducible or unexplained failures use code.' },
+          resources: {
+            type: 'object',
+            additionalProperties: false,
+            description: 'For failureKind=resources: what the desk showed when the run died.',
+            properties: {
+              freeMemory: { type: 'string', description: 'e.g. "0.8 GB"' },
+              swap: { type: 'string', description: 'free swap, e.g. "0 B"' },
+              load: { type: 'string', description: 'load average, e.g. "61"' },
+              cancelled: { type: 'number', description: 'tests cancelled or killed' },
+            },
+          },
         },
       },
     },
@@ -530,6 +545,34 @@ export function securityReportOutcome(report: QaReport): QaReport {
   return report;
 }
 
+function qaResources(r: QaResources): QaResources {
+  const text = (v: unknown) => typeof v === 'string' && v.trim() ? v.trim().slice(0, 40) : undefined;
+  return {
+    ...(text(r.freeMemory) && { freeMemory: text(r.freeMemory) }),
+    ...(text(r.swap) && { swap: text(r.swap) }),
+    ...(text(r.load) && { load: text(r.load) }),
+    ...(Number.isFinite(r.cancelled) && { cancelled: Math.max(0, Math.round(r.cancelled!)) }),
+  };
+}
+
+const workerLimit = (c: QaCheck) => c.failureKind === 'environment' || c.failureKind === 'resources';
+
+/** A security review whose only gaps are the desk running out of memory: source coverage done, no findings, no code failures. */
+export function resourceOnlyAudit(report: QaReport): boolean {
+  const gaps = report.checks.filter((c) => c.result !== 'pass');
+  return report.blockingFindings === 'none' && gaps.some((c) => c.failureKind === 'resources') &&
+    gaps.every((c) => workerLimit(c) || (c.name === 'Dynamic validation' && c.result === 'skip')) &&
+    report.checks.some((c) => c.name === REQUIRED_AUDIT_CHECKS[0] && c.result === 'pass');
+}
+
+/** The card's and company_status's wording for a run the desk's memory killed. */
+export function resourceNote(checks: QaCheck[]): string {
+  const r = checks.find((c) => c.failureKind === 'resources' && c.resources)?.resources ?? {};
+  const seen = [r.freeMemory && `free ${r.freeMemory}`, r.swap && `swap ${r.swap}`, r.load && `load ${r.load}`,
+    r.cancelled !== undefined && `${r.cancelled} tests cancelled`].filter(Boolean);
+  return `QA desk ran out of memory${seen.length ? ` (${seen.join(', ')})` : ''}; not charged a round`;
+}
+
 function parseReport(result: SessionResult, security = false): QaReport | null {
   let raw: unknown = result.structured;
   if (!raw && result.text) {
@@ -557,7 +600,8 @@ function parseReport(result: SessionResult, security = false): QaReport | null {
       ...(typeof c?.findingKey === 'string' ? { findingKey: c.findingKey } : {}),
       ...(typeof c?.confirmed === 'boolean' ? { confirmed: c.confirmed } : {}),
       ...(typeof c?.introducedBySha === 'string' ? { introducedBySha: c.introducedBySha } : {}),
-      ...(c?.failureKind === 'code' || c?.failureKind === 'environment' ? { failureKind: c.failureKind } : {}),
+      ...(c?.failureKind === 'code' || c?.failureKind === 'environment' || c?.failureKind === 'resources' ? { failureKind: c.failureKind } : {}),
+      ...(c?.failureKind === 'resources' && c.resources && typeof c.resources === 'object' ? { resources: qaResources(c.resources) } : {}),
     })) : [],
     commands: Array.isArray(r.commands) ? r.commands.map((c) => ({ command: String(c?.command ?? ''), result: String(c?.result ?? '') })) : [],
     screenshots: Array.isArray(r.screenshots) ? r.screenshots.map(String) : [],
@@ -602,6 +646,7 @@ export class Swarm {
     prContributions: [],
     qaOutcomes: [],
     lessons: [],
+    scoreLedger: { version: SCORE_LEDGER_VERSION, cutoverAt: 0, events: [] }, // a new office has no legacy history
     requests: [],
     ceo: { queue: [], job: null, lastReviewAt: null, lastFingerprint: null },
     research: { queue: [], job: null, done: [] },
@@ -621,6 +666,7 @@ export class Swarm {
   /** Links to the boxes: removed ones stay until the CLIs still running there have ended. */
   private boxConns = new Map<string, BoxConnection>();
   private officeTelemetry: MachineTelemetry | null = null;
+  private scoreTotals = new Map<string, DeveloperScoresView>(); // projected from state.scoreLedger
   private stopResources?: () => void;
   /**
    * The CEO's office tools. Every session gets its own server: one can only be connected to one session at a time, so
@@ -636,6 +682,7 @@ export class Swarm {
       proposeLetGo: (a) => this.proposeLetGo(a),
       fileIssue: (a) => this.fileIssue(a),
       closeIssue: (a) => this.closeIssue(a),
+      commentIssue: (a) => this.commentIssue(a),
       routeIssue: (a) => this.routeIssue(a),
       connectFloor: (a) => this.connectFloor(a),
       startIssue: (a) => this.startIssue(a),
@@ -768,6 +815,8 @@ export class Swarm {
         prContributions: loaded.prContributions ?? [],
         qaOutcomes: loaded.qaOutcomes ?? [],
         lessons: loaded.lessons ?? [],
+        // Earlier offices start Authorship and Repair at zero; their combined score stays as the legacy total.
+        scoreLedger: loaded.scoreLedger ?? { version: SCORE_LEDGER_VERSION, cutoverAt: Date.now(), events: [] },
         qa: (loaded.qa ?? []).map((q) => ({
           ...q,
           reviewId: q.reviewId ?? crypto.randomUUID(),
@@ -823,6 +872,7 @@ export class Swarm {
       // first run
     }
     await this.history.load();
+    this.scoreTotals = projectScores(this.state.scoreLedger.events);
     for (const r of this.state.repos) if (r.localPath) this.backend.setLocalPath(r.fullName, r.localPath);
     this.state.officeId ||= crypto.randomBytes(8).toString('hex');
     const interrupted: PersistedAgent[] = [];
@@ -1047,6 +1097,7 @@ export class Swarm {
       endedAt: a.endedAt,
       costUsd: a.costUsd,
       score: a.score ?? 0,
+      ...(a.role === 'dev' && { scores: this.scoreTotals.get(a.id) ?? ZERO_SCORES }),
       turns: a.turns,
       browserUrl: rt.browserUrl,
       hasScreenshot: !!rt.screenshot,
@@ -1095,6 +1146,7 @@ export class Swarm {
       runAttempts: this.history.attempts,
       qaOutcomes: this.state.qaOutcomes,
       lessons: this.state.lessons,
+      scoreEvents: this.state.scoreLedger.events,
       qa: this.state.qa.filter((q) => !q.closed).map((q) => this.qaView(q)),
       requests: this.state.requests,
       ceo: this.ceoInfo(),
@@ -1172,6 +1224,21 @@ export class Swarm {
     if (index < 0) this.state.prContributions.push(history);
     else this.state.prContributions[index] = history;
     this.broadcast({ type: 'prContribution', contribution: history });
+    this.save();
+    this.syncScores(history.repoId, history.prNumber);
+  }
+
+  /** Append whatever the PR's current contribution and QA evidence adds to or corrects in the score ledger. */
+  private syncScores(repoId: string, prNumber: number) {
+    const history = this.contribution(repoId, { number: prNumber, title: '', url: '', state: 'OPEN' });
+    const outcomes = this.state.qaOutcomes.filter((o) => o.repoId === repoId && o.prNumber === prNumber);
+    const ledger = this.state.scoreLedger;
+    const added = reconcileScores(ledger.events, { repoId, prNumber }, deriveScoreEvents(history, outcomes, ledger.cutoverAt), outcomes, Date.now());
+    if (!added.length) return;
+    ledger.events.push(...added);
+    this.scoreTotals = projectScores(ledger.events);
+    this.broadcast({ type: 'scoreEvents', events: added });
+    for (const a of this.state.agents) if (added.some((e) => e.agentId === a.id)) this.emitAgent(a);
     this.save();
   }
 
@@ -1350,6 +1417,7 @@ export class Swarm {
     outcome.revision = !pr || !outcome.headSha || !outcome.baseSha || !pr.baseSha ? 'unknown'
       : pr.headSha === outcome.headSha && pr.baseSha === outcome.baseSha ? 'exact' : 'stale';
     this.emitQaOutcome(outcome);
+    this.syncScores(outcome.repoId, outcome.prNumber);
   }
 
   private async recordQaOutcome(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport | null, result: SessionResult): Promise<QaOutcomeView> {
@@ -1416,6 +1484,7 @@ export class Swarm {
       }
     }
     this.emitQaOutcome(outcome);
+    this.syncScores(outcome.repoId, outcome.prNumber);
     await this.writeState();
     return correction;
   }
@@ -2602,6 +2671,8 @@ export class Swarm {
       return this.mergeNote(rec, `merge blocked: ${error}`);
     }
     this.recordFeedback({ kind: 'merged', ...rec });
+    const history = this.state.prContributions.find((h) => h.repoId === repo.id && h.prNumber === pr.number);
+    if (history) this.setContribution({ ...history, state: 'MERGED' });
     this.toast('success', `🔀 Merged PR #${pr.number} into ${repo.defaultBranch}: ${pr.title}`);
     await this.closeResolvedIssues(repo, pr.number, latest.closesIssues);
     return true;
@@ -4430,7 +4501,7 @@ export class Swarm {
       `2. Review the code as a careful reviewer would: git diff origin/${repo.defaultBranch}...HEAD. Look for bugs, unhandled errors and edge cases, security problems, leftover debug code, and new logic without tests.`,
       "3. Install dependencies if needed, then run the project's test suite, linters, type checks and build (whichever exist).",
       TEST_ENVIRONMENT_GUIDANCE,
-      'If worker limits (such as exhausted memory) prevent validation, distinguish them from code defects: mark only those failed checks failureKind=environment. Use this only with evidence that no code defect is known or suspected; reproducible or unexplained failures use code. The office records these local checks as skipped and requires green GitHub checks for the reviewed commit before merging an environment-only result. Do not request source changes just to satisfy a worker limitation.',
+      'If worker limits prevent validation, distinguish them from code defects: mark only those failed or skipped checks failureKind=environment, or failureKind=resources with the resources evidence (free memory, swap, load, tests cancelled) when the run was cancelled or killed under memory pressure. That is a resource failure, not a timeout: do not call it one. Use these only with evidence that no code defect is known or suspected; reproducible or unexplained failures use code. The office records these local checks as skipped and requires green GitHub checks for the reviewed commit before merging an environment-only result. Do not request source changes just to satisfy a worker limitation.',
       repo.browserTesting
         ? `4. If the project has a UI, start it in the background on port ${this.port(a)} (reserved for you) and exercise the change in a real browser with the Playwright tools: navigate, click, type, resize to a phone size, try edge cases, and check the console for errors. Take a screenshot with browser_take_screenshot (no filename) of every important state: the screenshots are attached to the PR as evidence. Stop the server afterwards.`
         : '4. Exercise the changed behaviour directly (run the program, call the API, write a quick script).',
@@ -4451,6 +4522,7 @@ export class Swarm {
       ...(repo.qaBrief ? [`Floor QA brief:\n${repo.qaBrief}`] : []),
       'Leave target source and GitHub state intact. The office records your verdict and owns the merge hold.',
       'No OS sandbox alone is a known desk limit: finish source review and artifact validation without running target code. If this is the only gap, no blocking finding exists, and normal QA/CI gates passed, return pass with validationGap=no-os-sandbox, normalGatesPassed=true, blockingFindings=none. Record gate evidence and "dynamic validation not run: no OS sandbox on this desk". High/critical confirmed or needs_validation findings still fail or hold; other coverage gaps remain incomplete.',
+      'If test or validator runs are cancelled or killed because the desk ran out of memory or swap, that is a resource failure, not a timeout: finish the source review, mark those checks skip with failureKind=resources and the resources evidence (free memory, swap, load, tests cancelled), and return incomplete. The office retries once without charging a QA round.',
       playbook,
       ONE_TURN,
     ].join('\n\n');
@@ -4658,12 +4730,14 @@ export class Swarm {
 
     // A worker limitation needs CI evidence, not developers pushing meaningless commits.
     const failedChecks = report.checks.filter((c) => c.result === 'fail');
-    const environmentOnly = !security && report.checks.some((c) => c.result !== 'pass' && c.failureKind === 'environment') &&
-      failedChecks.every((c) => c.failureKind === 'environment');
+    const environmentOnly = !security && report.checks.some((c) => c.result !== 'pass' && workerLimit(c)) &&
+      failedChecks.every(workerLimit);
+    const outOfMemory = report.checks.some((c) => c.result !== 'pass' && c.failureKind === 'resources') ? resourceNote(report.checks) : null;
     if (environmentOnly) {
       report.verdict = 'pass';
       report.checks = report.checks.map((c) => c.result === 'fail' ? { ...c, result: 'skip' } : c);
       report.summary += '\n\nLocal validation was blocked only by the worker environment; no code defect was reported. Merge requires passing GitHub checks for the reviewed commit. The incomplete local checks remain disclosed below.';
+      if (outOfMemory) report.summary += `\n\n${outOfMemory}.`;
     }
     // Keep the desk busy until the report is recorded: uploads/comments can outlast a scheduler tick.
     const sandboxIncomplete = security && report.verdict === 'incomplete';
@@ -4676,6 +4750,17 @@ export class Swarm {
     if (sandboxRetry) {
       report.verdict = 'incomplete';
       report.summary += `\n\nRetrying once on ${sandboxRetry.name}'s desk; no QA round charged.`;
+    }
+    // A desk out of memory says nothing about the code: retry once uncharged, then fall back to the environment-only rule.
+    const resourceGap = security && report.verdict !== 'pass' && resourceOnlyAudit(report);
+    const resourceRetry = resourceGap && !!rec?.testedSha && rec.resourceRetry?.headSha !== rec.testedSha;
+    const resourceFallback = resourceGap && !resourceRetry;
+    if (resourceRetry) {
+      report.verdict = 'incomplete';
+      report.summary += `\n\n${outOfMemory}; retrying once.`;
+    } else if (resourceFallback) {
+      report.verdict = 'pass';
+      report.summary += `\n\n${outOfMemory}. The retry ran out of memory too and no code defect was reported, so merge requires passing GitHub checks for the reviewed commit.`;
     }
     let pass = report.verdict === 'pass';
     let incomplete = report.verdict === 'incomplete';
@@ -4722,7 +4807,7 @@ export class Swarm {
         }
       }
       if (gone()) return;
-      const outcome = () => sandboxRetry ? { status: 'queued' as const, conflictFix: false }
+      const outcome = () => sandboxRetry || resourceRetry ? { status: 'queued' as const, conflictFix: false }
         : qaOutcome({ pass, incomplete, escalate, security, qaRounds, mergeFixes: rec.mergeFixes }, conflict, MAX_QA_ROUNDS);
       try {
         if (security) {
@@ -4731,7 +4816,9 @@ export class Swarm {
           if (!isCurrentAudit(pr)) return handBackStaleAudit(pr);
         }
         this.appendLog(a, [{ kind: 'system', text: '📎 Uploading evidence and posting the QA report on the PR…' }]);
-        const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security, outcome().conflictFix, !!sandboxRetry);
+        const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security, outcome().conflictFix,
+          sandboxRetry ? 'queued for one security review on another desk; no human action needed'
+          : resourceRetry ? 'the desk ran out of memory: retrying once; no QA round charged, no human action needed' : null);
         if (gone()) return;
         commentUrl = (await this.backend.commentPull(repo.fullName, rec.prNumber, body)) || null;
         if (gone()) return;
@@ -4806,6 +4893,7 @@ export class Swarm {
           qaAgentId: null,
           securitySandboxRetry: { headSha: rec.testedSha, baseSha: review.auditBaseSha, agentId: sandboxRetry.id },
         } : {}),
+        ...(resourceRetry && rec.testedSha ? { qaAgentId: null, resourceRetry: { headSha: rec.testedSha, agentId: a.id } } : {}),
         summary: report.summary,
         checks: report.checks,
         commentUrl: commentUrl ?? rec.commentUrl,
@@ -4815,10 +4903,12 @@ export class Swarm {
         ...(conflictFix ? { mergeFixes: rec.mergeFixes + 1 } : {}),
         passedSha: pass && !escalate ? rec.testedSha : null,
         failedSha: pass || incomplete ? null : rec.testedSha,
-        ...(!security ? { ciRequired: environmentOnly } : {}),
+        ...(!security ? { ciRequired: environmentOnly } : resourceFallback ? { ciRequired: true } : {}),
         securityReview: security && pass && rec.testedSha ? { ...review, approvedSha: rec.testedSha } : rec.securityReview,
         ...(security && pass ? { securityLabel: false } : {}), // the office removed it, not the manager
-        mergeNote: escalate ? 'waiting for detailed security review' : incomplete ? report.summary : null,
+        mergeNote: escalate ? 'waiting for detailed security review'
+          : outOfMemory && (pass || resourceRetry) ? `${outOfMemory}${resourceRetry ? '; retrying once' : ''}`
+          : incomplete ? report.summary : null,
         pendingSince: null,
         mergeRetryAt: null,
         alerted: false,
@@ -4831,6 +4921,7 @@ export class Swarm {
         pass
           ? `✅ ${a.name} passed PR #${rec.prNumber}: ${nextAfterQa}`
           : sandboxRetry ? `↻ Retrying PR #${rec.prNumber}'s security review on ${sandboxRetry.name}'s desk; no QA round charged.`
+          : resourceRetry ? `↻ ${a.name}'s desk ran out of memory on PR #${rec.prNumber}; retrying once, no QA round charged.`
           : incomplete ? `⚠️ ${label} of PR #${rec.prNumber} is incomplete; merge remains held.`
           : nextStatus === 'needs-human'
             ? `❌ PR #${rec.prNumber} failed QA ${qaRounds} times and needs a human`
@@ -4849,7 +4940,7 @@ export class Swarm {
     this.toast('info', `PR #${rec.prNumber} is unchanged since QA failed it: ${human ? 'it needs a human' : 'back to a developer, no re-test'}`);
   }
 
-  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[], security = false, conflictFix = false, sandboxRetry = false) {
+  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[], security = false, conflictFix = false, retry: string | null = null) {
     const pass = report.verdict === 'pass';
     const images: string[] = [];
     const evidence = shots.slice(-8);
@@ -4887,11 +4978,10 @@ export class Swarm {
     if (images.length) lines.push('', '### 📸 Evidence', '', ...images.flatMap((img) => [img, '']));
     else lines.push('', '_No browser screenshots were taken in this round._');
     const merge = repo.autoMerge ? "merges automatically once GitHub's checks pass" : 'ready for the manager to merge';
-    const next = sandboxRetry ? 'queued for one security review on another desk; no human action needed'
-      : security && pass ? 'audit result applies to the cited revision. CubeFarm verifies it before clearing the merge hold'
+    const next = retry ?? (security && pass ? 'audit result applies to the cited revision. CubeFarm verifies it before clearing the merge hold'
       : !security && pass && (report.securityReviewReason || rec.securityReview) ? 'waiting for detailed security review'
       : pass ? merge : conflictFix ? 'sent back to the developer to resolve the conflict and address QA findings'
-      : report.verdict === 'incomplete' || rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes';
+      : report.verdict === 'incomplete' || rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes');
     lines.push('', `<sub>Posted by cubefarm · ${next}</sub>`);
     return lines.join('\n');
   }
@@ -5232,8 +5322,12 @@ export class Swarm {
       const retry = rec.securitySandboxRetry;
       const retryPending = retry && retry.headSha === pulls.find((p) => p.number === rec.prNumber)?.headSha &&
         testers.some((a) => a.id === retry.agentId);
+      // After a desk ran out of memory, prefer another tester's desk, else wait for the floor's other QA sessions to finish.
+      const spent = rec.resourceRetry && rec.resourceRetry.headSha === pulls.find((p) => p.number === rec.prNumber)?.headSha ? rec.resourceRetry.agentId : null;
+      const fresh = testers.find((a) => a.id !== spent);
+      if (spent && !fresh && this.state.agents.some((a) => a.repoId === repo.id && a.task === 'qa' && a.status === 'working')) continue;
       const tester =
-        retryPending ? testers.find((a) => a.id === retry.agentId) : testers[0] ??
+        retryPending ? testers.find((a) => a.id === retry.agentId) : fresh ?? testers[0] ??
         this.pickDev(
           repo,
           devs.filter((a) => a.id !== rec.devAgentId),
@@ -7107,6 +7201,28 @@ export class Swarm {
     this.setRequestedStarts(repo, repo.requestedStarts.filter((r) => r.issueNumber !== x.number));
     this.emitRepo(repo);
     return `Closed #${x.number} on floor ${repo.floor} as not planned: ${reason}`;
+  }
+
+  /** The CEO's comment on an open issue, also passed into any session working on that issue right now. */
+  private async commentIssue(x: { floor: number; number: number; body: string }) {
+    const repo = this.floorRepo(x.floor);
+    const body = String(x.body ?? '').trim();
+    if (!body || body.length > 6000) throw new Error('Give a comment of 1–6000 characters.');
+    const issue = await this.backend.readIssue(repo.fullName, x.number);
+    if (!issue) throw new Error(`Unknown issue #${x.number} on floor ${repo.floor}. Check company_status for open issues.`);
+    if (issue.state === 'CLOSED') throw new Error(`Issue #${x.number} is closed. File a new issue for the extra work.`);
+    const ceo = this.ceo().name;
+    const url = await this.backend.commentIssue(repo.fullName, x.number, `${body}\n\n---\n_Added by ${ceo}, the cubefarm CEO._\n\n${AGENT_COMMENT_MARKER}`);
+    const working = this.state.agents.filter((a) => a.repoId === repo.id && a.issueNumber === x.number && this.agentRt.get(a.id)?.session);
+    for (const a of working) {
+      this.appendLog(a, [{ kind: 'manager', text: `▶ ${ceo} added to #${x.number}` }]);
+      this.agentRt.get(a.id)!.session!.send(`${ceo}, the CEO, added this to issue #${x.number} (${url}) at the manager's request. Take it into account in your current work:\n\n${body}`);
+    }
+    this.postMessage('office', `${ceo} commented on #${x.number} (floor ${repo.floor}): ${body.length > 200 ? `${body.slice(0, 199).trimEnd()}…` : body}`);
+    const told = working.length
+      ? `Passed to ${working.map((a) => a.name).join(' and ')}'s running session${working.length > 1 ? 's' : ''}.`
+      : `No session is running on #${x.number}, so nobody was notified; agents see it when they next read the issue. To be sure a fix or QA round sees it, also put it in the note of send_back_to_dev or rerun_qa.`;
+    return `Commented on #${x.number} on floor ${repo.floor}: ${url || '(no URL returned)'}. ${told}`;
   }
 
   /** Explicit manager instruction through the CEO, pinned to the last QA head. */

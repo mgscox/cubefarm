@@ -404,6 +404,7 @@ export interface AgentView {
   endedAt: number | null;
   costUsd: number;
   score: number; // legacy feedback: +2 per merged PR, -1 per QA send-back with eligible defect evidence
+  scores?: DeveloperScoresView; // developers only: Authorship and Repair from the score ledger
   turns: number;
   browserUrl: string | null;
   hasScreenshot: boolean;
@@ -434,14 +435,23 @@ export interface QaCheck {
   name: string;
   result: 'pass' | 'fail' | 'skip';
   details: string;
-  /** Only use environment when the worker prevented validation and no code defect is known or suspected. */
-  failureKind?: 'code' | 'environment';
+  /** Only use environment when the worker prevented validation and no code defect is known or suspected; resources when it ran out of memory. */
+  failureKind?: 'code' | 'environment' | 'resources';
+  /** For resources: what the desk showed when the run died. */
+  resources?: QaResources;
   /** Reuse this defect key when re-reviewing the same revision. */
   findingKey?: string;
   /** Confirmed by reproduction/source evidence in details; unexplained failures stay unconfirmed. */
   confirmed?: boolean;
   /** Verified contribution that introduced the defect, not merely the currently tested head. */
   introducedBySha?: string;
+}
+
+export interface QaResources {
+  freeMemory?: string;
+  swap?: string;
+  load?: string;
+  cancelled?: number; // tests cancelled or killed
 }
 
 export type QaClassification = 'code' | 'worker' | 'inconclusive';
@@ -543,6 +553,29 @@ export interface LessonExport {
   generatedAt: number;
   filter: { repoId: string | null; specialty: string | null };
   lessons: (LessonVersion & { id: string; repoId: string; approvedAt: number; approvedBy: string })[];
+}
+
+/** A developer's separate scores; `events` is the sample count behind each total. */
+export interface DeveloperScoresView {
+  authorship: { points: number; events: number };
+  repair: { points: number; events: number };
+  neutral: number; // recorded outcomes that scored nothing
+}
+
+/** One append-only score ledger entry. Corrections void or restore an earlier event instead of editing it. */
+export interface ScoreEventView {
+  id: string; // stable identity from the evidence: a replay never appends it twice
+  repoId: string;
+  prNumber: number;
+  agentId: string | null; // null: attribution unknown
+  name: string | null;
+  score: 'authorship' | 'repair' | null; // null: neutral history
+  points: number;
+  rule: 'merge' | 'original-defect' | 'repair-fix' | 'repair-regression' | 'neutral' | 'correction';
+  reason: string;
+  evidence: { outcomeId?: string; findingId?: string; attemptId?: string; sha?: string | null; correctionId?: string };
+  corrects?: { eventId: string; active: boolean };
+  at: number;
 }
 
 /** Failed preparations for one PR task and head; kept across office restarts. */
@@ -915,6 +948,7 @@ export interface WorldSnapshot {
   agents: AgentView[];
   qa: QaView[];
   prContributions?: PrContributionView[];
+  scoreEvents?: ScoreEventView[];
   runAttempts?: RunAttemptView[];
   qaOutcomes?: QaOutcomeView[];
   lessons?: LessonView[];
@@ -953,6 +987,7 @@ export type ServerEvent =
   | { type: 'qaOutcome'; outcome: QaOutcomeView }
   | { type: 'lesson'; lesson: LessonView }
   | { type: 'prContribution'; contribution: PrContributionView }
+  | { type: 'scoreEvents'; events: ScoreEventView[] }
   | { type: 'runAttempt'; attempt: RunAttemptView }
   | { type: 'runAttemptsRemoved'; ids: string[] }
   | { type: 'qaRemoved'; repoId: string; prNumber: number }

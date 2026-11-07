@@ -60,6 +60,7 @@ interface State {
   screens: Record<string, number>; // agentId -> screenshot timestamp (cache buster)
   qaOutcomes: import('../../shared/types').QaOutcomeView[];
   lessons: import('../../shared/types').LessonView[];
+  scoreEvents: import('../../shared/types').ScoreEventView[];
   prContributions: PrContributionView[];
   runAttempts: NonNullable<WorldSnapshot['runAttempts']>;
   qa: Record<string, QaView>; // `${repoId}#${prNumber}`
@@ -176,6 +177,7 @@ export const useStore = create<State>((set, get) => ({
   qa: {},
   qaOutcomes: [],
   lessons: [],
+  scoreEvents: [],
   prContributions: [],
   runAttempts: [],
   requests: [],
@@ -235,6 +237,7 @@ export const useStore = create<State>((set, get) => ({
           qa,
           qaOutcomes: d.qaOutcomes ?? [],
           lessons: d.lessons ?? [],
+          scoreEvents: d.scoreEvents ?? [],
           prContributions: d.prContributions ?? [],
           runAttempts: d.runAttempts ?? [],
           requests: d.requests,
@@ -315,6 +318,11 @@ export const useStore = create<State>((set, get) => ({
         const lessons = get().lessons;
         const index = lessons.findIndex((l) => l.id === ev.lesson.id);
         set({ lessons: index < 0 ? [...lessons, ev.lesson] : lessons.map((l, i) => i === index ? ev.lesson : l) });
+        break;
+      }
+      case 'scoreEvents': {
+        const known = new Set(get().scoreEvents.map((e) => e.id));
+        set({ scoreEvents: [...get().scoreEvents, ...ev.events.filter((e) => !known.has(e.id))] });
         break;
       }
       case 'prContribution': {
@@ -616,7 +624,7 @@ export function kanbanFor(repo: RepoView, agents: Agent[], qaRecords: Record<str
       agent: status === 'testing' ? tester : dev,
       note:
         status === 'queued'
-          ? `waiting for QA${rec && rec.round > 1 ? ` · round ${rec.round}` : ''}`
+          ? `waiting for QA${rec && rec.round > 1 ? ` · round ${rec.round}` : ''}${rec?.mergeNote ? ` · ${rec.mergeNote}` : ''}`
           : status === 'testing'
             ? `🔍 testing · round ${rec!.round}`
             : status === 'failed'

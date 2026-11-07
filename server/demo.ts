@@ -406,7 +406,8 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
             verdict: 'fail', summary: 'The changed behavior passed; local validation stopped because the demo worker exhausted memory. No code defect was found.',
             checks: [
               { name: 'Changed behavior', result: 'pass', details: 'Acceptance criteria passed in the demo fixture.' },
-              { name: 'Local suite', result: 'fail', failureKind: 'environment', details: 'Simulated worker memory exhaustion.' },
+              { name: 'Local suite', result: 'fail', failureKind: 'resources', details: 'Simulated worker memory exhaustion: the suite was cancelled, not timed out.',
+                resources: { freeMemory: '0.8 GB', swap: '0 B', load: '61', cancelled: 204 } },
             ],
             commands: [{ command: 'npm test', result: 'Interrupted by simulated worker memory exhaustion.' }],
             screenshots: [],
@@ -417,6 +418,7 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
       // Most first rounds pass; some fail so the fix loop can be seen in action. A [regression] issue's first round always
       // fails on the same toolbar defect, so two of them make a recurring finding for a lesson (docs/lessons.md).
       const pass = round > 1 || (!opts.prompt.includes('[regression]') && Math.random() > 0.35);
+      const introducedBySha = opts.prompt.match(/Known contribution SHAs: ([0-9a-f]+)/)?.[1];
       cb.log([{ kind: 'text', text: pass ? '● Everything checks out. Writing up the report.' : '● The toolbar overflows on a 375px screen. Failing this round.' }]);
       cb.finished({
         ok: true,
@@ -433,9 +435,12 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
             { name: 'Unit tests', result: 'pass', details: '41 passed, 0 failed' },
             { name: 'Lint + build', result: 'pass', details: 'No lint errors; production build succeeds' },
             { name: 'Feature works on desktop', result: 'pass', details: 'Clicked through the new flow at 1280x800' },
-            pass ? { name: 'Mobile layout (375px)', result: 'pass', details: 'Layout wraps correctly' }
-              : { name: 'Mobile layout (375px)', result: 'fail', failureKind: 'code', findingKey: 'toolbar-overflow', confirmed: true,
-                details: 'Toolbar overflows horizontally; button unreachable. Reproduced at 375px on the head; the base wraps.' },
+            pass ? { name: 'Mobile layout (375px)', result: 'pass', details: 'Layout wraps correctly' } : {
+              name: 'Mobile layout (375px)', result: 'fail', failureKind: 'code', findingKey: 'mobile-toolbar', confirmed: true,
+              details: 'Toolbar overflows horizontally; button unreachable. Reproduced at the PR head; the base branch wraps correctly.',
+              // The first known contribution is the original submission, so the inherited-defect repair handoff can be seen.
+              ...(introducedBySha && { introducedBySha }),
+            },
             { name: 'Console errors', result: 'pass', details: 'None' },
           ],
           commands: [
@@ -1007,6 +1012,10 @@ export function createDemoBackend(): Backend {
       const i = repos.get(fullName)?.issues.find((x) => x.number === number);
       return { title: i?.title ?? `Issue #${number}`, body: i?.body ?? '' };
     },
+    commentIssue: async (fullName, number) => {
+      if (!repos.get(fullName)?.issues.some((i) => i.number === number)) throw new Error(`Unknown issue #${number}`);
+      return `https://github.com/${fullName}/issues/${number}#issuecomment-${Date.now()}`;
+    },
     commentPull: async (fullName, number) => `https://github.com/${fullName}/pull/${number}#issuecomment-${Date.now()}`,
     uploadEvidence: async (fullName, filePath) => `https://github.com/${fullName}/raw/swarm-qa-evidence/${filePath}`,
     ensureClone: async () => new Promise((r) => setTimeout(r, 400)),
@@ -1444,6 +1453,8 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
       }
       const close = text.match(/\bclose\s+(?:issue\s*)?#(\d+)\s+on\s+floor\s+(\d+)\s+because\s+([^\n]+)/i);
       if (close) return use('close_issue', { floor: Number(close[2]), number: Number(close[1]), reason: close[3].trim() });
+      const comment = text.match(/\bcomment\s+on\s+(?:issue\s*)?#(\d+)\s+on\s+floor\s+(\d+):\s*([\s\S]+)/i);
+      if (comment) return use('comment_issue', { floor: Number(comment[2]), number: Number(comment[1]), body: comment[3].trim().slice(0, 6000) });
       const triage = text.match(/\btriage\s+(?:issue\s*)?#(\d+)\s+on\s+floor\s+(\d+)/i);
       if (triage) return use('route_issue', { floor: Number(triage[2]), number: Number(triage[1]), triaged: true });
       const merge = text.match(/\bmerge\s+(?:PR\s*)?#(\d+)\s+on\s+(?:floor\s+(\d+)|([\w./-]+))\s+(?:because|with|reason)\s+([^\n]+)/i);
