@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { RunAttemptView } from '../shared/types.ts';
 import { addUsage, errorCause, exportAttempts, finishedOutcome, playbookVersion, pruneAttempts, redact, RunHistory, RUN_HISTORY_LIMITS } from './runHistory.ts';
 
@@ -118,6 +118,55 @@ describe('export', () => {
 });
 
 describe('the store', () => {
+  it('publishes retention removals while keeping running attempts', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'run-history-'));
+    try {
+      const notify = vi.fn();
+      const store = new RunHistory(path.join(dir, 'history.json'), notify);
+      store.add(attempt('stale-wait'));
+      store.add(attempt('old-result', { outcome: { result: 'no-pr', cause: 'agent' } }));
+      store.add(attempt('running', { times: { assignedAt: 1000, startedAt: 2000, endedAt: null } }));
+      await store.write(181 * DAY);
+      expect(store.attempts.map((x) => x.id)).toEqual(['running']);
+      expect(notify).toHaveBeenCalledWith({ type: 'runAttemptsRemoved', ids: ['stale-wait', 'old-result'] });
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+
+  it('retries a failed write without losing changes made during that write', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'run-history-'));
+    try {
+      const file = path.join(dir, 'history.json');
+      const store = new RunHistory(file);
+      const x = store.add(attempt('one'));
+      await store.write(5000);
+      store.end(x, { result: 'qa-passed', cause: 'agent' }, 5000);
+      await fs.mkdir(`${file}.tmp`);
+      await expect(store.write(5000)).rejects.toThrow();
+      await fs.rm(`${file}.tmp`, { recursive: true, maxRetries: 3 });
+      await store.write(5000);
+      const reloaded = new RunHistory(file);
+      await reloaded.load();
+      expect(reloaded.get('one')?.outcome).toEqual({ result: 'qa-passed', cause: 'agent' });
+
+      store.add(attempt('two'));
+      const rename = fs.rename.bind(fs);
+      const pending = vi.spyOn(fs, 'rename').mockImplementationOnce(async (...args) => {
+        store.end(store.get('two'), { result: 'no-pr', cause: 'agent' }, 6000);
+        await rename(...args);
+      });
+      await store.write(6000);
+      pending.mockRestore();
+      await store.write(6000);
+      await reloaded.load();
+      expect(reloaded.get('two')?.outcome).toEqual({ result: 'no-pr', cause: 'agent' });
+    } finally {
+      vi.restoreAllMocks();
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 3 });
+    }
+  });
+
   it('ends an attempt once and survives a reload', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'run-history-'));
     try {

@@ -1,5 +1,5 @@
 import { useStore } from './store';
-import type { IdeaInput, IdeaReviewCycleView, IdeaView, IssuePlanView, ProposalDecisionInput, ProposalView, AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, RunHistoryExport, SwarmSettings } from '../../shared/types';
+import type { IdeaInput, IdeaReviewCycleView, IdeaView, IssuePlanView, ProposalDecisionInput, ProposalView, AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
 
 import type { ClaudeAuthenticationView, ManagerMcpSettingsPatch, ManagerMcpSettingsView } from '../../shared/types';
 
@@ -44,7 +44,6 @@ export const api = {
   connectRepo: (fullName: string, floor: FloorOptions = {}) => call<RepoView>('POST', '/api/repos', { fullName, ...floor }),
   createRepo: (body: FloorOptions & { name: string; description: string; visibility: 'private' | 'public'; owner?: string }) =>
     call<RepoView>('POST', '/api/repos/new', body),
-  runHistory: (repoId: string) => call<RunHistoryExport>('GET', `/api/run-history?repoId=${encodeURIComponent(repoId)}`),
   folders: (dir?: string) => call<{ root: string; folders: ProjectFolderView[] }>('GET', `/api/folders${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`),
   connectFolder: (path: string, floor: FloorOptions = {}) => call<RepoView>('POST', '/api/folders/connect', { path, ...floor }),
   publishFolder: (body: FloorOptions & { path: string; name?: string; visibility: 'private' | 'public'; description?: string }) =>

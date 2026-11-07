@@ -164,6 +164,8 @@ export interface RequestedStart {
   preferredAgentId: string;
   note?: string;
   restartPending: boolean;
+  /** The attempt waiting for a desk, separate from the desk's current task. */
+  attemptId?: string;
 }
 
 /** Persisted per issue/PR so a quiet session's remedies survive retries, desk handoffs and office restarts. */
@@ -806,6 +808,7 @@ export interface WorldSnapshot {
   agents: AgentView[];
   qa: QaView[];
   prContributions?: PrContributionView[];
+  runAttempts?: RunAttemptView[];
   requests: HireRequestView[];
   ceo: CeoInfo;
   research: ResearchInfo;
@@ -839,6 +842,8 @@ export type ServerEvent =
   | { type: 'screen'; agentId: string; url: string | null; at: number }
   | { type: 'qa'; qa: QaView }
   | { type: 'prContribution'; contribution: PrContributionView }
+  | { type: 'runAttempt'; attempt: RunAttemptView }
+  | { type: 'runAttemptsRemoved'; ids: string[] }
   | { type: 'qaRemoved'; repoId: string; prNumber: number }
   | { type: 'settings'; settings: SwarmSettings }
   | { type: 'request'; request: HireRequestView }

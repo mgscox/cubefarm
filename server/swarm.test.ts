@@ -202,6 +202,72 @@ describe('run history', () => {
   const generation = (id: string) => (s.agentRt.get(id) as { generation?: number }).generation as never;
   const ok: SessionResult = { ok: true, text: '', errors: [], turns: 7, costUsd: 0.5 };
 
+  it.each(['stop', 'clear', 'fire', 'close'] as const)('ends queued attempts when the manager chooses %s', async (action) => {
+    const events = vi.spyOn(s, 'broadcast');
+    const box = swarm.addBox('Attic', 'offline-attic');
+    await vi.advanceTimersByTimeAsync(1600);
+    swarm.updateAgent('a1', { box: box.id });
+    const number = await swarm.createIssue(repo.id, 'Queued work', '');
+    await swarm.assign('a1', number);
+    const pending = swarm.runHistory({ issue: number }).attempts[0];
+    expect(pending).toMatchObject({ outcome: null, times: { startedAt: null } });
+    if (action === 'stop') swarm.stopAgent('a1');
+    if (action === 'clear') swarm.resetAgent('a1');
+    if (action === 'fire') swarm.fireAgent('a1');
+    if (action === 'close') await swarm.closeDemoIssue(repo.id, number);
+    expect(repo.requestedStarts).toEqual([]);
+    expect(swarm.runHistory({ issue: number }).attempts[0]).toMatchObject({
+      id: pending.id,
+      times: { startedAt: null, endedAt: expect.any(Number) },
+      outcome: { result: action === 'clear' ? 'cleared' : action === 'close' ? 'closed' : 'stopped', cause: action === 'close' ? 'external' : 'manager' },
+    });
+    expect(swarm.snapshot().runAttempts).toEqual(expect.arrayContaining([expect.objectContaining({ id: pending.id, outcome: expect.any(Object) })]));
+    expect(events).toHaveBeenCalledWith({ type: 'runAttempt', attempt: expect.objectContaining({ id: pending.id, outcome: expect.any(Object) }) });
+  });
+
+  it('reuses a pending request and links its handoff when a desk becomes available', async () => {
+    const box = swarm.addBox('Attic', 'offline-attic');
+    await vi.advanceTimersByTimeAsync(1600);
+    swarm.updateAgent('a1', { box: box.id });
+    const number = await swarm.createIssue(repo.id, 'Wait for a desk', '');
+    await swarm.assign('a1', number);
+    const pending = swarm.runHistory({ issue: number }).attempts[0];
+    await swarm.assign('a1', number);
+    expect(swarm.runHistory({ issue: number }).attempts).toHaveLength(1);
+    expect(repo.requestedStarts[0].attemptId).toBe(pending.id);
+    swarm.updateAgent('a1', { box: '' });
+    await swarm.assign('a1', number);
+    const [started, waiting] = swarm.runHistory({ issue: number }).attempts;
+    expect(started).toMatchObject({ parentId: pending.id, outcome: null });
+    expect(waiting).toMatchObject({ id: pending.id, outcome: { result: 'superseded', cause: 'office' } });
+  });
+
+  it('keeps a successful repair joined to the review round it repaired', async () => {
+    const fixture = demoPull(repo.fullName, 'swarm/issue-66-ada', false);
+    try {
+      const ada = s.state.agents[0];
+      Object.assign(ada, { model: '', effort: '', cli: '' });
+      const pull = fixture.pull;
+      s.repoRt.get(repo.id)!.pulls = [pull];
+      const rec = s.queueQa(repo, pull.number, ada, 66);
+      Object.assign(rec, { status: 'failed', round: 1, fixReason: 'qa', fixInstructions: 'Fix overflow' });
+      vi.spyOn(s, 'prepare').mockResolvedValue('fake-desk');
+      vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+      vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+      await s.runFix(ada, repo, rec);
+      s.sessionStarted(ada, {}, null);
+      pull.headSha = 'repaired-sha';
+      await s.recordFinished(ada, repo, ok, generation('a1'), undefined);
+      expect(rec.round).toBe(2);
+      const repair = swarm.snapshot().prContributions![0].repairs[0];
+      expect(swarm.runHistory({ pr: pull.number }).attempts[0]).toMatchObject({
+        outcome: { result: 'repaired', cause: 'agent' },
+        review: { reviewId: repair.reviewId, round: 1, repairId: repair.id },
+        revisions: { start: repair.startingSha, submitted: 'repaired-sha' },
+      });
+    } finally { fixture.remove(); }
+  });
+
   it('links a delivered PR, a worker-blocked QA retry and a no-PR run, and keeps them through merge and restart', async () => {
     const fixture = demoPull(repo.fullName, 'swarm/issue-66-ada', false);
     try {

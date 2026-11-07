@@ -1,26 +1,33 @@
-// A floor's attempts from the office's run history (docs/run-history.md), read when opened and exportable as JSON.
-import { useState } from 'react';
-import type { RunHistoryExport } from '../../../shared/types';
-import { api } from '../api';
+// A floor's live attempts from the office's run history (docs/run-history.md), exportable as JSON.
+import { useMemo } from 'react';
 import { cost, duration, outcomeLabel, runtimeLabel, workLabel } from '../runHistory';
+import { useStore } from '../store';
 
 export function RunHistory({ repoId }: { repoId: string }) {
-  const [data, setData] = useState<RunHistoryExport | null>(null);
-  const [loading, setLoading] = useState(false);
-  const load = () => {
-    setLoading(true);
-    api.runHistory(repoId).then(setData, () => undefined).finally(() => setLoading(false));
-  };
+  const history = useStore((s) => s.runAttempts);
+  const contributions = useStore((s) => s.prContributions);
+  const repos = useStore((s) => s.repos);
+  const attempts = useMemo(() => {
+    const prStates = new Map(repos.find((r) => r.id === repoId)?.pulls.map((p) => [p.number, p.state]));
+    for (const h of contributions) if (h.repoId === repoId) prStates.set(h.prNumber, h.state);
+    return history.filter((x) => x.repoId === repoId).reverse()
+      .sort((x, y) => y.times.assignedAt - x.times.assignedAt)
+      .map((x) => ({
+        ...x,
+        prState: x.prNumber === null ? null : prStates.get(x.prNumber) ?? null,
+        queueMs: x.times.startedAt === null ? null : x.times.startedAt - x.times.assignedAt,
+        runMs: x.times.startedAt === null || x.times.endedAt === null ? null : x.times.endedAt - x.times.startedAt,
+      }));
+  }, [history, repoId, contributions, repos]);
   return (
-    <details className="run-history" onToggle={(e) => { if (e.currentTarget.open && !data && !loading) load(); }}>
+    <details className="run-history">
       <summary>Run history</summary>
       <div className="run-history-bar">
-        <button className="btn" onClick={load} disabled={loading}>⟳ Refresh</button>
         <a className="btn" href={`/api/run-history?repoId=${encodeURIComponent(repoId)}&download=1`} download>⬇ Export JSON</a>
-        <span className="muted small">{loading ? 'Loading…' : data ? `${data.attempts.length} attempts, newest first` : ''}</span>
+        <span className="muted small">{attempts.length} attempts, newest first</span>
       </div>
-      {data?.attempts.length === 0 && <p className="muted small">No attempts recorded yet.</p>}
-      {!!data?.attempts.length && (
+      {attempts.length === 0 && <p className="muted small">No attempts recorded yet.</p>}
+      {!!attempts.length && (
         <div className="run-history-table">
           <table>
             <thead>
@@ -30,7 +37,7 @@ export function RunHistory({ repoId }: { repoId: string }) {
               </tr>
             </thead>
             <tbody>
-              {data.attempts.map((x) => (
+              {attempts.map((x) => (
                 <tr key={x.id}>
                   <td>
                     <code title={x.id}>{x.id.slice(0, 8)}</code>

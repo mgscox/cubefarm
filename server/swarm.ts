@@ -1070,6 +1070,7 @@ export class Swarm {
       repos: this.state.repos.map((r) => this.repoView(r)),
       agents: this.state.agents.map((a) => this.agentView(a, true)),
       prContributions: this.state.prContributions,
+      runAttempts: this.history.attempts,
       qa: this.state.qa.filter((q) => !q.closed).map((q) => this.qaView(q)),
       requests: this.state.requests,
       ceo: this.ceoInfo(),
@@ -1152,7 +1153,7 @@ export class Swarm {
 
   // ---------- run history ----------
 
-  private history = new RunHistory(RUN_HISTORY_FILE);
+  private history = new RunHistory(RUN_HISTORY_FILE, (event) => this.broadcast(event));
 
   /** The floor's attempts (or one issue's or PR's), for inspection and export. */
   runHistory(filter: { repoId?: string; issue?: number; pr?: number } = {}): RunHistoryExport {
@@ -1188,7 +1189,7 @@ export class Swarm {
     const now = Date.now();
     const parent = this.history.latestOn(repo.id, { pr: task === 'qa' || task === 'fix' ? work.prNumber : null, issue: work.issueNumber });
     const parked = parent && !parent.outcome && parent.times.startedAt === null && parent.id !== a.attemptId ? parent : undefined;
-    if (waiting && parked?.agent.id === a.id) return; // already waiting
+    if (waiting && parked?.agent.id === a.id) return parked.id; // already waiting
     if (!waiting) this.endAttempt(a, { result: 'superseded', cause: 'office' });
     this.history.end(parked, { result: 'superseded', cause: 'office' }, now, waiting ? 'superseded by another wait' : `started on ${a.name}'s desk`);
     const issue = this.repoRt.get(repo.id)?.issues.find((i) => i.number === work.issueNumber);
@@ -1216,6 +1217,7 @@ export class Swarm {
     });
     if (!waiting) a.attemptId = attempt.id;
     this.save();
+    return attempt.id;
   }
 
   /** The attempt's revisions, review, session and worker as they stand now. */
@@ -1231,7 +1233,9 @@ export class Swarm {
       x.worker.name = a.deskBox ? this.boxName(a.deskBox) : 'office';
       if (rec && !issueWork) {
         const repair = x.task === 'fix' ? history?.repairs.find((r) => r.id === rec.repairAttemptId && r.agentId === a.id) : undefined;
-        x.review = { reviewId: rec.reviewId, round: rec.round, repairId: repair?.id ?? x.review?.repairId ?? null };
+        x.review = repair
+          ? { reviewId: repair.reviewId, round: repair.round, repairId: repair.id }
+          : x.review ?? { reviewId: rec.reviewId, round: rec.round, repairId: null };
         if (x.task === 'qa') x.revisions.start ??= rec.testedSha;
         if (repair) x.revisions = { start: repair.startingSha, submitted: repair.submittedSha };
       } else if (issueWork) {
@@ -2127,17 +2131,22 @@ export class Swarm {
     }
   }
 
-  private setRequestedStarts(repo: PersistedRepo, requests: RequestedStart[]) {
+  private setRequestedStarts(repo: PersistedRepo, requests: RequestedStart[], outcome: NonNullable<RunAttemptView['outcome']> = { result: 'closed', cause: 'external', excerpt: 'Requested work is no longer eligible.' }) {
+    for (const previous of repo.requestedStarts) {
+      if (previous.attemptId && !requests.some((r) => r.attemptId === previous.attemptId)) {
+        this.history.end(this.history.get(previous.attemptId), outcome, Date.now());
+      }
+    }
     repo.requestedStarts = requests;
     this.emitRepo(repo);
     this.save();
   }
 
-  private cancelRequestedStart(a: PersistedAgent) {
+  private cancelRequestedStart(a: PersistedAgent, outcome: NonNullable<RunAttemptView['outcome']> = { result: 'stopped', cause: 'manager' }) {
     const repo = this.state.repos.find((r) => r.id === a.repoId);
     if (!repo) return;
-    const requests = repo.requestedStarts.filter((r) => r.issueNumber !== a.issueNumber && !(a.issueNumber == null && r.restartPending && r.preferredAgentId === a.id));
-    if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests);
+    const requests = repo.requestedStarts.filter((r) => r.issueNumber !== a.issueNumber && !(r.restartPending && r.preferredAgentId === a.id));
+    if (requests.length !== repo.requestedStarts.length) this.setRequestedStarts(repo, requests, outcome);
   }
 
   // ---------- GitHub / repos ----------
@@ -3075,6 +3084,7 @@ export class Swarm {
     }
 
     this.abandonIdeaResearch(a);
+    this.cancelRequestedStart(a);
     this.endAttempt(a, { result: 'stopped', cause: 'manager', excerpt: 'Let go' });
     this.agentRt.get(id)?.session?.stop();
     this.agentRt.get(id)?.terminal?.releaseIdle?.();
@@ -3169,7 +3179,7 @@ export class Swarm {
   resetAgent(id: string) {
     const a = this.agent(id);
     if (BUSY.includes(a.status)) throw new HttpError(409, `${a.name} is busy; stop them first`);
-    this.cancelRequestedStart(a);
+    this.cancelRequestedStart(a, { result: 'cleared', cause: 'manager' });
     for (const q of this.state.qa) {
       if (q.qaAgentId === id && q.status === 'testing') this.setQa(q, { status: 'queued', qaAgentId: null });
       if (q.devAgentId === id && q.status === 'fixing') this.setQa(q, { status: 'failed' });
@@ -3274,15 +3284,17 @@ export class Swarm {
       if (parent || issue.subIssues === null) this.toast('info', `Starting #${issueNumber} manually: ${parent ? `parent: ${parent}` : 'sub-issues have not loaded'}.`);
     }
     const where = this.place(a, 'new');
-    if (explicit) this.setRequestedStarts(repo, [
+    const previous = repo.requestedStarts.find((r) => r.issueNumber === issueNumber);
+    if (explicit || 'wait' in where) this.setRequestedStarts(repo, [
       ...repo.requestedStarts.filter((r) => r.issueNumber !== issueNumber),
-      { issueNumber, preferredAgentId: a.id, note, restartPending: 'wait' in where },
+      { issueNumber, preferredAgentId: a.id, note, restartPending: 'wait' in where, attemptId: previous?.attemptId },
     ]);
     if ('wait' in where) {
       // It starts once a desk is free: theirs when their box is back, or another developer's.
       this.appendLog(a, [{ kind: 'system', text: `⏸ #${issueNumber} waits: ${this.waitReason(where)}.` }]);
       const task = a.role === 'researcher' ? 'research' : prototype ? 'prototype' : 'issue';
-      this.openAttempt(a, route, { task, issueNumber, prNumber: revision?.number ?? null, note: this.waitReason(where) });
+      const attemptId = this.openAttempt(a, route, { task, issueNumber, prNumber: revision?.number ?? null, note: this.waitReason(where) });
+      this.setRequestedStarts(repo, repo.requestedStarts.map((r) => r.issueNumber === issueNumber ? { ...r, attemptId } : r));
       return { ...this.agentView(a, false), warning: `waiting: ${this.waitReason(where)}` };
     }
     const branch = revision?.headRefName ?? (prototype ? `${PROTOTYPE_BRANCH}${issue.number}-${slugify(a.name)}`
@@ -6903,6 +6915,7 @@ export class Swarm {
     await this.backend.closeIssue(repo.fullName, x.number, 'not planned', `${reason}\n\n${AGENT_COMMENT_MARKER}`);
     const rt = this.repoRt.get(repo.id)!;
     rt.issues = rt.issues.filter((i) => i.number !== x.number);
+    this.setRequestedStarts(repo, repo.requestedStarts.filter((r) => r.issueNumber !== x.number));
     this.emitRepo(repo);
     return `Closed #${x.number} on floor ${repo.floor} as not planned: ${reason}`;
   }
@@ -7014,7 +7027,7 @@ export class Swarm {
       if (qa) this.closeQaRecord(qa, 'CLOSED');
       else this.broadcast({ type: 'qaRemoved', repoId: repo.id, prNumber: x.number });
       for (const a of agents) this.clearTask(a);
-      repo.requestedStarts = repo.requestedStarts.filter((r) => !issues.has(r.issueNumber));
+      this.setRequestedStarts(repo, repo.requestedStarts.filter((r) => !issues.has(r.issueNumber)), { result: 'deferred', cause: 'office' });
       for (const n of issues) this.issueFailures.delete(`${repo.id}#${n}`);
       this.emitRepo(repo);
       this.save();

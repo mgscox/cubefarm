@@ -8,6 +8,10 @@ or export it as JSON:
 GET /api/run-history?repoId=<owner/name>[&issue=<n>][&pr=<n>][&download=1]
 ```
 
+The open table updates from the office's websocket snapshot and attempt events, including cancellations and PR
+closure or merge. Export is a point-in-time download. A queued start keeps its attempt ID with the request, so
+Stop, Clear desk, letting its developer go, or closing its issue also ends the waiting attempt.
+
 ## What an attempt is
 
 An attempt is one task on one desk, from assignment to its end: an issue (or prototype or research issue), a QA run,

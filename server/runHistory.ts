@@ -2,7 +2,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { AgentStatus, MachineTelemetry, PullInfo, QaStatus, RunAttemptView, RunCause, RunHealth, RunHistoryExport, RunResult } from '../shared/types.ts';
+import type { AgentStatus, MachineTelemetry, PullInfo, QaStatus, RunAttemptView, RunCause, RunHealth, RunHistoryExport, RunResult, ServerEvent } from '../shared/types.ts';
 
 /** Retention: running attempts are always kept; others go after maxAgeDays, then the oldest ended ones beyond maxAttempts. */
 export const RUN_HISTORY_LIMITS = { maxAttempts: 5000, maxAgeDays: 180, excerptChars: 240 } as const;
@@ -132,7 +132,7 @@ export class RunHistory {
   attempts: RunAttemptView[] = [];
   private dirty = false;
 
-  constructor(private file: string) {}
+  constructor(private file: string, private notify: (event: Extract<ServerEvent, { type: 'runAttempt' | 'runAttemptsRemoved' }>) => void = () => {}) {}
 
   async load() {
     try {
@@ -146,11 +146,21 @@ export class RunHistory {
   async write(now = Date.now()) {
     if (!this.dirty) return;
     this.dirty = false;
-    this.attempts = pruneAttempts(this.attempts, now);
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify({ format: 'cubefarm-run-history', version: 1, attempts: this.attempts }));
-    await fs.rename(tmp, this.file);
+    try {
+      const kept = pruneAttempts(this.attempts, now);
+      const ids = new Set(kept.map((x) => x.id));
+      const removed = this.attempts.filter((x) => !ids.has(x.id)).map((x) => x.id);
+      this.attempts = kept;
+      if (removed.length) this.notify({ type: 'runAttemptsRemoved', ids: removed });
+      await fs.mkdir(path.dirname(this.file), { recursive: true });
+      const tmp = `${this.file}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify({ format: 'cubefarm-run-history', version: 1, attempts: this.attempts }));
+      await fs.rename(tmp, this.file);
+    } catch (err) {
+      // A failed save needs a retry; mutations during a successful write already set dirty again.
+      this.dirty = true;
+      throw err;
+    }
   }
 
   get(id: string | null | undefined) {
@@ -160,6 +170,7 @@ export class RunHistory {
   add(attempt: RunAttemptView) {
     this.attempts.push(attempt);
     this.dirty = true;
+    this.notify({ type: 'runAttempt', attempt });
     return attempt;
   }
 
@@ -176,6 +187,7 @@ export class RunHistory {
   change(attempt: RunAttemptView, patch: (x: RunAttemptView) => void) {
     patch(attempt);
     this.dirty = true;
+    this.notify({ type: 'runAttempt', attempt });
   }
 
   /** Ends an open attempt once; later endings of the same attempt change nothing. */
@@ -185,6 +197,7 @@ export class RunHistory {
     attempt.times.endedAt = at;
     attempt.events.push({ at, kind: 'ended', note: note ?? `${outcome.result} (${outcome.cause})` });
     this.dirty = true;
+    this.notify({ type: 'runAttempt', attempt });
     return true;
   }
 }
