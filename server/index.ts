@@ -150,6 +150,8 @@ app.post(
   route((req) =>
     swarm.hireAgent(repoId(req), {
       name: str(req.body.name),
+      box: req.body.box,
+      cli: str(req.body.cli),
       model: str(req.body.model),
       effort: str(req.body.effort),
       role: str(req.body.role),
@@ -161,6 +163,7 @@ app.post(
   ),
 );
 
+app.post('/api/upstash/:id/retry', route((req) => swarm.retryUpstash(String(req.params.id), req.body?.cleanup === true)));
 app.post('/api/boxes', route((req) => swarm.addBox(req.body?.name, req.body?.destination)));
 app.delete('/api/boxes/:id', route((req) => swarm.removeBox(String(req.params.id))));
 app.post('/api/boxes/:id/check', route((req) => swarm.checkBox(String(req.params.id))));

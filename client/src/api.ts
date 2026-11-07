@@ -86,7 +86,7 @@ export const api = {
   mergePull: (repoId: string, n: number, method: 'squash' | 'merge' | 'rebase' = 'squash') => call('POST', `${r(repoId)}/pulls/${n}/merge`, { method }),
   closePull: (repoId: string, n: number) => call('POST', `${r(repoId)}/pulls/${n}/close`),
   sendToQa: (repoId: string, n: number) => call('POST', `${r(repoId)}/pulls/${n}/qa`),
-  hireAgent: (repoId: string, opts: { name?: string; model?: string; effort?: string; role?: 'dev' | 'qa' | 'researcher'; title?: string; specialty?: string } = {}) =>
+  hireAgent: (repoId: string, opts: { name?: string; model?: string; effort?: string; role?: 'dev' | 'qa' | 'researcher'; title?: string; specialty?: string; box?: string | null } = {}) =>
     call('POST', `${r(repoId)}/agents`, opts),
   updateAgent: (
     id: string,
@@ -94,6 +94,7 @@ export const api = {
   ) =>
     call('PATCH', `/api/agents/${id}`, patch),
   fireAgent: (id: string) => call('DELETE', `/api/agents/${id}`),
+  retryUpstash: (id: string, cleanup = false) => call('POST', `/api/upstash/${id}/retry`, { cleanup }),
   addBox: (name: string, destination: string) => call<BoxView>('POST', '/api/boxes', { name, destination }),
   removeBox: (id: string) => call('DELETE', `/api/boxes/${id}`),
   checkBox: (id: string) => call<BoxView>('POST', `/api/boxes/${id}/check`),

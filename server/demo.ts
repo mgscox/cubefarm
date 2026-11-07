@@ -803,6 +803,7 @@ export function createDemoBackend(): Backend {
   const deskBranches = new Map<string, string | null>();
   const deskPulls = new Map<string, number | undefined>();
   const workerBlocked = new Set<string>();
+  const cloudBoxes = new Map<string, { id: string; name: string }>();
   /** Fake desks under a folder: the office's own (/demo), or a box's. */
   const desks = (root: string) => ({
     mainDir: (fullName: string) => `${root}/${fullName}/main`,
@@ -1035,6 +1036,19 @@ export function createDemoBackend(): Backend {
     hooksReady: () => undefined,
     releaseClis: async () => undefined,
     detectClis: async () => fakeClis(),
+    upstash: {
+      missing: () => null,
+      list: async () => [...cloudBoxes.values()],
+      create: async (task) => { const id = `demo-${task.id}`; cloudBoxes.set(id, { id, name: task.name }); return id; },
+      connect: async (task, opts) => {
+        cloudBoxes.set(task.boxId!, { id: task.boxId!, name: task.name });
+        const conn = fakeBox(opts, desks(`/upstash/${task.id}`), startSession);
+        await new Promise((resolve) => setTimeout(resolve, 1600));
+        return conn;
+      },
+      saved: async () => undefined,
+      delete: async (id) => { cloudBoxes.delete(id); },
+    },
     connectBox: (opts) => fakeBox(opts, desks(`/boxes/${opts.box.name.replace(/[^\w.-]+/g, '-')}`), startSession),
     previews: demoPreviews,
     office: demoOffice,

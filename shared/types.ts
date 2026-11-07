@@ -922,6 +922,7 @@ export interface WorldSnapshot {
   usage: UsageView;
   clis: CliView[];
   boxes: BoxView[];
+  upstashTasks?: UpstashTask[];
   officeTelemetry?: MachineTelemetry | null;
   officeCapacity?: MachineCapacity;
   /** Approved Proposals' publications, newest last. */
@@ -960,6 +961,7 @@ export type ServerEvent =
   | { type: 'usage'; usage: UsageView }
   | { type: 'clis'; clis: CliView[] }
   | { type: 'box'; box: BoxView }
+  | { type: 'upstash'; tasks: UpstashTask[] }
   | { type: 'boxRemoved'; boxId: string }
   | { type: 'officeTelemetry'; telemetry: MachineTelemetry | null; capacity: MachineCapacity }
   | { type: 'publication'; publication: PublicationView }
@@ -1058,4 +1060,23 @@ export interface ClaudeAuthenticationView {
   flowExpiresAt: number | null;
   setupCommand: string | null;
   authorizationUrl: string | null;
+}
+
+/** One disposable Small Box, tied to the worker and repository until work is saved. No credentials. */
+export interface UpstashTask {
+  id: string;
+  name: string;
+  boxId: string | null;
+  agentId: string;
+  repo: string;
+  branch: string;
+  cli: AgentCli;
+  /** Persisted before the first remote desk operation; false means no task work could have started. */
+  deskStarted?: boolean;
+  /** Connection metadata in snapshots/events only. */
+  connection?: { status: BoxStatus; error: string | null } | null;
+  slug: string;
+  port: number;
+  phase: 'creating' | 'create-failed' | 'active' | 'cleanup-blocked' | 'deleting';
+  error: string | null;
 }

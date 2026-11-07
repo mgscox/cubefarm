@@ -7319,3 +7319,69 @@ describe('silent session recovery', () => {
     expect(s.backend.startSession).not.toHaveBeenCalled();
   });
 });
+
+describe('Upstash placement', () => {
+  const cloud = () => swarm as unknown as {
+    state: { upstashTasks: import('../shared/types.ts').UpstashTask[]; repos: { box?: string }[]; settings: { runtime: string } };
+    clis: { id: string; installed: boolean }[];
+    upstash: { full(): boolean };
+    place(a: unknown, kind: 'new' | 'within'): { box?: string; wait?: string; lacks?: string };
+  };
+  const task = (): import('../shared/types.ts').UpstashTask => ({ id: 'upstash-task', name: 'task', boxId: 'box-1', agentId: 'a1', repo: repo.fullName, branch: 'task', cli: 'codex', slug: 'ada-a1', port: 5324, phase: 'active', error: null });
+
+  it('offers opt-in placement when hiring, for individual workers and for a whole floor', () => {
+    const hired = swarm.hireAgent(repo.id, { name: 'Cloud Ada', box: 'upstash', cli: 'codex' });
+    expect(hired.box).toBe('upstash');
+    swarm.updateAgent(hired.id, { box: '' });
+    expect(s.state.agents.find((a) => a.id === hired.id)?.box).toBe('');
+    swarm.updateRepo(repo.id, { box: 'upstash', everyone: true });
+    expect((s.state.repos[0] as Repo & { box: string }).box).toBe('upstash');
+    expect(s.state.agents.find((a) => a.id === hired.id)?.box).toBeNull();
+  });
+
+  it('falls back to the floor machine, or queues if an Upstash floor’s main-office fallback lacks the CLI', () => {
+    const c = cloud(); c.state.settings.runtime = 'terminal'; c.upstash = { full: () => true };
+    Object.assign(s.state.agents[0], { box: 'upstash', cli: 'codex', deskBox: '' });
+    c.clis = [{ id: 'claude', installed: true }];
+    c.state.repos[0].box = 'upstash';
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ wait: '', lacks: 'codex' });
+    c.clis.push({ id: 'codex', installed: true });
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ box: '' });
+    const floor = swarm.addBox('Floor machine', 'floor-machine');
+    c.state.repos[0].box = floor.id;
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ wait: floor.id });
+  });
+
+  it('reuses an active reservation even at capacity and holds new work behind cleanup after a placement change', () => {
+    const c = cloud(); c.state.settings.runtime = 'terminal'; c.upstash = { full: () => true };
+    Object.assign(s.state.agents[0], { box: 'upstash', cli: 'codex', deskBox: 'upstash-task' });
+    c.state.upstashTasks.push(task());
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ box: 'upstash' });
+    // An active task cannot silently move to local disk when its connection is missing.
+    expect(c.place(s.state.agents[0], 'within')).toEqual({ wait: 'upstash-task' });
+    s.state.agents[0].box = '';
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ wait: 'upstash-task' });
+    s.state.agents[0].box = 'upstash'; c.state.upstashTasks[0].phase = 'cleanup-blocked';
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ wait: 'upstash-task' });
+  });
+});
+
+
+it('reconnects a stopped Upstash task without resetting its unsaved worktree', async () => {
+  const a = s.state.agents[0];
+  Object.assign(a, { status: 'preparing', deskBox: 'upstash-task', box: 'upstash', branch: 'task', cli: 'codex' });
+  const task: import('../shared/types.ts').UpstashTask = { id: 'upstash-task', name: 'task', boxId: 'box-1', agentId: 'a1', repo: repo.fullName, branch: 'task', cli: 'codex', slug: 'ada-a1', port: 5324, phase: 'active', error: null, deskStarted: true };
+  const internals = swarm as unknown as { state: { upstashTasks: typeof task[] }; upstash: import('./upstash.ts').UpstashTasks; boxConns: Map<string, BoxConnection>; openUpstash(): Promise<unknown>; writeState(): Promise<void> };
+  internals.state.upstashTasks.push(task);
+  const { UpstashTasks } = await import('./upstash.ts');
+  internals.upstash = new UpstashTasks(internals.state.upstashTasks, s.backend.upstash, async () => {});
+  const machine = { ...s.backend, prepareDesk: vi.fn(), deskExists: vi.fn(async () => true), deskDir: () => 'existing-cloud-desk' };
+  a.name = 'Renamed worker';
+  internals.boxConns.set(task.id, { machine, hooksReady: () => undefined, state: () => ({ status: 'online' }) } as unknown as BoxConnection);
+  vi.spyOn(internals, 'openUpstash').mockResolvedValue([]);
+  vi.spyOn(internals, 'writeState').mockResolvedValue();
+  s.repoRt.get(repo.id)!.cloneStatus = 'ready';
+  expect(await s.prepare(a, repo, {}, 'task')).toBe('existing-cloud-desk');
+  expect(machine.prepareDesk).not.toHaveBeenCalled();
+  expect(machine.deskExists).toHaveBeenCalledWith(repo.fullName, task.slug);
+});

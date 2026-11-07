@@ -161,6 +161,8 @@ export interface BoxConnection {
 /** What the office gives a box link: the box, and who to tell when it changes. */
 export interface BoxOptions {
   box: PersistedBox;
+  /** Provider transport; absent for ordinary SSH boxes. Credentials stay in this process. */
+  transport?: { file: string; args: string[]; env: NodeJS.ProcessEnv };
   officeId: string;
   changed(): void;
   terminalFor(agentId: string): AgentTerminal | null;

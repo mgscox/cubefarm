@@ -96,6 +96,11 @@ function start(m: Extract<ToHost, { op: 'spawn' }>) {
     // Windows' own console host lingers after each CLI exits (one conhost.exe per terminal, forever in a keeper that
     // outlives restarts); the one node-pty ships goes with its terminal.
     proc = nodePty.spawn(m.file, m.args, { name: 'xterm-256color', cols: m.cols, rows: m.rows, cwd: m.cwd, env: m.env, useConptyDll: true });
+    if (m.env.CUBEFARM_UPSTASH_CLI) {
+      // Cloud cleanup must still find a task's process group after its CLI exits or the keeper restarts.
+      try { fs.appendFileSync(path.join(path.dirname(secretFile), 'task-processes.jsonl'), `${JSON.stringify(proc.pid)}\n`); }
+      catch (err) { killTree(proc.pid); throw err; }
+    }
   } catch (err) {
     send({ op: 'failed', id: m.id, error: (err as Error).message });
     return;
