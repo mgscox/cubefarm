@@ -164,6 +164,12 @@ app.post(
 app.post('/api/boxes', route((req) => swarm.addBox(req.body?.name, req.body?.destination)));
 app.delete('/api/boxes/:id', route((req) => swarm.removeBox(String(req.params.id))));
 app.post('/api/boxes/:id/check', route((req) => swarm.checkBox(String(req.params.id))));
+app.get('/api/run-history', route((req, res) => {
+  const n = (v: unknown) => (v === undefined || v === '' ? undefined : num(v));
+  const filter = { repoId: str(req.query.repoId) || undefined, issue: n(req.query.issue), pr: n(req.query.pr) };
+  if (req.query.download) res.attachment(`cubefarm-run-history${filter.repoId ? `-${filter.repoId.replace(/[^\w.-]+/g, '-')}` : ''}.json`);
+  return swarm.runHistory(filter);
+}));
 app.patch('/api/fleet/capacity', route((req) => swarm.setMachineCapacity(req.body?.id, req.body?.capacity)));
 app.patch('/api/agents/:id', route((req) => swarm.updateAgent(String(req.params.id), req.body ?? {})));
 app.delete('/api/agents/:id', route((req) => swarm.fireAgent(String(req.params.id))));
