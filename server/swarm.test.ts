@@ -146,6 +146,27 @@ describe('disposable Upstash worker placement', () => {
     expect(worker().box).toBe('upstash');
   });
 
+  it.each(['claude', 'codex', 'opencode'] as const)('uses %s for a QA tester inheriting an Upstash floor', async (cli) => {
+    swarm.updateRepo(repo.id, { box: 'upstash' });
+    const tester = swarm.hireAgent(repo.id, { name: 'QA pilot', role: 'qa', cli, model: cli === 'opencode' ? 'openrouter/example/model' : '' });
+    const fixture = demoPull(repo.fullName, 'swarm/issue-35-ada', false);
+    try {
+      s.repoRt.get(repo.id)!.pulls = [fixture.pull];
+      const allocate = vi.spyOn(s.upstash, 'allocate');
+      vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+      const rec = s.queueQa(repo, fixture.pull.number, undefined, 35);
+      const run = s.runQa(s.state.agents.find((a) => a.id === tester.id)!, repo, rec);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await run;
+      const box = swarm.snapshot().boxes[0];
+      expect(box?.disposable).toBe(true);
+      expect(allocate.mock.calls[0]?.[2]).toBe(cli);
+      expect(swarm.snapshot().agents.find((a) => a.id === tester.id)).toMatchObject({ role: 'qa', box: null, deskBox: box.id });
+    } finally {
+      fixture.remove();
+    }
+  });
+
   it('holds a pending task and verifies its desk again after a failed delete', async () => {
     swarm.updateAgent('a1', { box: 'upstash' });
     await swarm.assign('a1', 35);
