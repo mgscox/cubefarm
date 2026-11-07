@@ -28,10 +28,9 @@ import type { AgentBoot, AgentCli } from '../shared/types.ts';
 // One agent session as the real CLI in a pseudo-terminal: the same contract as the Agent SDK runner (log lines, the
 // current tool, the final text, finished), so the rest of the office doesn't care which runtime an agent uses.
 //
-// Claude Code reports through HTTP hooks passed with --settings: every tool call (PreToolUse also approves it, so the
-// CLI never stops to ask), each finished turn (Stop, with the final text), failures (StopFailure) and, through its
-// status line, cost and usage limits. Codex says when a turn ends (notify) and, once the manager trusts the office's
-// hooks in its /hooks, reports its steps through them too. OpenCode's plugin only says when a turn ends.
+// Claude Code reports tool calls, finished turns (Stop, with the final text) and failures (StopFailure) through HTTP
+// hooks passed with --settings. Its status line reports cost and usage limits. Codex reports turn endings (notify)
+// and reports its steps once the manager trusts the office's hooks in /hooks. OpenCode's plugin reports turn endings.
 //
 // The CLIs run in the office's terminal keeper (ptyClient.ts) and call their hooks there, so an office restart doesn't
 // stop them: the office picks them up again when it's back (reconnectClis). Writing a CLI's files and starting it is

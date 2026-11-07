@@ -69,6 +69,8 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
     writeHelpers();
     fs.mkdirSync(dir, { recursive: true });
     const settings = {
+      // Accept the startup notice for this office session only, without changing the user's Claude settings.
+      ...(plan.cli === 'claude' && plan.role !== 'researcher' ? { skipDangerousModePermissionPrompt: true } : {}),
       permissions: { allow: ['mcp__playwright__*', 'mcp__office__*'] },
       hooks: Object.fromEntries(HOOK_EVENTS.map((e) => [e, [{ hooks: [{ type: 'http', url: hookUrl, timeout: hooks.held ? 120 : 30 }] }]])),
       statusLine: { type: 'command', command: `${shellArg(process.execPath)} ${shellArg(path.join(BIN_DIR, 'statusline.cjs'))} ${shellArg(hookUrl)}`, padding: 0 },
