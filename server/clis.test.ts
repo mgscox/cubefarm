@@ -5,11 +5,40 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, cliStartupFailed, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, selectedOption, startupQuestionOnScreen, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, cliStartupFailed, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, selectedOption, startupQuestionOnScreen, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
+import { CONSOLE_PERMISSION, NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
+
+describe('officePermission', () => {
+  it.each([CONSOLE_PERMISSION, NAVIGATE_PERMISSION])('recognises the current office MCP dialog: %s', (screen) => {
+    expect(officePermission(screen)?.key).toBe('enter');
+  });
+
+  it.each([2, 3])('moves from choice %i toward the one-time Yes', (selected) => {
+    const screen = NAVIGATE_PERMISSION.replace('❯ 1.', '  1.').replace(`  ${selected}.`, `❯ ${selected}.`);
+    expect(officePermission(screen)).toEqual({ tool: 'playwright — Navigate to a URL', key: 'up' });
+  });
+
+  it.each([
+    `${NAVIGATE_PERMISSION}\n❯ new prompt`,
+    `${NAVIGATE_PERMISSION}\n● Working…`,
+    `${NAVIGATE_PERMISSION}\nDo you trust this folder?\n❯ No, exit`,
+    `playwright — Navigate to a URL Tool: (MCP)\nurl: "old"\nBash command\nDo you want to proceed?\n❯ 1. Yes\nEsc to cancel · Tab to amend`,
+    `playwright — Navigate to a URL Tool: (MCP)\nurl: "old"\nunrelated — Run Tool: (MCP)\nDo you want to proceed?\n❯ 1. Yes\nEsc to cancel · Tab to amend`,
+    NAVIGATE_PERMISSION.replace('❯ 1.', '  1.'),
+    NAVIGATE_PERMISSION.replace('  3. No', '❯ 3. No'),
+    NAVIGATE_PERMISSION.replace('Do you want to proceed?', 'Select login method'),
+    NAVIGATE_PERMISSION.replace('playwright —', 'unrelated —'),
+    NAVIGATE_PERMISSION.replace('Esc to cancel · Tab to amend', ''),
+    `❯ ${NAVIGATE_PERMISSION}`,
+    ...['Bash', 'PowerShell', 'NotebookEdit', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', ...CROSS_TURN_TOOLS].map((tool) => `${tool}\nDo you want to proceed?\n❯ 1. Yes\nEsc to cancel · Tab to amend`),
+  ])('leaves stale, partial, unrelated and disallowed tool screens alone: %s', (screen) => {
+    expect(officePermission(screen)).toBeNull();
+  });
+});
 
 describe('unwrapCmdShim', () => {
   it('runs node on the script a node shim points at, keeping its node flags', () => {
@@ -383,7 +412,7 @@ describe('launchArgs', () => {
 
   it("lets OpenCode run without stopping to ask, and without updating itself", () => {
     const config = (patch: Partial<LaunchContext>) => JSON.parse(launchArgs('opencode', ctx(patch)).env.OPENCODE_CONFIG_CONTENT);
-    for (const role of ['dev', 'qa'] as const) expect(config({ role }).permission).toEqual({ edit: 'allow', bash: 'allow', webfetch: 'allow' });
+    for (const role of ['dev', 'qa'] as const) expect(config({ role }).permission).toEqual({ edit: 'allow', bash: 'allow', webfetch: 'allow', 'playwright_*': 'allow' });
     expect(config({}).update).toBe('disable');
   });
 });

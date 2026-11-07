@@ -201,9 +201,9 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         ...(ctx.resumeId ? ['--resume', ctx.resumeId] : ['--session-id', ctx.sessionId]),
         ...(ctx.model ? ['--model', ctx.model] : []),
         ...(ctx.effort ? ['--effort', ctx.effort] : []),
-        // The office's PreToolUse hook answers every permission question (allow, or deny with an office rule).
+        // Unattended desks need to run even when a tool call requires approval beyond PreToolUse.
         '--permission-mode',
-        ctx.role === 'researcher' ? 'auto' : 'acceptEdits',
+        ctx.role === 'researcher' ? 'auto' : 'bypassPermissions',
         // On top of the manager's own setup (settings, skills, plugins, MCP servers): the office's hooks and servers.
         '--settings',
         ctx.files.settings,
@@ -252,7 +252,7 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         ...(ctx.repoSkills ? { skills: [ctx.repoSkills] } : {}),
         instructions: [ctx.files.system],
         update: 'disable', // several agents starting at once must not each reinstall it
-        permission: { edit: 'allow', bash: 'allow', webfetch: 'allow' }, // it can't stop to ask either
+        permission: { edit: 'allow', bash: 'allow', webfetch: 'allow', 'playwright_*': 'allow' }, // MCP has no approval hook in OpenCode
         ...(ctx.browser ? { mcp: { playwright: { type: 'local', command: [ctx.browser.command, ...ctx.browser.args], enabled: true } } } : {}),
       };
       // No project argument: it starts in its terminal's folder, and a desk path in its command line would make the
@@ -475,6 +475,26 @@ export function readClaudeTurn(cwd: string, sessionId: string, home = os.homedir
 }
 
 // ---------- prompts the office answers ----------
+
+/** Only office MCP servers: none of Claude's --disallowedTools belong to these namespaces. */
+export function officePermission(screen: string): { tool: string; key: 'enter' | 'up' } | null {
+  const header = [...screen.matchAll(/^[ \t]*((?:playwright|office) — [^\n]+?) Tool: \(MCP\)[ \t]*$/gm)].at(-1);
+  if (!header) return null;
+  const dialog = screen.slice(header.index + header[0].length);
+  // A current dialog ends at its controls. Output or a new input below them makes it stale transcript text.
+  if (!/\n[ \t]*Esc to cancel · Tab to amend\s*$/.test(dialog)) return null;
+  const question = dialog.match(/\n[ \t]*Do you want to proceed\?[ \t]*\n/);
+  if (!question) return null;
+  // Don't attribute a later tool's question to an older MCP heading still on screen.
+  if (dialog.slice(0, question.index).split('\n').some((line) => line.trim() && !/^[ \t]*\w+:[ \t]/.test(line))) return null;
+  const menu = dialog.slice(question.index! + question[0].length, dialog.lastIndexOf('Esc to cancel'));
+  const options = [...menu.matchAll(/^[ \t]*(❯)?[ \t]*(\d+)\.[ \t]*([^\n]+)$/gm)];
+  const selected = options.filter((o) => o[1]);
+  if (selected.length !== 1 || options[0]?.[2] !== '1' || options[0][3].trim() !== 'Yes') return null;
+  if (options.some((o, i) => Number(o[2]) !== i + 1 || (i > 0 && !/^(?:Yes, and don['’]t ask again\b.*|No)[ \t]*$/.test(o[3])))) return null;
+  if (selectedOption(`Do you want to proceed?\n${menu}`, /Do you want to proceed\?/) === null) return null;
+  return { tool: header[1], key: selected[0][2] === '1' ? 'enter' : 'up' };
+}
 
 const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|^[ \t]*(?:Do you )?trust this folder\b|^[ \t]*(?:Do you want to )?allow Codex to work in this folder/im;
 const HOOK_REVIEW_PROMPT = /Hooks need review/i;

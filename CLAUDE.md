@@ -38,6 +38,9 @@ It ships on npm as `cubefarm` (`npx cubefarm`); it used to be called Office Swar
 When Chrome or Playwright gets a proxy error, blank page, or timeout loading a local or LAN preview, read
 [cubefarm-browser-proxy-resolve](skills/cubefarm-browser-proxy-resolve/SKILL.md) before retrying or recording a QA verdict.
 
+Use [worker scratch space](docs/operations/fleet-maintenance.md#worker-scratch-space) at `CUBEFARM_JOB_SCRATCH` when set for
+disposable QA and audit outputs. Stop subprocesses using it before finishing so CubeFarm can delete their scratch files.
+
 ## Scripts
 
 | Command | What it does |
@@ -68,8 +71,8 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
 - `agentRunner.ts`: one Agent SDK session; options, env stripping, Playwright MCP, and turning the SDK stream into
   terminal lines.
 - `cliRunner.ts`: the terminal runtime (the default): one agent as the real CLI in a node-pty, same session contract
-  as `agentRunner.ts`. Claude Code reports through HTTP hooks (`POST /api/hooks/:token`; PreToolUse approves every
-  call); Codex reports turn endings (notify) and, once the manager trusts them, its steps (`-c hooks.*`); OpenCode
+  as `agentRunner.ts`. Claude Code reports through HTTP hooks (`POST /api/hooks/:token`); Codex reports turn
+  endings (notify) and, once the manager trusts them, its steps (`-c hooks.*`); OpenCode
   only turn endings. Codex/OpenCode screenshots are collected from the session's Playwright output folder. Esc in a
   terminal ends the session as `interrupted`. The CEO's office tools are served over MCP (`/api/mcp/:token`).
 - `machine.ts`: the `Machine` seam (an agent's desk and sessions; `Backend` is the office's own) and `CliHost`, the

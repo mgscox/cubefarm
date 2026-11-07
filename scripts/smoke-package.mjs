@@ -8,7 +8,7 @@ import path from 'node:path';
 import { tsImport } from 'tsx/esm/api';
 
 const root = path.resolve(import.meta.dirname, '..');
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cubefarm-package-'));
+const tmp = fs.mkdtempSync(path.join(process.env.CUBEFARM_JOB_SCRATCH || os.tmpdir(), 'cubefarm-package-'));
 // An agent's reserved port when it has one (CI sets SWARM_PORT=0).
 const PORT = Number(process.env.SWARM_PORT) || 4456;
 const sh = (cmd, cwd) => {

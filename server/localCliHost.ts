@@ -20,6 +20,7 @@ function prepare(plan: CliPlan): PreparedCli {
   const launch = writeCliSession({ ...plan, prompt: images.prompt(plan.prompt), systemAppend: images.prompt(plan.systemAppend) }, { url: keeper ?? plan.officeUrl, held: !!keeper });
   return {
     dir: launch.dir,
+    jobScratch: !!launch.env.CUBEFARM_JOB_SCRATCH,
     prompt: launch.prompt,
     hookUrl: `${keeper ?? plan.officeUrl}/api/hooks`,
     start({ cols, rows }, meta) {

@@ -63,7 +63,10 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
       return { dir, notes };
     },
     removeDesk: (fullName, slug) => workspace.removeDesk(str(fullName), str(slug)),
-    releaseDesk: (fullName, slug, port) => workspace.releaseDesk(str(fullName), str(slug), Number(port), { pids: ctx.pids(), markers: [SESSIONS_DIR, BIN_DIR] }),
+    releaseDesk: (fullName, slug, port, finishedScratchSession) => workspace.releaseDesk(
+      str(fullName), str(slug), Number(port), { pids: ctx.pids(), markers: [SESSIONS_DIR, BIN_DIR] },
+      typeof finishedScratchSession === 'string' ? finishedScratchSession : undefined,
+    ),
     deskHead: (fullName, slug) => workspace.deskHead(str(fullName), str(slug)),
     deskExists: (fullName, slug) => workspace.deskExists(str(fullName), str(slug)),
     deskAhead: (fullName, slug, base) => workspace.deskAhead(str(fullName), str(slug), str(base)),
@@ -78,7 +81,7 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
       const p = plan as CliPlan;
       const cli = writeCliSession({ ...p, prompt: images.prompt(p.prompt), systemAppend: images.prompt(p.systemAppend) }, { url: ctx.hookUrl(), held: true });
       prepared.set((plan as CliPlan).token, { cli, at: now });
-      return { dir: cli.dir, prompt: cli.prompt, hookUrl: `${ctx.hookUrl()}/api/hooks` };
+      return { dir: cli.dir, jobScratch: !!cli.env.CUBEFARM_JOB_SCRATCH, prompt: cli.prompt, hookUrl: `${ctx.hookUrl()}/api/hooks` };
     },
     newShots: (dir, seen, now) => sessionShots(sessionDir(dir), new Set(seen as string[]), Number(now) || Infinity).map(shot),
     savedShot(cwd, text) {

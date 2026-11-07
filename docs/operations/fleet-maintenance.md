@@ -24,6 +24,12 @@ The checker calls the running office's existing APIs. With Automatic updates ena
 
 The defaults are `http://127.0.0.1:4317` and floor `mgscox/cubefarm`. For a different office, set `CUBEFARM_OFFICE_URL`, `CUBEFARM_OFFICE_REPO` in the cron environment. Keep the office floor's local folder pointed at the running office checkout. Failed checks return a nonzero exit and record the error in the log. Each check retries transient connection failures for up to 30 seconds so a supervised office restart can finish. Runs have a 12-minute budget, shorter than the schedule interval; all API operations are idempotent checks, so a manual repeat is safe.
 
+## Worker scratch space
+
+On Linux, use `findmnt -T /tmp` and `df -hT /tmp /var/tmp "$HOME"` to check the temporary filesystem and the disk separately. A RAM-backed `/tmp` can fill and put pressure on memory and swap while the disk still has room.
+
+Development and QA jobs get a private `CUBEFARM_JOB_SCRATCH` directory under the worker’s CubeFarm home. Use it for temporary installs, demo copies and other disposable outputs. Pass it to tools through `TMPDIR` (`TEMP` on Windows) or their output directory option. CubeFarm deletes the scratch files at completion, including when the developer’s terminal stays open. Keep source changes and required evidence in their normal locations. Files that tools put directly in system temp or the worktree are outside this cleanup.
+
 ## Fleet warnings
 
 Each Fleet card distinguishes a **CubeFarm worker restart** from an **OS restart**. A worker restart warning is driven by the reported keeper build and pending restart step, including a failed restart; it clears when a fresh report confirms the keeper is current.

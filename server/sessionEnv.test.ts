@@ -45,6 +45,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   // Session files and helper scripts are irrelevant to env handoff; never touch office state.
   vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
+  vi.spyOn(fs, 'mkdtempSync').mockImplementation((prefix) => `${prefix}fixture`);
   vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
   vi.spyOn(fs, 'rm').mockImplementation((_path, _options, cb) => cb(null));
   vi.stubEnv('npm_config_registry', 'https://registry.npmjs.org/');
@@ -63,6 +64,19 @@ function expectProjectEnv(env: NodeJS.ProcessEnv | undefined) {
   expect(Object.keys(env!).some((key) => key.toLowerCase() === 'npm_config_allow_scripts')).toBe(false);
   expect(env!.npm_config_registry).toBe('https://registry.npmjs.org/');
 }
+
+it('preapproves only office MCP namespaces in Claude session settings when hooks are unreachable', () => {
+  const terminal = { cols: 120, rows: 32, note: vi.fn(), bind: vi.fn() } as unknown as AgentTerminal;
+  const session = startCliSession({ ...opts, cli: 'claude', terminal }, callbacks);
+  try {
+    const call = vi.mocked(fs.writeFileSync).mock.calls.find(([file]) => String(file).endsWith('settings.json'))!;
+    const settings = JSON.parse(String(call[1]));
+    expect(settings.permissions.allow).toEqual(['mcp__playwright__*', 'mcp__office__*']);
+    expect(settings.hooks.PreToolUse[0].hooks[0]).toMatchObject({ type: 'http', timeout: 30 });
+  } finally {
+    session.stop();
+  }
+});
 
 describe.each(['npm_config_allow_scripts', 'NPM_CONFIG_ALLOW_SCRIPTS', 'Npm_Config_Allow_Scripts'])('%s', (key) => {
   beforeEach(() => vi.stubEnv(key, 'esbuild,acorn'));
