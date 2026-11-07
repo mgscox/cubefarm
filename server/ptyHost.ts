@@ -4,6 +4,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import * as nodePty from '@lydell/node-pty';
+import { clearSessionScratch } from './jobScratch.ts';
 import { encode, keeperBuild, localHookAnswer, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
 
 // The office's terminal keeper: a small process of its own that runs the agents' CLIs in pseudo-terminals, so they
@@ -112,6 +113,13 @@ function start(m: Extract<ToHost, { op: 'spawn' }>) {
     h.exit = exitCode;
     h.signal = signal || undefined;
     quietly(() => proc.kill()); // on Windows the terminal's console host (conhost.exe) outlives the CLI until then
+    const scratch = m.env.CUBEFARM_JOB_SCRATCH;
+    if (scratch && path.basename(scratch) === 'job-scratch') {
+      // An offline office cannot release this desk. The keeper can still remove the exited CLI's disposable files.
+      const root = path.join(path.dirname(secretFile), 'sessions');
+      void clearSessionScratch(path.dirname(scratch), { root, recreate: false })
+        .catch((err) => note(`could not clear exited CLI scratch: ${err.message}`));
+    }
     if (h.attached && office) send({ op: 'exit', id: m.id, code: exitCode, signal: h.signal });
     if ((h.attached && office) || h.killed) held.delete(m.id);
   });

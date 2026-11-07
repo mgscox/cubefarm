@@ -463,7 +463,7 @@ async function stopDeskProcesses(desk: string, port: number, keep: OfficeProcess
     const psList = (paths: string[]) => paths.flatMap(pathForms).map((d) => `'${d.toLowerCase().replaceAll("'", "''")}'`).join(', ');
     const script = `
 $ErrorActionPreference = 'SilentlyContinue'
-$spare = @(${spare.join(', ')})
+$spare = @($PID, ${spare.join(', ')})
 $seed = @()
 Get-NetTCPConnection -LocalPort ${port} -State Listen | ForEach-Object { $seed += [int]$_.OwningProcess }
 $desks = @(${psList([desk])})
@@ -499,6 +499,7 @@ Write-Output $kill.Count`;
   const listening = await run('sh', ['-c', `lsof -ti tcp:${port} -sTCP:LISTEN 2>/dev/null || true`]).catch(() => '');
   const listing = await run('ps', ['-A', '-ww', '-o', 'pid=,args=']).catch(() => '');
   const pids = new Set([...listening.split(/\s+/).map(Number), ...leftoversInDesk(listing, desk, keep, scratch)]);
+  operationSignal()?.throwIfAborted();
   for (const pid of pids) {
     if (!pid || spare.includes(pid)) continue;
     try {

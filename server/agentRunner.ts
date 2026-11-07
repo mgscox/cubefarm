@@ -318,12 +318,13 @@ export function summariseResult(cwd: string, tool: string, text: string): LogEnt
 
 export function startSession(opts: SessionOptions, callbacks: SessionCallbacks): SessionHandle {
   let done = false;
+  let completion = Promise.resolve();
   const cb: SessionCallbacks = {
     ...callbacks,
     finished: (r) => {
       if (done) return;
       done = true;
-      callbacks.finished(r);
+      completion = Promise.resolve(callbacks.finished(r));
     },
   };
   const input = new InputQueue();
@@ -509,6 +510,20 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
     }
   };
 
+  const session: SessionHandle = {
+    send(text) {
+      const prompt = images.prompt(text);
+      pendingTurns += 1;
+      input.push(prompt);
+    },
+    stop() {
+      stopped = true;
+      clearTimeout(emptyTurn);
+      input.close();
+      abort.abort();
+    },
+  };
+
   (async () => {
     let skillDir: string | undefined;
     let jobDir: string | undefined;
@@ -516,6 +531,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
       if (jobScratchEnabled(opts.role)) {
         fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
         jobDir = fs.mkdtempSync(path.join(SESSIONS_DIR, 'sdk-'));
+        session.finishedScratchSession = jobDir;
         env.CUBEFARM_JOB_SCRATCH = createJobScratch(jobDir);
         options.systemPrompt = { type: 'preset', preset: 'claude_code', append: images.prompt(opts.systemAppend) + JOB_SCRATCH_INSTRUCTIONS };
       }
@@ -535,22 +551,13 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
       if (!stopped && !begun && conversation.lost(`${startup}\n${message}`)) message = LOST_CONVERSATION;
       cb.finished({ ok: false, text: '', costUsd: lastCost, turns: lastTurns, errors: [message] });
     } finally {
-      if (jobDir) await fs.promises.rm(jobDir, { recursive: true, force: true, maxRetries: 5 }).catch((err) => console.warn('Could not clear job scratch', err));
+      if (jobDir) {
+        await completion.catch((err) => console.warn('Could not finish job', err));
+        await fs.promises.rm(jobDir, { recursive: true, force: true, maxRetries: 5 }).catch((err) => console.warn('Could not clear job scratch', err));
+      }
       if (skillDir) fs.rm(skillDir, { recursive: true, force: true, maxRetries: 5 }, () => undefined);
     }
   })();
 
-  return {
-    send(text) {
-      const prompt = images.prompt(text);
-      pendingTurns += 1;
-      input.push(prompt);
-    },
-    stop() {
-      stopped = true;
-      clearTimeout(emptyTurn);
-      input.close();
-      abort.abort();
-    },
-  };
+  return session;
 }

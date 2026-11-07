@@ -7,7 +7,7 @@ import { operationSignal } from './operation.ts';
 
 // Disposable files are scoped to a CubeFarm session, separate from its CLI state and Git desk.
 
-export const SESSIONS_DIR = path.join(HOME_DIR, 'sessions');
+export const SESSIONS_DIR = path.resolve(HOME_DIR, 'sessions');
 
 export function jobScratchEnabled(role: AgentRole): boolean {
   return role === 'dev' || role === 'qa';
@@ -21,16 +21,16 @@ export function createJobScratch(sessionDir: string): string {
 
 export const JOB_SCRATCH_INSTRUCTIONS = `\n\nUse the directory in CUBEFARM_JOB_SCRATCH for disposable test and PR files such as demo copies, temporary installs and browser profiles. Pass it as TMPDIR (TEMP on Windows) to test commands that use system temp. CubeFarm deletes its contents after the job finishes. Stop subprocesses using it before reporting completion. Keep source changes and required evidence in their normal locations.`;
 
-export function sessionScratchDir(dir: string): string {
+export function sessionScratchDir(dir: string, root = SESSIONS_DIR): string {
   const sessionDir = path.resolve(dir);
-  if (path.dirname(sessionDir) !== path.resolve(SESSIONS_DIR)) throw new Error('Invalid session scratch location');
+  if (path.dirname(sessionDir) !== path.resolve(root)) throw new Error('Invalid session scratch location');
   if (fs.lstatSync(sessionDir, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error('Invalid session scratch location');
   return path.join(sessionDir, 'job-scratch');
 }
 
 /** Detach finished files before awaiting deletion, so a later turn gets its own empty directory. */
-export async function clearSessionScratch(dir: string): Promise<void> {
-  const scratch = sessionScratchDir(dir);
+export async function clearSessionScratch(dir: string, { root = SESSIONS_DIR, recreate = true } = {}): Promise<void> {
+  const scratch = sessionScratchDir(dir, root);
   const sessionDir = path.dirname(scratch);
   const info = fs.lstatSync(scratch, { throwIfNoEntry: false });
   if (!info) return; // A session from before scratch was introduced.
@@ -51,7 +51,7 @@ export async function clearSessionScratch(dir: string): Promise<void> {
         await setTimeout((attempt + 1) * 100, undefined, { signal: operationSignal() });
       }
     }
-    createJobScratch(sessionDir);
+    if (recreate) createJobScratch(sessionDir);
   } finally {
     await fs.promises.rm(discard, { recursive: true, force: true, maxRetries: 5 });
   }

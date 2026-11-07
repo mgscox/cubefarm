@@ -452,13 +452,22 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     setBoot(null);
     clearInterval(shotTimer);
     clearInterval(stuckTimer);
+    const l = live;
+    const allowInput = term.allowInput;
+    const pauseInput = () => false;
+    if (l?.jobScratch) term.allowInput = pauseInput;
     const lastShots = collectShots(true);
     if (term.onInput === watchKeys) term.onInput = null;
-    const l = live;
     cb.tool(null);
     const deliver = () => {
       if (l?.jobScratch) handle.finishedScratchSession = l.dir;
-      const completion = cb.finished({ ...r, costUsd, turns });
+      // The office blocks follow-ups until desk release finishes, starting in this callback.
+      let completion: void | Promise<void>;
+      try {
+        completion = cb.finished({ ...r, costUsd, turns });
+      } finally {
+        if (term.allowInput === pauseInput) term.allowInput = allowInput;
+      }
       // The keeper must still advertise a recoverable result until screenshots and the handoff finish.
       if (l && lives.get(term) === l) {
         l.session = null;
