@@ -1,3 +1,5 @@
+import { createEvaluation } from './evaluations.ts';
+import type { PlaybookEvaluation } from '../shared/types.ts';
 import { UPSTASH, UpstashTasks } from './upstash.ts';
 import type { UpstashTask } from '../shared/types.ts';
 import syncFs from 'node:fs';
@@ -5,7 +7,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { emptyTelegram, TelegramMirror, telegramToken, telegramTransport, type TelegramState, type TelegramTransport } from './telegram.ts';
-import { createDemoTelegram, demoApprovedProposal, demoCrossFloorProposal, demoTracker } from './demo.ts';
+import { createDemoTelegram, demoEvaluation, demoApprovedProposal, demoCrossFloorProposal, demoTracker } from './demo.ts';
 import { loadPublications, Publisher } from './publication.ts';
 import { approvedHold, blockerKey, readBlocker, type BlockerReading } from './approvedBlockers.ts';
 import type { WebSocket } from 'ws';
@@ -255,6 +257,7 @@ interface Persisted {
   prContributions: PrContributionView[];
   qaOutcomes: QaOutcomeView[];
   lessons: LessonView[];
+  evaluations: PlaybookEvaluation[];
   scoreLedger: ScoreLedger;
   requests: HireRequestView[];
   ceo: CeoState;
@@ -650,6 +653,7 @@ export class Swarm {
     prContributions: [],
     qaOutcomes: [],
     lessons: [],
+    evaluations: [],
     scoreLedger: { version: SCORE_LEDGER_VERSION, cutoverAt: 0, events: [] }, // a new office has no legacy history
     requests: [],
     ceo: { queue: [], job: null, lastReviewAt: null, lastFingerprint: null },
@@ -820,6 +824,7 @@ export class Swarm {
         prContributions: loaded.prContributions ?? [],
         qaOutcomes: loaded.qaOutcomes ?? [],
         lessons: loaded.lessons ?? [],
+        evaluations: loaded.evaluations ?? [],
         // Earlier offices start Authorship and Repair at zero; their combined score stays as the legacy total.
         scoreLedger: loaded.scoreLedger ?? { version: SCORE_LEDGER_VERSION, cutoverAt: Date.now(), events: [] },
         qa: (loaded.qa ?? []).map((q) => ({
@@ -1269,6 +1274,7 @@ export class Swarm {
       runAttempts: this.history.attempts,
       qaOutcomes: this.state.qaOutcomes,
       lessons: this.state.lessons,
+      evaluations: this.state.evaluations,
       scoreEvents: this.state.scoreLedger.events,
       qa: this.state.qa.filter((q) => !q.closed).map((q) => this.qaView(q)),
       requests: this.state.requests,
@@ -1676,6 +1682,36 @@ export class Swarm {
     const before = structuredClone(lesson);
     reviewLesson(lesson, input, this.state.lessons, 'manager', Date.now());
     return this.saveLesson(lesson, () => Object.assign(lesson, before));
+  }
+
+  /** Save an immutable evaluation; subsequent runs or evidence corrections require a new comparison. */
+  async evaluatePlaybook(repoId: string, input: unknown) {
+    const evaluation = createEvaluation(input, { ...this.lessonEvidence(repoId), lessons: this.state.lessons }, Date.now());
+    this.state.evaluations.push(evaluation);
+    try {
+      await this.writeState();
+    } catch (err) {
+      this.state.evaluations = this.state.evaluations.filter((e) => e !== evaluation);
+      throw err;
+    }
+    this.broadcast({ type: 'evaluation', evaluation });
+    return evaluation;
+  }
+
+  async demoPlaybookEvaluation(repoId: string) {
+    if (!this.backend.demo) throw new HttpError(404, 'Pinned fixtures are only available in the demo office');
+    const fixture = demoEvaluation(this.repo(repoId).id);
+    this.state.lessons.push(fixture.lesson);
+    this.state.qaOutcomes.push(...fixture.outcomes);
+    for (const attempt of fixture.attempts) this.history.add(attempt);
+    const evaluation = await this.evaluatePlaybook(repoId, fixture.input);
+    this.broadcast({ type: 'lesson', lesson: fixture.lesson });
+    for (const outcome of fixture.outcomes) this.broadcast({ type: 'qaOutcome', outcome });
+    return evaluation;
+  }
+
+  evaluationExport(repoId?: string) {
+    return { format: 'cubefarm-evaluations', version: 1, evaluations: this.state.evaluations.filter((e) => !repoId || e.repoId === repoId) };
   }
 
   private appendLog(a: PersistedAgent, entries: LogEntry[]) {

@@ -654,6 +654,46 @@ describe('lessons', () => {
   });
 });
 
+describe('playbook evaluations', () => {
+  beforeEach(() => s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null }));
+  it('saves a demo comparison, broadcasts it and restores the same report after restart', async () => {
+    const events = vi.spyOn(s, 'broadcast');
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+    vi.spyOn(fs, 'rename').mockResolvedValue();
+    const evaluation = await swarm.demoPlaybookEvaluation(repo.id);
+    expect(events).toHaveBeenCalledWith({ type: 'evaluation', evaluation });
+    expect(swarm.snapshot().evaluations).toEqual([evaluation]);
+    expect(swarm.evaluationExport(repo.id).evaluations).toEqual([evaluation]);
+    expect(swarm.evaluationExport('other/repo').evaluations).toEqual([]);
+    const persisted = String(write.mock.calls.findLast((c) => c[0] === `${STATE_FILE}.tmp`)![1]);
+    const fresh = new Swarm(createDemoBackend());
+    (fresh as unknown as Internals).backend.demo = false;
+    vi.spyOn(fresh as unknown as Internals, 'save').mockImplementation(() => {});
+    vi.spyOn(fs, 'readFile').mockImplementation(async (file) => String(file) === STATE_FILE ? persisted : Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' })));
+    await fresh.init();
+    expect(fresh.snapshot().evaluations).toEqual([evaluation]);
+    expect(fresh.evaluationExport(repo.id)).toEqual(swarm.evaluationExport(repo.id));
+  });
+
+  it('does not publish an evaluation that could not be saved or expose demo fixtures in real mode', async () => {
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    vi.spyOn(fs, 'writeFile').mockResolvedValue();
+    vi.spyOn(fs, 'rename').mockResolvedValue();
+    const e = await swarm.demoPlaybookEvaluation(repo.id);
+    const events = vi.spyOn(s, 'broadcast');
+    vi.spyOn(s, 'writeState').mockRejectedValue(new Error('EACCES'));
+    await expect(swarm.evaluatePlaybook(repo.id, {
+      lessonId: e.lesson.id, basePlaybook: e.report.basePlaybook, candidatePlaybook: e.report.candidatePlaybook,
+      cases: e.cases.map((c) => ({ ...c, baseAttemptId: c.base.attemptId, candidateAttemptId: c.candidate.attemptId })),
+    })).rejects.toThrow('EACCES');
+    expect(swarm.snapshot().evaluations).toEqual([e]);
+    expect(events).not.toHaveBeenCalled();
+    s.backend.demo = false;
+    await expect(swarm.demoPlaybookEvaluation(repo.id)).rejects.toMatchObject({ status: 404 });
+  });
+});
+
 describe('specialty-first assignment', () => {
   const addDev = (id: string, specialty: string, authorship: number, repair: number, desk: number) => {
     const a: Record<string, unknown> = { ...s.state.agents[0], id, name: id, specialty, desk, score: 100 - desk };

@@ -29,6 +29,16 @@ function linkHasCredentials(url: URL): boolean {
     || url.pathname.split('/').some((seg) => SECRET_VALUE.test(decode(seg)));
 }
 
+/** Safe durable evidence link, shared by lessons and evaluations. */
+export function evidenceUrl(value: string | null): string | null {
+  if (value === null) return null;
+  let url: URL;
+  try { url = new URL(value); } catch { throw new HttpError(400, 'Evidence needs an http(s) URL'); }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new HttpError(400, 'Evidence needs an http(s) URL');
+  if (linkHasCredentials(url)) throw new HttpError(400, 'Evidence must not carry credentials in its URL');
+  return url.href;
+}
+
 function text(value: unknown, name: string, max: number, required = true): string {
   if (value === undefined || value === null || value === '') {
     if (required) throw new HttpError(400, `${name} is required`);
@@ -72,11 +82,8 @@ function source(ref: unknown, kind: LessonKind, ev: LessonEvidence): LessonSourc
       classification: null, url: null, summary: summary(`${attempt.task} ${work}: ${attempt.outcome.result} (${attempt.outcome.cause})${attempt.outcome.excerpt ? ` ${attempt.outcome.excerpt}` : ''}`) };
   }
   if (typeof r.url === 'string') {
-    let url: URL;
-    try { url = new URL(r.url); } catch { throw new HttpError(400, 'A link source needs an http(s) URL'); }
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new HttpError(400, 'A link source needs an http(s) URL');
-    if (linkHasCredentials(url)) throw new HttpError(400, 'A link source must not carry credentials in its URL');
-    return { kind: 'link', ref: url.href, qaOutcomeId: null, prNumber: null, sha: null, classification: null, url: url.href,
+    const url = evidenceUrl(r.url)!;
+    return { kind: 'link', ref: url, qaOutcomeId: null, prNumber: null, sha: null, classification: null, url,
       summary: summary(text(r.summary, 'A link source summary', LESSON_LIMITS.guidance)) };
   }
   throw new HttpError(400, 'A source is a finding (qaOutcomeId and findingId), an attempt (attemptId) or a link (url and summary)');

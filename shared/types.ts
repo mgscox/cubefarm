@@ -146,6 +146,68 @@ export interface RunHistoryExport {
   attempts: (RunAttemptView & { queueMs: number | null; runMs: number | null; prState: PullInfo['state'] | null })[];
 }
 
+export type EvaluationMetric = 'firstPassQa' | 'verifiedRepair' | 'workerBlocked';
+export type EvaluationResult = 'yes' | 'no' | 'incomplete' | 'unknown' | 'not-applicable';
+
+/** Compact facts retained with an evaluation even after the underlying attempts are pruned. */
+export interface EvaluationObservation {
+  attemptId: string;
+  repoId: string;
+  specialty: string | null;
+  task: RunAttemptView['task'];
+  prNumber: number | null;
+  runtime: RunAttemptView['runtime'];
+  worker: RunAttemptView['worker'];
+  revisions: RunAttemptView['revisions'];
+  result: RunResult | null;
+  cause: RunCause | null;
+  metrics: Record<EvaluationMetric, EvaluationResult>;
+  evidence: {
+    outcomeId: string;
+    sha: string | null;
+    revision: QaOutcomeView['revision'];
+    verdict: QaOutcomeView['verdict'];
+    worker: { box: string | null; health: RunHealth | null };
+    url: string | null;
+    summary: string;
+  }[];
+}
+
+export interface EvaluationReport {
+  format: 'cubefarm-evaluation-report';
+  version: 1;
+  generatedAt: number;
+  basePlaybook: string;
+  candidatePlaybook: string;
+  observations: EvaluationObservation[];
+  cohorts: {
+    context: Pick<EvaluationObservation, 'repoId' | 'specialty' | 'task' | 'runtime' | 'worker'>;
+    attempts: number;
+    smallSample: boolean;
+    metrics: Record<EvaluationMetric, Record<EvaluationResult, number> & { numerator: number; denominator: number }>;
+  }[];
+}
+
+/** Immutable comparison of recorded pinned runs; adopting guidance remains a manager decision. */
+export interface PlaybookEvaluation {
+  id: string;
+  repoId: string;
+  at: number;
+  lesson: LessonExport['lessons'][number];
+  cases: {
+    id: string;
+    expectedBehavior: string;
+    metric: EvaluationMetric;
+    expected: boolean;
+    base: EvaluationObservation;
+    candidate: EvaluationObservation;
+    baseResult: EvaluationResult;
+    candidateResult: EvaluationResult;
+    comparable: boolean;
+  }[];
+  report: EvaluationReport;
+}
+
 export interface PullRefresh {
   pulls: PullInfo[];
   checksError?: string; // diagnostic details from optional check enrichment
@@ -961,6 +1023,7 @@ export interface WorldSnapshot {
   runAttempts?: RunAttemptView[];
   qaOutcomes?: QaOutcomeView[];
   lessons?: LessonView[];
+  evaluations?: PlaybookEvaluation[];
   requests: HireRequestView[];
   ceo: CeoInfo;
   research: ResearchInfo;
@@ -996,6 +1059,7 @@ export type ServerEvent =
   | { type: 'qa'; qa: QaView }
   | { type: 'qaOutcome'; outcome: QaOutcomeView }
   | { type: 'lesson'; lesson: LessonView }
+  | { type: 'evaluation'; evaluation: PlaybookEvaluation }
   | { type: 'prContribution'; contribution: PrContributionView }
   | { type: 'scoreEvents'; events: ScoreEventView[] }
   | { type: 'runAttempt'; attempt: RunAttemptView }
