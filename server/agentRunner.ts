@@ -60,6 +60,8 @@ export interface SessionResult {
   ok: boolean;
   text: string;
   costUsd: number;
+  /** False when the CLI never reported a cost, so costUsd 0 means unknown rather than free. */
+  costReported?: boolean;
   turns: number;
   errors: string[];
   structured?: unknown;

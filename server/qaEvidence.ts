@@ -28,7 +28,7 @@ export function qaFindings(checks: QaCheck[], headSha: string | null, baseSha: s
       .find((p) => p?.submittedSha === c.introducedBySha) : null;
     return {
       id: old?.id ?? crypto.randomUUID(), key, check: c.name,
-      classification: c.failureKind === 'environment' ? 'worker' as const : c.failureKind === 'code' ? 'code' as const : 'inconclusive' as const,
+      classification: c.failureKind === 'environment' || c.failureKind === 'resources' ? 'worker' as const : c.failureKind === 'code' ? 'code' as const : 'inconclusive' as const,
       evidence: c.details, confirmed: c.confirmed === true && c.result === 'fail' && c.details.trim().length > 0,
       attributableTo: contribution ? { agentId: contribution.agentId, submittedSha: contribution.submittedSha! } : null,
     };
