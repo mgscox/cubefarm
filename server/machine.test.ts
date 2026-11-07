@@ -672,7 +672,7 @@ describe('startCliSession on a host', () => {
   });
 
   it.each([false, true])('retains the result through a second restart during box screenshot collection (keepAlive=%s)', async (keepAlive) => {
-    let meta: unknown = { agentId: 'ada', cli: 'codex', token: 'shots', dir: 'sessions/t', busy: true, resumeId: 'known' };
+    let meta: unknown = { agentId: 'ada', cli: 'codex', token: 'shots', dir: 'sessions/t', jobScratch: true, busy: true, resumeId: 'known' };
     const reply = turn({ ended: true, mark: 'reply', text: '{"verdict":"pass"}' });
     const h = { ...host(vi.fn()), recoverTurn: async () => reply,
       newShots: () => new Promise<[]>(() => {}),
@@ -680,11 +680,13 @@ describe('startCliSession on a host', () => {
       adopt: () => ({ ...pty, setMeta: (next: unknown) => { meta = next; } }),
     };
     const first = terminal();
+    first.allowInput = () => true;
     await reconnectClis(() => first, h);
     const cb1 = claudeCallbacks();
     startCliSession({ ...opts, cli: 'codex', terminal: first, reattach: true, keepAlive }, cb1, h);
     await vi.advanceTimersByTimeAsync(8000);
     handleHook('shots', { hook_event_name: 'UserPromptSubmit', prompt: 'Late hook during final screenshots' });
+    expect(first.allowInput()).toBe(false);
     expect(cb1.finished).not.toHaveBeenCalled();
     expect(meta).toMatchObject({ busy: true, transcriptPending: true });
     vi.clearAllTimers(); // old office dies before its screenshot RPC/finish timeout resolves

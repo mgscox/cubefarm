@@ -38,6 +38,9 @@ It ships on npm as `cubefarm` (`npx cubefarm`); it used to be called Office Swar
 When Chrome or Playwright gets a proxy error, blank page, or timeout loading a local or LAN preview, read
 [cubefarm-browser-proxy-resolve](skills/cubefarm-browser-proxy-resolve/SKILL.md) before retrying or recording a QA verdict.
 
+Use [worker scratch space](docs/operations/fleet-maintenance.md#worker-scratch-space) at `CUBEFARM_JOB_SCRATCH` when set for
+disposable QA and audit outputs. Stop subprocesses using it before finishing so CubeFarm can delete their scratch files.
+
 ## Scripts
 
 | Command | What it does |

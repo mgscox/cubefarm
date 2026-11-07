@@ -76,6 +76,40 @@ describe('CLI installer folders outside PATH', () => {
     fs.rmSync(launch.dir, { recursive: true, force: true, maxRetries: 5 });
   });
 
+  it('deletes a box job’s disposable files and preserves its session and desk', async () => {
+    install(['.opencode', 'bin']);
+    const box = createBoxOps({ hookUrl: () => 'http://127.0.0.1:45678', pids: () => [], root: home });
+    const plan: CliPlan = {
+      cli: 'opencode', token: 'box-job-scratch', sessionId: 'test', cwd: home, prompt: 'QA', systemAppend: '',
+      model: '', effort: '', name: 'Nancy', role: 'qa', additionalDirectories: [], browserTesting: false,
+      officeUrl: 'http://office.invalid', officeTools: false,
+    };
+    await box.rpc('prepare', [plan]);
+    const launch = box.take(plan.token)!;
+    const scratch = launch.env.CUBEFARM_JOB_SCRATCH;
+    try {
+      expect(fs.statSync(scratch).isDirectory()).toBe(true);
+      fs.writeFileSync(path.join(home, 'uncommitted.txt'), 'keep');
+      fs.mkdirSync(path.join(scratch, 'node_modules'));
+      fs.writeFileSync(path.join(scratch, 'node_modules', 'package.txt'), 'discard');
+      if (!win) fs.chmodSync(path.join(scratch, 'node_modules'), 0o500);
+      fs.symlinkSync(home, path.join(scratch, 'desk-link'), win ? 'junction' : 'dir');
+      const release = () => box.rpc('releaseDesk', ['demo-co/example', 'nancy', 0, launch.dir]);
+      await release();
+      await release();
+      expect(fs.readdirSync(scratch)).toEqual([]);
+      expect(fs.readFileSync(path.join(home, 'uncommitted.txt'), 'utf8')).toBe('keep');
+      expect(fs.readFileSync(path.join(launch.dir, 'instructions.md'), 'utf8')).toContain('CUBEFARM_JOB_SCRATCH');
+
+      fs.rmdirSync(scratch);
+      fs.symlinkSync(home, scratch, win ? 'junction' : 'dir');
+      await expect(release()).rejects.toThrow('Invalid session scratch location');
+      expect(fs.readFileSync(path.join(home, 'uncommitted.txt'), 'utf8')).toBe('keep');
+    } finally {
+      fs.rmSync(launch.dir, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
   it('prefers PATH over installer folders, and detects a common folder for Codex too', () => {
     const onPath = install(['custom']);
     install(['.opencode', 'bin']);
