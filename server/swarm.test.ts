@@ -5251,6 +5251,31 @@ describe('QA rounds', () => {
       expect(merge).not.toHaveBeenCalled();
     });
 
+    it.each(['explicit fail', 'confirmed finding'] as const)('keeps a posted %s audit blocked when the manager stops it during the last revision read', async (variant) => {
+      const { tester, comment } = await securityDesk();
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+      let readsAfterPost = -1;
+      comment.mockImplementation(async () => { readsAfterPost = 0; return 'comment-url'; });
+      const pr = { ...pull, labels: ['ready-for-review'], baseSha: 'base-1', body: '', isCrossRepository: false };
+      // The send-back check reads the PR first; the evidence's revision read comes last.
+      vi.mocked(s.backend.prDetails).mockImplementation(async () => {
+        if (readsAfterPost >= 0 && ++readsAfterPost === 2) swarm.stopAgent('q2');
+        return pr;
+      });
+      await s.onQaFinished(tester, repo, result(true, {
+        ...sandboxReport, checks: auditChecks, validationGap: 'none', summary: 'Tenant boundary bypass',
+        ...(variant === 'explicit fail' ? { verdict: 'fail' } : { verdict: 'pass', blockingFindings: 'confirmed' }),
+      }));
+      expect(readsAfterPost).toBe(2);
+      expect(tester).toMatchObject({ status: 'stopped' });
+      expect(rec).toMatchObject({ status: 'needs-human', testedSha: 'sha-1' });
+      expect(s.state.qaOutcomes.at(-1)).toMatchObject({ commentUrl: null });
+      s.repoRt.get(repo.id)!.pulls = [{ ...pull, labels: ['ready-for-review'] }];
+      await expect(swarm.mergePr({ floor: repo.floor, number: 13, reason: 'Manager requested merge' })).rejects.toMatchObject({ status: 409 });
+      expect(merge).not.toHaveBeenCalled();
+    });
+
     it('queues a labeled PR that already passed regular QA, even when automatic merge is off', () => {
       Object.assign(rec, { status: 'passed', passedSha: pull.headSha, testedSha: pull.headSha });
       s.reconcilePulls(repo, [{ ...pull, labels: ['ready-for-review'] }]);

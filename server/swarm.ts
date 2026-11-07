@@ -4983,11 +4983,12 @@ export class Swarm {
       const { status: nextStatus, conflictFix } = outcome();
       if (evidence) {
         const current = await this.backend.prDetails(repo.fullName, rec.prNumber).catch(() => null);
+        // A stopped attempt never writes its failedSha, so its posted report must not count as merge evidence.
+        if (gone()) return;
         this.observeQaRevision(evidence, current);
         evidence.commentUrl = commentUrl;
         this.emitQaOutcome(evidence);
         this.save();
-        if (gone()) return;
         if (nextStatus === 'failed') {
           const candidates = scoringFindings(evidence).filter((f) => f.attributableTo?.agentId === rec.devAgentId);
           const change = this.recordFeedback({ kind: 'qa-send-back', ...rec, findingIds: candidates.map((f) => f.id) });
