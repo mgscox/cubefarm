@@ -434,12 +434,22 @@ describe('planStartIssue', () => {
     expect(pickDeveloper([dev, other], () => false, [], [])?.id).toBe('bob');
   });
 
-  it('prefers score over specialty and workload, keeping the existing order on ties', () => {
+  it('prefers specialty before Authorship and ignores legacy points', () => {
     const experienced = { ...other, score: 4 };
-    expect(planStartIssue(request, { ...context, available: [dev, experienced] }).agent.id).toBe('bob');
+    expect(planStartIssue(request, { ...context, available: [dev, experienced], score: (a) => a.id === 'bob' ? 4 : -1 }).agent.id).toBe('ada');
     expect(pickDeveloper([experienced, { ...dev, score: 4 }], (a) => a.id === 'ada', [], [])?.id).toBe('ada');
-    expect(pickDeveloper([{ ...dev, score: -1 }, other], (a) => a.id === 'ada', [], [])?.id).toBe('bob');
+    expect(pickDeveloper([{ ...dev, score: -1 }, other], (a) => a.id === 'ada', [], [])?.id).toBe('ada');
+    expect(pickDeveloper([experienced, dev], () => false, [], [])?.id).toBe('bob');
+    expect(pickDeveloper([experienced, { ...dev, desk: -1 }], () => false, [], [])?.id).toBe('ada');
     expect(pickDeveloper([], () => true, [], [])).toBeUndefined();
+  });
+
+  it('compares the supplied score before workload and desk within the eligible group', () => {
+    const scored = (a: typeof dev) => a.id === 'ada' ? 2 : 1;
+    expect(pickDeveloper([other, dev], () => false, ['server', 'server'], ['server'], scored)?.id).toBe('ada');
+    expect(pickDeveloper([other, dev], () => false, ['server'], [], () => 0)?.id).toBe('bob');
+    expect(pickDeveloper([other, dev], () => false, [], ['server'], () => 0)?.id).toBe('bob');
+    expect(pickDeveloper([dev, other], () => false, [], [], () => 0)?.id).toBe('bob');
   });
 
   it('gives research issues only to researchers, and researchers only research issues', () => {

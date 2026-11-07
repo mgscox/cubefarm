@@ -82,14 +82,14 @@ export interface StartIssueRequest {
   note?: string;
 }
 
-/** Prefer the highest score; ties use match, ready/open load, then desk order. */
-export function pickDeveloper<A extends { specialty: string; desk: number; score?: number }>(devs: A[], suits: (a: A) => boolean, ready: string[], open: string[]): A | undefined {
+/** Specialty first, then the relevant score, ready/open load and desk. Legacy points never rank work. */
+export function pickDeveloper<A extends { specialty: string; desk: number }>(devs: A[], suits: (a: A) => boolean, ready: string[], open: string[], score: (a: A) => number = () => 0): A | undefined {
   const rank = (a: A) => {
     const s = a.specialty.toLowerCase();
-    return [suits(a) ? 0 : 1, ready.filter((w) => w === s).length, open.filter((w) => w === s).length, a.desk];
+    return [suits(a) ? 0 : 1, -score(a), ready.filter((w) => w === s).length, open.filter((w) => w === s).length, a.desk];
   };
   return devs.map((a) => ({ a, r: rank(a) }))
-    .sort((x, y) => (y.a.score ?? 0) - (x.a.score ?? 0) || x.r[0] - y.r[0] || x.r[1] - y.r[1] || x.r[2] - y.r[2] || x.r[3] - y.r[3])[0]?.a;
+    .sort((x, y) => x.r[0] - y.r[0] || x.r[1] - y.r[1] || x.r[2] - y.r[2] || x.r[3] - y.r[3] || x.r[4] - y.r[4])[0]?.a;
 }
 
 type StartAgent = Pick<AgentView, 'id' | 'name' | 'repoId' | 'role' | 'status' | 'specialty' | 'desk'>;
@@ -101,6 +101,7 @@ export function planStartIssue<A extends StartAgent>(x: StartIssueRequest, conte
   agents: A[];
   available: A[];
   ready: string[];
+  score?: (a: A) => number;
   inProgress: boolean;
   usagePaused: boolean;
 }) {
@@ -124,7 +125,7 @@ export function planStartIssue<A extends StartAgent>(x: StartIssueRequest, conte
     const want = issueSpecialty(issue.labels);
     // Research issues go to the floor's researchers, everything else to its developers.
     const pool = context.available.filter((a) => (a.role === 'researcher') === (want === RESEARCH));
-    agent = pickDeveloper(pool, (a) => a.specialty.toLowerCase() === want, context.ready, context.issues.map((i) => issueSpecialty(i.labels)));
+    agent = pickDeveloper(pool, (a) => !!want && a.specialty.toLowerCase() === want, context.ready, context.issues.map((i) => issueSpecialty(i.labels)), context.score);
     if (!agent) throw new Error(want === RESEARCH ? `No free researcher on floor ${x.floor}. Use request_research for the lobby researcher, or propose hiring one.` : `No free developer on floor ${x.floor}.`);
   }
   return { agent, issue };
