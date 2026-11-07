@@ -353,6 +353,17 @@ class BoxLink implements CliHost {
     setTimeout(() => c?.kill(), 2000).unref();
   }
 
+  async releaseDesk(fullName: string, slug: string, port: number, finishedScratchSession?: string): Promise<void> {
+    const release = () => this.call<void>('releaseDesk', fullName, slug, port, finishedScratchSession);
+    try {
+      await release();
+    } catch (err) {
+      if (!finishedScratchSession || this.status === 'online' || this.closed) throw err;
+      await this.check();
+      await release();
+    }
+  }
+
   // ---------- CliHost ----------
 
   preparePrompt(text: string): string | Promise<string> {
@@ -362,10 +373,11 @@ class BoxLink implements CliHost {
 
   async prepare(plan: CliPlan): Promise<PreparedCli> {
     const attachments = images.collect(`${plan.prompt}\n${plan.systemAppend}`);
-    const { dir, prompt, hookUrl } = await this.call<{ dir: string; prompt: string; hookUrl?: string }>('prepare', plan, attachments);
+    const { dir, jobScratch, prompt, hookUrl } = await this.call<Omit<PreparedCli, 'start'>>('prepare', plan, attachments);
     this.launching.set(plan.token, Date.now());
     return {
       dir,
+      jobScratch,
       prompt,
       hookUrl,
       start: ({ cols, rows }, meta) => {
@@ -460,7 +472,7 @@ export function connectBox(opts: BoxOptions): BoxConnection {
       return r.dir;
     },
     removeDesk: (fullName, slug) => link.call('removeDesk', fullName, slug),
-    releaseDesk: (fullName, slug, port) => link.call('releaseDesk', fullName, slug, port),
+    releaseDesk: (fullName, slug, port, finishedScratchSession) => link.releaseDesk(fullName, slug, port, finishedScratchSession),
     deskHead: (fullName, slug) => link.call('deskHead', fullName, slug),
     deskExists: (fullName, slug) => link.call('deskExists', fullName, slug),
     deskAhead: (fullName, slug, base) => link.call('deskAhead', fullName, slug, base),

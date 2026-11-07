@@ -5009,6 +5009,32 @@ describe('manual office closure', () => {
     expect(s.startPipelineWork(repo)).toBe(false);
   });
 
+  it('passes a finished terminal’s scratch to its machine and holds follow-ups during cleanup', async () => {
+    let finished!: SessionCallbacks['finished'];
+    let released!: () => void;
+    vi.mocked(s.backend.startSession).mockImplementationOnce((_opts, cb) => {
+      finished = cb.finished;
+      return { send: vi.fn(), stop: vi.fn(), finishedScratchSession: 'worker-session' };
+    });
+    await swarm.assign('a1', 66);
+    await drain();
+    ada().sessionId = 'retained-session';
+    const release = vi.spyOn(s.backend, 'releaseDesk').mockReturnValueOnce(new Promise<void>((resolve) => { released = resolve; }));
+    const completion = finished(result);
+    await drain();
+    expect(release).toHaveBeenCalledWith(repo.fullName, 'ada-a1', expect.any(Number), 'worker-session');
+    await expect(swarm.message('a1', 'Follow up')).rejects.toThrow('cleaning up the previous job');
+    const terminal = f.newTerminal('a1');
+    try {
+      expect(terminal.allowInput()).toBe(false);
+      released();
+      await completion;
+      expect(terminal.allowInput()).toBe(true);
+    } finally {
+      terminal.dispose();
+    }
+  });
+
   it('holds completion retries and resumes them once, retaining pushed work', async () => {
     vi.spyOn(s.backend, 'deskHead').mockResolvedValueOnce('base').mockResolvedValue('new-commit');
     vi.spyOn(s.backend, 'prForBranch').mockResolvedValue(null);

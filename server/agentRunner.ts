@@ -13,6 +13,7 @@ import { CROSS_TURN_TOOLS } from './clis.ts';
 import { VERSION } from './config.ts';
 import { projectEnv } from './projectEnv.ts';
 import { playwrightMcpCommand } from './browser.ts';
+import { createJobScratch, jobScratchEnabled, JOB_SCRATCH_INSTRUCTIONS, SESSIONS_DIR } from './jobScratch.ts';
 import { ACTIVE_REPO_SKILLS, writeSessionSkills } from './repoSkills.ts';
 
 // One Claude Code instance (via the Claude Agent SDK) working one issue in its own git worktree.
@@ -87,12 +88,14 @@ export interface SessionCallbacks {
   usageWarning?(info: UsageWarning): void;
   /** A new CLI the office hasn't heard from (see AgentBoot); null once it has, or the session ends. */
   boot?(state: AgentBoot | null): void;
-  finished(result: SessionResult): void;
+  finished(result: SessionResult): void | Promise<void>;
 }
 
 export interface SessionHandle {
   send(text: string): void;
   stop(): void;
+  /** The completed terminal job's session directory on its machine. */
+  finishedScratchSession?: string;
 }
 
 /** Async queue used as the streaming-input prompt so the manager can message a running agent. */
@@ -508,7 +511,14 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
 
   (async () => {
     let skillDir: string | undefined;
+    let jobDir: string | undefined;
     try {
+      if (jobScratchEnabled(opts.role)) {
+        fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
+        jobDir = fs.mkdtempSync(path.join(SESSIONS_DIR, 'sdk-'));
+        env.CUBEFARM_JOB_SCRATCH = createJobScratch(jobDir);
+        options.systemPrompt = { type: 'preset', preset: 'claude_code', append: images.prompt(opts.systemAppend) + JOB_SCRATCH_INSTRUCTIONS };
+      }
       if (ACTIVE_REPO_SKILLS.skills.length) {
         skillDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cubefarm-sdk-skills-'));
         const plugin = writeSessionSkills(ACTIVE_REPO_SKILLS, skillDir, 'claude');
@@ -525,6 +535,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
       if (!stopped && !begun && conversation.lost(`${startup}\n${message}`)) message = LOST_CONVERSATION;
       cb.finished({ ok: false, text: '', costUsd: lastCost, turns: lastTurns, errors: [message] });
     } finally {
+      if (jobDir) await fs.promises.rm(jobDir, { recursive: true, force: true, maxRetries: 5 }).catch((err) => console.warn('Could not clear job scratch', err));
       if (skillDir) fs.rm(skillDir, { recursive: true, force: true, maxRetries: 5 }, () => undefined);
     }
   })();

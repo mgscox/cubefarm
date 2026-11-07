@@ -266,6 +266,7 @@ interface AgentRuntime {
   screenshot: { data: Buffer; mime: string; at: number } | null;
   shots: Shot[]; // every screenshot of the current session (QA evidence)
   terminal: AgentTerminal | null; // their terminal, once they've run in the terminal runtime
+  scratchCleanup?: Promise<void>; // the old job still owns scratch on its retained terminal
   starting?: number; // reserved while reading an issue session baseline
   startWatch?: { since: number; controller: AbortController; timer: NodeJS.Timeout; job?: PrepJob };
   generation?: number; // bumped by every new task, cleared task and session: see nextGeneration
@@ -3149,6 +3150,10 @@ export class Swarm {
   private newTerminal(agentId: string) {
     const t = new AgentTerminal();
     t.allowInput = () => {
+      if (this.agentRt.get(agentId)?.scratchCleanup) {
+        this.toast('error', 'The previous job is still cleaning up. Try again in a moment.');
+        return false;
+      }
       if (!this.state.officeHeld || this.agentRt.get(agentId)?.session) return true;
       this.toast('error', 'The office is closed to new work. Reopen Office in Settings first.');
       return false;
@@ -3282,6 +3287,8 @@ export class Swarm {
         // The CLI waiting at their prompt has the desk as its working directory, and Windows can't reset a folder a
         // process is in: close it and wait for it, and for any CLI already closing there, to exit. Only the author's
         // fix round that resumes that CLI's own conversation (prepareFix) picks it up again.
+        await rt?.scratchCleanup;
+        if (gone()) return null;
         const term = rt?.terminal;
         if (term?.releaseIdle) {
           const resume = within && !moved ? job.rec.devSessionId ?? undefined : undefined;
@@ -3505,7 +3512,7 @@ export class Swarm {
         limited: (at) => this.pauseForLimit(at),
         usageWarning: (info) => this.paceForWarning(info),
         boot: (state) => { if (rt.generation === generation) this.setBoot(a, rt, state); },
-        finished: (result) => void this.onFinished(a, repo, result, generation, session),
+        finished: (result) => this.onFinished(a, repo, result, generation, session),
       },
     );
   }
@@ -3535,7 +3542,20 @@ export class Swarm {
     a.costUsd += result.costUsd;
     a.turns += result.turns;
     // Dev servers the agent forgot to stop would otherwise keep its port and lock its desk folder.
-    const released = this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
+    const machine = this.machineFor(a);
+    const scratchSession = session?.finishedScratchSession;
+    const release = scratchSession
+      ? machine.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a), scratchSession)
+      : machine.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
+    const released = release.catch((err) => {
+      if (scratchSession) this.appendLog(a, [{ kind: 'system', text: `Could not clear disposable job files: ${oneLine(err)}` }]);
+    });
+    if (scratchSession) {
+      rt.scratchCleanup = released;
+      await released;
+      if (rt.scratchCleanup === released) delete rt.scratchCleanup;
+      if (!this.state.agents.includes(a) || this.officeUpdate.handedOver || rt.generation !== generation) return;
+    }
     if (result.interrupted) this.interrupted(a);
 
     if (result.recoveryFailed) {
@@ -4596,6 +4616,7 @@ export class Swarm {
       if (!typed) rt.session.send(text);
       return;
     }
+    if (rt.scratchCleanup) throw new HttpError(409, `${a.name} is cleaning up the previous job; try again in a moment`);
     if (a.role === 'qa') throw new HttpError(409, `${a.name} isn't testing anything right now. Send a PR to QA from the Kanban board.`);
     if (rt.starting !== undefined) throw new HttpError(409, `${a.name}'s session is still starting; try again in a moment`);
     if (a.status === 'preparing') throw new HttpError(409, `${a.name} is still setting up; try again in a moment`);

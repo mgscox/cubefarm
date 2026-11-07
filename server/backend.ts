@@ -116,7 +116,7 @@ export const realBackend: Backend = {
   prepareDesk: workspace.prepareDesk,
   removeDesk: workspace.removeDesk,
   prepareResearchFolder: workspace.ensureLocalRepo,
-  releaseDesk: (fullName, agentSlug, port) => workspace.releaseDesk(fullName, agentSlug, port, officeProcesses()),
+  releaseDesk: (fullName, agentSlug, port, finishedScratchSession) => workspace.releaseDesk(fullName, agentSlug, port, officeProcesses(), finishedScratchSession),
   startSession: (opts, cb) => (opts.terminal ? startCliSession(opts, cb) : startSession(opts, cb)),
   cliHost: localCliHost,
   terminals: terminalsAvailable,

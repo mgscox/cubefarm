@@ -13,7 +13,7 @@ if (!Number.isInteger(PORT) || PORT <= 0 || PORT === 4317 || PORT === 5317) thro
 
 // Workers load this file too and inherit the runner's env, so only the runner makes (and later removes) the folder.
 if (!process.env.E2E_SWARM_HOME) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cubefarm-e2e-'));
+  const home = fs.mkdtempSync(path.join(process.env.CUBEFARM_JOB_SCRATCH || os.tmpdir(), 'cubefarm-e2e-'));
   process.env.E2E_SWARM_HOME = home;
   process.on('exit', () => fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 }));
 }

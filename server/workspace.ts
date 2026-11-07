@@ -4,6 +4,7 @@ import { WORKSPACE_ROOT } from './config.ts';
 import { gh, git, run } from './exec.ts';
 import { projectEnv } from './projectEnv.ts';
 import { operationSignal } from './operation.ts';
+import { clearSessionScratch, sessionScratchDir } from './jobScratch.ts';
 
 // Layout on disk:
 //   <your projects folder>/<repo>                    the floor's main checkout: your own folder, only fetched and fast-forwarded (syncMain)
@@ -430,14 +431,16 @@ export interface OfficeProcesses {
 export const pathForms = (p: string) => [...new Set([p, p.replaceAll('\\', '/'), p.replaceAll('\\', '\\\\')])];
 
 /** The processes of a `ps -A -ww -o pid=,args=` listing whose command line points into a desk, except the office's. */
-export function leftoversInDesk(listing: string, desk: string, keep: OfficeProcesses): number[] {
+export function leftoversInDesk(listing: string, desk: string, keep: OfficeProcesses, scratch?: string): number[] {
   const out: number[] = [];
   for (const line of listing.split('\n')) {
     const m = line.trim().match(/^(\d+)\s+(.*)$/);
     if (!m) continue;
     const [pid, args] = [Number(m[1]), m[2]];
-    if (keep.pids.includes(pid) || keep.markers.some((mark) => pathForms(mark).some((f) => args.includes(f)))) continue;
-    if (pathForms(desk).some((f) => args.includes(f))) out.push(pid);
+    if (keep.pids.includes(pid)) continue;
+    if (scratch && pathForms(scratch).some((form) => args.includes(form))) out.push(pid);
+    else if (!keep.markers.some((mark) => pathForms(mark).some((form) => args.includes(form))) &&
+             pathForms(desk).some((form) => args.includes(form))) out.push(pid);
   }
   return out;
 }
@@ -447,8 +450,14 @@ export function leftoversInDesk(listing: string, desk: string, keep: OfficeProce
  * desk, plus the shell/node chain that launched it. Never the office's own processes (the keeper, the CLIs in agents'
  * terminals): the walk up from a leftover stops at them.
  */
-export async function releaseDesk(fullName: string, agentSlug: string, port: number, keep: OfficeProcesses = { pids: [], markers: [] }): Promise<void> {
-  const desk = deskDir(fullName, agentSlug);
+export async function releaseDesk(fullName: string, agentSlug: string, port: number, keep: OfficeProcesses = { pids: [], markers: [] }, finishedScratchSession?: string): Promise<void> {
+  const scratch = finishedScratchSession ? sessionScratchDir(finishedScratchSession) : undefined;
+  await stopDeskProcesses(deskDir(fullName, agentSlug), port, keep, scratch);
+  operationSignal()?.throwIfAborted();
+  if (finishedScratchSession) await clearSessionScratch(finishedScratchSession);
+}
+
+async function stopDeskProcesses(desk: string, port: number, keep: OfficeProcesses, scratch?: string): Promise<void> {
   const spare = [process.pid, ...keep.pids];
   if (process.platform === 'win32') {
     const psList = (paths: string[]) => paths.flatMap(pathForms).map((d) => `'${d.toLowerCase().replaceAll("'", "''")}'`).join(', ');
@@ -459,11 +468,13 @@ $seed = @()
 Get-NetTCPConnection -LocalPort ${port} -State Listen | ForEach-Object { $seed += [int]$_.OwningProcess }
 $desks = @(${psList([desk])})
 $marks = @(${psList(keep.markers)})
+$scratch = @(${psList(scratch ? [scratch] : [])})
 $all = Get-CimInstance Win32_Process
 $byId = @{}; foreach ($p in $all) { $byId[[int]$p.ProcessId] = $p }
 foreach ($p in $all) {
   if (-not $p.CommandLine) { continue }
   $cmd = $p.CommandLine.ToLower()
+  foreach ($d in $scratch) { if ($cmd.Contains($d)) { $seed += [int]$p.ProcessId } }
   $ours = $false
   foreach ($m in $marks) { if ($cmd.Contains($m)) { $ours = $true } }
   if ($ours) { continue }
@@ -487,7 +498,7 @@ Write-Output $kill.Count`;
   }
   const listening = await run('sh', ['-c', `lsof -ti tcp:${port} -sTCP:LISTEN 2>/dev/null || true`]).catch(() => '');
   const listing = await run('ps', ['-A', '-ww', '-o', 'pid=,args=']).catch(() => '');
-  const pids = new Set([...listening.split(/\s+/).map(Number), ...leftoversInDesk(listing, desk, keep)]);
+  const pids = new Set([...listening.split(/\s+/).map(Number), ...leftoversInDesk(listing, desk, keep, scratch)]);
   for (const pid of pids) {
     if (!pid || spare.includes(pid)) continue;
     try {
