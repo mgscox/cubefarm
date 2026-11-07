@@ -23,7 +23,7 @@ export interface Machine {
   prepareDesk(fullName: string, base: DeskBase, agentSlug: string, branch: string, note?: (text: string) => void): Promise<string>;
   removeDesk(fullName: string, agentSlug: string): Promise<void>;
   /** Stop processes an agent left running (dev servers on its port, anything started in its desk). */
-  releaseDesk(fullName: string, agentSlug: string, port: number): Promise<void>;
+  releaseDesk(fullName: string, agentSlug: string, port: number, finishedScratchSession?: string): Promise<void>;
   /** Current local HEAD, captured before an issue session starts. */
   deskHead(fullName: string, agentSlug: string): Promise<string>;
   /** Local commits ahead of the desk base, including unpushed work. */
@@ -91,6 +91,7 @@ export function planCli(opts: SessionOptions, ids: { cli: AgentCli; token: strin
 export interface PreparedCli {
   /** The session's folder on its machine. */
   dir: string;
+  jobScratch?: boolean;
   /** The prompt as the CLI is given it (a long one is a pointer to its file). */
   prompt: string;
   /** Where its hooks post on its machine, when not the office's own address (a box's): said when none arrive. */

@@ -201,9 +201,9 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         ...(ctx.resumeId ? ['--resume', ctx.resumeId] : ['--session-id', ctx.sessionId]),
         ...(ctx.model ? ['--model', ctx.model] : []),
         ...(ctx.effort ? ['--effort', ctx.effort] : []),
-        // The office's PreToolUse hook answers every permission question (allow, or deny with an office rule).
+        // Unattended desks need to run even when a tool call requires approval beyond PreToolUse.
         '--permission-mode',
-        ctx.role === 'researcher' ? 'auto' : 'acceptEdits',
+        ctx.role === 'researcher' ? 'auto' : 'bypassPermissions',
         // On top of the manager's own setup (settings, skills, plugins, MCP servers): the office's hooks and servers.
         '--settings',
         ctx.files.settings,

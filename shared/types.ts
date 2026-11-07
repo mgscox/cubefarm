@@ -67,6 +67,30 @@ export interface PullInfo {
   pendingChecks: string[];
 }
 
+/** PR contributions outlive active QA cards and retain names after a desk is removed. */
+export interface PrContributionView {
+  repoId: string;
+  prNumber: number;
+  title: string;
+  url: string;
+  state: PullInfo['state'];
+  original: { agentId: string; name: string; submittedSha: string; at: number } | null;
+  repairs: {
+    id: string;
+    agentId: string;
+    name: string;
+    reason: string;
+    startingSha: string | null;
+    submittedSha: string | null;
+    reviewId: string;
+    round: number;
+    commentUrl: string | null;
+    findings: string | null;
+    startedAt: number;
+    finishedAt: number | null;
+  }[];
+}
+
 export interface PullRefresh {
   pulls: PullInfo[];
   checksError?: string; // diagnostic details from optional check enrichment
@@ -322,7 +346,7 @@ export interface AgentView {
   startedAt: number | null;
   endedAt: number | null;
   costUsd: number;
-  score: number; // developer feedback: +2 per merged PR, -1 per QA send-back
+  score: number; // legacy feedback: +2 per merged PR, -1 per QA send-back with eligible defect evidence
   turns: number;
   browserUrl: string | null;
   hasScreenshot: boolean;
@@ -355,6 +379,58 @@ export interface QaCheck {
   details: string;
   /** Only use environment when the worker prevented validation and no code defect is known or suspected. */
   failureKind?: 'code' | 'environment';
+  /** Reuse this defect key when re-reviewing the same revision. */
+  findingKey?: string;
+  /** Confirmed by reproduction/source evidence in details; unexplained failures stay unconfirmed. */
+  confirmed?: boolean;
+  /** Verified contribution that introduced the defect, not merely the currently tested head. */
+  introducedBySha?: string;
+}
+
+export type QaClassification = 'code' | 'worker' | 'inconclusive';
+
+export interface QaCiEvidence {
+  headSha: string;
+  observedAt: number;
+  availability: 'available' | 'unavailable';
+  checks: { id: string | null; runId: string | null; name: string; status: string | null; conclusion: string | null; url: string | null }[];
+}
+
+/** Local evidence survives active QA cleanup. Corrections append; original findings remain intact. */
+export interface QaOutcomeView {
+  id: string;
+  repoId: string;
+  prNumber: number;
+  reviewId: string;
+  round: number;
+  attemptId: string;
+  reviewer: { agentId: string; name: string };
+  startedAt: number;
+  finishedAt: number;
+  baseSha: string | null;
+  headSha: string | null;
+  revision: 'exact' | 'stale' | 'unknown';
+  classification: QaClassification | 'pass' | 'mixed';
+  observed: { headSha: string; baseSha: string | null; at: number } | null;
+  verdict: 'pass' | 'fail' | 'incomplete';
+  summary: string;
+  checks: QaCheck[];
+  commands: { command: string; result: string }[];
+  findings: {
+    id: string;
+    key: string;
+    check: string;
+    classification: QaClassification;
+    evidence: string;
+    confirmed: boolean;
+    attributableTo: { agentId: string; submittedSha: string } | null;
+  }[];
+  worker: { boxId: string | null; from: number | null; to: number | null; telemetry: MachineTelemetry | null };
+  terminalReason: string | null;
+  ci: QaCiEvidence | null;
+  commentUrl: string | null;
+  corrections: { id: string; findingId: string; previousCorrectionId: string | null; actor: string; reason: string; classification: QaClassification; at: number }[];
+  legacyPenalty?: { agentId: string; findingIds: string[]; active: boolean };
 }
 
 /** Failed preparations for one PR task and head; kept across office restarts. */
@@ -372,7 +448,7 @@ export interface QaView {
   round: number; // 1-based QA round
   preparation?: Partial<Record<'qa' | 'fix', DeskPreparation>>;
   rerunNote?: { round: number; text: string }; // manager's instructions for one QA round
-  devAgentId: string | null; // who wrote it (null for PRs opened outside the swarm)
+  devAgentId: string | null; // current developer responsible for the PR; original authorship lives in contributions
   qaAgentId: string | null; // who is testing / last tested it
   summary: string | null; // latest QA summary
   checks: QaCheck[];
@@ -726,6 +802,8 @@ export interface WorldSnapshot {
   repos: RepoView[];
   agents: AgentView[];
   qa: QaView[];
+  prContributions?: PrContributionView[];
+  qaOutcomes?: QaOutcomeView[];
   requests: HireRequestView[];
   ceo: CeoInfo;
   research: ResearchInfo;
@@ -758,6 +836,8 @@ export type ServerEvent =
   | { type: 'log'; agentId: string; lines: LogLine[] }
   | { type: 'screen'; agentId: string; url: string | null; at: number }
   | { type: 'qa'; qa: QaView }
+  | { type: 'qaOutcome'; outcome: QaOutcomeView }
+  | { type: 'prContribution'; contribution: PrContributionView }
   | { type: 'qaRemoved'; repoId: string; prNumber: number }
   | { type: 'settings'; settings: SwarmSettings }
   | { type: 'request'; request: HireRequestView }

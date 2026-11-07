@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { HOME_DIR } from './config.ts';
+import { createJobScratch, jobScratchEnabled, JOB_SCRATCH_INSTRUCTIONS, SESSIONS_DIR, sessionScratchDir } from './jobScratch.ts';
 import { projectEnv } from './projectEnv.ts';
 import { playwrightMcpCommand } from './browser.ts';
 import { cliLabel, cliSearchLocations, CODEX_HOOK_SOURCE, commandFor, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE } from './clis.ts';
@@ -14,7 +15,7 @@ import { ACTIVE_REPO_SKILLS, stageCodexSkills, writeSessionSkills } from './repo
 // <SWARM_HOME>/bin, and its command line and environment. The office's own machine (localCliHost.ts) and a box
 // (boxOps.ts) both start CLIs from here.
 
-export const SESSIONS_DIR = path.join(HOME_DIR, 'sessions');
+export { SESSIONS_DIR };
 export const BIN_DIR = path.join(HOME_DIR, 'bin');
 /** Prompts longer than this go in a file: Windows caps a command line at 32K characters. */
 const INLINE_PROMPT_MAX = 8000;
@@ -64,11 +65,19 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
   const browser = plan.browserTesting ? playwrightMcpCommand(path.join(dir, 'browser')) : null;
   let prompt = plan.prompt;
   let repoSkills: string | undefined;
+  let scratch: string | undefined;
+  let systemAppend = plan.systemAppend;
   let files: { settings: string; mcp: string | null; system: string };
   try {
     writeHelpers();
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (jobScratchEnabled(plan.role)) {
+      scratch = createJobScratch(dir);
+      systemAppend += JOB_SCRATCH_INSTRUCTIONS;
+    }
     const settings = {
+      // Accept the startup notice for this office session only, without changing the user's Claude settings.
+      ...(plan.cli === 'claude' && plan.role !== 'researcher' ? { skipDangerousModePermissionPrompt: true } : {}),
       permissions: { allow: ['mcp__playwright__*', 'mcp__office__*'] },
       hooks: Object.fromEntries(HOOK_EVENTS.map((e) => [e, [{ hooks: [{ type: 'http', url: hookUrl, timeout: hooks.held ? 120 : 30 }] }]])),
       statusLine: { type: 'command', command: `${shellArg(process.execPath)} ${shellArg(path.join(BIN_DIR, 'statusline.cjs'))} ${shellArg(hookUrl)}`, padding: 0 },
@@ -79,7 +88,7 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
     files = { settings: path.join(dir, 'settings.json'), mcp: Object.keys(servers).length ? path.join(dir, 'mcp.json') : null, system: path.join(dir, 'instructions.md') };
     fs.writeFileSync(files.settings, JSON.stringify(settings, null, 2));
     if (files.mcp) fs.writeFileSync(files.mcp, JSON.stringify({ mcpServers: servers }, null, 2));
-    fs.writeFileSync(files.system, plan.systemAppend);
+    fs.writeFileSync(files.system, systemAppend);
     if (prompt.length > INLINE_PROMPT_MAX) {
       const file = path.join(dir, 'task.md');
       fs.writeFileSync(file, prompt);
@@ -93,7 +102,7 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
 
   const launch = launchArgs(plan.cli, {
     prompt,
-    systemAppend: plan.systemAppend,
+    systemAppend,
     model: plan.model,
     effort: plan.effort,
     resumeId: plan.resumeId,
@@ -118,6 +127,7 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
     if (/^(NO_COLOR|FORCE_COLOR|TERM_PROGRAM|TERM_PROGRAM_VERSION|CODEX_THREAD_ID|OPENCODE_CONFIG_CONTENT)$/i.test(k)) continue;
     env[k] = v;
   }
+  if (scratch) env.CUBEFARM_JOB_SCRATCH = scratch;
   Object.assign(env, { TERM: 'xterm-256color', COLORTERM: 'truecolor' }, launch.env);
 
   return { dir, prompt, file: cmd.file, args: [...cmd.args, ...launch.args], cwd: plan.cwd, env };
@@ -137,4 +147,11 @@ export function sessionShots(dir: string, seen: Set<string>, now: number): { nam
   return shots;
 }
 
-export const removeSessionDir = (dir: string) => fs.rm(dir, { recursive: true, force: true, maxRetries: 5 }, () => undefined);
+export function removeSessionDir(dir: string): void {
+  try {
+    sessionScratchDir(dir); // Only remove a session owned by this office.
+  } catch {
+    return;
+  }
+  fs.rm(dir, { recursive: true, force: true, maxRetries: 5 }, () => undefined);
+}

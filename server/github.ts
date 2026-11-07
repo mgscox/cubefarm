@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CommandError, gh, ghJson } from './exec.ts';
-import type { GhRepoSummary, IssueInfo, PullInfo, PullRefresh } from '../shared/types.ts';
+import type { GhRepoSummary, IssueInfo, PullInfo, PullRefresh, QaCiEvidence } from '../shared/types.ts';
 import { AGENT_COMMENT_MARKER, dependencyUrls, READY_FOR_SECURITY_REVIEW } from '../shared/issues.ts';
 
 // All GitHub access goes through the gh CLI so it reuses the user's existing `gh auth login`.
@@ -335,6 +335,18 @@ interface CommitStatus { context: string; state: string; target_url: string | nu
 const REST_CACHE_MS = 30_000; // Reuse manual refresh bursts, but re-read even completed runs on the normal 45s sync.
 const restCache = new WeakMap<RestQuery, Map<string, { at: number; checks: Check[] }>>();
 
+// Never infer passing from a truncated response. Explicit pages also support older gh releases.
+async function checkPages<T>(endpoint: string, field: 'workflow_runs' | 'statuses' | 'check_runs', api: RestQuery): Promise<T[]> {
+  const items: T[] = [];
+  for (let page = 1; page <= 10; page++) {
+    const response = await api(['api', `${endpoint}${endpoint.includes('?') ? '&' : '?'}per_page=100&page=${page}`]) as { total_count: number } & Record<typeof field, T[]>;
+    items.push(...response[field]);
+    if (items.length >= response.total_count) return items;
+    if (response[field].length === 0) break;
+  }
+  throw new Error('REST checks exceeded the pagination limit');
+}
+
 async function restChecks(fullName: string, sha: string, api: RestQuery): Promise<Check[]> {
   let cache = restCache.get(api);
   if (!cache) restCache.set(api, cache = new Map());
@@ -344,21 +356,10 @@ async function restChecks(fullName: string, sha: string, api: RestQuery): Promis
   const cached = cache.get(key);
   if (cached) return cached.checks;
 
-  // Both endpoints paginate. Never infer passing from a truncated response.
-  const pages = async <T>(endpoint: string, field: 'workflow_runs' | 'statuses'): Promise<T[]> => {
-    const items: T[] = [];
-    for (let page = 1; page <= 10; page++) {
-      const response = await api(['api', `${endpoint}${endpoint.includes('?') ? '&' : '?'}per_page=100&page=${page}`]) as { total_count: number } & Record<typeof field, T[]>;
-      items.push(...response[field]);
-      if (items.length >= response.total_count) return items;
-      if (response[field].length === 0) break;
-    }
-    throw new Error('REST checks exceeded the pagination limit');
-  };
-  const runs = await pages<WorkflowRun>(`repos/${fullName}/actions/runs?head_sha=${encodeURIComponent(sha)}`, 'workflow_runs');
+  const runs = await checkPages<WorkflowRun>(`repos/${fullName}/actions/runs?head_sha=${encodeURIComponent(sha)}`, 'workflow_runs', api);
   let statuses: CommitStatus[] = [];
   try {
-    statuses = await pages<CommitStatus>(`repos/${fullName}/commits/${encodeURIComponent(sha)}/status`, 'statuses');
+    statuses = await checkPages<CommitStatus>(`repos/${fullName}/commits/${encodeURIComponent(sha)}/status`, 'statuses', api);
   } catch (error) {
     // Commit statuses are optional for tokens that can read Actions but not statuses.
     if (!(error instanceof CommandError) || !/\bHTTP (?:403|404)\b/.test(error.stderr)) throw error;
@@ -613,6 +614,7 @@ export async function branchAhead(fullName: string, base: string, branch: string
 export interface PrDetails {
   number: number;
   title: string;
+  createdAt?: string;
   labels?: string[];
   body: string;
   url: string;
@@ -628,10 +630,36 @@ export interface PrDetails {
   mergeState: string;
 }
 
+/** Read checks by immutable commit SHA; never attach a newer PR head's CI to an older review. */
+export async function qaCi(fullName: string, headSha: string, api: RestQuery = ghJson): Promise<QaCiEvidence> {
+  const observedAt = Date.now();
+  const endpoint = `repos/${fullName}/commits/${encodeURIComponent(headSha)}`;
+  type Run = { id?: number; name: string; status: string; conclusion: string | null; html_url: string | null };
+  type Status = { id?: number; context: string; state: string; target_url: string | null };
+  const checks: QaCiEvidence['checks'] = [];
+  const results = await Promise.allSettled([
+    checkPages<Run>(`${endpoint}/check-runs`, 'check_runs', api),
+    checkPages<Status>(`${endpoint}/status`, 'statuses', api),
+  ]);
+  if (results[0].status === 'fulfilled') {
+    for (const c of results[0].value) {
+      checks.push({ id: c.id == null ? null : String(c.id), runId: c.html_url?.match(/\/actions\/runs\/(\d+)/)?.[1] ?? null,
+        name: c.name, status: c.status, conclusion: c.conclusion, url: c.html_url });
+    }
+  }
+  if (results[1].status === 'fulfilled') {
+    for (const c of results[1].value) {
+      checks.push({ id: c.id == null ? null : String(c.id), runId: null, name: c.context, status: null, conclusion: c.state, url: c.target_url });
+    }
+  }
+  return { headSha, observedAt, availability: results.every((r) => r.status === 'fulfilled') ? 'available' : 'unavailable', checks };
+}
+
 export async function prDetails(fullName: string, number: number): Promise<PrDetails> {
   const raw = await ghJson<{
     number: number;
     title: string;
+    createdAt: string;
     labels: { name: string }[];
     body: string;
     url: string;
@@ -645,10 +673,11 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     state: PrDetails['state'];
     mergeable: string;
     mergeStateStatus: string;
-  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,labels,body,url,headRefName,headRefOid,baseRefOid,baseRefName,isDraft,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
+  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,createdAt,labels,body,url,headRefName,headRefOid,baseRefOid,baseRefName,isDraft,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
   return {
     number: raw.number,
     title: raw.title,
+    createdAt: raw.createdAt,
     labels: (raw.labels ?? []).map((label) => label.name),
     body: raw.body ?? '',
     url: raw.url,

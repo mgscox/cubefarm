@@ -17,6 +17,7 @@ import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, readConfigEnv, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, VERSION, WORKSPACE_ROOT } from './config.ts';
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, pickDeveloper, planRoute, planStartIssue, prStatusView, specialtyLabel, specialtySlug, type CeoJob, type DevFixRequest, type MergePrRequest, type OfficeTools, type ParkPrRequest, type ResearchRequest, type StartIssueRequest } from './ceo.ts';
 import { developerFeedback, type FeedbackEvent } from './feedback.ts';
+import { submittedContribution, finishedContribution } from './prContributions.ts';
 import { checkParkPr } from './parkPr.ts';
 import { checkMergePr } from './mergePr.ts';
 import { issueHolder, duplicateIssueSessions, issueTaken } from './issueClaims.ts';
@@ -41,6 +42,8 @@ import { demoProposalRecords, demoReview, isReviewFixture } from './demoIdeaRevi
 import { currentRound, nextStep, pickReviewers, promote, recordReview, REVIEW_FOCUSES, reviseRound, startReview } from '../shared/ideaReview.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { qaOutcome } from './qaOutcome.ts';
+import { qaFindings, workerSnapshot } from './qaEvidence.ts';
+import { scoringFindings } from '../shared/qaEvidence.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
 import { pickRequestedStart, retainRequestedStarts } from './requestedStarts.ts';
@@ -53,7 +56,7 @@ import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isPrototypeIssue, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, PROTOTYPE_BRANCH, prototypeIssueNumber, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
-import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView } from '../shared/types.ts';
+import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView, type PrContributionView, type QaOutcomeView, type QaClassification } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
 import { COMPANY_RESEARCH_DOCS, isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
 import type {
@@ -175,6 +178,8 @@ interface HeldRetry {
 
 /** A pull request's trip through QA. */
 interface QaRecord extends QaView {
+  attempt?: { id: string; startedAt: number; headSha: string; baseSha: string | null };
+  repairAttemptId?: string;
   reviewId: string; // distinguish QA cycles when a closed PR is reopened
   crossRepository?: boolean; // from a fork: never scores an office developer (unknown on records saved before it existed)
   closed?: boolean; // Keep the security requirement if this PR is reopened.
@@ -230,6 +235,8 @@ interface Persisted {
   agents: PersistedAgent[];
   feedbackEvents: Record<string, true>;
   qa: QaRecord[];
+  prContributions: PrContributionView[];
+  qaOutcomes: QaOutcomeView[];
   requests: HireRequestView[];
   ceo: CeoState;
   research: ResearchState;
@@ -266,6 +273,7 @@ interface AgentRuntime {
   screenshot: { data: Buffer; mime: string; at: number } | null;
   shots: Shot[]; // every screenshot of the current session (QA evidence)
   terminal: AgentTerminal | null; // their terminal, once they've run in the terminal runtime
+  scratchCleanup?: Promise<void>; // the old job still owns scratch on its retained terminal
   starting?: number; // reserved while reading an issue session baseline
   startWatch?: { since: number; controller: AbortController; timer: NodeJS.Timeout; job?: PrepJob };
   generation?: number; // bumped by every new task, cleared task and session: see nextGeneration
@@ -347,6 +355,7 @@ function readSpecialism(name: 'developer' | 'prototype' | 'qa' | 'security') {
   }
 }
 const MAX_QA_ROUNDS = 3;
+const TEST_ENVIRONMENT_GUIDANCE = "Use the repository's normal test setup. Keep dependency registries reachable during tests unless offline execution is required. Isolate live services with test configuration, mocks or emulators. Before running a full suite in a custom runner, verify a test that installs dependencies can run in that same environment, if the suite has one.";
 // Every agent runs Claude Opus 5.5 at medium effort unless the manager overrides it.
 const DEFAULT_MODEL = 'claude-opus-5-5';
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -438,6 +447,9 @@ const QA_SCHEMA = {
           name: { type: 'string' },
           result: { type: 'string', enum: ['pass', 'fail', 'skip'] },
           details: { type: 'string', description: 'What you did and what you observed.' },
+          findingKey: { type: 'string', description: 'Stable short defect key; reuse for the same defect on an unchanged revision.' },
+          confirmed: { type: 'boolean', description: 'True only for a confirmed defect with reproduction or source evidence in details.' },
+          introducedBySha: { type: 'string', description: 'Contribution SHA proven to introduce the defect (e.g. head fails and base passes). Omit when attribution is unknown.' },
           failureKind: { type: 'string', enum: ['code', 'environment'], description: 'For failed checks: environment only when worker limits prevented validation and no code defect is known or suspected. Reproducible or unexplained failures use code.' },
         },
       },
@@ -526,7 +538,15 @@ function parseReport(result: SessionResult, security = false): QaReport | null {
   return {
     verdict: r.verdict,
     summary: String(r.summary ?? ''),
-    checks: Array.isArray(r.checks) ? r.checks.map((c) => ({ name: String(c?.name ?? ''), result: c?.result === 'fail' ? 'fail' : c?.result === 'skip' || (security && c?.result !== 'pass') ? 'skip' : 'pass', details: String(c?.details ?? ''), ...(c?.failureKind === 'code' || c?.failureKind === 'environment' ? { failureKind: c.failureKind } : {}) })) : [],
+    checks: Array.isArray(r.checks) ? r.checks.map((c) => ({
+      name: String(c?.name ?? ''),
+      result: c?.result === 'fail' ? 'fail' : c?.result === 'skip' || (security && c?.result !== 'pass') ? 'skip' : 'pass',
+      details: String(c?.details ?? ''),
+      ...(typeof c?.findingKey === 'string' ? { findingKey: c.findingKey } : {}),
+      ...(typeof c?.confirmed === 'boolean' ? { confirmed: c.confirmed } : {}),
+      ...(typeof c?.introducedBySha === 'string' ? { introducedBySha: c.introducedBySha } : {}),
+      ...(c?.failureKind === 'code' || c?.failureKind === 'environment' ? { failureKind: c.failureKind } : {}),
+    })) : [],
     commands: Array.isArray(r.commands) ? r.commands.map((c) => ({ command: String(c?.command ?? ''), result: String(c?.result ?? '') })) : [],
     screenshots: Array.isArray(r.screenshots) ? r.screenshots.map(String) : [],
     fixInstructions: r.fixInstructions ? String(r.fixInstructions) : undefined,
@@ -567,6 +587,8 @@ export class Swarm {
     agents: [],
     feedbackEvents: {},
     qa: [],
+    prContributions: [],
+    qaOutcomes: [],
     requests: [],
     ceo: { queue: [], job: null, lastReviewAt: null, lastFingerprint: null },
     research: { queue: [], job: null, done: [] },
@@ -730,6 +752,8 @@ export class Swarm {
           deskBox: typeof a.deskBox === 'string' ? a.deskBox : '',
         })),
         feedbackEvents: loaded.feedbackEvents ?? {},
+        prContributions: loaded.prContributions ?? [],
+        qaOutcomes: loaded.qaOutcomes ?? [],
         qa: (loaded.qa ?? []).map((q) => ({
           ...q,
           reviewId: q.reviewId ?? crypto.randomUUID(),
@@ -1051,6 +1075,8 @@ export class Swarm {
       settings: this.state.settings,
       repos: this.state.repos.map((r) => this.repoView(r)),
       agents: this.state.agents.map((a) => this.agentView(a, true)),
+      prContributions: this.state.prContributions,
+      qaOutcomes: this.state.qaOutcomes,
       qa: this.state.qa.filter((q) => !q.closed).map((q) => this.qaView(q)),
       requests: this.state.requests,
       ceo: this.ceoInfo(),
@@ -1115,6 +1141,100 @@ export class Swarm {
     Object.assign(rec, patch, { updatedAt: Date.now() });
     this.broadcast({ type: 'qa', qa: this.qaView(rec) });
     this.save();
+  }
+
+  private contribution(repoId: string, pr: Pick<PrDetails, 'number' | 'title' | 'url' | 'state'>): PrContributionView {
+    return this.state.prContributions.find((h) => h.repoId === repoId && h.prNumber === pr.number) ??
+      { repoId, prNumber: pr.number, title: pr.title, url: pr.url, state: pr.state, original: null, repairs: [] };
+  }
+
+  private setContribution(history: PrContributionView) {
+    const index = this.state.prContributions.findIndex((h) => h.repoId === history.repoId && h.prNumber === history.prNumber);
+    if (index >= 0 && JSON.stringify(this.state.prContributions[index]) === JSON.stringify(history)) return;
+    if (index < 0) this.state.prContributions.push(history);
+    else this.state.prContributions[index] = history;
+    this.broadcast({ type: 'prContribution', contribution: history });
+    this.save();
+  }
+
+  private emitQaOutcome(outcome: QaOutcomeView) {
+    this.broadcast({ type: 'qaOutcome', outcome });
+    this.save();
+  }
+
+  private observeQaRevision(outcome: QaOutcomeView, pr: PrDetails | null) {
+    outcome.observed = pr ? { headSha: pr.headSha, baseSha: pr.baseSha ?? null, at: Date.now() } : null;
+    outcome.revision = !pr || !outcome.headSha || !outcome.baseSha || !pr.baseSha ? 'unknown'
+      : pr.headSha === outcome.headSha && pr.baseSha === outcome.baseSha ? 'exact' : 'stale';
+    this.emitQaOutcome(outcome);
+  }
+
+  private async recordQaOutcome(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport | null, result: SessionResult): Promise<QaOutcomeView> {
+    const attempt = rec.attempt;
+    const id = attempt?.id ?? `${rec.reviewId}:${rec.round}:${a.id}:${rec.testedSha ?? 'unknown'}`;
+    const existing = this.state.qaOutcomes.find((o) => o.id === id);
+    if (existing) return existing;
+    const headSha = attempt?.headSha ?? rec.testedSha;
+    const baseSha = attempt ? attempt.baseSha : rec.securityReview?.auditBaseSha ?? null;
+    const finishedAt = Date.now();
+    const startedAt = attempt?.startedAt ?? a.startedAt ?? finishedAt;
+    const box = this.state.boxes.find((b) => b.id === a.deskBox);
+    const telemetry = a.deskBox ? box ? this.boxView(box).telemetry ?? null : null : this.officeTelemetry;
+    const outcome: QaOutcomeView = {
+      id, repoId: repo.id, prNumber: rec.prNumber, reviewId: rec.reviewId, round: rec.round, attemptId: id,
+      reviewer: { agentId: a.id, name: a.name }, startedAt, finishedAt,
+      headSha: headSha ?? null, baseSha, revision: 'unknown', classification: 'inconclusive', observed: null,
+      verdict: report?.verdict ?? 'incomplete', summary: report?.summary ?? 'QA ended without a usable report.',
+      checks: structuredClone(report?.checks ?? []), commands: structuredClone(report?.commands ?? []),
+      findings: qaFindings(report?.checks ?? [], headSha ?? null, baseSha,
+        this.state.prContributions.find((h) => h.repoId === repo.id && h.prNumber === rec.prNumber),
+        this.state.qaOutcomes.filter((o) => o.repoId === repo.id && o.prNumber === rec.prNumber)),
+      worker: workerSnapshot(a.deskBox || null, telemetry, startedAt, finishedAt),
+      terminalReason: result.errors.length ? result.errors.join('\n').slice(0, 2000) : result.interrupted ? 'Interrupted'
+        : result.startupFailed ? 'Worker session failed to start' : result.recoveryFailed ? 'Worker session recovery failed'
+        : a.status === 'stopped' ? 'Stopped by manager' : !report ? 'No usable QA report' : null,
+      ci: null, commentUrl: null, corrections: [],
+    };
+    const categories = new Set(outcome.findings.map((f) => f.classification));
+    outcome.classification = categories.size > 1 ? 'mixed' : categories.values().next().value ??
+      (report?.verdict === 'pass' ? 'pass' : result.startupFailed || result.recoveryFailed ? 'worker' : 'inconclusive');
+    // Save facts before uploads or revision reads can fail, or the active QA card is removed.
+    this.state.qaOutcomes.push(outcome);
+    this.emitQaOutcome(outcome);
+    const [pr, ci] = await Promise.all([
+      this.backend.prDetails(repo.fullName, rec.prNumber).catch(() => null),
+      headSha ? this.backend.qaCi(repo.fullName, headSha).catch(() => null) : null,
+    ]);
+    outcome.ci = ci?.headSha === headSha ? ci : null;
+    this.observeQaRevision(outcome, pr);
+    return outcome;
+  }
+
+  /** Append a correction to one finding; never rewrite the original evidence. */
+  async correctQaFinding(id: string, input: { findingId?: unknown; actor?: unknown; reason?: unknown; classification?: unknown }) {
+    const outcome = this.state.qaOutcomes.find((o) => o.id === id);
+    if (!outcome) throw new HttpError(404, 'Unknown QA outcome');
+    const { findingId, actor, reason, classification } = input;
+    if (typeof findingId !== 'string' || !outcome.findings.some((f) => f.id === findingId)) throw new HttpError(400, 'Unknown finding');
+    if (actor !== 'manager' && actor !== outcome.reviewer.agentId) throw new HttpError(400, 'Actor must be manager or the recorded reviewer');
+    if (typeof reason !== 'string' || !reason.trim() || reason.length > 2000) throw new HttpError(400, 'Correction requires a reason of at most 2000 characters');
+    if (typeof classification !== 'string' || !['code', 'worker', 'inconclusive'].includes(classification)) throw new HttpError(400, 'Unknown classification');
+    const correction = { id: crypto.randomUUID(), findingId, actor, reason: reason.trim(), classification: classification as QaClassification,
+      previousCorrectionId: outcome.corrections.findLast((c) => c.findingId === findingId)?.id ?? null, at: Date.now() };
+    outcome.corrections.push(correction);
+    const penalty = outcome.legacyPenalty;
+    if (penalty) {
+      const active = scoringFindings(outcome).some((f) => penalty.findingIds.includes(f.id));
+      const dev = this.state.agents.find((a) => a.id === penalty.agentId && a.repoId === outcome.repoId);
+      if (dev && active !== penalty.active) {
+        dev.score += active ? -1 : 1;
+        penalty.active = active;
+        this.emitAgent(dev);
+      }
+    }
+    this.emitQaOutcome(outcome);
+    await this.writeState();
+    return correction;
   }
 
   private appendLog(a: PersistedAgent, entries: LogEntry[]) {
@@ -2431,13 +2551,15 @@ export class Swarm {
     const change = developerFeedback(event, dev, this.state.feedbackEvents);
     if (!change || !dev) return;
     dev.score = change.score;
-    this.state.feedbackEvents[change.key] = true;
+    for (const key of change.keys) this.state.feedbackEvents[key] = true;
     this.emitAgent(dev);
     this.save();
+    return change;
   }
 
   /** Keep agents and QA records in step with what happened to PRs on GitHub. */
   private reconcilePulls(repo: PersistedRepo, pulls: PullInfo[]) {
+    for (const pr of pulls) this.setContribution({ ...this.contribution(repo.id, pr), title: pr.title, url: pr.url, state: pr.state });
     for (const pr of pulls.filter((p) => p.state === 'MERGED')) {
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === pr.number);
       const owner = this.state.agents.find((a) => a.id === rec?.devAgentId && a.role === 'dev' && a.repoId === repo.id);
@@ -2490,6 +2612,8 @@ export class Swarm {
   }
 
   private closeQaRecord(rec: QaRecord, state: 'CLOSED' | 'MERGED') {
+    const history = this.state.prContributions.find((h) => h.repoId === rec.repoId && h.prNumber === rec.prNumber);
+    if (history) this.setContribution({ ...history, state });
     if (state === 'MERGED') this.recordFeedback({ kind: 'merged', ...rec });
     const review = rec.securityReview;
     if (state === 'CLOSED' && review) {
@@ -3148,6 +3272,10 @@ export class Swarm {
   private newTerminal(agentId: string) {
     const t = new AgentTerminal();
     t.allowInput = () => {
+      if (this.agentRt.get(agentId)?.scratchCleanup) {
+        this.toast('error', 'The previous job is still cleaning up. Try again in a moment.');
+        return false;
+      }
       if (!this.state.officeHeld || this.agentRt.get(agentId)?.session) return true;
       this.toast('error', 'The office is closed to new work. Reopen Office in Settings first.');
       return false;
@@ -3208,6 +3336,7 @@ export class Swarm {
       '1. Read the issue and explore the relevant code before changing anything.',
       '2. Implement the change with focused commits and clear messages.',
       "3. Run the project's existing tests, linters and build (if any) and fix what you broke. Install dependencies first if needed.",
+      fixing ? '' : TEST_ENVIRONMENT_GUIDANCE,
       repo.browserTesting
         ? `4. If the project has a web UI, start its dev server in the background on port ${this.port(a)} (reserved for you, so you don't collide with teammates), then check your change with the Playwright browser tools (browser_navigate, browser_snapshot, browser_click, browser_take_screenshot). Stop the dev server when you're done.`
         : '4. Verify the behaviour you changed as directly as you can.',
@@ -3280,6 +3409,8 @@ export class Swarm {
         // The CLI waiting at their prompt has the desk as its working directory, and Windows can't reset a folder a
         // process is in: close it and wait for it, and for any CLI already closing there, to exit. Only the author's
         // fix round that resumes that CLI's own conversation (prepareFix) picks it up again.
+        await rt?.scratchCleanup;
+        if (gone()) return null;
         const term = rt?.terminal;
         if (term?.releaseIdle) {
           const resume = within && !moved ? job.rec.devSessionId ?? undefined : undefined;
@@ -3370,7 +3501,11 @@ export class Swarm {
     const generation = this.agentRt.get(a.id)?.generation;
     const state = await (work.kind === 'issue'
       ? this.backend.readIssue(repo.fullName, work.number).then((i) => (issueClosed(i) ? 'CLOSED' : 'OPEN'))
-      : this.backend.prDetails(repo.fullName, work.number).then((d) => d.state)
+      : this.backend.prDetails(repo.fullName, work.number).then((d) => {
+        const pull = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === work.number);
+        if (pull) pull.headSha = d.headSha;
+        return d.state;
+      })
     ).catch(() => 'OPEN' as const);
     if (!this.state.agents.includes(a) || a.status !== 'preparing' || this.agentRt.get(a.id)?.generation !== generation) return true;
     if (state === 'OPEN') return false;
@@ -3503,7 +3638,7 @@ export class Swarm {
         limited: (at) => this.pauseForLimit(at),
         usageWarning: (info) => this.paceForWarning(info),
         boot: (state) => { if (rt.generation === generation) this.setBoot(a, rt, state); },
-        finished: (result) => void this.onFinished(a, repo, result, generation, session),
+        finished: (result) => this.onFinished(a, repo, result, generation, session),
       },
     );
   }
@@ -3533,21 +3668,40 @@ export class Swarm {
     a.costUsd += result.costUsd;
     a.turns += result.turns;
     // Dev servers the agent forgot to stop would otherwise keep its port and lock its desk folder.
-    const released = this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
+    const machine = this.machineFor(a);
+    const scratchSession = session?.finishedScratchSession;
+    const release = scratchSession
+      ? machine.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a), scratchSession)
+      : machine.releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
+    const released = release.catch((err) => {
+      if (scratchSession) this.appendLog(a, [{ kind: 'system', text: `Could not clear disposable job files: ${oneLine(err)}` }]);
+    });
+    if (scratchSession) {
+      rt.scratchCleanup = released;
+      await released;
+      if (rt.scratchCleanup === released) delete rt.scratchCleanup;
+      if (!this.state.agents.includes(a) || this.officeUpdate.handedOver || rt.generation !== generation) return;
+    }
     if (result.interrupted) this.interrupted(a);
 
     if (result.recoveryFailed) {
       this.fail(a, result, 'session recovery');
       a.status = 'stopped'; // The outcome is unknown: don't automatically rerun the task after the error cooldown.
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
-      if (rec) this.setQa(rec, { status: 'needs-human', qaAgentId: null, summary: a.lastError });
+      if (rec) {
+        this.setQa(rec, { status: 'needs-human', qaAgentId: null, summary: a.lastError });
+        if (a.task === 'qa') await this.recordQaOutcome(a, repo, rec, null, result);
+      }
     } else if (result.startupFailed && !result.ok && a.status !== 'stopped') {
       a.startupFailed = true;
       a.heldRetry = null;
       this.cancelRequestedStart(a);
       this.fail(a, result, 'CLI startup; clear the desk before retrying');
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
-      if (a.task === 'qa' && rec?.qaAgentId === a.id) this.setQa(rec, { status: 'queued', qaAgentId: null, summary: a.lastError });
+      if (a.task === 'qa' && rec?.qaAgentId === a.id) {
+        this.setQa(rec, { status: 'queued', qaAgentId: null, summary: a.lastError });
+        await this.recordQaOutcome(a, repo, rec, null, result);
+      }
       else if (a.task === 'fix' && rec?.devAgentId === a.id) this.setQa(rec, { status: 'failed' });
     } else if (a.task === 'qa') await this.onQaFinished(a, repo, result, released);
     else if (a.task === 'fix') await this.onFixFinished(a, repo, result);
@@ -3686,6 +3840,7 @@ export class Swarm {
         a.prNumber = pr.number;
         a.prUrl = pr.url;
         crossRepository = false;
+        this.setContribution(submittedContribution(this.contribution(repo.id, pr), pr, a, Date.now()));
       }
     }
 
@@ -4017,6 +4172,7 @@ export class Swarm {
       '1. Read the PR description and the linked issue, and work out the acceptance criteria.',
       `2. Review the code as a careful reviewer would: git diff origin/${repo.defaultBranch}...HEAD. Look for bugs, unhandled errors and edge cases, security problems, leftover debug code, and new logic without tests.`,
       "3. Install dependencies if needed, then run the project's test suite, linters, type checks and build (whichever exist).",
+      TEST_ENVIRONMENT_GUIDANCE,
       'If worker limits (such as exhausted memory) prevent validation, distinguish them from code defects: mark only those failed checks failureKind=environment. Use this only with evidence that no code defect is known or suspected; reproducible or unexplained failures use code. The office records these local checks as skipped and requires green GitHub checks for the reviewed commit before merging an environment-only result. Do not request source changes just to satisfy a worker limitation.',
       repo.browserTesting
         ? `4. If the project has a UI, start it in the background on port ${this.port(a)} (reserved for you) and exercise the change in a real browser with the Playwright tools: navigate, click, type, resize to a phone size, try edge cases, and check the console for errors. Take a screenshot with browser_take_screenshot (no filename) of every important state: the screenshots are attached to the PR as evidence. Stop the server afterwards.`
@@ -4111,6 +4267,8 @@ export class Swarm {
     }
     const security = !!review && review.qaSha === pr.headSha && review.approvedSha !== pr.headSha;
     rec.testedSha = pr.headSha;
+    rec.attempt = { id: crypto.randomUUID(), startedAt: Date.now(), headSha: pr.headSha, baseSha: pr.baseSha ?? null };
+    this.save();
     if (security) {
       this.appendLog(a, [{ kind: 'system', text: `Detailed security review · PR #${pr.number}` }]);
       this.setQa(rec, { mergeNote: 'detailed security review in progress' });
@@ -4120,6 +4278,7 @@ export class Swarm {
     if (gone()) return;
     if (!cwd) {
       if (this.state.qa.includes(rec) && rec.status === 'testing') this.setQa(rec, { status: 'queued', qaAgentId: null });
+      await this.recordQaOutcome(a, repo, rec, null, { ok: false, text: '', errors: [a.lastError ?? 'QA desk preparation failed'], turns: 0, costUsd: 0 });
       return;
     }
 
@@ -4127,6 +4286,8 @@ export class Swarm {
     const prompt = [
       `Please ${security ? 'perform a detailed security review of' : 'QA'} pull request #${pr.number}: ${pr.title}`,
       `URL: ${pr.url}`,
+      `Known contribution SHAs: ${[this.state.prContributions.find((h) => h.repoId === repo.id && h.prNumber === pr.number)].flatMap((h) => h ? [h.original?.submittedSha, ...h.repairs.map((r) => r.submittedSha)] : []).filter(Boolean).join(', ') || 'unknown'}. Confirm defects with evidence; set introducedBySha only when proven. Reuse findingKey on retries.`,
+      `Prior finding keys at this revision: ${this.state.qaOutcomes.filter((o) => o.repoId === repo.id && o.prNumber === pr.number && o.headSha === pr.headSha && o.baseSha === pr.baseSha).at(-1)?.findings.map((f) => `${f.key}: ${f.check}`).join('; ') || 'none'}.`,
       `Author: ${dev ? `${dev.name} (developer agent)` : 'a teammate'} · QA round ${rec.round}`,
       rec.rerunNote?.round === rec.round ? `Note from the manager: ${rec.rerunNote.text}` : '',
       rec.fixReason === 'conflict' && rec.passedSha
@@ -4145,7 +4306,7 @@ export class Swarm {
       .join('\n');
 
     try {
-      if (review) {
+      {
         const head = await this.machineFor(a).deskHead(repo.fullName, this.agentSlug(a));
         if (gone()) return;
         if (head !== pr.headSha) {
@@ -4177,6 +4338,8 @@ export class Swarm {
       a.status = 'error';
       a.endedAt = Date.now();
       a.lastError = (err as Error).message;
+      await this.recordQaOutcome(a, repo, rec, null, { ok: false, text: '', errors: [a.lastError], startupFailed: true, turns: 0, costUsd: 0 });
+      if (gone()) return;
       this.appendLog(a, [{ kind: 'error', text: `✗ ${a.lastError}` }]);
       this.setQa(rec, { status: review ? 'needs-human' : 'queued', qaAgentId: null, ...(review ? { mergeNote: a.lastError } : {}) });
       this.emitAgent(a);
@@ -4225,9 +4388,13 @@ export class Swarm {
           sessionFailures: failures,
           summary: a.status === 'stopped' ? 'QA was stopped by the manager.' : rec.summary,
         });
+        await this.recordQaOutcome(a, repo, rec, null, result);
       }
       return;
     }
+
+    const evidence = rec ? await this.recordQaOutcome(a, repo, rec, report, result) : null;
+    if (gone()) return;
 
     // A worker limitation needs CI evidence, not developers pushing meaningless commits.
     const failedChecks = report.checks.filter((c) => c.result === 'fail');
@@ -4275,6 +4442,7 @@ export class Swarm {
       }
       const isCurrentAudit = (pr: PrDetails) => pr.state === 'OPEN' && pr.headSha === rec.testedSha && pr.baseSha === review?.auditBaseSha;
       const handBackStaleAudit = (pr: PrDetails) => {
+        if (evidence) this.observeQaRevision(evidence, pr);
         if (pr.state === 'OPEN' && pr.headSha === rec.testedSha && pr.baseSha && pr.baseSha !== review?.auditBaseSha) {
           this.sendBackForSecurityBase(repo, rec, pr);
         } else {
@@ -4335,6 +4503,7 @@ export class Swarm {
         // Verify the send-back still applies after posting the report.
         const current = await this.backend.prDetails(repo.fullName, rec.prNumber).catch(() => null);
         if (gone()) return;
+        if (evidence) this.observeQaRevision(evidence, current);
         if (current) rec.crossRepository ??= current.isCrossRepository;
         if (!current || !rec.testedSha) {
           incomplete = true;
@@ -4353,7 +4522,23 @@ export class Swarm {
         }
       }
       const { status: nextStatus, conflictFix } = outcome();
-      if (nextStatus === 'failed') this.recordFeedback({ kind: 'qa-send-back', ...rec });
+      if (evidence) {
+        const current = await this.backend.prDetails(repo.fullName, rec.prNumber).catch(() => null);
+        this.observeQaRevision(evidence, current);
+        evidence.commentUrl = commentUrl;
+        this.emitQaOutcome(evidence);
+        this.save();
+        if (gone()) return;
+        if (nextStatus === 'failed') {
+          const candidates = scoringFindings(evidence).filter((f) => f.attributableTo?.agentId === rec.devAgentId);
+          const change = this.recordFeedback({ kind: 'qa-send-back', ...rec, findingIds: candidates.map((f) => f.id) });
+          if (change && rec.devAgentId) {
+            evidence.legacyPenalty = { agentId: rec.devAgentId, findingIds: candidates.filter((f) => change.keys.some((key) => key.endsWith(`:${f.id}`))).map((f) => f.id), active: true };
+            this.emitQaOutcome(evidence);
+            this.save();
+          }
+        }
+      }
       const findings = report.fixInstructions ?? report.checks.filter((c) => c.result === 'fail').map((c) => `${c.name}: ${c.details}`).join('\n');
       this.setQa(rec, {
         status: nextStatus,
@@ -4474,6 +4659,7 @@ export class Swarm {
     this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
     const generation = this.agentRt.get(dev.id)?.generation;
     if (await this.closedBeforeStart(dev, repo, { kind: 'pr', number: rec.prNumber })) return;
+    this.startRepairContribution(dev, repo, rec, this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headSha ?? null);
     const cwd = await this.prepare(dev, repo, { pr: rec.prNumber }, headRef, { rec, task: 'fix', author });
     if (this.agentRt.get(dev.id)?.generation !== generation) return;
     if (!cwd) {
@@ -4515,17 +4701,33 @@ export class Swarm {
       'Then reply with a short summary of what you changed. Do not open a new pull request; QA will re-test automatically.',
     ];
     const mergeEnd = 'Then reply with a short summary of what you did. Do not open a new pull request; the office merges it once the checks pass, after another QA round if the code changed.';
-    const prompt = (mergeFix ? [...mergeFix, '', mergeEnd] : qaFix).filter((l) => l !== '').join('\n');
+    // A fix can reuse a live CLI with its original system prompt. Put the guidance in the new turn.
+    const prompt = [...(mergeFix ? [...mergeFix, mergeEnd] : qaFix), TEST_ENVIRONMENT_GUIDANCE].filter(Boolean).join('\n');
     const resume = original && rec.devSessionId && !this.agentRt.get(dev.id)?.deskMoved ? rec.devSessionId : undefined;
     await this.startAgentSession(dev, repo, cwd, prompt, this.buildSystemAppend(dev, repo, cwd, headRef, { pr: rec.prNumber, headRef }), resume);
+  }
+
+  private startRepairContribution(dev: PersistedAgent, repo: PersistedRepo, rec: QaRecord, startingSha: string | null, findings = rec.fixInstructions ?? rec.summary) {
+    const pull = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber);
+    const history = this.contribution(repo.id, pull ?? { number: rec.prNumber, title: `PR #${rec.prNumber}`, url: '', state: 'OPEN' });
+    const attemptId = crypto.randomUUID();
+    this.setContribution({ ...history, repairs: [...history.repairs, {
+      id: attemptId, agentId: dev.id, name: dev.name, reason: rec.fixReason ?? 'qa',
+      startingSha, submittedSha: null,
+      reviewId: rec.reviewId, round: rec.round, commentUrl: rec.commentUrl,
+      findings, startedAt: Date.now(), finishedAt: null,
+    }] });
+    this.setQa(rec, { repairAttemptId: attemptId });
   }
 
   private async onFixFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult) {
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
     const generation = this.agentRt.get(a.id)?.generation;
-    // Did it push anything? A checks fix may only re-run a flaky check, so only the other fixes are asked.
-    const head = rec && result.ok && a.status !== 'stopped' && rec.fixReason !== 'checks' ? await this.prHead(a, repo, rec.prNumber) : null;
+    const attemptId = rec?.repairAttemptId;
+    const head = rec && a.status !== 'stopped' && (attemptId || (result.ok && rec.fixReason !== 'checks')) ? await this.prHead(a, repo, rec.prNumber) : null;
     if (!this.state.agents.includes(a) || this.officeUpdate.handedOver || this.agentRt.get(a.id)?.generation !== generation) return; // the task moved on meanwhile
+    const history = this.state.prContributions.find((h) => h.repoId === repo.id && h.prNumber === a.prNumber);
+    if (history && attemptId) this.setContribution(finishedContribution(history, attemptId, a.id, head, Date.now()));
     const devs = this.state.agents.filter((x) => x.repoId === repo.id && x.role === 'dev').length;
     if (a.status === 'stopped') {
       if (rec?.status === 'fixing') this.setQa(rec, { status: 'failed' });
@@ -4592,6 +4794,7 @@ export class Swarm {
       if (!typed) rt.session.send(text);
       return;
     }
+    if (rt.scratchCleanup) throw new HttpError(409, `${a.name} is cleaning up the previous job; try again in a moment`);
     if (a.role === 'qa') throw new HttpError(409, `${a.name} isn't testing anything right now. Send a PR to QA from the Kanban board.`);
     if (rt.starting !== undefined) throw new HttpError(409, `${a.name}'s session is still starting; try again in a moment`);
     if (a.status === 'preparing') throw new HttpError(409, `${a.name} is still setting up; try again in a moment`);
@@ -4607,6 +4810,14 @@ export class Swarm {
     a.startedAt = Date.now();
     if (a.task === null) a.task = 'issue';
     const fixing = a.task === 'fix' && a.prNumber ? { pr: a.prNumber, headRef: a.branch } : undefined;
+    if (fixing) {
+      const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
+      if (rec) {
+        // Typed prompts need synchronous admission before the CLI hook returns.
+        const head = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headSha ?? null;
+        this.startRepairContribution(a, repo, rec, head, text);
+      }
+    }
     await this.startAgentSession(a, repo, cwd, text, this.buildSystemAppend(a, repo, cwd, a.branch, fixing), a.sessionId, undefined, typed ? 'typed' : null);
   }
 
@@ -6421,7 +6632,7 @@ export class Swarm {
           }),
           pullRequests: rt.pulls
             .filter((p) => p.state === 'OPEN')
-            .map((p) => prStatusView(p, this.state.qa.find((x) => x.repoId === r.id && x.prNumber === p.number), { maxQaRounds: MAX_QA_ROUNDS, agentName })),
+            .map((p) => prStatusView(p, this.state.qa.find((x) => x.repoId === r.id && x.prNumber === p.number), { maxQaRounds: MAX_QA_ROUNDS, agentName, contribution: this.state.prContributions.find((h) => h.repoId === r.id && h.prNumber === p.number) })),
           mergedRecently: rt.pulls.filter((p) => p.state === 'MERGED').slice(0, full ? undefined : 5).map((p) => `#${p.number} ${p.title}`),
         };
       });

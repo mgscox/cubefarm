@@ -5,24 +5,29 @@ const dev = { id: 'ada', repoId: 'floor-1', role: 'dev' as const, score: 0 };
 const merged: FeedbackEvent = { kind: 'merged', repoId: dev.repoId, prNumber: 13, devAgentId: dev.id, crossRepository: false };
 
 describe('developer feedback', () => {
-  it('awards two for a merge and subtracts one for each distinct QA send-back', () => {
+  it('awards two for a merge and penalizes each set of eligible findings once', () => {
     const reward = developerFeedback(merged, dev, {})!;
     expect(reward.score).toBe(2);
     const recorded = { [reward.key]: true as const };
     expect(developerFeedback(merged, { ...dev, score: 2 }, recorded)).toBeNull();
-    const sendBack = { ...merged, kind: 'qa-send-back' as const, reviewId: 'review-1', round: 1 };
+    const sendBack = { ...merged, kind: 'qa-send-back' as const, reviewId: 'review-1', round: 1, findingIds: ['finding-1'] };
     const penalty = developerFeedback(sendBack, { ...dev, score: 2 }, recorded)!;
     expect(penalty.score).toBe(1);
     recorded[penalty.key] = true;
     expect(developerFeedback(sendBack, { ...dev, score: 1 }, recorded)).toBeNull();
-    expect(developerFeedback({ ...sendBack, round: 2 }, { ...dev, score: 1 }, recorded)?.score).toBe(0);
-    expect(developerFeedback({ ...sendBack, reviewId: 'reopened-review' }, { ...dev, score: 1 }, recorded)?.score).toBe(0);
+    expect(developerFeedback({ ...sendBack, round: 2 }, { ...dev, score: 1 }, recorded)).toBeNull();
+    expect(developerFeedback({ ...sendBack, reviewId: 'reopened-review' }, { ...dev, score: 1 }, recorded)).toBeNull();
+    expect(developerFeedback({ ...sendBack, findingIds: ['new-finding'] }, { ...dev, score: 1 }, recorded)?.score).toBe(0);
+  });
+
+  it('never penalizes a send-back without eligible evidence', () => {
+    expect(developerFeedback({ ...merged, kind: 'qa-send-back', reviewId: 'r', round: 1 }, dev, {})).toBeNull();
   });
 
   it('starts legacy scores at zero and allows negative scores', () => {
     const { score: _score, ...legacy } = dev;
     expect(developerFeedback(merged, legacy, {})?.score).toBe(2);
-    expect(developerFeedback({ ...merged, kind: 'qa-send-back', reviewId: 'review-1', round: 1 }, legacy, {})?.score).toBe(-1);
+    expect(developerFeedback({ ...merged, kind: 'qa-send-back', reviewId: 'review-1', round: 1, findingIds: ['finding-1'] }, legacy, {})?.score).toBe(-1);
   });
 
   it('attributes only to the recorded developer on the same floor', () => {
@@ -37,6 +42,6 @@ describe('developer feedback', () => {
 
   it.each([true, undefined])('scores nothing for a PR not confirmed to be from the floor repo (cross-repository: %s)', (crossRepository) => {
     expect(developerFeedback({ ...merged, crossRepository }, dev, {})).toBeNull();
-    expect(developerFeedback({ ...merged, crossRepository, kind: 'qa-send-back', reviewId: 'review-1', round: 1 }, dev, {})).toBeNull();
+    expect(developerFeedback({ ...merged, crossRepository, kind: 'qa-send-back', reviewId: 'review-1', round: 1, findingIds: ['finding-1'] }, dev, {})).toBeNull();
   });
 });
