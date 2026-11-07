@@ -1,3 +1,4 @@
+import { UPSTASH } from '../../../shared/types';
 import { MessageBox } from './MessageBox';
 import { PromptTextarea } from './PromptTextarea';
 import { ClaudeAuthenticationSettings } from './ClaudeAuthenticationSettings';
@@ -415,10 +416,11 @@ function TeamTab() {
   const boxes = useStore((s) => s.boxes);
   const openOverlay = useStore((s) => s.openOverlay);
   const terminal = settings.runtime === 'terminal';
-  const fleet = terminal && boxes.length > 0;
+  const fleet = terminal;
   // The Agent SDK runtime is Claude Code for everyone.
   const workerCli = (a: { cli: AgentCli | '' }): AgentCli => (terminal ? a.cli || settings.defaultCli : 'claude');
   const [names, setNames] = useState<Record<string, string>>({});
+  const [hireBoxes, setHireBoxes] = useState<Record<string, string>>({});
   const [openBrief, setOpenBrief] = useState<string | null>(null);
   if (repos.length === 0) return <p className="muted">Connect a repo first; agents need a floor to sit on.</p>;
   return (
@@ -435,12 +437,23 @@ function TeamTab() {
             <div className="row">
               <span className="floor-badge">{repo.floor}</span>
               <b className="grow">{repo.fullName}</b>
+            </div>
+            <div className="row wrap">
               <input value={names[repo.id] ?? ''} onChange={(e) => setNames({ ...names, [repo.id]: e.target.value })} placeholder="Name (optional)" style={{ maxWidth: 160 }} />
+              {fleet && (
+                <select aria-label={`New worker machine on floor ${repo.floor}`} value={hireBoxes[repo.id] ?? FLOOR_BOX}
+                  onChange={(e) => setHireBoxes({ ...hireBoxes, [repo.id]: e.target.value })}>
+                  <option value={FLOOR_BOX}>Follow floor</option>
+                  <option value="">This machine</option>
+                  <option value={UPSTASH}>Upstash Box</option>
+                  {boxes.filter((b) => !b.disposable).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+              )}
               <button
                 className="btn btn-small btn-good"
                 disabled={team.filter((a) => a.role === 'dev' || a.role === 'researcher').length >= 12}
                 onClick={() =>
-                  void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'dev' })).then(() => setNames({ ...names, [repo.id]: '' }))
+                  void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'dev', box: fleet && hireBoxes[repo.id] !== FLOOR_BOX ? hireBoxes[repo.id] : undefined })).then(() => setNames({ ...names, [repo.id]: '' }))
                 }
               >
                 + Developer
@@ -449,7 +462,7 @@ function TeamTab() {
                 className="btn btn-small"
                 disabled={team.filter((a) => a.role === 'qa').length >= 3}
                 onClick={() =>
-                  void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'qa' })).then(() => setNames({ ...names, [repo.id]: '' }))
+                  void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'qa', box: fleet && hireBoxes[repo.id] !== FLOOR_BOX ? hireBoxes[repo.id] : undefined })).then(() => setNames({ ...names, [repo.id]: '' }))
                 }
               >
                 + QA tester
@@ -545,7 +558,8 @@ function TeamTab() {
                           >
                             <option value={FLOOR_BOX}>Floor's box</option>
                             <option value="">This machine</option>
-                            {boxes.map((b) => {
+                            <option value={UPSTASH}>Upstash Box</option>
+                            {boxes.filter((b) => !b.disposable).map((b) => {
                               const lacks = missingClis([a], b, settings.defaultCli).length > 0; // their task there wouldn't start
                               return (
                                 <option key={b.id} value={b.id} disabled={lacks && a.box !== b.id}>

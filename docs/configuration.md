@@ -36,6 +36,11 @@ On Windows, keep it inside your user profile, which other accounts can't read by
 | --- | --- |
 | `CUBEFARM_TELEGRAM_TOKEN` | The bot token for [Telegram](telegram.md). |
 | `CUBEFARM_MCP_TOKEN` | The fallback bearer token for the [manager MCP gateway](manager-mcp.md). A token saved in Settings takes precedence, and the Settings switch can disable access with either token source. |
+| `CUBEFARM_UPSTASH_BOX_API_KEY` | Upstash Box management key. The office uses it to list, create, and delete Boxes. |
+| `CUBEFARM_UPSTASH_GITHUB_TOKEN` | GitHub token with clone and push access to the floors using Upstash. Give it access only to the repositories those workers use. |
+| `CUBEFARM_UPSTASH_ANTHROPIC_API_KEY` | Anthropic API key for Claude Code on Upstash. |
+| `CUBEFARM_UPSTASH_OPENAI_API_KEY` | OpenAI Platform API key for Codex on Upstash. |
+| `CUBEFARM_UPSTASH_OPENROUTER_API_KEY` | OpenRouter API key for OpenCode on Upstash. Select an explicit `openrouter/...` model on the worker. |
 
 The file only holds the settings listed here. `SWARM_HOME`, `SWARM_PORT`, `SWARM_HOST` and the other `SWARM_*` variables are read from the environment only.
 
@@ -52,6 +57,14 @@ requested. Remote desk RPCs additionally have their own deadlines (the desk time
 - **A missing or unreadable file** means no settings. CubeFarm starts as usual, and Telegram, for example, shows as unconfigured.
 - **Demo mode** (`--demo`) ignores the file. An explicitly supplied `CUBEFARM_MCP_TOKEN` environment variable can enable MCP for testing in a demo office on branch `main`.
 - **It stays out of agents' environments.** The server reads the values it needs and doesn't copy the file into its own environment, which agents, previews and their tools inherit. Gateway tokens are also removed from agent and preview environments when supplied by the shell.
+
+## Upstash workers
+
+Upstash is opt-in. Choose **Upstash Box** when hiring a developer or QA tester, in their Team settings, or for a whole floor in Fleet. A floor move preserves a worker's explicit Upstash choice. The office needs its normal built server bundle, `tar`, and an SSH key enrolled in the Upstash Console. Configure the office host's SSH client to use that identity and trust the verified Upstash SSH host key before enabling the feature. The office uses a non-interactive SSH connection for terminals and hooks.
+
+A new task gets a Small Box when the account is below the office's ten-Box cap. If the cap is full, the task uses the floor's SSH machine or the main office if the floor uses Upstash. It waits if that machine cannot run its CLI. The placement choice applies again on the next task.
+
+When the task ends, the office deletes its Box after confirming the desk is clean and its commits are on GitHub. An unsaved or unverifiable desk stays in Fleet with a cleanup error. Save the work on that Box to let the office retry cleanup. Keep each Box limited to repositories you trust with its GitHub token and the selected model provider key. Code running inside a Box can read those two credentials.
 
 ## OpenCode desk models
 

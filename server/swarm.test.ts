@@ -35,6 +35,9 @@ interface Internals {
   backend: Backend;
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[]; prContributions: PrContributionView[]; qaOutcomes: import('../shared/types.ts').QaOutcomeView[]; feedbackEvents: Record<string, true> };
   writeState(): Promise<void>;
+  upstash: Pick<import('./upstash.ts').UpstashBoxes, 'allocate' | 'find' | 'bootstrap' | 'safeToDelete' | 'present' | 'remove'>;
+  clis: import('../shared/types.ts').CliView[];
+  sweepUpstash(): void;
   repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string; issuesFetchedAt?: number }>;
   agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null; shots?: unknown[]; qaResume?: unknown }>;
   issueFailures: Map<string, number>;
@@ -112,6 +115,111 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('disposable Upstash worker placement', () => {
+  beforeEach(async () => {
+    s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
+    Object.assign(repo, { box: '', defaultBranch: 'main' });
+    Object.assign(s.state.agents[0], { model: '' });
+    s.repoRt.get(repo.id)!.cloneStatus = 'ready';
+    s.clis = await s.backend.detectClis();
+    setIssues(issue(35), issue(36));
+    vi.spyOn(s, 'writeState').mockResolvedValue();
+    runTask.mockImplementation(async (a, r) => {
+      await s.prepare(a, r, {}, (a as { branch: string }).branch);
+    });
+  });
+
+  it.each(['claude', 'codex', 'opencode'] as const)('routes %s to a dedicated Box, then removes it after the desk is saved', async (cli) => {
+    swarm.updateAgent('a1', { cli, box: 'upstash' });
+    const prepare = swarm.assign('a1', 35);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await prepare;
+    const worker = () => swarm.snapshot().agents.find((a) => a.id === 'a1')!;
+    const boxes = () => swarm.snapshot().boxes;
+    expect(boxes()).toEqual([expect.objectContaining({ disposable: true, name: 'Upstash · Ada', status: 'online' })]);
+    expect(worker().deskBox).toBe(boxes()[0].id);
+    swarm.stopAgent('a1');
+    s.sweepUpstash();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(boxes()).toHaveLength(0);
+    expect(worker().box).toBe('upstash');
+  });
+
+  it.each(['claude', 'codex', 'opencode'] as const)('uses %s for a QA tester inheriting an Upstash floor', async (cli) => {
+    swarm.updateRepo(repo.id, { box: 'upstash' });
+    const tester = swarm.hireAgent(repo.id, { name: 'QA pilot', role: 'qa', cli, model: cli === 'opencode' ? 'openrouter/example/model' : '' });
+    const fixture = demoPull(repo.fullName, 'swarm/issue-35-ada', false);
+    try {
+      s.repoRt.get(repo.id)!.pulls = [fixture.pull];
+      const allocate = vi.spyOn(s.upstash, 'allocate');
+      vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+      const rec = s.queueQa(repo, fixture.pull.number, undefined, 35);
+      const run = s.runQa(s.state.agents.find((a) => a.id === tester.id)!, repo, rec);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await run;
+      const box = swarm.snapshot().boxes[0];
+      expect(box?.disposable).toBe(true);
+      expect(allocate.mock.calls[0]?.[2]).toBe(cli);
+      expect(swarm.snapshot().agents.find((a) => a.id === tester.id)).toMatchObject({ role: 'qa', box: null, deskBox: box.id });
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  it('holds a pending task and verifies its desk again after a failed delete', async () => {
+    swarm.updateAgent('a1', { box: 'upstash' });
+    await swarm.assign('a1', 35);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const box = () => swarm.snapshot().boxes[0];
+    const saved = vi.spyOn(s.upstash, 'safeToDelete').mockResolvedValue(true);
+    const remove = vi.spyOn(s.upstash, 'remove').mockRejectedValueOnce(new Error('provider unavailable'));
+    swarm.stopAgent('a1');
+    s.state.agents[0].heldRetry = { kind: 'finish-pushed-work' };
+    s.sweepUpstash();
+    await vi.advanceTimersByTimeAsync(8_001);
+    expect(saved).not.toHaveBeenCalled();
+    s.state.agents[0].heldRetry = null;
+    s.sweepUpstash();
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(box()?.error).toMatch(/Cleanup blocked/);
+    expect(remove).toHaveBeenCalledTimes(1);
+
+    saved.mockResolvedValueOnce(false);
+    s.sweepUpstash();
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(box()?.error).toMatch(/Save local changes/);
+    expect(remove).toHaveBeenCalledTimes(1);
+
+    s.sweepUpstash();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(box()).toBeUndefined();
+    expect(remove).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['local', 'ssh', 'upstash'] as const)('uses the correct machine on a %s floor only at quota', async (floor) => {
+    const destination = floor === 'ssh' ? swarm.addBox('Floor machine', 'ssh-test').id : floor === 'upstash' ? floor : '';
+    swarm.updateRepo(repo.id, { box: destination });
+    swarm.updateAgent('a1', { box: 'upstash' });
+    await vi.advanceTimersByTimeAsync(2_000);
+    const allocate = vi.spyOn(s.upstash, 'allocate').mockResolvedValue(null);
+    await swarm.assign('a1', 35);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(allocate).toHaveBeenCalledTimes(1);
+    expect(swarm.snapshot().agents.find((a) => a.id === 'a1')).toMatchObject({ box: 'upstash', deskBox: floor === 'ssh' ? destination : '' });
+  });
+
+  it('queues work when a full Upstash account would fall back to an offline floor', async () => {
+    const remote = swarm.addBox('Offline floor', 'offline-test');
+    swarm.updateRepo(repo.id, { box: remote.id });
+    swarm.updateAgent('a1', { box: 'upstash' });
+    vi.spyOn(s.upstash, 'allocate').mockResolvedValue(null);
+    await swarm.assign('a1', 35);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(swarm.snapshot().agents.find((a) => a.id === 'a1')).toMatchObject({ status: 'idle', box: 'upstash' });
+    expect(repo.requestedStarts).toEqual([expect.objectContaining({ issueNumber: 35, preferredAgentId: 'a1', restartPending: true })]);
+  });
 });
 
 describe('automatic desk recovery', () => {
@@ -5600,6 +5708,9 @@ describe('manual office closure', () => {
     officeLifecycleView(): { state: string; running: number };
     refreshOfficeLifecycle(): Promise<void>;
     writeState(): Promise<void>;
+  upstash: Pick<import('./upstash.ts').UpstashBoxes, 'allocate' | 'find' | 'bootstrap' | 'safeToDelete' | 'present' | 'remove'>;
+  clis: import('../shared/types.ts').CliView[];
+  sweepUpstash(): void;
     buildSystemAppend(...args: unknown[]): string;
     syncRepo(id: string): Promise<void>;
     newTerminal(id: string): { allowInput(): boolean; dispose(): void };

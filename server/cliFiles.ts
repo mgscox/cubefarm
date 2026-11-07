@@ -122,10 +122,14 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
   // Each agent must be a clean instance on the account its CLI is logged into: no API keys (they would switch Claude
   // Code's billing to the API) and nothing inherited from a Claude Code session the office itself was started from.
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(claudeEnv(projectEnv(process.env), { login: plan.cli !== 'claude' }))) {
+  for (const [k, v] of Object.entries(claudeEnv(projectEnv(process.env), { login: plan.cli !== 'claude' || !!process.env.CUBEFARM_UPSTASH_WORKER }))) {
     if (v === undefined) continue;
     if (/^(NO_COLOR|FORCE_COLOR|TERM_PROGRAM|TERM_PROGRAM_VERSION|CODEX_THREAD_ID|OPENCODE_CONFIG_CONTENT)$/i.test(k)) continue;
     env[k] = v;
+  }
+  // The dedicated Box has exactly one API-backed CLI; ordinary desks retain their existing auth.
+  if (process.env.CUBEFARM_UPSTASH_WORKER === 'claude' && plan.cli === 'claude' && process.env.ANTHROPIC_API_KEY) {
+    env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
   }
   if (scratch) env.CUBEFARM_JOB_SCRATCH = scratch;
   Object.assign(env, { TERM: 'xterm-256color', COLORTERM: 'truecolor' }, launch.env);

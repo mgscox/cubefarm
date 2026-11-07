@@ -12,6 +12,7 @@ export interface PersistedBox {
   /** Its workspaces folder and path separator, from its last info. */
   layout?: BoxLayout | null;
   capacity?: MachineCapacity;
+  upstash?: { agentId: string; repo: string; slug: string; createdAt: number; retryAt?: number; remoteId?: string; used?: boolean; saved?: boolean; error?: string };
 }
 
 /** Where a box keeps desks: its own folder and separator (it may run another OS than the office). */
@@ -70,7 +71,7 @@ export function validDestination(d: string): boolean {
 }
 
 /** A word for a POSIX shell, single-quoted. */
-const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
+export const sq = (s: string) => `'${s.replaceAll("'", `'"'"'`)}'`;
 
 /**
  * The box host's command run in the box user's login shell. ssh runs a command in a plain non-interactive shell, which
@@ -94,8 +95,9 @@ export const retryForm = (plain: boolean, stderr: string) => ({ plain: !plain, n
  * version, with stdio bridged to it, in the box user's login shell (plain: as it is, for a Windows box).
  * SWARM_BOX_COMMAND replaces the remote command (a box that runs a checkout).
  */
-export function boxCommand(destination: string, version: string, officeId: string, remote = process.env.SWARM_BOX_COMMAND, plain = false): { file: string; args: string[] } {
-  return sshBox(destination, version, `--stdio --office ${officeId}`, remote, plain);
+export function boxCommand(destination: string, version: string, officeId: string, remote = process.env.SWARM_BOX_COMMAND, plain = false, upstash = false): { file: string; args: string[] } {
+  const command = upstash ? 'export PATH="$HOME/.local/bin:$PATH"; exec node "$HOME/.cubefarm-runtime/bin/cubefarm.js" box' : remote;
+  return sshBox(destination, version, `--stdio --office ${officeId}`, command, plain);
 }
 
 /** A release (0.3.19), as opposed to a commit: what a box follows when the office runs from npm. */

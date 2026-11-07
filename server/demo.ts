@@ -697,11 +697,14 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
   let pulled = commit;
   let keeperStale = /^restart-demo/i.test(opts.box.destination);
   const keeperChanges = /^stale-keeper/i.test(opts.box.destination);
+  let ready: (() => void) | undefined;
+  const connected = opts.box.upstash ? new Promise<void>((resolve) => { ready = resolve; }) : Promise.resolve();
   let timer = setTimeout(async () => {
     status = offline ? 'offline' : 'online';
     if (!offline) clis = await machine.detectClis();
     if (!offline) stopResources = monitorResources(async () => demoResources(opts.box.destination), (value) => { telemetry = value; opts.changed(); });
     opts.changed();
+    ready?.();
   }, 1500);
   const workspaces = `/boxes/${opts.box.name}/workspaces`;
   const machine: Machine = {
@@ -745,10 +748,11 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
       refused: false,
       telemetry,
     }),
-    reconnected: Promise.resolve([]), // fake sessions end with the office
+    reconnected: connected.then(() => []), // fake sessions end with the office
     hooksReady: () => undefined,
     // An online box detects again on the same link; an offline one tries connecting and still fails.
     check: async () => {
+      if (opts.box.upstash) await connected;
       if (status === 'online') {
         clis = await machine.detectClis();
         return opts.changed();
@@ -1613,4 +1617,22 @@ export function createDemoTelegram(): import('./telegram.ts').TelegramTransport 
     },
   };
   return fake;
+}
+
+
+// Demo Boxes never contact the provider, even when the office host has real credentials.
+export function createDemoUpstash() {
+  const boxes = new Set<string>();
+  return {
+    allocate: async (name: string) => {
+      if (boxes.size >= 10) return null;
+      boxes.add(name);
+      return name;
+    },
+    find: async (name: string) => boxes.has(name) ? name : null,
+    bootstrap: async () => {},
+    present: async (id: string) => boxes.has(id),
+    safeToDelete: async () => true,
+    remove: async (id: string) => { boxes.delete(id); },
+  };
 }

@@ -150,6 +150,7 @@ app.post(
   route((req) =>
     swarm.hireAgent(repoId(req), {
       name: str(req.body.name),
+      box: req.body.box,
       model: str(req.body.model),
       effort: str(req.body.effort),
       role: str(req.body.role),

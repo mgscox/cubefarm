@@ -40,6 +40,8 @@ export interface SessionOptions {
   label?: string;
   /** Leave the CLI waiting at its prompt when the task is done, for the manager and for follow-ups. */
   keepAlive?: boolean;
+  /** The office explicitly selected API-key billing for this disposable terminal. */
+  upstash?: boolean;
   /** The prompt was typed at the CLI's prompt by the manager: it's already running, so it isn't sent again. */
   typed?: boolean;
   /** Whose terminal it is (the terminal keeper holds this, for the office that picks the CLI up after a restart). */
