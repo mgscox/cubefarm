@@ -34,6 +34,10 @@ On Windows, keep it inside your user profile, which other accounts can't read by
 
 | Setting | What it does |
 | --- | --- |
+| `UPSTASH_BOX_API_KEY` | Upstash Box credentials for opt-in disposable worker placement. |
+| `ANTHROPIC_API_KEY` | Anthropic API billing for Claude Code workers on Upstash. Local Claude desks retain their subscription login. |
+| `OPENAI_API_KEY` | OpenAI Platform API billing for Codex workers on Upstash; a ChatGPT subscription does not supply this key. |
+| `OPENROUTER_API_KEY` | OpenRouter API billing for OpenCode workers on Upstash. |
 | `CUBEFARM_TELEGRAM_TOKEN` | The bot token for [Telegram](telegram.md). |
 | `CUBEFARM_MCP_TOKEN` | The fallback bearer token for the [manager MCP gateway](manager-mcp.md). A token saved in Settings takes precedence, and the Settings switch can disable access with either token source. |
 
@@ -52,6 +56,30 @@ requested. Remote desk RPCs additionally have their own deadlines (the desk time
 - **A missing or unreadable file** means no settings. CubeFarm starts as usual, and Telegram, for example, shows as unconfigured.
 - **Demo mode** (`--demo`) ignores the file. An explicitly supplied `CUBEFARM_MCP_TOKEN` environment variable can enable MCP for testing in a demo office on branch `main`.
 - **It stays out of agents' environments.** The server reads the values it needs and doesn't copy the file into its own environment, which agents, previews and their tools inherit. Gateway tokens are also removed from agent and preview environments when supplied by the shell.
+
+## Disposable Upstash workers
+
+In the terminal runtime, choose **Upstash · Small Box per task** when hiring a developer or QA worker,
+on Team, or as a floor's machine in Fleet. Nothing is created until a task starts. The office supplies the
+Box key, the selected CLI's API key and its GitHub login token; it sends no subscription token or unrelated
+config values to the Box. Demo mode fakes this entire lifecycle without reading credentials.
+
+Each task retains its worker, repository, CLI and Small Box across reconnects. At ten account Boxes (including
+Boxes created outside CubeFarm), or a provider quota rejection, the task uses its floor's machine. An Upstash
+floor falls back to the main office. If that machine lacks the selected CLI, the task stays queued.
+Quota rejections pause new Box attempts for one minute; other provider failures stay visible for recovery.
+
+On completion or clearing a task, CubeFarm stops the Box's terminal keeper and leftover desk processes, fetches
+Git refs, and checks every worktree, local branch and stash. Dirty files, untracked files, unpushed commits,
+unavailable GitHub, or an uncertain delete keep a cleanup record in Fleet. **Reconnect Box** lets the worker
+resume to save its work; **Retry saved-work cleanup** checks again before deleting. There is no force-delete
+control. A lost create response is recovered by the reservation's unique Box name without creating a second Box.
+
+OpenCode on Upstash uses OpenRouter. Enter a model such as `openrouter/anthropic/claude-sonnet-4.6`;
+CubeFarm adds `openrouter/` to a model without that prefix, and uses that example model when the field is empty.
+Remote workers use the office's bundled worker code and dependencies installed from its npm release, plus the
+selected CLI and GitHub CLI. An office restart reconnects to its existing keeper; it does not reinstall below a
+running task. These workers require outbound access to npm, GitHub and their selected inference provider.
 
 ## OpenCode desk models
 

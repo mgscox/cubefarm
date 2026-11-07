@@ -1,3 +1,5 @@
+import { createUpstashProvider } from './upstashProvider.ts';
+import type { UpstashProvider } from './upstash.ts';
 import * as github from './github.ts';
 import * as workspace from './workspace.ts';
 import { startSession } from './agentRunner.ts';
@@ -15,6 +17,7 @@ import { createResourceReader } from './machineResources.ts';
 
 /** Everything the swarm needs from the outside world, the office's own machine included. The demo backend fakes all of it. */
 export interface Backend extends Machine {
+  upstash: UpstashProvider;
   demo: boolean;
   resources(): Promise<MachineSample>;
   user(): Promise<string>;
@@ -78,6 +81,7 @@ export interface Backend extends Machine {
 
 export const realBackend: Backend = {
   demo: false,
+  upstash: createUpstashProvider(),
   resources: createResourceReader(),
   user: github.currentUser,
   listMyRepos: github.listMyRepos,

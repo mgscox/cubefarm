@@ -27,5 +27,5 @@ it('removes every spelling of the inherited script policy without changing other
 
 it('keeps office gateway credentials out of agent and preview environments', () => {
   expect(projectEnv({ CUBEFARM_TELEGRAM_TOKEN: 'private', cubefarm_telegram_token: 'private',
-    CUBEFARM_MCP_TOKEN: 'private', cubefarm_mcp_token: 'private', PATH: 'bin' })).toEqual({ PATH: 'bin' });
+    UPSTASH_BOX_API_KEY: 'private', upstash_box_api_key: 'private', CUBEFARM_MCP_TOKEN: 'private', cubefarm_mcp_token: 'private', PATH: 'bin' })).toEqual({ PATH: 'bin' });
 });

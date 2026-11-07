@@ -51,6 +51,7 @@ interface State {
   workspaceRoot: string;
   settings: SwarmSettings;
   clis: CliView[]; // the coding-agent CLIs installed where the office runs
+  upstashTasks: NonNullable<WorldSnapshot['upstashTasks']>;
   boxes: BoxView[]; // other machines agents' desks and CLIs can run on
   officeTelemetry: WorldSnapshot['officeTelemetry'];
   officeCapacity: WorldSnapshot['officeCapacity'];
@@ -169,6 +170,7 @@ export const useStore = create<State>((set, get) => ({
   },
   clis: [],
   boxes: [],
+  upstashTasks: [],
   repos: [],
   agents: {},
   logs: {},
@@ -255,6 +257,7 @@ export const useStore = create<State>((set, get) => ({
           usage: d.usage,
           clis: d.clis ?? [],
           boxes: d.boxes ?? [],
+          upstashTasks: d.upstashTasks ?? [],
           officeTelemetry: d.officeTelemetry ?? null,
           officeCapacity: d.officeCapacity ?? 'unknown',
           restarting: false,
@@ -356,6 +359,9 @@ export const useStore = create<State>((set, get) => ({
         set({ boxes: boxes.some((b) => b.id === ev.box.id) ? boxes.map((b) => (b.id === ev.box.id ? ev.box : b)) : [...boxes, ev.box] });
         break;
       }
+      case 'upstash':
+        set({ upstashTasks: ev.tasks });
+        break;
       case 'boxRemoved':
         set({ boxes: get().boxes.filter((b) => b.id !== ev.boxId) });
         break;

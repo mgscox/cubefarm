@@ -24,6 +24,8 @@ export const busy = (a: Pick<AgentView, 'status'>) => BUSY.includes(a.status);
 /** A box's name for the console, mid-sentence: '' is the office's own machine. */
 export function boxName(boxes: Pick<BoxView, 'id' | 'name'>[], id: string): string {
   if (!id) return 'this machine';
+  if (id === 'upstash') return 'Upstash (Small Box per task)';
+  if (id.startsWith('upstash-')) return 'the task’s Upstash Box';
   return boxes.find((b) => b.id === id)?.name ?? 'a removed box';
 }
 

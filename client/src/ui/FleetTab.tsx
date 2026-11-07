@@ -153,7 +153,7 @@ function FloorMachine({ repo, boxes, agents }: { repo: RepoView; boxes: BoxView[
   const defaultCli = useStore((s) => s.settings.defaultCli);
   const clis = useStore((s) => s.clis);
   const team = agentsOnRepo(agents, repo.id).filter(movable);
-  const target = boxes.some((b) => b.id === to) ? to : '';
+  const target = to === 'upstash' || boxes.some((b) => b.id === to) ? to : '';
   const text = floorMoveText(floorMove(repo, team, target), boxName(boxes, target));
   // Their next task there wouldn't start: the box hasn't got their coding agent.
   const lacking = missingClis(team, boxes.find((b) => b.id === target), defaultCli);
@@ -183,6 +183,7 @@ function FloorMachine({ repo, boxes, agents }: { repo: RepoView; boxes: BoxView[
           onChange={(e) => setTo(e.target.value)}
         >
           <option value="">This machine</option>
+          <option value="upstash">Upstash · Small Box per task</option>
           {boxes.map((b) => (
             <option key={b.id} value={b.id}>
               {b.name}
@@ -265,6 +266,7 @@ function AddBox() {
 
 export function FleetTab() {
   const boxes = useStore((s) => s.boxes);
+  const tasks = useStore((s) => s.upstashTasks);
   const repos = useStore((s) => s.repos);
   const agents = useStore((s) => s.agents);
   const terminal = useStore((s) => s.settings.runtime === 'terminal');
@@ -289,7 +291,25 @@ export function FleetTab() {
           <FloorMachine key={`${r.id}-${r.box}`} repo={r} boxes={boxes} agents={agents} />
         ))}
       </div>
-      <AddBox />
+      <div>
+        <div className="card">
+          <h3>Upstash workers</h3>
+          <p className="small">Opt in when hiring, in Team, or for a whole floor. Each task gets one Small Box. At the ten-Box cap or a provider quota rejection it uses the floor’s machine, or the main office for an Upstash floor. Tasks wait if that machine lacks their CLI.</p>
+          <p className="small muted">The office config supplies UPSTASH_BOX_API_KEY and the selected CLI’s ANTHROPIC_API_KEY, OPENAI_API_KEY (OpenAI Platform), or OPENROUTER_API_KEY. Subscription sign-ins stay on your machines.</p>
+          <p className="small">{tasks.length}/10 task Boxes reserved. Cleanup checks for dirty files and unpushed commits before deletion.</p>
+          {tasks.map((t) => <div className="card small" key={t.id}>
+            <b>{agents[t.agentId]?.name ?? 'Former worker'}</b> · {t.repo} · {t.cli}
+            <div>{t.phase}{t.connection ? ` · ${t.connection.status}` : ''} · <code>{t.branch}</code></div>
+            {t.connection?.error && <p role="status" className="term-error">{t.connection.error}</p>}
+            {t.error && <p role="status" className="term-error">{t.error}</p>}
+            <div className="row">
+              <button className="btn btn-small" disabled={t.phase === 'deleting'} onClick={() => void attempt(() => api.retryUpstash(t.id))}>Reconnect Box</button>
+              <button className="btn btn-small" disabled={!!agents[t.agentId] && busy(agents[t.agentId])} onClick={() => void attempt(() => api.retryUpstash(t.id, true))}>Retry saved-work cleanup</button>
+            </div>
+          </div>)}
+        </div>
+        <AddBox />
+      </div>
     </div>
   );
 }
