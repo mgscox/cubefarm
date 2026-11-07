@@ -31,7 +31,7 @@ inconclusive ones support neither, and the office refuses a draft that mixes the
   one-line summary of at most 240 characters with tokens, keys and passwords replaced by `[redacted]`. Logs, prompts,
   transcripts and screenshots are never copied in. If the QA outcome or attempt behind a source is later pruned, or
   an external link expires, the lesson keeps the link and the summary and the view marks it "record pruned". A link
-  carrying credentials or a token-like query parameter is refused.
+  carrying credentials, a secret-named parameter, or a token-like value or path segment is refused.
 - **Verification**: a fix or a regression test (with its name), and the passing QA outcome, or the `qa-passed`,
   `repaired` or `delivered` attempt, that verified it.
 - **Revisions**: the commits where the findings were seen and where the fix was verified.

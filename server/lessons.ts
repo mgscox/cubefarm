@@ -17,7 +17,17 @@ export interface LessonEvidence {
 }
 
 const VERIFYING: RunResult[] = ['qa-passed', 'repaired', 'delivered'];
-const SECRET_PARAM = /token|secret|passw|api[_-]?key|access[_-]?key|signature|^sig$|^code$|^auth(orization)?$/i;
+const SECRET_PARAM = /token|secret|passw|api[_-]?key|access[_-]?key|^key$|jwt|credential|signature|^sig$|^code$|^auth(orization)?$/i;
+// Known token prefixes, JWTs, and long mixed-case opaque strings (not lowercase slugs, SHAs or UUIDs).
+const SECRET_VALUE = /\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{10,}|\bsk-[A-Za-z0-9_-]{10,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\bAKIA[0-9A-Z]{16}\b|\beyJ[\w-]+\.[\w-]+\.|^(?=.*\d)(?=.*[A-Z])(?=.*[a-z])[A-Za-z0-9+/_=-]{32,}$/;
+
+/** Whether a link carries credentials: in its userinfo, a secret-named parameter, or a token-like value or path segment. */
+function linkHasCredentials(url: URL): boolean {
+  const decode = (x: string) => { try { return decodeURIComponent(x); } catch { return x; } };
+  const params = [...url.searchParams, ...new URLSearchParams(url.hash.slice(1))];
+  return !!(url.username || url.password) || params.some(([k, v]) => SECRET_PARAM.test(k) || SECRET_VALUE.test(v))
+    || url.pathname.split('/').some((seg) => SECRET_VALUE.test(decode(seg)));
+}
 
 function text(value: unknown, name: string, max: number, required = true): string {
   if (value === undefined || value === null || value === '') {
@@ -65,9 +75,7 @@ function source(ref: unknown, kind: LessonKind, ev: LessonEvidence): LessonSourc
     let url: URL;
     try { url = new URL(r.url); } catch { throw new HttpError(400, 'A link source needs an http(s) URL'); }
     if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new HttpError(400, 'A link source needs an http(s) URL');
-    if (url.username || url.password || [...url.searchParams.keys(), ...new URLSearchParams(url.hash.slice(1)).keys()].some((k) => SECRET_PARAM.test(k))) {
-      throw new HttpError(400, 'A link source must not carry credentials in its URL');
-    }
+    if (linkHasCredentials(url)) throw new HttpError(400, 'A link source must not carry credentials in its URL');
     return { kind: 'link', ref: url.href, qaOutcomeId: null, prNumber: null, sha: null, classification: null, url: url.href,
       summary: summary(text(r.summary, 'A link source summary', LESSON_LIMITS.guidance)) };
   }

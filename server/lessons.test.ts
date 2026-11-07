@@ -127,6 +127,18 @@ describe('drafting a lesson', () => {
     fails(() => draftLesson({ ...agentDraft, sources: [{ url: 'https://me:pw@ci.example/run/1', summary: 'x' }] }, ev, 'manager', 1), 400, /credentials/);
     fails(() => draftLesson({ ...agentDraft, sources: [{ url: 'https://ci.example/run/1?access_token=abc', summary: 'x' }] }, ev, 'manager', 1), 400, /credentials/);
     fails(() => draftLesson({ ...agentDraft, sources: [{ url: 'https://ci.example/cb#id_token=abc', summary: 'x' }] }, ev, 'manager', 1), 400, /credentials/);
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl';
+    for (const url of [`https://ci.example/run/1?key=abc`, `https://ci.example/run/1?jwt=${jwt}`, `https://ci.example/run/1?q=${jwt}`,
+      'https://hooks.example/services/ghp_abcdefghijklmnopqrstuvwxyz0123/run', 'https://ci.example/share/Xk9fQ2LmP7vR4tZ8wN3bY6cH1jD5sA0e/log']) {
+      fails(() => draftLesson({ ...agentDraft, sources: [{ url, summary: 'x' }] }, ev, 'manager', 1), 400, /credentials/);
+    }
+    // Ordinary links stay: commit SHAs, UUIDs, lowercase slugs and plain query values.
+    const ok = draftLesson({ ...agentDraft, sources: [
+      { url: 'https://github.com/o/r/commit/0123456789abcdef0123456789abcdef01234567', summary: 'Fix' },
+      { url: 'https://ci.example/runs/8f14e45f-ceea-467f-a8f7-2d5c1b3e9a10?page=2&sort=desc', summary: 'Run' },
+      { url: 'https://docs.example/guides/check-the-toolbar-at-375px-before-handing-off#mobile-layout', summary: 'Guide' },
+    ] }, ev, 'manager', 1);
+    expect(ok.versions[0].sources).toHaveLength(3);
   });
 });
 
