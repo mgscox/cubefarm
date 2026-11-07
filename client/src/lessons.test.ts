@@ -44,7 +44,7 @@ describe('lesson drafts', () => {
 
 it('offers passing reviews and successful attempts on the floor as verification, newest first and once each', () => {
   const outcomes = [
-    { id: 'q1', repoId: 'r', prNumber: 11, round: 2, verdict: 'pass', headSha: 'abcdef123', finishedAt: 50 },
+    { id: 'q1', attemptId: 'q1', repoId: 'r', prNumber: 11, round: 2, verdict: 'pass', headSha: 'abcdef123', finishedAt: 50 },
     { id: 'q0', repoId: 'r', prNumber: 11, round: 1, verdict: 'fail', headSha: 'x', finishedAt: 40 },
     { id: 'q9', repoId: 'other', prNumber: 1, round: 1, verdict: 'pass', headSha: 'y', finishedAt: 90 },
   ] as QaOutcomeView[];
@@ -53,4 +53,7 @@ it('offers passing reviews and successful attempts on the floor as verification,
     ['attempt:a1', 'fix PR #12 repaired (Ada)'],
     ['qa:q1', 'PR #11 QA round 2 passed at abcdef1'],
   ]);
+  // The review is matched to its run by attemptId, not by sharing an id.
+  const reviewed = [{ ...outcomes[0], id: 'q2', attemptId: 'run7' }];
+  expect(verificationOptions('r', reviewed, [run('run7', 'qa-passed', 50)]).map((o) => o.value)).toEqual(['qa:q2']);
 });

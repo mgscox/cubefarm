@@ -1,7 +1,7 @@
 // A floor's reviewed lessons (docs/lessons.md): recurring findings to draft from, drafts to review, approved lessons.
 import { useMemo, useState } from 'react';
 import type { LessonVersion, LessonView } from '../../../shared/types';
-import { approvedVersion, lessonExport, lessonStatus, recurringFindings, sourceHeld, versionStatus, type LessonSuggestion } from '../../../shared/lessons';
+import { approvedVersion, canRevise, lessonExport, lessonRetired, lessonStatus, recurringFindings, sourceHeld, versionStatus, type LessonSuggestion } from '../../../shared/lessons';
 import { api, type LessonInput } from '../api';
 import { kindLabel, sourceLabel, STATUS_LABEL, suggestionInput, verificationOptions, versionInput } from '../lessons';
 import { useStore } from '../store';
@@ -87,10 +87,10 @@ function Decision({ lesson }: { lesson: LessonView }) {
   return (
     <div className="row lesson-actions">
       <input aria-label="Review reason" placeholder="Reason" maxLength={2000} value={reason} onChange={(e) => setReason(e.target.value)} />
-      {status === 'draft' && <button className="btn btn-small btn-good" disabled={busy} onClick={() => decide('approve')}>Approve</button>}
+      {status === 'draft' && !lessonRetired(lesson) && <button className="btn btn-small btn-good" disabled={busy} onClick={() => decide('approve')}>Approve</button>}
       {status === 'draft' && <button className="btn btn-small" disabled={busy || !reason.trim()} onClick={() => decide('request-revision')}>Send back</button>}
       {pending && <button className="btn btn-small btn-bad" disabled={busy || !reason.trim()} onClick={() => decide('reject')}>Reject</button>}
-      {status !== 'superseded' && status !== 'rejected' && <button className="btn btn-small" disabled={busy} onClick={() => setRevising(true)}>Revise…</button>}
+      {canRevise(lesson) && <button className="btn btn-small" disabled={busy} onClick={() => setRevising(true)}>Revise…</button>}
       {current && !pending && <button className="btn btn-small" disabled={busy || !reason.trim()} onClick={() => decide('supersede')}>Supersede</button>}
     </div>
   );

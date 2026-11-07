@@ -29,6 +29,16 @@ export function approvedVersion(lesson: LessonView): LessonExport['lessons'][num
   return null;
 }
 
+/** Retired: its approved version was superseded with nothing approved since. A retired lesson doesn't come back. */
+export function lessonRetired(lesson: LessonView): boolean {
+  return !approvedVersion(lesson) && lesson.reviews.some((r) => r.action === 'superseded');
+}
+
+/** A new version can be drafted unless the lesson is retired or was rejected with no approved version to improve on. */
+export function canRevise(lesson: LessonView): boolean {
+  return !lessonRetired(lesson) && (lessonStatus(lesson) !== 'rejected' || !!approvedVersion(lesson));
+}
+
 /** Approved, applicable versions, newest approval first. A lesson for every specialty applies to each one. */
 export function lessonExport(lessons: LessonView[], filter: { repoId?: string | null; specialty?: string | null }, now: number): LessonExport {
   const repoId = filter.repoId || null;

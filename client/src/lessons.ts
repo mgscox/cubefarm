@@ -47,8 +47,9 @@ export function versionInput(v: LessonVersion): LessonInput {
 export function verificationOptions(repoId: string, outcomes: QaOutcomeView[], attempts: RunAttemptView[], limit = 30): { value: string; label: string; at: number }[] {
   const reviews = outcomes.filter((o) => o.repoId === repoId && o.verdict === 'pass')
     .map((o) => ({ value: `qa:${o.id}`, label: `PR #${o.prNumber} QA round ${o.round} passed${o.headSha ? ` at ${o.headSha.slice(0, 7)}` : ''}`, at: o.finishedAt }));
-  // A QA outcome shares its attempt's id: list that run once, as the review.
-  const runs = attempts.filter((x) => x.repoId === repoId && x.outcome && ['qa-passed', 'repaired', 'delivered'].includes(x.outcome.result) && !reviews.some((r) => r.value === `qa:${x.id}`))
+  // A passing QA review and its attempt are one run: list it once, as the review.
+  const reviewed = new Set(outcomes.filter((o) => o.repoId === repoId && o.verdict === 'pass').map((o) => o.attemptId));
+  const runs = attempts.filter((x) => x.repoId === repoId && x.outcome && ['qa-passed', 'repaired', 'delivered'].includes(x.outcome.result) && !reviewed.has(x.id))
     .map((x) => ({ value: `attempt:${x.id}`, label: `${x.task} ${x.prNumber === null ? `#${x.issueNumber}` : `PR #${x.prNumber}`} ${x.outcome!.result} (${x.agent.name})`, at: x.times.endedAt ?? x.times.assignedAt }));
   return [...reviews, ...runs].sort((x, y) => y.at - x.at).slice(0, limit);
 }

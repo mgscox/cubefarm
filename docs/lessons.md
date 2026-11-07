@@ -30,7 +30,8 @@ inconclusive ones support neither, and the office refuses a draft that mixes the
 - **Sources** (1 to 20): QA findings, run-history attempts and links. Each keeps its ids, PR, revision and URL and a
   one-line summary of at most 240 characters with tokens, keys and passwords replaced by `[redacted]`. Logs, prompts,
   transcripts and screenshots are never copied in. If the QA outcome or attempt behind a source is later pruned, or
-  an external link expires, the lesson keeps the link and the summary and the view marks it "record pruned".
+  an external link expires, the lesson keeps the link and the summary and the view marks it "record pruned". A link
+  carrying credentials or a token-like query parameter is refused.
 - **Verification**: a fix or a regression test (with its name), and the passing QA outcome, or the `qa-passed`,
   `repaired` or `delivered` attempt, that verified it.
 - **Revisions**: the commits where the findings were seen and where the fix was verified.
@@ -41,7 +42,9 @@ inconclusive ones support neither, and the office refuses a draft that mixes the
 Reviews are appended, never edited: `drafted`, `revised` (a new version), `approved`, `revision-requested`,
 `rejected` and `superseded`, each with the version, who, when and why. Sending back, rejecting and superseding need a
 reason. Approving a new version supersedes the version approved before it, which applies until then. **Supersede**
-retires an approved lesson, optionally pointing at the lesson that replaces it.
+retires an approved lesson, optionally pointing at the lesson that replaces it. A rejected revision leaves the
+approved version applying, and **Revise…** can try again; a lesson rejected with nothing approved, or retired, takes
+no new versions or approvals: draft a new lesson instead.
 
 ## API
 

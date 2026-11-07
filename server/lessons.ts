@@ -1,7 +1,7 @@
 // Drafting and reviewing lessons: input checks, source links with redacted summaries, and the review history.
 import crypto from 'node:crypto';
 import type { LessonKind, LessonSource, LessonVersion, LessonView, QaOutcomeView, RunAttemptView, RunResult } from '../shared/types.ts';
-import { findingClassification, findingSupports, lessonRevisions, lessonStatus, approvedVersion } from '../shared/lessons.ts';
+import { findingClassification, findingSupports, lessonRevisions, lessonRetired, lessonStatus, approvedVersion, canRevise } from '../shared/lessons.ts';
 import { HttpError } from './httpError.ts';
 import { redact } from './runHistory.ts';
 
@@ -17,6 +17,7 @@ export interface LessonEvidence {
 }
 
 const VERIFYING: RunResult[] = ['qa-passed', 'repaired', 'delivered'];
+const SECRET_PARAM = /token|secret|passw|api[_-]?key|access[_-]?key|signature|^sig$|^code$|^auth(orization)?$/i;
 
 function text(value: unknown, name: string, max: number, required = true): string {
   if (value === undefined || value === null || value === '') {
@@ -64,7 +65,9 @@ function source(ref: unknown, kind: LessonKind, ev: LessonEvidence): LessonSourc
     let url: URL;
     try { url = new URL(r.url); } catch { throw new HttpError(400, 'A link source needs an http(s) URL'); }
     if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new HttpError(400, 'A link source needs an http(s) URL');
-    if (url.username || url.password) throw new HttpError(400, 'A link source must not carry credentials in its URL');
+    if (url.username || url.password || [...url.searchParams.keys(), ...new URLSearchParams(url.hash.slice(1)).keys()].some((k) => SECRET_PARAM.test(k))) {
+      throw new HttpError(400, 'A link source must not carry credentials in its URL');
+    }
     return { kind: 'link', ref: url.href, qaOutcomeId: null, prNumber: null, sha: null, classification: null, url: url.href,
       summary: summary(text(r.summary, 'A link source summary', LESSON_LIMITS.guidance)) };
   }
@@ -85,6 +88,8 @@ function verifiedBy(ref: unknown, ev: LessonEvidence): LessonSource {
   }
   if (typeof r.attemptId === 'string') {
     const x = ev.attempts.find((a) => a.id === r.attemptId && a.repoId === ev.repoId);
+    const kept = ev.kept?.find((s) => s.kind === 'attempt' && s.qaOutcomeId === null && s.ref === r.attemptId);
+    if (!x && kept) return kept;
     if (!x?.outcome || !VERIFYING.includes(x.outcome.result)) throw new HttpError(400, `Attempt ${r.attemptId} did not pass QA, repair or deliver, so it can't verify a fix`);
     return source({ attemptId: x.id }, 'operational', ev);
   }
@@ -126,8 +131,8 @@ export function draftLesson(input: unknown, ev: LessonEvidence, author: string, 
 
 /** A new draft version. An approved version keeps applying until the new one is approved. */
 export function reviseLesson(lesson: LessonView, input: unknown, ev: LessonEvidence, author: string, at: number) {
-  const status = lessonStatus(lesson);
-  if (status === 'superseded') throw new HttpError(409, 'This lesson was superseded; draft a new lesson instead');
+  if (lessonRetired(lesson)) throw new HttpError(409, 'This lesson was superseded; draft a new lesson instead');
+  if (!canRevise(lesson)) throw new HttpError(409, 'This lesson was rejected; draft a new lesson instead');
   const body = (input ?? {}) as Record<string, unknown>;
   const version = lesson.versions.at(-1)!.version + 1;
   const previous = lesson.versions.at(-1)!;
@@ -148,6 +153,7 @@ export function reviewLesson(lesson: LessonView, input: unknown, lessons: Lesson
   switch (body.action) {
     case 'approve': {
       if (status !== 'draft') throw new HttpError(409, `Only a draft can be approved; version ${latest.version} is ${status}`);
+      if (lessonRetired(lesson)) throw new HttpError(409, 'This lesson was superseded; draft a new lesson instead');
       const previous = approvedVersion(lesson);
       add(latest.version, 'approved', text(body.reason, 'reason', LESSON_LIMITS.reason, false));
       if (previous) add(previous.version, 'superseded', `Replaced by version ${latest.version}`);

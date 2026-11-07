@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { LessonView, QaOutcomeView, RepoView, ServerEvent } from '../shared/types';
-import { draftLesson, reviewLesson } from '../server/lessons.ts';
+import { draftLesson, reviewLesson, reviseLesson } from '../server/lessons.ts';
 
 test('a regression confirmed on two PRs becomes a reviewed lesson, apart from operational ones', async ({ page, baseURL }, testInfo) => {
   await page.route((url) => !url.href.startsWith(baseURL!) && !url.protocol.startsWith('data'), (route) => route.fulfill({ status: 200, body: '' }));
@@ -43,6 +43,12 @@ test('a regression confirmed on two PRs becomes a reviewed lesson, apart from op
     const lesson = draftLesson(body, evidence(), 'manager', 7000);
     lessons.push(lesson);
     send({ type: 'lesson', lesson });
+    await route.fulfill({ json: lesson });
+  });
+  await page.route('**/api/lessons/*/versions', async (route) => {
+    const lesson = lessons.find((l) => route.request().url().includes(l.id))!;
+    reviseLesson(lesson, route.request().postDataJSON(), evidence(), 'manager', 7500);
+    send({ type: 'lesson', lesson: structuredClone(lesson) });
     await route.fulfill({ json: lesson });
   });
   await page.route('**/api/lessons/*/reviews', async (route) => {
@@ -90,4 +96,16 @@ test('a regression confirmed on two PRs becomes a reviewed lesson, apart from op
   await openLessons();
   await expect(panel.locator('summary').first()).toHaveText('Lessons (1)');
   await expect(panel.locator('.kcard.lesson')).toContainText('Approved');
+
+  // A rejected revision leaves version 1 approved, and the manager can still write a better one.
+  const approved = panel.locator('.kcard.lesson').first();
+  await approved.getByRole('button', { name: 'Revise…' }).click();
+  await approved.getByLabel('Lesson title').fill('Toolbar sweep');
+  await approved.getByRole('button', { name: 'Save new version' }).click();
+  const draft = panel.locator('.kcard.lesson').filter({ hasText: 'Toolbar sweep' });
+  await draft.getByLabel('Review reason').fill('Too broad.');
+  await draft.getByRole('button', { name: 'Reject' }).click();
+  await expect(approved).toContainText('version 1 · Approved · version 2 rejected');
+  await expect(approved.getByRole('button', { name: 'Revise…' })).toBeVisible();
+  await expect(approved.getByRole('button', { name: 'Supersede' })).toBeVisible();
 });

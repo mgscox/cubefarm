@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { QaOutcomeView, RunAttemptView } from '../shared/types.ts';
-import { approvedVersion, lessonExport, lessonStatus, recurringFindings, sourceHeld, versionStatus } from '../shared/lessons.ts';
+import { approvedVersion, canRevise, lessonExport, lessonRetired, lessonStatus, recurringFindings, sourceHeld, versionStatus } from '../shared/lessons.ts';
 import { draftLesson, reviewLesson, reviseLesson, type LessonEvidence } from './lessons.ts';
 import { HttpError } from './httpError.ts';
 
@@ -125,6 +125,8 @@ describe('drafting a lesson', () => {
     fails(() => draftLesson({ ...agentDraft, sources: [{ qaOutcomeId: 'o1', findingId: 'f1' }] }, { ...ev, repoId: 'other/repo' }, 'manager', 1), 400, /Unknown finding/);
     fails(() => draftLesson({ ...agentDraft, sources: [{ url: 'file:///etc/passwd', summary: 'x' }] }, ev, 'manager', 1), 400, /http\(s\) URL/);
     fails(() => draftLesson({ ...agentDraft, sources: [{ url: 'https://me:pw@ci.example/run/1', summary: 'x' }] }, ev, 'manager', 1), 400, /credentials/);
+    fails(() => draftLesson({ ...agentDraft, sources: [{ url: 'https://ci.example/run/1?access_token=abc', summary: 'x' }] }, ev, 'manager', 1), 400, /credentials/);
+    fails(() => draftLesson({ ...agentDraft, sources: [{ url: 'https://ci.example/cb#id_token=abc', summary: 'x' }] }, ev, 'manager', 1), 400, /credentials/);
   });
 });
 
@@ -167,6 +169,29 @@ describe('reviewing a lesson', () => {
     expect(lesson.reviews.at(-1)).toMatchObject({ supersededBy: replacement.id, reason: 'Covered by the wider check.' });
   });
 
+  it('lets a rejected revision of an approved lesson be revised again, but not a rejected or retired lesson', () => {
+    const ev = office();
+    const lesson = draftLesson(agentDraft, ev, 'manager', 1);
+    const lessons = [lesson];
+    reviewLesson(lesson, { action: 'approve' }, lessons, 'manager', 2);
+    reviseLesson(lesson, { ...agentDraft, title: 'Too broad' }, ev, 'manager', 3);
+    reviewLesson(lesson, { action: 'reject', reason: 'Too broad.' }, lessons, 'manager', 4);
+    expect([lessonStatus(lesson), approvedVersion(lesson)?.version, canRevise(lesson)]).toEqual(['rejected', 1, true]);
+    reviseLesson(lesson, { ...agentDraft, title: 'Better' }, ev, 'manager', 5);
+    expect(lesson.versions.map((v) => v.version)).toEqual([1, 2, 3]);
+
+    const rejected = draftLesson(agentDraft, ev, 'manager', 6);
+    reviewLesson(rejected, { action: 'reject', reason: 'No.' }, lessons, 'manager', 7);
+    expect(canRevise(rejected)).toBe(false);
+    fails(() => reviseLesson(rejected, agentDraft, ev, 'manager', 8), 409, /rejected/);
+
+    // Superseded while version 3 waits: the lesson is retired, so version 3 can't bring it back.
+    reviewLesson(lesson, { action: 'supersede', reason: 'Retired.' }, lessons, 'manager', 9);
+    expect([lessonStatus(lesson), lessonRetired(lesson), canRevise(lesson)]).toEqual(['draft', true, false]);
+    fails(() => reviewLesson(lesson, { action: 'approve' }, lessons, 'manager', 10), 409, /superseded/);
+    fails(() => reviseLesson(lesson, agentDraft, ev, 'manager', 10), 409, /superseded/);
+  });
+
   it('filters the export by floor and specialty, with every-specialty lessons in each', () => {
     const ev = office();
     const frontend = draftLesson(agentDraft, ev, 'manager', 1);
@@ -187,5 +212,18 @@ describe('reviewing a lesson', () => {
     reviseLesson(lesson, { ...agentDraft, title: 'Revised after pruning' }, pruned, 'manager', 2);
     expect(lesson.versions[1].sources).toEqual(lesson.versions[0].sources);
     expect(lesson.versions[1].verification.evidence).toEqual(lesson.versions[0].verification.evidence);
+  });
+
+  it('keeps a pruned verifying attempt when an operational lesson is revised', () => {
+    const ev = office();
+    const draft = {
+      kind: 'operational', specialty: null, title: 'Leave QA desks disk headroom', guidance: 'Clear the npm cache on boxes under 5 GB free.',
+      sources: [{ attemptId: 'q13' }], verification: { kind: 'fix', attemptId: 'q13b' },
+    };
+    const lesson = draftLesson(draft, ev, 'manager', 1);
+    const pruned = { ...ev, attempts: ev.attempts.filter((x) => x.id !== 'q13b') };
+    reviseLesson(lesson, { ...draft, title: 'Revised after pruning' }, pruned, 'manager', 2);
+    expect(lesson.versions[1].verification.evidence).toEqual(lesson.versions[0].verification.evidence);
+    fails(() => draftLesson(draft, pruned, 'manager', 3), 400, /did not pass QA/);
   });
 });
