@@ -415,8 +415,9 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
         });
         return;
       }
-      // Most first rounds pass; some fail so the fix loop can be seen in action.
-      const pass = round > 1 || Math.random() > 0.35;
+      // Most first rounds pass; some fail so the fix loop can be seen in action. A [regression] issue's first round always
+      // fails on the same toolbar defect, so two of them make a recurring finding for a lesson (docs/lessons.md).
+      const pass = round > 1 || (!opts.prompt.includes('[regression]') && Math.random() > 0.35);
       const introducedBySha = opts.prompt.match(/Known contribution SHAs: ([0-9a-f]+)/)?.[1];
       cb.log([{ kind: 'text', text: pass ? '● Everything checks out. Writing up the report.' : '● The toolbar overflows on a 375px screen. Failing this round.' }]);
       cb.finished({

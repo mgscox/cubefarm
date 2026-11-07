@@ -102,6 +102,8 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
   back, then released; retries and restarts find a lost create by its marker. The demo's fixture approval is refused elsewhere.
 - `runHistory.ts`: every attempt at an issue or PR in `<SWARM_HOME>/run-history.json` (`docs/run-history.md`): outcome,
   cause, usage and retention rules (pure) and the store; `swarm.ts` opens and ends attempts, `GET /api/run-history` exports them.
+- `lessons.ts`: reviewed lessons (`docs/lessons.md`): drafting from QA findings and attempts (links and redacted
+  summaries only), review history; `shared/lessons.ts` has the status, export and recurring-finding rules.
 - `backend.ts`: the `Backend` interface (everything touching GitHub, git, disk and sessions) and `realBackend`.
 - `demo.ts`: `createDemoBackend()`: fake GitHub, fake sessions (drawn into the agent's terminal in the terminal runtime), fake previews for `--demo`.
 - `github.ts`: all GitHub access through the `gh` CLI.

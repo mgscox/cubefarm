@@ -60,6 +60,7 @@ interface State {
   logs: Record<string, LogLine[]>;
   screens: Record<string, number>; // agentId -> screenshot timestamp (cache buster)
   qaOutcomes: import('../../shared/types').QaOutcomeView[];
+  lessons: import('../../shared/types').LessonView[];
   scoreEvents: import('../../shared/types').ScoreEventView[];
   prContributions: PrContributionView[];
   runAttempts: NonNullable<WorldSnapshot['runAttempts']>;
@@ -177,6 +178,7 @@ export const useStore = create<State>((set, get) => ({
   screens: {},
   qa: {},
   qaOutcomes: [],
+  lessons: [],
   scoreEvents: [],
   prContributions: [],
   runAttempts: [],
@@ -236,6 +238,7 @@ export const useStore = create<State>((set, get) => ({
           screens,
           qa,
           qaOutcomes: d.qaOutcomes ?? [],
+          lessons: d.lessons ?? [],
           scoreEvents: d.scoreEvents ?? [],
           prContributions: d.prContributions ?? [],
           runAttempts: d.runAttempts ?? [],
@@ -312,6 +315,12 @@ export const useStore = create<State>((set, get) => ({
       }
       case 'qaOutcome': {
         set({ qaOutcomes: [...get().qaOutcomes.filter((o) => o.id !== ev.outcome.id), ev.outcome] });
+        break;
+      }
+      case 'lesson': {
+        const lessons = get().lessons;
+        const index = lessons.findIndex((l) => l.id === ev.lesson.id);
+        set({ lessons: index < 0 ? [...lessons, ev.lesson] : lessons.map((l, i) => i === index ? ev.lesson : l) });
         break;
       }
       case 'scoreEvents': {
