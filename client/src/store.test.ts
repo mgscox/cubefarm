@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RepoView } from '../../shared/types';
+import type { PrContributionView, RepoView } from '../../shared/types';
 import { kanbanFor, useStore, type Agent } from './store';
 
 // Audio is a browser boundary; these tests exercise incoming office events in Node.
@@ -14,6 +14,17 @@ it('receives developer score changes through agent events', () => {
   apply({ type: 'agent', agent: { ...agent, score: 0 } });
   apply({ type: 'agent', agent: { ...agent, score: 2 } });
   expect(useStore.getState().agents[agent.id].score).toBe(2);
+});
+
+it('keeps PR contributions after QA cleanup and replaces repeated history events', () => {
+  useStore.setState({ prContributions: [], qa: {} });
+  const apply = useStore.getState().apply;
+  const history: PrContributionView = { repoId: 'r', prNumber: 1, title: 'Feature', url: '', state: 'OPEN', original: { agentId: 'a1', name: 'Ada', submittedSha: 'initial', at: 1 }, repairs: [] };
+  apply({ type: 'prContribution', contribution: history });
+  apply({ type: 'prContribution', contribution: { ...history, state: 'MERGED' } });
+  apply({ type: 'qaRemoved', repoId: 'r', prNumber: 1 });
+  apply({ type: 'agentRemoved', agentId: 'a1' });
+  expect(useStore.getState().prContributions).toEqual([{ ...history, state: 'MERGED' }]);
 });
 
 describe('agent screenshot availability', () => {

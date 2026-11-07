@@ -963,6 +963,7 @@ export function createDemoBackend(): Backend {
       return {
         number,
         title: pr.title,
+        createdAt: pr.createdAt,
         labels: pr.labels ?? [],
         isDraft: pr.isDraft,
         body: prototypeIssueNumber(pr.headRefName)

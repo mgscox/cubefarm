@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { CEO_ID, type IdeaView, type IssuePlanView, type IdeaReviewCycleView, type IdeaRecordView, type ProposalView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type PublicationView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, type IdeaView, type IssuePlanView, type IdeaReviewCycleView, type IdeaRecordView, type ProposalView, type AgentView, type BoxView, type CeoInfo, type CliView, type ResearchInfo, type HireRequestView, type LogLine, type OfficeUpdateView, type OfficeLifecycleView, type PhoneMessage, type PublicationView, type QaView, type PrContributionView, type RepoView, type ServerEvent, type SwarmSettings, type TelegramView, type UsageView, type WorldSnapshot } from '../../shared/types';
 import { appendPhoneMessage } from '../../shared/phone';
 import { hasLabel, isPrototypeIssue, prototypeIssueNumber, issueBlockers, issueReadinessReason, issueWorkNote, NEEDS_HUMAN, NEEDS_REVIEW } from '../../shared/issues';
 import { chirp, cue } from './ui/sfx';
@@ -58,6 +58,7 @@ interface State {
   agents: Record<string, Agent>;
   logs: Record<string, LogLine[]>;
   screens: Record<string, number>; // agentId -> screenshot timestamp (cache buster)
+  prContributions: PrContributionView[];
   qa: Record<string, QaView>; // `${repoId}#${prNumber}`
   requests: HireRequestView[];
   ceo: CeoInfo;
@@ -170,6 +171,7 @@ export const useStore = create<State>((set, get) => ({
   logs: {},
   screens: {},
   qa: {},
+  prContributions: [],
   requests: [],
   ceo: { queue: [], job: null, lastReviewAt: null, nextReviewAt: null },
   research: { queue: [], job: null, done: [] },
@@ -225,6 +227,7 @@ export const useStore = create<State>((set, get) => ({
           logs,
           screens,
           qa,
+          prContributions: d.prContributions ?? [],
           requests: d.requests,
           ceo: d.ceo,
           research: d.research ?? { queue: [], job: null, done: [] },
@@ -293,6 +296,11 @@ export const useStore = create<State>((set, get) => ({
           screens: { ...get().screens, [ev.agentId]: ev.at },
           agents: a ? { ...get().agents, [ev.agentId]: { ...a, hasScreenshot: true, screenshotAt: ev.at, browserUrl: ev.url ?? a.browserUrl } } : get().agents,
         });
+        break;
+      }
+      case 'prContribution': {
+        const h = ev.contribution;
+        set({ prContributions: [...get().prContributions.filter((p) => p.repoId !== h.repoId || p.prNumber !== h.prNumber), h] });
         break;
       }
       case 'qa': {
