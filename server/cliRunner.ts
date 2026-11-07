@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cliStartupFailed, codexTurnThread, hookReviewKey, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, startupQuestionOnScreen, STUCK_MS, trustKey } from './clis.ts';
+import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cliStartupFailed, codexTurnThread, hookReviewKey, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, startupQuestionOnScreen, STUCK_MS, trustKey, upstashApiKeyChoice } from './clis.ts';
 import { terminalsAvailable, type Pty } from './ptyClient.ts';
 import { ALLOW } from './ptyProtocol.ts';
 import { localCliHost } from './localCliHost.ts';
@@ -934,16 +934,18 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         return;
       }
       const screen = term.screen();
-      const question = startupQuestionOnScreen(screen, cli);
+      const question = startupQuestionOnScreen(screen, cli, opts.upstash);
       const review = question ? hookReviewKey(screen) : null;
-      const key = question && trustKeys < 12 && Date.now() - trustedAt > 3000 ? (trustKey(screen) ?? review) : null;
-      if (key === 'down') {
+      const apiKey = question && cli === 'claude' && opts.upstash ? upstashApiKeyChoice(screen) : null;
+      const key = question && trustKeys < 12 && Date.now() - trustedAt > 3000 ? (apiKey ?? trustKey(screen) ?? review) : null;
+      if (key === 'down' || key === 'up') {
         trustKeys += 1;
-        quietly(() => live?.proc?.write(term.appCursor ? '\x1bOB' : '\x1b[B'));
+        quietly(() => live?.proc?.write(`\x1b${term.appCursor ? 'O' : '['}${key === 'up' ? 'A' : 'B'}`));
       } else if (key === 'enter') {
         trustKeys += 1;
         trustedAt = Date.now(); // the question takes a moment to go: don't answer it twice
-        if (!review) log([{ kind: 'system', text: `✓ Trusted the worktree for ${label}.` }]);
+        if (apiKey) log([{ kind: 'system', text: '✓ Confirmed the configured API key for Claude Code.' }]);
+        else if (!review) log([{ kind: 'system', text: `✓ Trusted the worktree for ${label}.` }]);
         else if (!hooksHinted) {
           hooksHinted = true;
           log([{ kind: 'system', text: `ℹ To see ${label}'s steps here, trust the office's hooks once: in this terminal, type /hooks and press t. Until then the office shows its task.` }]);
@@ -965,7 +967,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let preparingPrompt: Promise<void> | null = null;
   const deliverPrompt = (text: string) => {
     if (done || !live?.proc) return;
-    if (pendingPrompts.length || startupQuestionOnScreen(term.screen(), cli)) {
+    if (pendingPrompts.length || startupQuestionOnScreen(term.screen(), cli, opts.upstash)) {
       busy();
       turnError = null;
       if (!pendingPrompts.length) promptUntil = Date.now() + BOOT_MS * 2;

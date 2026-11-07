@@ -1,3 +1,4 @@
+import { UPSTASH } from '../../../shared/types';
 import { useState } from 'react';
 import { api } from '../api';
 import { agentBox, boxName, boxNotes, boxWarnings, busy, floorMove, floorMoveText, missingClis, movable, workerLists } from '../fleet';
@@ -136,11 +137,11 @@ function BoxCard({ box, agents, repos, machines }: { box: BoxView; agents: Agent
           }
           onClick={check}
         >
-          {checking ? 'Checking…' : 'Look again'}
+          {checking ? 'Checking…' : box.disposable && box.error?.startsWith('Cleanup blocked') ? 'Retry cleanup' : 'Look again'}
         </button>
-        <button className="btn btn-small btn-ghost" onClick={remove}>
+        {!box.disposable && <button className="btn btn-small btn-ghost" onClick={remove}>
           Remove
-        </button>
+        </button>}
       </div>
     </div>
   );
@@ -153,10 +154,10 @@ function FloorMachine({ repo, boxes, agents }: { repo: RepoView; boxes: BoxView[
   const defaultCli = useStore((s) => s.settings.defaultCli);
   const clis = useStore((s) => s.clis);
   const team = agentsOnRepo(agents, repo.id).filter(movable);
-  const target = boxes.some((b) => b.id === to) ? to : '';
-  const text = floorMoveText(floorMove(repo, team, target), boxName(boxes, target));
+  const target = to === UPSTASH || boxes.some((b) => b.id === to && !b.disposable) ? to : '';
+  const text = floorMoveText(floorMove(repo, team, target), boxName(boxes, target)) ?? (target !== repo.box ? 'Sets the destination for new workers.' : null);
   // Their next task there wouldn't start: the box hasn't got their coding agent.
-  const lacking = missingClis(team, boxes.find((b) => b.id === target), defaultCli);
+  const lacking = missingClis(team.filter((a) => a.box !== UPSTASH), boxes.find((b) => b.id === target), defaultCli);
   const cliLabel = (a: Agent) => clis.find((c) => c.id === (a.cli || defaultCli))?.label ?? (a.cli || defaultCli);
   const blocked = !terminal ? 'Boxes need the terminal runtime' : lacking.length ? `${boxName(boxes, target)} hasn't got ${lacking.map((a) => `${cliLabel(a)} for ${a.name}`).join(', ')}` : null;
   const own = team.filter((a) => a.box !== null);
@@ -183,7 +184,8 @@ function FloorMachine({ repo, boxes, agents }: { repo: RepoView; boxes: BoxView[
           onChange={(e) => setTo(e.target.value)}
         >
           <option value="">This machine</option>
-          {boxes.map((b) => (
+          <option value={UPSTASH}>Upstash Box</option>
+          {boxes.filter((b) => !b.disposable).map((b) => (
             <option key={b.id} value={b.id}>
               {b.name}
               {b.status === 'online' ? '' : ` (${b.status})`}

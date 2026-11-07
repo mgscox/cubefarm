@@ -509,13 +509,17 @@ export function selectedOption(screen: string, question: RegExp): string | null 
   return markers.length === 1 ? markers[0][1].trim() || null : null;
 }
 
+const CLAUDE_API_KEY_PROMPT = /Do you want to use this API key\?/i;
+
 /**
  * Keep follow-up text out of a startup menu, even before its selection marker has been drawn. Only Claude Code and
  * Codex show these menus; other CLIs (OpenCode) never hold a follow-up.
  */
-export function startupQuestionOnScreen(screen: string, cli: AgentCli): boolean {
+export function startupQuestionOnScreen(screen: string, cli: AgentCli, upstash = false): boolean {
   if (cli !== 'claude' && cli !== 'codex') return false;
-  const last = [...screen.matchAll(new RegExp(`${TRUST_PROMPT.source}|${HOOK_REVIEW_PROMPT.source}`, 'gim'))].at(-1);
+  const prompts = [TRUST_PROMPT.source, HOOK_REVIEW_PROMPT.source];
+  if (upstash && cli === 'claude') prompts.push(CLAUDE_API_KEY_PROMPT.source);
+  const last = [...screen.matchAll(new RegExp(prompts.join('|'), 'gim'))].at(-1);
   if (!last) return false;
   const lineStart = screen.lastIndexOf('\n', last.index) + 1;
   const previousLine = screen.lastIndexOf('\n', lineStart - 2) + 1;
@@ -536,6 +540,13 @@ export function trustKey(screen: string): 'enter' | 'down' | null {
   if (/^(yes|trust|continue|proceed)\b/i.test(selected.trim())) return 'enter';
   if (/^(no|exit|quit|cancel)\b/i.test(selected.trim())) return 'down';
   return null;
+}
+
+/** The office already opted into the API key on this Box. The Claude menu puts Yes above No. */
+export function upstashApiKeyChoice(screen: string): 'enter' | 'up' | null {
+  const option = selectedOption(screen, CLAUDE_API_KEY_PROMPT)?.trim() ?? '';
+  if (/^yes\b/i.test(option)) return 'enter';
+  return /^no\b/i.test(option) ? 'up' : null;
 }
 
 /** A working CLI waiting this long, its screen unchanged and nothing from its hooks or the keyboard, is stuck. */

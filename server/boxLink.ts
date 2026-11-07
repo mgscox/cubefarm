@@ -14,6 +14,7 @@ import type { AgentCli, BoxStatus, CliView, MachineSample, MachineTelemetry } fr
 import { monitorResources } from './machineHealth.ts';
 import { operationSignal } from './operation.ts';
 import { startTimeouts } from './sessionStart.ts';
+import { projectEnv } from './projectEnv.ts';
 
 // The office's side of a box: `ssh <destination> cubefarm box --stdio` (boxStdio.ts) runs desk and session-file
 // methods there (boxOps.ts) and bridges to the box's host, a terminal keeper on that machine. The ssh link can drop
@@ -105,13 +106,13 @@ class BoxLink implements CliHost {
     clearTimeout(this.redial);
     let cmd: { file: string; args: string[] };
     try {
-      cmd = boxCommand(this.opts.box.destination, VERSION, this.opts.officeId, undefined, this.opts.box.layout ? this.opts.box.layout.sep === '\\' : this.plain);
+      cmd = boxCommand(this.opts.box.destination, VERSION, this.opts.officeId, undefined, this.opts.box.layout ? this.opts.box.layout.sep === '\\' : this.plain, !!this.opts.box.upstash);
     } catch (err) {
       return this.set('offline', (err as Error).message);
     }
     this.set('connecting');
     this.stderr = '';
-    const child = spawn(cmd.file, cmd.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(cmd.file, cmd.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: projectEnv(process.env) });
     this.child = child;
     let ready = false;
     const timer = setTimeout(() => {

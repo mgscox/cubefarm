@@ -778,3 +778,16 @@ describe('claudeTurn', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 });
+
+
+it('confirms Claude API billing only for a disposable Upstash worker at the actual setup menu', async () => {
+  const { startupQuestionOnScreen, upstashApiKeyChoice } = await import('./clis.ts');
+  const prompt = 'Do you want to use this API key?';
+  const no = [prompt, '  1. Yes', '❯ 2. No (recommended)'].join('\n');
+  const yes = [prompt, '❯ 1. Yes', '  2. No (recommended)'].join('\n');
+  expect(startupQuestionOnScreen(no, 'claude')).toBe(false);
+  expect(startupQuestionOnScreen(no, 'claude', true)).toBe(true);
+  expect(upstashApiKeyChoice(no)).toBe('up');
+  expect(upstashApiKeyChoice(yes)).toBe('enter');
+  expect(startupQuestionOnScreen(['───', '❯ ' + prompt].join('\n'), 'claude', true)).toBe(false);
+});

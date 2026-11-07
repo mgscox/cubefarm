@@ -343,7 +343,11 @@ export interface RebootStatus {
 }
 
 /** Another machine agents' desks and CLIs can run on, reached over ssh. */
+export const UPSTASH = 'upstash';
+
 export interface BoxView {
+  /** A task-owned Box cannot be selected as a permanent placement. */
+  disposable?: boolean;
   id: string;
   name: string;
   destination: string; // what ssh is given: user@host, an ~/.ssh/config alias, a Tailscale name
