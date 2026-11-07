@@ -347,6 +347,7 @@ function readSpecialism(name: 'developer' | 'prototype' | 'qa' | 'security') {
   }
 }
 const MAX_QA_ROUNDS = 3;
+const TEST_ENVIRONMENT_GUIDANCE = "Use the repository's normal test setup. Keep dependency registries reachable during tests unless offline execution is required. Isolate live services with test configuration, mocks or emulators. Before running a full suite in a custom runner, verify a test that installs dependencies can run in that same environment, if the suite has one.";
 // Every agent runs Claude Opus 5.5 at medium effort unless the manager overrides it.
 const DEFAULT_MODEL = 'claude-opus-5-5';
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -3208,6 +3209,7 @@ export class Swarm {
       '1. Read the issue and explore the relevant code before changing anything.',
       '2. Implement the change with focused commits and clear messages.',
       "3. Run the project's existing tests, linters and build (if any) and fix what you broke. Install dependencies first if needed.",
+      fixing ? '' : TEST_ENVIRONMENT_GUIDANCE,
       repo.browserTesting
         ? `4. If the project has a web UI, start its dev server in the background on port ${this.port(a)} (reserved for you, so you don't collide with teammates), then check your change with the Playwright browser tools (browser_navigate, browser_snapshot, browser_click, browser_take_screenshot). Stop the dev server when you're done.`
         : '4. Verify the behaviour you changed as directly as you can.',
@@ -4017,6 +4019,7 @@ export class Swarm {
       '1. Read the PR description and the linked issue, and work out the acceptance criteria.',
       `2. Review the code as a careful reviewer would: git diff origin/${repo.defaultBranch}...HEAD. Look for bugs, unhandled errors and edge cases, security problems, leftover debug code, and new logic without tests.`,
       "3. Install dependencies if needed, then run the project's test suite, linters, type checks and build (whichever exist).",
+      TEST_ENVIRONMENT_GUIDANCE,
       'If worker limits (such as exhausted memory) prevent validation, distinguish them from code defects: mark only those failed checks failureKind=environment. Use this only with evidence that no code defect is known or suspected; reproducible or unexplained failures use code. The office records these local checks as skipped and requires green GitHub checks for the reviewed commit before merging an environment-only result. Do not request source changes just to satisfy a worker limitation.',
       repo.browserTesting
         ? `4. If the project has a UI, start it in the background on port ${this.port(a)} (reserved for you) and exercise the change in a real browser with the Playwright tools: navigate, click, type, resize to a phone size, try edge cases, and check the console for errors. Take a screenshot with browser_take_screenshot (no filename) of every important state: the screenshots are attached to the PR as evidence. Stop the server afterwards.`
@@ -4515,7 +4518,8 @@ export class Swarm {
       'Then reply with a short summary of what you changed. Do not open a new pull request; QA will re-test automatically.',
     ];
     const mergeEnd = 'Then reply with a short summary of what you did. Do not open a new pull request; the office merges it once the checks pass, after another QA round if the code changed.';
-    const prompt = (mergeFix ? [...mergeFix, '', mergeEnd] : qaFix).filter((l) => l !== '').join('\n');
+    // A fix can reuse a live CLI with its original system prompt. Put the guidance in the new turn.
+    const prompt = [...(mergeFix ? [...mergeFix, mergeEnd] : qaFix), TEST_ENVIRONMENT_GUIDANCE].filter(Boolean).join('\n');
     const resume = original && rec.devSessionId && !this.agentRt.get(dev.id)?.deskMoved ? rec.devSessionId : undefined;
     await this.startAgentSession(dev, repo, cwd, prompt, this.buildSystemAppend(dev, repo, cwd, headRef, { pr: rec.prNumber, headRef }), resume);
   }
