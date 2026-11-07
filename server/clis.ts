@@ -481,19 +481,30 @@ export function officePermission(screen: string): { tool: string; key: 'enter' |
   const header = [...screen.matchAll(/^[ \t]*((?:playwright|office) — [^\n]+?) Tool: \(MCP\)[ \t]*$/gm)].at(-1);
   if (!header) return null;
   const dialog = screen.slice(header.index + header[0].length);
-  // A current dialog ends at its controls. Output or a new input below them makes it stale transcript text.
-  if (!/\n[ \t]*Esc to cancel · Tab to amend\s*$/.test(dialog)) return null;
-  const question = dialog.match(/\n[ \t]*Do you want to proceed\?[ \t]*\n/);
-  if (!question) return null;
+  const choice = claudePermissionChoice(dialog);
   // Don't attribute a later tool's question to an older MCP heading still on screen.
-  if (dialog.slice(0, question.index).split('\n').some((line) => line.trim() && !/^[ \t]*\w+:[ \t]/.test(line))) return null;
+  if (!choice || choice.context.split('\n').some((line) => line.trim() && !/^[ \t]*\w+:[ \t]/.test(line))) return null;
+  return { tool: header[1], key: choice.key };
+}
+
+/** The Bash header can scroll out of view when the command wraps. Its shell analysis reason sits above the menu. */
+export function bashExpansionPermission(screen: string): boolean {
+  const choice = claudePermissionChoice(screen);
+  return choice?.key === 'enter' && choice.hasNo && /(?:^|\n)[ \t]*Contains simple_expansion\s*$/.test(choice.context);
+}
+
+function claudePermissionChoice(dialog: string): { context: string; key: 'enter' | 'up'; hasNo: boolean } | null {
+  // A current dialog ends at its controls. Output or a new input below them makes it stale transcript text.
+  if (!/\n[ \t]*Esc to cancel · Tab to amend(?: ·[ \t]*(?:\n[ \t]*)?ctrl\+e to explain)?\s*$/.test(dialog)) return null;
+  const question = [...dialog.matchAll(/\n[ \t]*Do you want to proceed\?[ \t]*\n/g)].at(-1);
+  if (!question) return null;
   const menu = dialog.slice(question.index! + question[0].length, dialog.lastIndexOf('Esc to cancel'));
   const options = [...menu.matchAll(/^[ \t]*(❯)?[ \t]*(\d+)\.[ \t]*([^\n]+)$/gm)];
   const selected = options.filter((o) => o[1]);
   if (selected.length !== 1 || options[0]?.[2] !== '1' || options[0][3].trim() !== 'Yes') return null;
   if (options.some((o, i) => Number(o[2]) !== i + 1 || (i > 0 && !/^(?:Yes, and don['’]t ask again\b.*|No)[ \t]*$/.test(o[3])))) return null;
   if (selectedOption(`Do you want to proceed?\n${menu}`, /Do you want to proceed\?/) === null) return null;
-  return { tool: header[1], key: selected[0][2] === '1' ? 'enter' : 'up' };
+  return { context: dialog.slice(0, question.index), key: selected[0][2] === '1' ? 'enter' : 'up', hasNo: options.at(-1)?.[3].trim() === 'No' };
 }
 
 const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|^[ \t]*(?:Do you )?trust this folder\b|^[ \t]*(?:Do you want to )?allow Codex to work in this folder/im;
