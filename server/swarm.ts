@@ -44,6 +44,7 @@ import { currentRound, nextStep, pickReviewers, promote, recordReview, REVIEW_FO
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
 import { qaOutcome } from './qaOutcome.ts';
 import { qaFindings, workerSnapshot } from './qaEvidence.ts';
+import { deriveScoreEvents, projectScores, reconcileScores, SCORE_LEDGER_VERSION, ZERO_SCORES, type ScoreLedger } from './scores.ts';
 import { scoringFindings } from '../shared/qaEvidence.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
@@ -57,7 +58,7 @@ import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isPrototypeIssue, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, PROTOTYPE_BRANCH, prototypeIssueNumber, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
-import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView, type PrContributionView, type RunAssignReason, type RunAttemptView, type RunHistoryExport, type QaOutcomeView, type QaClassification } from '../shared/types.ts';
+import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView, type PrContributionView, type RunAssignReason, type RunAttemptView, type RunHistoryExport, type QaOutcomeView, type QaClassification, type DeveloperScoresView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
 import { COMPANY_RESEARCH_DOCS, isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
 import type {
@@ -248,6 +249,7 @@ interface Persisted {
   qa: QaRecord[];
   prContributions: PrContributionView[];
   qaOutcomes: QaOutcomeView[];
+  scoreLedger: ScoreLedger;
   requests: HireRequestView[];
   ceo: CeoState;
   research: ResearchState;
@@ -640,6 +642,7 @@ export class Swarm {
     qa: [],
     prContributions: [],
     qaOutcomes: [],
+    scoreLedger: { version: SCORE_LEDGER_VERSION, cutoverAt: 0, events: [] }, // a new office has no legacy history
     requests: [],
     ceo: { queue: [], job: null, lastReviewAt: null, lastFingerprint: null },
     research: { queue: [], job: null, done: [] },
@@ -659,6 +662,7 @@ export class Swarm {
   /** Links to the boxes: removed ones stay until the CLIs still running there have ended. */
   private boxConns = new Map<string, BoxConnection>();
   private officeTelemetry: MachineTelemetry | null = null;
+  private scoreTotals = new Map<string, DeveloperScoresView>(); // projected from state.scoreLedger
   private stopResources?: () => void;
   /**
    * The CEO's office tools. Every session gets its own server: one can only be connected to one session at a time, so
@@ -805,6 +809,8 @@ export class Swarm {
         feedbackEvents: loaded.feedbackEvents ?? {},
         prContributions: loaded.prContributions ?? [],
         qaOutcomes: loaded.qaOutcomes ?? [],
+        // Earlier offices start Authorship and Repair at zero; their combined score stays as the legacy total.
+        scoreLedger: loaded.scoreLedger ?? { version: SCORE_LEDGER_VERSION, cutoverAt: Date.now(), events: [] },
         qa: (loaded.qa ?? []).map((q) => ({
           ...q,
           reviewId: q.reviewId ?? crypto.randomUUID(),
@@ -860,6 +866,7 @@ export class Swarm {
       // first run
     }
     await this.history.load();
+    this.scoreTotals = projectScores(this.state.scoreLedger.events);
     for (const r of this.state.repos) if (r.localPath) this.backend.setLocalPath(r.fullName, r.localPath);
     this.state.officeId ||= crypto.randomBytes(8).toString('hex');
     const interrupted: PersistedAgent[] = [];
@@ -1084,6 +1091,7 @@ export class Swarm {
       endedAt: a.endedAt,
       costUsd: a.costUsd,
       score: a.score ?? 0,
+      ...(a.role === 'dev' && { scores: this.scoreTotals.get(a.id) ?? ZERO_SCORES }),
       turns: a.turns,
       browserUrl: rt.browserUrl,
       hasScreenshot: !!rt.screenshot,
@@ -1131,6 +1139,7 @@ export class Swarm {
       prContributions: this.state.prContributions,
       runAttempts: this.history.attempts,
       qaOutcomes: this.state.qaOutcomes,
+      scoreEvents: this.state.scoreLedger.events,
       qa: this.state.qa.filter((q) => !q.closed).map((q) => this.qaView(q)),
       requests: this.state.requests,
       ceo: this.ceoInfo(),
@@ -1208,6 +1217,21 @@ export class Swarm {
     if (index < 0) this.state.prContributions.push(history);
     else this.state.prContributions[index] = history;
     this.broadcast({ type: 'prContribution', contribution: history });
+    this.save();
+    this.syncScores(history.repoId, history.prNumber);
+  }
+
+  /** Append whatever the PR's current contribution and QA evidence adds to or corrects in the score ledger. */
+  private syncScores(repoId: string, prNumber: number) {
+    const history = this.contribution(repoId, { number: prNumber, title: '', url: '', state: 'OPEN' });
+    const outcomes = this.state.qaOutcomes.filter((o) => o.repoId === repoId && o.prNumber === prNumber);
+    const ledger = this.state.scoreLedger;
+    const added = reconcileScores(ledger.events, { repoId, prNumber }, deriveScoreEvents(history, outcomes, ledger.cutoverAt), outcomes, Date.now());
+    if (!added.length) return;
+    ledger.events.push(...added);
+    this.scoreTotals = projectScores(ledger.events);
+    this.broadcast({ type: 'scoreEvents', events: added });
+    for (const a of this.state.agents) if (added.some((e) => e.agentId === a.id)) this.emitAgent(a);
     this.save();
   }
 
@@ -1386,6 +1410,7 @@ export class Swarm {
     outcome.revision = !pr || !outcome.headSha || !outcome.baseSha || !pr.baseSha ? 'unknown'
       : pr.headSha === outcome.headSha && pr.baseSha === outcome.baseSha ? 'exact' : 'stale';
     this.emitQaOutcome(outcome);
+    this.syncScores(outcome.repoId, outcome.prNumber);
   }
 
   private async recordQaOutcome(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport | null, result: SessionResult): Promise<QaOutcomeView> {
@@ -1452,6 +1477,7 @@ export class Swarm {
       }
     }
     this.emitQaOutcome(outcome);
+    this.syncScores(outcome.repoId, outcome.prNumber);
     await this.writeState();
     return correction;
   }
@@ -2589,6 +2615,8 @@ export class Swarm {
       return this.mergeNote(rec, `merge blocked: ${error}`);
     }
     this.recordFeedback({ kind: 'merged', ...rec });
+    const history = this.state.prContributions.find((h) => h.repoId === repo.id && h.prNumber === pr.number);
+    if (history) this.setContribution({ ...history, state: 'MERGED' });
     this.toast('success', `🔀 Merged PR #${pr.number} into ${repo.defaultBranch}: ${pr.title}`);
     await this.closeResolvedIssues(repo, pr.number, latest.closesIssues);
     return true;
