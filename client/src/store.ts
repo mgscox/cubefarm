@@ -58,6 +58,7 @@ interface State {
   agents: Record<string, Agent>;
   logs: Record<string, LogLine[]>;
   screens: Record<string, number>; // agentId -> screenshot timestamp (cache buster)
+  qaOutcomes: import('../../shared/types').QaOutcomeView[];
   prContributions: PrContributionView[];
   qa: Record<string, QaView>; // `${repoId}#${prNumber}`
   requests: HireRequestView[];
@@ -171,6 +172,7 @@ export const useStore = create<State>((set, get) => ({
   logs: {},
   screens: {},
   qa: {},
+  qaOutcomes: [],
   prContributions: [],
   requests: [],
   ceo: { queue: [], job: null, lastReviewAt: null, nextReviewAt: null },
@@ -227,6 +229,7 @@ export const useStore = create<State>((set, get) => ({
           logs,
           screens,
           qa,
+          qaOutcomes: d.qaOutcomes ?? [],
           prContributions: d.prContributions ?? [],
           requests: d.requests,
           ceo: d.ceo,
@@ -296,6 +299,10 @@ export const useStore = create<State>((set, get) => ({
           screens: { ...get().screens, [ev.agentId]: ev.at },
           agents: a ? { ...get().agents, [ev.agentId]: { ...a, hasScreenshot: true, screenshotAt: ev.at, browserUrl: ev.url ?? a.browserUrl } } : get().agents,
         });
+        break;
+      }
+      case 'qaOutcome': {
+        set({ qaOutcomes: [...get().qaOutcomes.filter((o) => o.id !== ev.outcome.id), ev.outcome] });
         break;
       }
       case 'prContribution': {

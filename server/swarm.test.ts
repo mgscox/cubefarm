@@ -30,10 +30,10 @@ import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRun
 type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => Promise<void>;
 type Repo = { noWorkEndings?: import('../shared/types.ts').NoWorkEnding[]; id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; parkedBranches?: ParkedBranch[]; preview: { command: null; env: object } };
 type Backend = ReturnType<typeof createDemoBackend>;
-type QaRec = QaView & { reviewId?: string; crossRepository?: boolean; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
+type QaRec = QaView & { attempt?: { id: string; startedAt: number; headSha: string; baseSha: string | null }; reviewId?: string; crossRepository?: boolean; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
 interface Internals {
   backend: Backend;
-  state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[]; prContributions: PrContributionView[]; feedbackEvents: Record<string, true> };
+  state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[]; prContributions: PrContributionView[]; qaOutcomes: import('../shared/types.ts').QaOutcomeView[]; feedbackEvents: Record<string, true> };
   writeState(): Promise<void>;
   repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string; issuesFetchedAt?: number }>;
   agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null; shots?: unknown[]; qaResume?: unknown }>;
@@ -88,6 +88,12 @@ beforeEach(() => {
   vi.spyOn(s, 'schedule').mockImplementation(() => {});
   // These tests inject synthetic desks without preparing the demo backend's in-memory worktrees.
   vi.spyOn(s.backend, 'deskExists').mockResolvedValue(true);
+  vi.spyOn(s.backend, 'deskHead').mockImplementation(async (fullName) => {
+    const r = s.state.repos.find((r) => r.fullName === fullName);
+    const pr = r && s.repoRt.get(r.id)?.pulls.find((p) => p.state === 'OPEN');
+    const number = pr?.number ?? s.state.qa.find((q) => q.repoId === r?.id)?.prNumber;
+    return number ? (await s.backend.prDetails(fullName, number)).headSha : 'demo-head';
+  });
   repo = { id: 'r1', fullName: 'demo-co/pixel-todo', floor: 1, autoAssign: true, requestedStarts: [], preview: { command: null, env: {} } };
   s.state.repos.push(repo);
   s.state.agents.push({ id: 'a1', name: 'Ada', repoId: repo.id, role: 'dev', specialty: '', score: 0, status: 'idle', task: null, issueNumber: null, desk: 0, endedAt: null });
@@ -516,7 +522,7 @@ describe('developer scores', () => {
     } };
     vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, state: 'OPEN', body: '', isCrossRepository: false });
     await s.onQaFinished(testerRecord, repo, failure);
-    expect(dev().score).toBe(3);
+    expect(dev().score).toBe(4);
     s.reconcilePulls(repo, [pull]);
     vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
     const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
@@ -535,7 +541,7 @@ describe('developer scores', () => {
     vi.spyOn(restored, 'save').mockImplementation(() => {});
     vi.spyOn(fs, 'readFile').mockResolvedValueOnce(JSON.stringify(persisted));
     await fresh.init();
-    expect(fresh.snapshot().agents.find((a) => a.id === 'a1')?.score).toBe(legacy ? 0 : 5);
+    expect(fresh.snapshot().agents.find((a) => a.id === 'a1')?.score).toBe(legacy ? 0 : 6);
     if (!legacy) {
       const replay = { ...rec, status: 'testing' as const };
       restored.state.qa.push(replay);
@@ -544,7 +550,7 @@ describe('developer scores', () => {
       vi.spyOn(restored.backend, 'prDetails').mockResolvedValue({ ...pull, state: 'OPEN', body: '', isCrossRepository: false });
       await restored.onQaFinished(restoredTester, repo, failure);
       restored.reconcilePulls(repo, [pull]);
-      expect(restored.state.agents[0].score).toBe(5);
+      expect(restored.state.agents[0].score).toBe(6);
     }
     await fresh.shutdown();
   });
@@ -1345,6 +1351,7 @@ describe('CEO rerun_qa', () => {
   it('passes the note to the tester only in its QA round', async () => {
     const backend = createDemoBackend();
     backend.prDetails = async () => ({ ...pull(), body: 'Test recovery', isCrossRepository: false });
+    backend.deskHead = async () => pull().headSha;
     const qaSwarm = new Swarm(backend) as unknown as Internals;
     vi.spyOn(qaSwarm, 'save').mockImplementation(() => {});
     vi.spyOn(qaSwarm, 'beginTask').mockImplementation(() => {});
@@ -3618,6 +3625,129 @@ describe('QA rounds', () => {
     await s.onQaFinished(tester, repo, result(true, failReport));
   };
 
+  describe('durable QA outcomes', () => {
+    const code: QaCheck = { name: 'Feature', findingKey: 'missing-button', result: 'fail', failureKind: 'code', confirmed: true,
+      introducedBySha: 'sha-1', details: 'Head fails the reproduction; base passes.' };
+    let tester: Record<string, unknown>;
+    const complete = async (checks: QaCheck[], verdict = 'fail') => {
+      Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+      Object.assign(rec, { status: 'testing', testedSha: 'sha-1' });
+      await s.onQaFinished(tester, repo, result(true, { verdict, summary: 'Observed QA evidence', checks }));
+      return swarm.snapshot().qaOutcomes!.at(-1)!;
+    };
+    beforeEach(() => {
+      s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
+      tester = addAgent('q1', 'Grace', 'qa', 0);
+      rec.attempt = { id: 'attempt-1', startedAt: Date.now() - 1000, headSha: 'sha-1', baseSha: 'base-1' };
+      vi.mocked(s.backend.prDetails).mockResolvedValue({ ...pull, body: '', isCrossRepository: false, baseSha: 'base-1' });
+      s.state.prContributions.push({ repoId: repo.id, prNumber: 13, title: 'Feature', url: '', state: 'OPEN',
+        original: { agentId: 'a1', name: 'Ada', submittedSha: 'sha-1', at: Date.now() - 2000 }, repairs: [] });
+      vi.spyOn(s.backend, 'qaCi').mockImplementation(async (_repo, headSha) => ({ headSha, observedAt: Date.now(), availability: 'available',
+        checks: [{ id: 'check-7', runId: 'run-42', name: 'CI', status: 'completed', conclusion: 'success', url: null }] }));
+    });
+
+    it('retains worker-only failures before merge normalization, including exact-revision CI', async () => {
+      const events = vi.spyOn(s, 'broadcast');
+      const evidence = await complete([{ name: 'Suite', result: 'fail', failureKind: 'environment', details: 'Exit 137: worker OOM; unchanged-base probe passed.' }]);
+      expect(evidence).toMatchObject({ reviewId: 'review-13', attemptId: 'attempt-1', reviewer: { agentId: 'q1', name: 'Grace' },
+        headSha: 'sha-1', baseSha: 'base-1', revision: 'exact', verdict: 'fail', classification: 'worker',
+        checks: [{ result: 'fail' }], findings: [{ classification: 'worker' }], worker: { telemetry: null },
+        ci: { headSha: 'sha-1', checks: [{ id: 'check-7', runId: 'run-42', conclusion: 'success' }] } });
+      expect(rec).toMatchObject({ status: 'passed', ciRequired: true, checks: [{ result: 'skip' }] });
+      expect(ada.score).toBe(0);
+      expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'qaOutcome' }));
+      expect(s.backend.qaCi).toHaveBeenCalledWith(repo.fullName, 'sha-1');
+    });
+
+    it('scores only the confirmed attributable defect in a mixed report and keeps its ID on an unchanged-head retry', async () => {
+      const checks: QaCheck[] = [code, { name: 'Suite', result: 'fail', failureKind: 'environment', details: 'Worker OOM.' },
+        { ...code, name: 'Suspected', findingKey: 'suspected', confirmed: false },
+        { ...code, name: 'Unknown origin', findingKey: 'unknown-origin', introducedBySha: 'unknown' }];
+      const first = await complete(checks);
+      expect(first.classification).toBe('mixed');
+      expect(first.legacyPenalty?.findingIds).toEqual([first.findings[0].id]);
+      expect(ada.score).toBe(-1);
+      rec.attempt = { ...rec.attempt!, id: 'attempt-2' };
+      rec.round++;
+      const retry = await complete(checks);
+      expect(retry.findings[0].id).toBe(first.findings[0].id);
+      expect(swarm.snapshot().qaOutcomes).toHaveLength(2);
+      expect(ada.score).toBe(-1);
+      await complete(checks); // duplicate completion of the same attempt
+      expect(swarm.snapshot().qaOutcomes).toHaveLength(2);
+      expect(ada.score).toBe(-1);
+    });
+
+    it.each(['head', 'base'] as const)('retains stale evidence when the %s moves while posting, even on a final round', async (part) => {
+      rec.round = 3;
+      vi.spyOn(s.backend, 'commentPull').mockImplementation(async () => {
+        vi.mocked(s.backend.prDetails).mockResolvedValue({ ...pull, headSha: part === 'head' ? 'sha-2' : 'sha-1', baseSha: part === 'base' ? 'base-2' : 'base-1', body: '', isCrossRepository: false });
+        return 'comment';
+      });
+      const evidence = await complete([code]);
+      expect(evidence).toMatchObject({ revision: 'stale', headSha: 'sha-1', baseSha: 'base-1', checks: [{ introducedBySha: 'sha-1' }] });
+      expect(ada.score).toBe(0);
+    });
+
+    it('rejects CI evidence from another head and leaves an unexplained failure inconclusive', async () => {
+      vi.mocked(s.backend.qaCi).mockResolvedValue({ headSha: 'new-head', observedAt: Date.now(), availability: 'available', checks: [] });
+      const evidence = await complete([{ name: 'Suite', result: 'fail', details: 'Timed out; cause unknown.' }]);
+      expect(evidence).toMatchObject({ ci: null, classification: 'inconclusive', findings: [{ classification: 'inconclusive' }] });
+      expect(ada.score).toBe(0);
+    });
+
+    it('retains a session failure reason without treating it as a code defect', async () => {
+      Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+      rec.status = 'testing';
+      await s.onQaFinished(tester, repo, { ...result(false), errors: ['Session timed out after 600s'] });
+      expect(swarm.snapshot().qaOutcomes!.at(-1)).toMatchObject({ verdict: 'incomplete', classification: 'inconclusive', terminalReason: 'Session timed out after 600s' });
+      expect(ada.score).toBe(0);
+    });
+
+    it('preserves a manager handoff while no-report CI evidence is delayed', async () => {
+      let finishCi!: (ci: Awaited<ReturnType<Backend['qaCi']>>) => void;
+      vi.mocked(s.backend.qaCi).mockImplementation(() => new Promise((resolve) => { finishCi = resolve; }));
+      Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+      rec.status = 'testing';
+      const finishing = s.onQaFinished(tester, repo, result(false));
+      await vi.advanceTimersByTimeAsync(0);
+      s.clearTask(tester);
+      Object.assign(rec, { status: 'failed', qaAgentId: null, summary: 'Accepted manager repair', sessionFailures: 0 });
+      finishCi({ headSha: 'sha-1', observedAt: Date.now(), availability: 'available', checks: [] });
+      await finishing;
+      expect(rec).toMatchObject({ status: 'failed', summary: 'Accepted manager repair', sessionFailures: 0 });
+      expect(swarm.snapshot().qaOutcomes).toHaveLength(1);
+    });
+
+    it('persists linked reviewer/manager corrections and history after cleanup and restart', async () => {
+      const first = await complete([code]);
+      expect(ada.score).toBe(-1);
+      vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+      const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+      vi.spyOn(fs, 'rename').mockResolvedValue();
+      const correction = await swarm.correctQaFinding(first.id, { findingId: first.findings[0].id, actor: 'manager', reason: 'Stable worker retry passed unchanged.', classification: 'worker' });
+      expect(ada.score).toBe(0);
+      const second = await swarm.correctQaFinding(first.id, { findingId: first.findings[0].id, actor: 'q1', reason: 'Root cause still unknown.', classification: 'inconclusive' });
+      expect(second.previousCorrectionId).toBe(correction.id);
+      expect(first.findings[0].classification).toBe('code');
+      await expect(swarm.correctQaFinding(first.id, { findingId: first.findings[0].id, actor: 'other', reason: 'No', classification: 'worker' })).rejects.toMatchObject({ status: 400 });
+      await expect(swarm.correctQaFinding(first.id, { findingId: first.findings[0].id, actor: 'manager', reason: '', classification: 'worker' })).rejects.toMatchObject({ status: 400 });
+      s.reconcilePulls(repo, [{ ...pull, state: 'MERGED' }]);
+      expect(swarm.snapshot().qa).toHaveLength(0);
+      await s.writeState();
+      const persisted = JSON.parse(String(write.mock.calls.at(-1)![1]));
+      Object.assign(persisted, { repos: [], agents: [] });
+      const fresh = new Swarm(createDemoBackend());
+      const restored = fresh as unknown as Internals;
+      restored.backend.demo = false;
+      vi.spyOn(restored, 'save').mockImplementation(() => {});
+      vi.spyOn(fs, 'readFile').mockResolvedValueOnce(JSON.stringify(persisted));
+      await fresh.init();
+      expect(fresh.snapshot().qaOutcomes).toEqual(swarm.snapshot().qaOutcomes);
+      await fresh.shutdown();
+    });
+  });
+
   it('does not send an environment-only validation failure to developers for a code fix', async () => {
     const tester = addAgent('q1', 'Grace', 'qa', 0);
     Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
@@ -3684,20 +3814,20 @@ describe('QA rounds', () => {
     await s.onQaFinished(tester, repo, finished.mock.calls[0][0]);
     expect(rec).toMatchObject({ status: 'passed', ciRequired: true, passedSha: pull.headSha });
   });
-  it('charges each completed QA send-back to its responsible developer once per round', async () => {
+  it('keeps unclassified send-backs neutral through retries and owner changes', async () => {
     const tester = addAgent('q1', 'Grace', 'qa', 0);
     const replacement = addAgent('a2', 'Barbara', 'dev', 1);
     Object.assign(ada, { score: 0 });
     Object.assign(replacement, { score: 4 });
     vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, body: '', isCrossRepository: false });
     await qaFails(tester);
-    expect(ada.score).toBe(-1);
+    expect(ada.score).toBe(0);
     await qaFails(tester); // duplicated callback / same persisted round
-    expect(ada.score).toBe(-1);
+    expect(ada.score).toBe(0);
     Object.assign(rec, { round: 3, retests: 1, devAgentId: 'a2' });
     await qaFails(tester);
-    expect(ada.score).toBe(-1);
-    expect(replacement.score).toBe(3);
+    expect(ada.score).toBe(0);
+    expect(replacement.score).toBe(4);
     expect(tester.score ?? 0).toBe(0);
   });
 
@@ -3767,12 +3897,12 @@ describe('QA rounds', () => {
     expect(ada.score).toBe(0);
   });
 
-  it('counts a fresh QA send-back after a retained security record closes and reopens', async () => {
+  it('retains neutral scoring after a security record closes and reopens', async () => {
     const tester = addAgent('q1', 'Grace', 'qa', 0);
     Object.assign(rec, { securityReview: { reason: 'Authentication', qaSha: null } });
     const reviewId = rec.reviewId;
     await qaFails(tester);
-    expect(ada.score).toBe(-1);
+    expect(ada.score).toBe(0);
     s.reconcilePulls(repo, [{ ...pull, state: 'CLOSED' }]);
     s.reconcilePulls(repo, [{ ...pull, headSha: 'sha-2' }]);
     expect(rec.reviewId).not.toBe(reviewId);
@@ -3780,7 +3910,7 @@ describe('QA rounds', () => {
     Object.assign(rec, { status: 'testing', testedSha: 'sha-2' });
     Object.assign(tester, { task: 'qa', status: 'working', prNumber: 13 });
     await s.onQaFinished(tester, repo, result(true, failReport));
-    expect(ada.score).toBe(-2);
+    expect(ada.score).toBe(0);
   });
 
   it('does not charge skipped unchanged QA', async () => {

@@ -957,6 +957,14 @@ export function createDemoBackend(): Backend {
     },
     branchAhead: async () => 0, // the fake sessions always open their PR
     containsCommit: async () => true,
+    qaCi: async (fullName, headSha) => {
+      const pr = repos.get(fullName)?.pulls.find((p) => p.headSha === headSha);
+      return { headSha, observedAt: Date.now(), availability: pr ? 'available' : 'unavailable', checks: pr ? [{
+        id: `demo-check-${headSha}`, runId: `demo-run-${headSha}`, name: 'Demo CI', status: 'COMPLETED',
+        conclusion: pr.checks === 'passing' ? 'SUCCESS' : pr.checks === 'failing' ? 'FAILURE' : null,
+        url: `${pr.url}/checks`,
+      }] : [] };
+    },
     prDetails: async (fullName, number) => {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
       if (!pr) throw new Error(`Unknown PR #${number}`);
