@@ -15,6 +15,8 @@ export const HOME_DIR = process.env.SWARM_HOME ?? path.join(os.homedir(), '.cube
 export const WORKSPACE_ROOT = path.join(HOME_DIR, 'workspaces');
 export const DEMO = process.argv.includes('--demo') || process.env.SWARM_DEMO === '1' || process.env.SWARM_DEMO === 'true';
 export const STATE_FILE = path.join(HOME_DIR, DEMO ? 'demo-state.json' : 'state.json');
+/** Every attempt at an issue or PR (docs/run-history.md), apart from the state file so its pruning leaves them alone. */
+export const RUN_HISTORY_FILE = path.join(HOME_DIR, DEMO ? 'demo-run-history.json' : 'run-history.json');
 // The manager's own settings and secrets, apart from the office's state, where other tools keep theirs.
 export const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'cubefarm');
 export const CONFIG_ENV_FILE = path.join(CONFIG_DIR, '.env');

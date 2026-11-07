@@ -91,6 +91,61 @@ export interface PrContributionView {
   }[];
 }
 
+/** Why an attempt started: who or what routed the work to this desk. */
+export type RunAssignReason = 'manager' | 'ceo' | 'requested' | 'auto' | 'qa-queue' | 'repair' | 'retry' | 'follow-up' | 'resume';
+
+/** What an attempt came to. */
+export type RunResult =
+  | 'delivered' | 'no-pr' | 'qa-passed' | 'qa-failed' | 'worker-blocked' | 'repaired' | 'no-change' | 'completed'
+  | 'prepare-failed' | 'start-failed' | 'failed' | 'stopped' | 'closed' | 'interrupted' | 'deferred' | 'superseded' | 'cleared';
+
+/** Who ended it, as far as the evidence shows: the agent's own work, its machine, the model provider, the manager, the office, GitHub. */
+export type RunCause = 'agent' | 'worker' | 'provider' | 'manager' | 'office' | 'external' | 'unknown';
+
+/** A machine's health in a few fields; null fields were not measured. */
+export interface RunHealth {
+  status: MachineTelemetry['status'];
+  constraints: MachineTelemetry['constraints'];
+  cpuPercent: number | null;
+}
+
+/**
+ * One attempt at an issue or PR: a task on one desk from assignment to its end. Retries, follow-ups and handoffs are
+ * new attempts whose parentId is the attempt before them on the same work. null means unknown, never zero.
+ */
+export interface RunAttemptView {
+  id: string;
+  parentId: string | null;
+  repoId: string;
+  repo: string; // owner/name
+  task: 'issue' | 'prototype' | 'research' | 'fix' | 'qa';
+  specialty: string | null; // the issue's swarm:<specialty>
+  issueNumber: number | null;
+  prNumber: number | null;
+  agent: { id: string; name: string; role: AgentRole; specialty: string };
+  assignment: { reason: RunAssignReason; factors: Record<string, string | number | boolean | null> };
+  /** What the office asked the CLI for; the CLI's own default when model is null. */
+  runtime: { cli: string | null; model: string | null; effort: string | null; playbook: string | null; office: string };
+  worker: { box: string; name: string; healthAtStart: RunHealth | null; healthAtEnd: RunHealth | null };
+  sessionIds: string[];
+  revisions: { start: string | null; submitted: string | null };
+  /** QA review and PR repair identifiers shared with PrContributionView. */
+  review: { reviewId: string; round: number; repairId: string | null } | null;
+  times: { assignedAt: number; startedAt: number | null; endedAt: number | null };
+  usage: { sessions: number; costUsd: number | null; turns: number | null };
+  events: { at: number; kind: 'assigned' | 'waiting' | 'started' | 'reattached' | 'session-ended' | 'ended'; note?: string }[];
+  outcome: { result: RunResult; cause: RunCause; excerpt?: string } | null;
+}
+
+/** GET /api/run-history: attempts, newest first, with their PR's latest state joined in. */
+export interface RunHistoryExport {
+  format: 'cubefarm-run-history';
+  version: 1;
+  generatedAt: number;
+  retention: { maxAttempts: number; maxAgeDays: number; excerptChars: number };
+  attempts: (RunAttemptView & { queueMs: number | null; runMs: number | null; prState: PullInfo['state'] | null })[];
+}
+
 export interface PullRefresh {
   pulls: PullInfo[];
   checksError?: string; // diagnostic details from optional check enrichment
@@ -109,6 +164,8 @@ export interface RequestedStart {
   preferredAgentId: string;
   note?: string;
   restartPending: boolean;
+  /** The attempt waiting for a desk, separate from the desk's current task. */
+  attemptId?: string;
 }
 
 /** Persisted per issue/PR so a quiet session's remedies survive retries, desk handoffs and office restarts. */
@@ -812,6 +869,7 @@ export interface WorldSnapshot {
   agents: AgentView[];
   qa: QaView[];
   prContributions?: PrContributionView[];
+  runAttempts?: RunAttemptView[];
   qaOutcomes?: QaOutcomeView[];
   requests: HireRequestView[];
   ceo: CeoInfo;
@@ -847,6 +905,8 @@ export type ServerEvent =
   | { type: 'qa'; qa: QaView }
   | { type: 'qaOutcome'; outcome: QaOutcomeView }
   | { type: 'prContribution'; contribution: PrContributionView }
+  | { type: 'runAttempt'; attempt: RunAttemptView }
+  | { type: 'runAttemptsRemoved'; ids: string[] }
   | { type: 'qaRemoved'; repoId: string; prNumber: number }
   | { type: 'settings'; settings: SwarmSettings }
   | { type: 'request'; request: HireRequestView }
