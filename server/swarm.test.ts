@@ -153,6 +153,7 @@ describe('durable PR contribution workflow', () => {
         expect.objectContaining({ agentId: 'a1', reason: 'conflict', startingSha: 'barbara-fix', submittedSha: 'ada-fix', findings: 'Resolve main conflict' }),
       ]);
       Object.assign(ada, { sessionId: 'followup-session', status: 'done' });
+      s.repoRt.get(repo.id)!.pulls = [{ ...pull }];
       await swarm.message('a1', 'Also fix the review follow-up');
       pull.headSha = 'followup-fix';
       await s.onFixFinished(ada, repo, result);
@@ -6348,6 +6349,26 @@ describe('silent session recovery', () => {
     expect(terminal.onIdlePrompt!('Please finish this fix')).toBe(true);
     expect(s.backend.startSession).toHaveBeenLastCalledWith(expect.objectContaining({ typed: true }), expect.anything());
     expect(read).not.toHaveBeenCalled();
+    terminal.dispose();
+  });
+
+  it.each(['cached-head', null])('records a typed fix follow-up synchronously with starting SHA %s', async (headSha) => {
+    Object.assign(s.agentRt.get('a1')!, { session: null });
+    Object.assign(dev(), { status: 'done', task: 'fix', prNumber: 12 });
+    s.queueQa(repo, 12, dev(), 66);
+    if (headSha) s.repoRt.get(repo.id)!.pulls = [{ number: 12, headSha } as PullInfo];
+    const terminal = (s as unknown as { terminalFor(a: unknown): AgentTerminal }).terminalFor(dev());
+    const read = vi.spyOn(s.backend, 'prDetails');
+    vi.mocked(s.backend.startSession).mockClear();
+
+    expect(terminal.onIdlePrompt!('Please finish this fix')).toBe(true);
+    expect(s.backend.startSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ typed: true }), expect.anything());
+    expect(read).not.toHaveBeenCalled();
+    expect(s.state.prContributions).toHaveLength(1);
+    expect(s.state.prContributions[0].repairs).toHaveLength(1);
+    expect(s.state.prContributions[0].repairs[0]).toMatchObject({ agentId: 'a1', startingSha: headSha, findings: 'Please finish this fix' });
+    await Promise.resolve();
+    expect(s.state.prContributions[0].repairs).toHaveLength(1);
     terminal.dispose();
   });
 

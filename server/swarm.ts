@@ -4654,9 +4654,8 @@ export class Swarm {
     if (fixing) {
       const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
       if (rec) {
-        const generation = rt.generation;
-        const head = await this.prHead(a, repo, rec.prNumber);
-        if (!this.state.agents.includes(a) || rt.generation !== generation || rt.session) return;
+        // Typed prompts need synchronous admission before the CLI hook returns.
+        const head = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headSha ?? null;
         this.startRepairContribution(a, repo, rec, head, text);
       }
     }
