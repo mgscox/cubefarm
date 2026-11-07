@@ -28,6 +28,15 @@ export function sessionScratchDir(dir: string, root = SESSIONS_DIR): string {
   return path.join(sessionDir, 'job-scratch');
 }
 
+async function allowRemoval(dir: string): Promise<void> {
+  const info = await fs.promises.lstat(dir);
+  if (!info.isDirectory()) return;
+  if ((info.mode & 0o700) !== 0o700) await fs.promises.chmod(dir, info.mode | 0o700);
+  for (const entry of await fs.promises.readdir(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) await allowRemoval(path.join(dir, entry.name));
+  }
+}
+
 /** Detach finished files before awaiting deletion, so a later turn gets its own empty directory. */
 export async function clearSessionScratch(dir: string, { root = SESSIONS_DIR, recreate = true } = {}): Promise<void> {
   const scratch = sessionScratchDir(dir, root);
@@ -53,6 +62,14 @@ export async function clearSessionScratch(dir: string, { root = SESSIONS_DIR, re
     }
     if (recreate) createJobScratch(sessionDir);
   } finally {
-    await fs.promises.rm(discard, { recursive: true, force: true, maxRetries: 5 });
+    const remove = () => fs.promises.rm(discard, { recursive: true, force: true, maxRetries: 5 });
+    try {
+      await remove();
+    } catch (err) {
+      if (process.platform === 'win32' || (err as NodeJS.ErrnoException).code !== 'EACCES') throw err;
+      // Audits may make disposable dependency copies read-only for their validation runs.
+      await allowRemoval(discard);
+      await remove();
+    }
   }
 }

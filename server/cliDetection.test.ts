@@ -92,6 +92,7 @@ describe('CLI installer folders outside PATH', () => {
       fs.writeFileSync(path.join(home, 'uncommitted.txt'), 'keep');
       fs.mkdirSync(path.join(scratch, 'node_modules'));
       fs.writeFileSync(path.join(scratch, 'node_modules', 'package.txt'), 'discard');
+      if (!win) fs.chmodSync(path.join(scratch, 'node_modules'), 0o500);
       fs.symlinkSync(home, path.join(scratch, 'desk-link'), win ? 'junction' : 'dir');
       const release = () => box.rpc('releaseDesk', ['demo-co/example', 'nancy', 0, launch.dir]);
       await release();

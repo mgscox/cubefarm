@@ -13,7 +13,7 @@ import { CROSS_TURN_TOOLS } from './clis.ts';
 import { VERSION } from './config.ts';
 import { projectEnv } from './projectEnv.ts';
 import { playwrightMcpCommand } from './browser.ts';
-import { createJobScratch, jobScratchEnabled, JOB_SCRATCH_INSTRUCTIONS, SESSIONS_DIR } from './jobScratch.ts';
+import { clearSessionScratch, createJobScratch, jobScratchEnabled, JOB_SCRATCH_INSTRUCTIONS, SESSIONS_DIR } from './jobScratch.ts';
 import { ACTIVE_REPO_SKILLS, writeSessionSkills } from './repoSkills.ts';
 
 // One Claude Code instance (via the Claude Agent SDK) working one issue in its own git worktree.
@@ -553,7 +553,8 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
     } finally {
       if (jobDir) {
         await completion.catch((err) => console.warn('Could not finish job', err));
-        await fs.promises.rm(jobDir, { recursive: true, force: true, maxRetries: 5 }).catch((err) => console.warn('Could not clear job scratch', err));
+        await clearSessionScratch(jobDir, { recreate: false }).catch((err) => console.warn('Could not clear job scratch', err));
+        await fs.promises.rm(jobDir, { recursive: true, force: true, maxRetries: 5 }).catch((err) => console.warn('Could not remove job directory', err));
       }
       if (skillDir) fs.rm(skillDir, { recursive: true, force: true, maxRetries: 5 }, () => undefined);
     }
