@@ -19,7 +19,7 @@ import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, p
 import { developerFeedback, type FeedbackEvent } from './feedback.ts';
 import { submittedContribution, finishedContribution } from './prContributions.ts';
 import { checkParkPr } from './parkPr.ts';
-import { checkMergePr } from './mergePr.ts';
+import { checkMergePr, incompleteAuditOverride } from './mergePr.ts';
 import { issueHolder, duplicateIssueSessions, issueTaken } from './issueClaims.ts';
 import { orphanedQa } from './qaOwnership.ts';
 import { closedWork, closedWorkText, issueClosed, restartClosedWork, type ClosedWork } from './closedWork.ts';
@@ -2787,9 +2787,12 @@ export class Swarm {
     const repo = this.repo(repoId);
     const rt = this.repoRt.get(repo.id)!;
     if (rt.parking || rt.merging) throw new HttpError(409, `Wait until PR parking or merging finishes on ${repo.fullName}`);
+    const record = () => this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number);
+    const outcome = () => this.state.qaOutcomes.findLast((o) => o.repoId === repo.id && o.prNumber === number && o.reviewId === record()?.reviewId);
     const preflight = (pr: PullInfo | PrDetails | undefined, reserved = false) => checkMergePr(number, repo.fullName, {
       merging: !reserved && rt.merging, parking: !reserved && !!rt.parking, syncing: rt.syncing,
-      qa: this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number),
+      qa: record(),
+      outcome: outcome(),
       pull: pr,
       busy: this.state.agents.some((a) => a.repoId === repo.id && (
         a.prNumber === number || (pr && (a.branch === pr.headRefName ||
@@ -2809,7 +2812,7 @@ export class Swarm {
         if (!rec && labeled && current.state === 'OPEN') {
           rec = this.queueQa(repo, number, null, current.closesIssues[0] ?? null, current.isCrossRepository);
         }
-        const held = rec ? this.holdForSecurityReview(repo, rec, current) : labeled;
+        const held = rec ? !(approval && incompleteAuditOverride(rec, outcome(), current)) && this.holdForSecurityReview(repo, rec, current) : labeled;
         if (held || (rec?.securityReview && !current.baseSha)) {
           throw new HttpError(409, `PR #${number} requires a passing security review for its current head and base`);
         }

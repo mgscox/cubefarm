@@ -4446,6 +4446,35 @@ describe('QA rounds', () => {
       expect(rec).toMatchObject({ status: gap === 'explicit failure' ? 'failed' : 'needs-human', passedSha: null, round: 2 });
     });
 
+    it.each(['posted', 'crashed', 'new head', 'new base'] as const)('lets only a manager merge over an incomplete audit posted at its head and base: %s', async (variant) => {
+      const { tester } = await securityDesk();
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+      Object.assign(s.agentRt.get('q2')!, { qaResume: null });
+      rec.sessionFailures = 1;
+      await s.onQaFinished(tester, repo, variant === 'crashed' ? result(false) : result(true, { ...sandboxReport, validationGap: 'other' }));
+      expect(rec).toMatchObject({ status: 'needs-human', testedSha: 'sha-1', passedSha: null });
+      expect(rec.failedSha).not.toBe('sha-1');
+      Object.assign(repo, { autoMerge: true });
+      s.repoRt.get(repo.id)!.pulls = [{ ...pull, labels: ['ready-for-review'] }];
+      await (s as unknown as { advanceMerges(repo: Repo): Promise<void> }).advanceMerges(repo);
+      expect(merge).not.toHaveBeenCalled();
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('requires a passing security review');
+      if (variant === 'new head' || variant === 'new base') {
+        const moved = variant === 'new head' ? { headSha: 'sha-2' } : { baseSha: 'base-2' };
+        vi.mocked(s.backend.prDetails).mockResolvedValue({ ...pull, labels: ['ready-for-review'], baseSha: 'base-1', body: '', isCrossRepository: false, ...moved });
+        s.repoRt.get(repo.id)!.pulls = [{ ...pull, labels: ['ready-for-review'], ...moved }];
+      }
+      const approved = swarm.mergePr({ floor: repo.floor, number: 13, reason: 'Manager requested merge; validation gaps accepted' });
+      if (variant !== 'posted') {
+        await expect(approved).rejects.toMatchObject({ status: 409 });
+        expect(merge).not.toHaveBeenCalled();
+        return;
+      }
+      expect(await approved).toContain('Merged PR #13');
+      expect(merge).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'squash', 'sha-1');
+    });
+
     it('queues a labeled PR that already passed regular QA, even when automatic merge is off', () => {
       Object.assign(rec, { status: 'passed', passedSha: pull.headSha, testedSha: pull.headSha });
       s.reconcilePulls(repo, [{ ...pull, labels: ['ready-for-review'] }]);
