@@ -1353,6 +1353,21 @@ export class Swarm {
     return compactHealth(st?.status === 'online' ? st.telemetry : null);
   }
 
+  /** The routing policy and selected match stay inspectable after a desk or issue is cleared. */
+  private assignmentFactors(a: PersistedAgent, task: RunAttemptView['task'], issue?: IssueInfo): RunAttemptView['assignment']['factors'] {
+    const qa = task === 'qa';
+    if (a.role !== 'dev' && !qa) return {};
+    const specialty = qa ? 'qa' : issue ? issueSpecialty(issue.labels) : '';
+    const match = !!specialty && (qa ? a.role === 'qa' || /test|qa/i.test(a.specialty) : (a.specialty ?? '').toLowerCase() === specialty);
+    const scoreKind = a.role === 'dev' && !qa ? task === 'fix' ? 'repair' : 'authorship' : null;
+    return {
+      policyVersion: qa ? 'qa-workload-v1' : 'specialty-first-v2',
+      specialty: specialty || null, agentSpecialty: a.specialty || null,
+      specialtyMatch: match, specialtyFallback: !!specialty && !match,
+      scoreKind, score: scoreKind ? (this.scoreTotals.get(a.id) ?? ZERO_SCORES)[scoreKind].points : null,
+    };
+  }
+
   /**
    * A new attempt for the agent's task (or, with `waiting`, for work that waits for a desk). The latest attempt on the
    * same issue or PR is its parent; one still waiting for a desk hands over to it.
@@ -1380,7 +1395,7 @@ export class Swarm {
       issueNumber: work.issueNumber,
       prNumber: work.prNumber,
       agent: { id: a.id, name: a.name, role: a.role, specialty: a.specialty ?? '' },
-      assignment: { reason: route.reason, factors: route.factors ?? {} },
+      assignment: { reason: route.reason, factors: { ...this.assignmentFactors(a, task, issue), ...route.factors } },
       runtime: { cli: null, model: null, effort: null, playbook: null, office: VERSION },
       worker: { box: a.deskBox ?? '', name: a.deskBox ? this.boxName(a.deskBox) : 'office', healthAtStart: null, healthAtEnd: null },
       sessionIds: [],
@@ -5099,7 +5114,7 @@ export class Swarm {
         rec.fixReason === 'conflict' ? `Resolving conflicts on PR #${rec.prNumber}` :
         rec.fixReason === 'checks' ? `Fixing checks on PR #${rec.prNumber}` : `Fixing PR #${rec.prNumber} after QA round ${rec.round}`,
       `Checking out PR #${rec.prNumber}…`,
-      { reason: 'repair', factors: { fixReason: rec.fixReason, to: original ? 'author' : 'teammate', agentSpecialty: dev.specialty || null, score: dev.score ?? null, priorCrashes: rec.fixCrashes?.length ?? 0 } },
+      { reason: 'repair', factors: { fixReason: rec.fixReason, to: original ? 'author' : 'teammate', priorCrashes: rec.fixCrashes?.length ?? 0 } },
     );
     this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
     const generation = this.agentRt.get(dev.id)?.generation;
@@ -5395,14 +5410,14 @@ export class Swarm {
   }
 
   /**
-   * The free developer to put on a job: highest score, then one it `suits`, then fewest ready
-   * issues in their specialty, then the least open work in it, then desk order.
+   * Prefer a free specialist, then the relevant score, ready/open specialty workload and desk.
+   * QA cover uses its own suitability and workload, without development scores.
    */
-  private pickDev(repo: PersistedRepo, devs: PersistedAgent[], suits: (a: PersistedAgent) => boolean) {
+  private pickDev(repo: PersistedRepo, devs: PersistedAgent[], suits: (a: PersistedAgent) => boolean, score: 'authorship' | 'repair' | null = 'authorship') {
     if (devs.length <= 1) return devs[0];
     const ready = this.readyIssues(repo).map((r) => r.want);
     const open = this.repoRt.get(repo.id)!.issues.map((i) => issueSpecialty(i.labels));
-    return pickDeveloper(devs, suits, ready, open);
+    return pickDeveloper(devs, suits, ready, open, (a) => score ? (this.scoreTotals.get(a.id) ?? ZERO_SCORES)[score].points : 0);
   }
 
   /**
@@ -5435,6 +5450,7 @@ export class Swarm {
           repo,
           devs.filter((a) => a.id !== rec.devAgentId),
           (a) => /test|qa/i.test(a.specialty),
+          null,
         );
       if (!tester) continue;
       void this.runQa(tester, repo, rec);
@@ -5451,7 +5467,7 @@ export class Swarm {
       const headRef = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headRefName ?? null;
       const to = fixGoesTo(author, !!author && pool.includes(author) && !('wait' in this.place(author, 'within')), rec.prNumber, headRef);
       if (to === 'wait') continue;
-      const dev = to === 'author' ? author : this.pickDev(repo, pool, (a) => a.specialty.toLowerCase() === want);
+      const dev = to === 'author' ? author : this.pickDev(repo, pool, (a) => !!want && a.specialty.toLowerCase() === want, 'repair');
       if (!dev || issueHolder(this.state.agents, repo.id, rec.issueNumber, dev.id)) continue;
       void this.runFix(dev, repo, rec);
       return true;
@@ -5463,8 +5479,8 @@ export class Swarm {
    * Restart explicit requests on manual floors, or give a free developer the next auto-assigned backlog issue.
    * Returns true if work started.
    * Issues that say "Depends on #N" wait until #N is closed; the rest go in readyIssues() order. A swarm:<specialty>
-   * label is a preference, not a lock: the highest-scoring free developer gets first pick; ties prefer a specialist
-   * and then whoever is least needed elsewhere.
+   * label prefers a free specialist, then Authorship, workload and desk order. Without a specialist, the
+   * eligible pool uses the same score and workload order.
    */
   private startIssueWork(repo: PersistedRepo): boolean {
     if (this.state.officeHeld) return false;
@@ -5496,12 +5512,11 @@ export class Swarm {
     }
     const ready = free.length ? all.filter((r) => r.want !== RESEARCH) : [];
     if (ready.length === 0) return false;
-    const fits = (a: PersistedAgent, want: string) => a.specialty.toLowerCase() === want;
+    const fits = (a: PersistedAgent, want: string) => !!want && a.specialty.toLowerCase() === want;
     // Of the issues holding up the most, take one a free specialist fits.
     const pick = ready.find((r) => r.empty === ready[0].empty && r.chain === ready[0].chain && free.some((a) => fits(a, r.want))) ?? ready[0];
     const agent = this.pickDev(repo, free, (a) => fits(a, pick.want))!;
     const factors = {
-      specialty: pick.want || null, agentSpecialty: agent.specialty || null, specialtyMatch: !!pick.want && fits(agent, pick.want), score: agent.score,
       freeDevelopers: free.length, freeSpecialists: pick.want ? free.filter((a) => fits(a, pick.want)).length : null, holdsUp: pick.chain, emptyEndings: pick.empty,
     };
     // assign() flips the agent to 'preparing' synchronously, so the next pass sees it as busy.
@@ -7366,10 +7381,11 @@ export class Swarm {
       agents: this.state.agents,
       available: this.available(repo, 'dev'),
       ready: this.readyIssues(repo).map((r) => r.want),
+      score: (a) => (this.scoreTotals.get(a.id) ?? ZERO_SCORES).authorship.points,
       inProgress: this.issueTaken(repo, x.number),
       usagePaused: this.limited(),
     });
-    await this.assign(agent.id, issue.number, x.note, { reason: 'ceo', factors: { pickedBy: x.agent ? 'ceo' : 'office', specialty: issueSpecialty(issue.labels) || null, agentSpecialty: agent.specialty || null, score: agent.score } });
+    await this.assign(agent.id, issue.number, x.note, { reason: 'ceo', factors: { pickedBy: x.agent ? 'ceo' : 'office' } });
     const warning = issueParent(issue) ? ` Warning: parent: ${issueParent(issue)}.` : issue.subIssues === null ? ' Warning: sub-issues have not loaded.' : '';
     return `${agent.name} started #${issue.number} ${issue.title} on floor ${repo.floor}.${warning}`;
   }
@@ -7487,7 +7503,9 @@ export class Swarm {
       preferred = dev.id;
     }
     const free = this.available(repo, 'dev');
-    const dev = free.find((a) => a.id === preferred) ?? free[0];
+    if (x.agent !== undefined && !free.some((a) => a.id === preferred)) throw new HttpError(409, 'The chosen developer is not available; wait for their desk or choose another developer.');
+    const want = issueSpecialty(rt.issues.find((i) => i.number === rec.issueNumber)?.labels ?? []);
+    const dev = free.find((a) => a.id === preferred) ?? this.pickDev(repo, free, (a) => !!want && a.specialty.toLowerCase() === want, 'repair');
     const chosen = dev?.id ?? preferred;
     this.setQa(rec, {
       preparation: undefined,

@@ -37,6 +37,7 @@ interface Internals {
   writeState(): Promise<void>;
   repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string; issuesFetchedAt?: number }>;
   agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null; shots?: unknown[]; qaResume?: unknown }>;
+  scoreTotals: Map<string, import('../shared/types.ts').DeveloperScoresView>;
   issueFailures: Map<string, number>;
   pausedUntil: number;
   readyIssues(repo: Repo): { issue: IssueInfo }[];
@@ -548,7 +549,7 @@ describe('run history', () => {
       s.beginTask(ada, { task: 'issue', issueNumber: 67, issueTitle: 'Other', branch: 'swarm/issue-67-ada', prNumber: null, prUrl: null, sessionId: null }, 'Issue #67', 'Preparing…');
       s.sessionStarted(ada, {}, null);
       await s.recordFinished(ada, repo, ok, generation('a1'), undefined);
-      expect(swarm.runHistory({ issue: 67 }).attempts).toEqual([expect.objectContaining({ assignment: { reason: 'manager', factors: {} }, prNumber: null, outcome: expect.objectContaining({ result: 'no-pr', cause: 'agent' }), usage: { sessions: 1, costUsd: 0.5, turns: 7 } })]);
+      expect(swarm.runHistory({ issue: 67 }).attempts).toEqual([expect.objectContaining({ assignment: expect.objectContaining({ reason: 'manager' }), prNumber: null, outcome: expect.objectContaining({ result: 'no-pr', cause: 'agent' }), usage: { sessions: 1, costUsd: 0.5, turns: 7 } })]);
 
       // Merging the PR removes its QA card, not its history.
       swarm.stopAgent('q1');
@@ -583,6 +584,127 @@ describe('run history', () => {
     s.beginTask(ada, { task: 'issue', issueNumber: 70, issueTitle: 'Stop me', branch: 'swarm/issue-70-ada', prNumber: null, prUrl: null, sessionId: null }, 'Issue #70', 'Preparing…');
     swarm.stopAgent('a1');
     expect(swarm.runHistory({ issue: 70 }).attempts[0].outcome).toMatchObject({ result: 'stopped', cause: 'manager' });
+  });
+});
+
+describe('specialty-first assignment', () => {
+  const addDev = (id: string, specialty: string, authorship: number, repair: number, desk: number) => {
+    const a: Record<string, unknown> = { ...s.state.agents[0], id, name: id, specialty, desk, score: 100 - desk };
+    s.state.agents.push(a);
+    s.agentRt.set(id, { log: [], pending: [], terminal: null });
+    scores(id, authorship, repair);
+    return a;
+  };
+  const scores = (id: string, authorship: number, repair: number) => s.scoreTotals.set(id, {
+    authorship: { points: authorship, events: 2 }, repair: { points: repair, events: 2 }, neutral: 0,
+  });
+  beforeEach(() => {
+    s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
+    Object.assign(repo, { links: [], defaultBranch: 'main' });
+    Object.assign(s.state.agents[0], { specialty: 'server', score: -100 });
+    scores('a1', -1, 10);
+  });
+
+  describe.each(['backlog', 'ceo'] as const)('%s', (source) => {
+    it.each([
+      { name: 'specialist beats a higher Authorship generalist', want: 'server', other: 'frontend', points: 9, expected: 'a1' },
+      { name: 'Authorship breaks a same-specialty tie', want: 'server', other: 'server', points: 2, expected: 'a2' },
+      { name: 'desk breaks a same-specialty score tie', want: 'server', other: 'server', points: -1, expected: 'a1' },
+      { name: 'no specialist falls back by Authorship', want: 'engine', other: 'frontend', points: 2, expected: 'a2' },
+      { name: 'unlabelled work is open to any specialty', want: '', other: '', points: 2, expected: 'a2' },
+      { name: 'legacy points do not break score ties', want: '', other: 'frontend', points: -1, expected: 'a1' },
+      { name: 'unavailable specialists permit fallback', want: 'server', other: 'frontend', points: 2, expected: 'a2', unavailable: true },
+    ])('$name', async ({ want, other, points, expected, unavailable }) => {
+      addDev('a2', other, points, -10, 1);
+      if (unavailable) s.state.agents[0].startupFailed = true;
+      setIssues(issue(66, want ? [`swarm:${want}`] : []));
+      if (source === 'backlog') expect(s.startIssueWork(repo)).toBe(true);
+      else expect(await s.officeTools().call('start_issue', { floor: 1, number: 66 })).toContain('started #66');
+      expect(runTask).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: expected }), repo, expect.objectContaining({ number: 66 }), undefined);
+      const attempt = swarm.runHistory({ issue: 66 }).attempts[0];
+      const match = !!want && (expected === 'a1' ? 'server' : other) === want;
+      expect(attempt.assignment).toMatchObject({
+        reason: source === 'backlog' ? 'auto' : 'ceo',
+        factors: { policyVersion: 'specialty-first-v2', specialty: want || null, specialtyMatch: match,
+          specialtyFallback: !!want && !match, scoreKind: 'authorship', score: expected === 'a1' ? -1 : points },
+      });
+    });
+  });
+
+  it('honours an explicit CEO pick ahead of an available specialist', async () => {
+    addDev('a2', '', -5, 0, 1);
+    setIssues(issue(66, ['swarm:server']));
+    await s.officeTools().call('start_issue', { floor: 1, number: 66, agent: 'a2' });
+    expect(runTask).toHaveBeenCalledWith(expect.objectContaining({ id: 'a2' }), repo, expect.anything(), undefined);
+    expect(swarm.runHistory({ issue: 66 }).attempts[0].assignment.factors).toMatchObject({ pickedBy: 'ceo', specialtyFallback: true });
+  });
+
+  it.each(['specialist', 'repair score', 'no specialist', 'same-agent', 'explicit'] as const)('repair takeover respects %s', async (scenario) => {
+    const fixture = demoPull(repo.fullName, 'swarm/issue-66-author', false);
+    try {
+      const { pull } = fixture;
+      s.repoRt.get(repo.id)!.pulls = [pull];
+      setIssues(issue(66, ['swarm:server']));
+      const rec = s.queueQa(repo, pull.number, null, 66);
+      Object.assign(rec, { status: 'failed', fixReason: 'qa', fixInstructions: 'Repair this defect', fixCrashes: [] });
+      const other = addDev('a2', scenario === 'repair score' ? 'server' : 'frontend', 20, scenario === 'repair score' ? 11 : -2, 1);
+      if (scenario === 'no specialist') s.state.agents[0].specialty = 'engine';
+      if (scenario === 'same-agent') rec.devAgentId = 'a2';
+      if (scenario === 'explicit') rec.devAgentId = 'a1';
+      if (scenario === 'explicit') await swarm.sendBackToDev({ floor: 1, number: pull.number, agent: 'a2' });
+      const chosen = ['repair score', 'same-agent', 'explicit'].includes(scenario) ? other : s.state.agents[0];
+      vi.spyOn(s, 'prepare').mockResolvedValue('fake-desk');
+      vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+      expect(s.startPipelineWork(repo)).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rec).toMatchObject({ status: 'fixing', devAgentId: chosen.id });
+      expect(swarm.runHistory({ pr: pull.number }).attempts[0].assignment).toMatchObject({
+        reason: 'repair', factors: { policyVersion: 'specialty-first-v2', specialty: 'server', scoreKind: 'repair',
+          score: chosen.id === 'a1' ? 10 : scenario === 'repair score' ? 11 : -2,
+          specialtyMatch: ['specialist', 'repair score'].includes(scenario),
+          specialtyFallback: !['specialist', 'repair score'].includes(scenario) },
+      });
+    } finally { fixture.remove(); }
+  });
+
+  it('refuses an unavailable explicit repair owner instead of silently assigning a teammate', async () => {
+    const fixture = demoPull(repo.fullName, 'swarm/issue-66-author', false);
+    try {
+      s.repoRt.get(repo.id)!.pulls = [fixture.pull];
+      setIssues(issue(66, ['swarm:server']));
+      const rec = s.queueQa(repo, fixture.pull.number, null, 66);
+      rec.status = 'failed';
+      Object.assign(addDev('a2', 'frontend', 20, 20, 1), { status: 'working', issueNumber: 70 });
+      await expect(swarm.sendBackToDev({ floor: 1, number: fixture.pull.number, agent: 'a2' })).rejects.toMatchObject({ status: 409, message: expect.stringContaining('not available') });
+      expect(rec.devAgentId).toBeNull();
+    } finally { fixture.remove(); }
+  });
+
+  it('CEO repair handoff ranks a new owner by specialty and Repair', async () => {
+    const fixture = demoPull(repo.fullName, 'swarm/issue-66-author', false);
+    try {
+      s.repoRt.get(repo.id)!.pulls = [fixture.pull];
+      setIssues(issue(66, ['swarm:server']));
+      const rec = s.queueQa(repo, fixture.pull.number, null, 66);
+      rec.status = 'failed';
+      addDev('a2', 'frontend', 20, 20, 1);
+      await swarm.sendBackToDev({ floor: 1, number: fixture.pull.number });
+      expect(rec.devAgentId).toBe('a1');
+    } finally { fixture.remove(); }
+  });
+
+  it.each(['suitability', 'ready workload', 'open workload', 'desk'] as const)('QA fallback uses %s and excludes the owner regardless of scores', (criterion) => {
+    const owner = s.state.agents[0];
+    Object.assign(owner, { specialty: 'qa', desk: -1 });
+    const other = addDev('a2', 'frontend', 100, 100, 1);
+    const cover = addDev('a3', criterion === 'suitability' ? 'testing' : 'server', -10, -10, criterion === 'desk' ? 0 : 2);
+    const rec = s.queueQa(repo, 13, owner, 66);
+    if (criterion === 'ready workload') setIssues(issue(70, ['swarm:frontend']));
+    if (criterion === 'open workload') setIssues(issue(70, ['swarm:frontend'], 'Depends on #71'), issue(71, ['swarm:skip']));
+    const qa = vi.spyOn(s, 'runQa').mockResolvedValue();
+    expect(s.startPipelineWork(repo)).toBe(true);
+    expect(qa).toHaveBeenCalledExactlyOnceWith(cover, repo, rec);
+    expect(other.status).toBe('idle');
   });
 });
 
@@ -663,14 +785,14 @@ describe('developer scores', () => {
     expect(runTask).toHaveBeenCalledWith(dev(), repo, issue(66), undefined);
   });
 
-  it('chooses the highest score ahead of specialty', () => {
+  it('chooses a free specialist ahead of a higher-scoring generalist', () => {
     dev().specialty = 'server';
     const higher = { ...dev(), id: 'a2', name: 'Barbara', specialty: '', score: 2, desk: 1 };
     s.state.agents.push(higher);
     s.agentRt.set('a2', { log: [], pending: [], terminal: null });
     setIssues(issue(66, ['swarm:server']));
     expect(s.startIssueWork(repo)).toBe(true);
-    expect(runTask).toHaveBeenCalledWith(higher, repo, expect.objectContaining({ number: 66 }), undefined);
+    expect(runTask).toHaveBeenCalledWith(dev(), repo, expect.objectContaining({ number: 66 }), undefined);
   });
 
   describe('PR attribution', () => {

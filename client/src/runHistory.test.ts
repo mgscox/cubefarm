@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cost, duration, outcomeLabel, runtimeLabel, workLabel } from './runHistory';
+import { assignmentLabel, cost, duration, outcomeLabel, runtimeLabel, workLabel } from './runHistory';
 
 describe('run history labels', () => {
   it('tells unknown measurements from zero', () => {
@@ -26,6 +26,16 @@ describe('run history labels', () => {
     expect(outcomeLabel({ outcome: null, times })).toBe('pending');
     expect(outcomeLabel({ outcome: null, times: { ...times, startedAt: 2 } })).toBe('running');
     expect(outcomeLabel({ outcome: { result: 'prepare-failed', cause: 'worker' }, times })).toBe('prepare-failed · worker');
+  });
+
+  it('explains specialty matches, fallbacks and the relevant score while keeping old attempts readable', () => {
+    const label = (factors: Record<string, string | number | boolean | null>) => assignmentLabel({ assignment: { reason: 'auto', factors } });
+    expect(label({ score: 100 })).toBe('auto');
+    const factors = { policyVersion: 'specialty-first-v2', specialty: 'server', specialtyMatch: true, scoreKind: 'authorship', score: -1 };
+    expect(label(factors)).toBe('auto · server match · Authorship -1');
+    expect(label({ ...factors, specialtyMatch: false, scoreKind: 'repair', score: 2 })).toBe('auto · server fallback · Repair 2');
+    expect(label({ ...factors, specialty: null })).toBe('auto · any specialty · Authorship -1');
+    expect(label({ policyVersion: 'qa-workload-v1', specialty: 'qa', specialtyMatch: true, scoreKind: null, score: null })).toBe('auto · qa match');
   });
 
   it('describes the runtime the office asked for', () => {
