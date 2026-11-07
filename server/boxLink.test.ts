@@ -7,7 +7,7 @@ import { encode, PTY_PROTOCOL, type ToHost } from './ptyProtocol.ts';
 import { withOperation } from './operation.ts';
 import type { BoxConnection } from './machine.ts';
 import { images, IMAGE_ROUTE } from './attachments.ts';
-import { NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
+import { BASH_EXPANSION_PERMISSION, NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
 import type { AgentTerminal } from './terminal.ts';
 
 vi.mock('node:child_process', async (original) => ({ ...await original<typeof import('node:child_process')>(), spawn: vi.fn() }));
@@ -88,9 +88,17 @@ describe('remote desk cancellation', () => {
     expect(await pending).toMatchObject({ dir: 'remote-session', prompt: 'remote prompt' });
   });
 
-  it('recovers a missed Claude approval over the box transport and continues the remote session', async () => {
+  it.each([
+    { tool: 'Playwright', dialog: NAVIGATE_PERMISSION, log: 'Approved playwright — Navigate to a URL (hook missed)' },
+    { tool: 'Bash', dialog: BASH_EXPANSION_PERMISSION, log: 'Approved Bash shell expansion once' },
+  ])('answers the Claude $tool dialog over the box transport and continues the remote session', async ({ tool, dialog, log }) => {
     let screen = '';
-    const term = { cols: 120, rows: 32, bind: vi.fn(), note: vi.fn(), write: (s: string) => { screen = s; }, screen: () => screen } as unknown as AgentTerminal;
+    let queued = '';
+    const term = {
+      cols: 120, rows: 32, bind: vi.fn(), note: vi.fn(),
+      write: (s: string) => { if (tool === 'Bash') queued = s; else screen = s; },
+      flush: async () => { screen = queued; }, screen: () => screen,
+    } as unknown as AgentTerminal;
     const cb = { log: vi.fn(), tool: vi.fn(), sessionId: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), finished: vi.fn() };
     const session = box.machine.startSession({
       cwd: 'remote-desk', cli: 'claude', terminal: term, prompt: 'Test the preview', systemAppend: '',
@@ -108,13 +116,16 @@ describe('remote desk cancellation', () => {
     });
     // A missing hook produces a permission dialog on the remote PTY, carried to the office over SSH.
     await vi.advanceTimersByTimeAsync(121_000);
-    child.stdout.write(encode({ op: 'data', id: launch.id, data: NAVIGATE_PERMISSION }));
+    child.stdout.write(encode({ op: 'data', id: launch.id, data: dialog }));
+    if (tool === 'Bash') {
+      child.stdout.write(encode({ op: 'hook', rid: 990, token: launch.token, body: { hook_event_name: 'Notification', notification_type: 'permission_prompt' } }));
+    }
     await vi.advanceTimersByTimeAsync(30_000);
     expect(sent.filter((m) => m.op === 'write')).toEqual([{ op: 'write', id: launch.id, data: '\r' }]);
     await vi.advanceTimersByTimeAsync(4000);
     expect(cb.finished).toHaveBeenCalledWith(expect.objectContaining({ ok: true, text: 'Preview checked' }));
     expect(sent).toContainEqual({ op: 'hookReply', rid: 991, answer: {} });
-    expect(cb.log.mock.calls.flat(2)).toContainEqual({ kind: 'system', text: 'Approved playwright — Navigate to a URL (hook missed)' });
+    expect(cb.log.mock.calls.flat(2)).toContainEqual({ kind: 'system', text: log });
     session.stop();
   });
 });
