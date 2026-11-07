@@ -22,7 +22,7 @@ import { developerFeedback, type FeedbackEvent } from './feedback.ts';
 import { submittedContribution, finishedContribution } from './prContributions.ts';
 import { compactHealth, errorCause, exportAttempts, finishedOutcome, playbookVersion, redact, RunHistory, addUsage } from './runHistory.ts';
 import { checkParkPr } from './parkPr.ts';
-import { checkMergePr } from './mergePr.ts';
+import { checkMergePr, incompleteAuditOverride } from './mergePr.ts';
 import { issueHolder, duplicateIssueSessions, issueTaken } from './issueClaims.ts';
 import { orphanedQa } from './qaOwnership.ts';
 import { closedWork, closedWorkText, issueClosed, restartClosedWork, type ClosedWork } from './closedWork.ts';
@@ -3327,9 +3327,12 @@ export class Swarm {
     const repo = this.repo(repoId);
     const rt = this.repoRt.get(repo.id)!;
     if (rt.parking || rt.merging) throw new HttpError(409, `Wait until PR parking or merging finishes on ${repo.fullName}`);
+    const record = () => this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number);
+    const outcome = () => this.state.qaOutcomes.findLast((o) => o.repoId === repo.id && o.prNumber === number && o.reviewId === record()?.reviewId);
     const preflight = (pr: PullInfo | PrDetails | undefined, reserved = false) => checkMergePr(number, repo.fullName, {
       merging: !reserved && rt.merging, parking: !reserved && !!rt.parking, syncing: rt.syncing,
-      qa: this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number),
+      qa: record(),
+      outcome: outcome(),
       pull: pr,
       busy: this.state.agents.some((a) => a.repoId === repo.id && (
         a.prNumber === number || (pr && (a.branch === pr.headRefName ||
@@ -3349,7 +3352,7 @@ export class Swarm {
         if (!rec && labeled && current.state === 'OPEN') {
           rec = this.queueQa(repo, number, null, current.closesIssues[0] ?? null, current.isCrossRepository);
         }
-        const held = rec ? this.holdForSecurityReview(repo, rec, current) : labeled;
+        const held = rec ? !(approval && incompleteAuditOverride(rec, outcome(), current)) && this.holdForSecurityReview(repo, rec, current) : labeled;
         if (held || (rec?.securityReview && !current.baseSha)) {
           throw new HttpError(409, `PR #${number} requires a passing security review for its current head and base`);
         }
@@ -5177,11 +5180,12 @@ export class Swarm {
       const { status: nextStatus, conflictFix } = outcome();
       if (evidence) {
         const current = await this.backend.prDetails(repo.fullName, rec.prNumber).catch(() => null);
+        // A stopped attempt never writes its failedSha, so its posted report must not count as merge evidence.
+        if (gone()) return;
         this.observeQaRevision(evidence, current);
         evidence.commentUrl = commentUrl;
         this.emitQaOutcome(evidence);
         this.save();
-        if (gone()) return;
         if (nextStatus === 'failed') {
           const candidates = scoringFindings(evidence).filter((f) => f.attributableTo?.agentId === rec.devAgentId);
           const change = this.recordFeedback({ kind: 'qa-send-back', ...rec, findingIds: candidates.map((f) => f.id) });
@@ -5208,7 +5212,8 @@ export class Swarm {
         fixReason: pass || incomplete ? null : conflictFix ? 'conflict' : 'qa',
         ...(conflictFix ? { mergeFixes: rec.mergeFixes + 1 } : {}),
         passedSha: pass && !escalate ? rec.testedSha : null,
-        failedSha: pass || incomplete ? null : rec.testedSha,
+        // The report's own verdict, even if a later read left the workflow incomplete: a manager override must not see a pass.
+        failedSha: report.verdict === 'fail' ? rec.testedSha : null,
         ...(!security ? { ciRequired: environmentOnly } : resourceFallback ? { ciRequired: true } : {}),
         securityReview: security && pass && rec.testedSha ? { ...review, approvedSha: rec.testedSha } : rec.securityReview,
         ...(security && pass ? { securityLabel: false } : {}), // the office removed it, not the manager
