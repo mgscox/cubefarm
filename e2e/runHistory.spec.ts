@@ -26,7 +26,7 @@ test('an open run history follows lifecycle events, PR merges and reconnects', a
           id: 'live-history-attempt', parentId: null, repoId: repo.id, repo: repo.fullName,
           task: 'fix', specialty: null, issueNumber: 999, prNumber: 999,
           agent: { id: 'history-desk', name: 'History developer', role: 'dev', specialty: '' },
-          assignment: { reason: 'repair', factors: {} },
+          assignment: { reason: 'repair', factors: { policyVersion: 'specialty-first-v2', specialty: 'server', specialtyMatch: false, specialtyFallback: true, scoreKind: 'repair', score: 2 } },
           runtime: { cli: 'codex', model: null, effort: 'high', playbook: null, office: 'test' },
           worker: { box: '', name: 'office', healthAtStart: null, healthAtEnd: null },
           sessionIds: [], revisions: { start: null, submitted: null }, review: null,
@@ -52,12 +52,15 @@ test('an open run history follows lifecycle events, PR merges and reconnects', a
   await openHistory();
   const row = page.locator('.run-history tbody tr').filter({ hasText: 'History developer' });
   await expect(row).toContainText('running');
+  await expect(row).toContainText('repair · server fallback · Repair 2');
+  await expect(row.getByText('repair · server fallback · Repair 2')).toHaveAttribute('title', 'specialty-first-v2');
   finish();
   await expect(row).toContainText('no-change · agent');
   await expect(row).toContainText('PR #999 (merged)');
   await expect(row).toContainText('4s');
   await page.screenshot({ path: testInfo.outputPath('run-history-live.png') });
   await openHistory();
+  await expect(row).toContainText('repair · server fallback · Repair 2');
   await expect(row).toContainText('no-change · agent');
   await expect(row).toContainText('PR #999 (merged)');
 });

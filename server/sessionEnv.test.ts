@@ -45,6 +45,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   // Session files and helper scripts are irrelevant to env handoff; never touch office state.
   vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
+  vi.spyOn(fs, 'mkdtempSync').mockImplementation((prefix) => `${prefix}fixture`);
   vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
   vi.spyOn(fs, 'rm').mockImplementation((_path, _options, cb) => cb(null));
   vi.stubEnv('npm_config_registry', 'https://registry.npmjs.org/');

@@ -6,7 +6,7 @@ export type AgentStatus =
   | 'working' // Claude Code session running
   | 'done' // finished, PR opened (or finished without one)
   | 'error' // session failed
-  | 'stopped'; // manager stopped it
+  | 'stopped'; // stoppedBy records whether scheduling can recover it
 
 export type LogKind = 'text' | 'tool' | 'result' | 'system' | 'error' | 'manager' | 'done' | 'thinking';
 
@@ -187,6 +187,7 @@ export interface NoWorkEnding {
   body: string;
   labels: string[];
   ownerCommentAt?: string;
+  reason?: string; // repeated failed sessions, retained until the brief changes
   retryAfterSync?: number; // no automatic retry until an issue refresh starts after this ending
 }
 
@@ -373,7 +374,15 @@ export type TermServerMessage =
 /** Browser to server: keystrokes go to the running CLI; the size is the viewer's fitted terminal. */
 export type TermClientMessage = { t: 'input'; data: string } | { t: 'resize'; cols: number; rows: number };
 
-export interface AgentView {
+/** Recovery state persists across office restarts and travels with agent snapshots/events. */
+export interface DeskRecovery {
+  stoppedBy?: 'manager' | 'office';
+  lastErrorAt?: number;
+  startupRetry?: { failures: number; retryAt: number | null; action: string | null };
+  taskFailures?: { key: string; count: number };
+}
+
+export interface AgentView extends DeskRecovery {
   id: string;
   name: string;
   repoId: string;
@@ -410,7 +419,7 @@ export interface AgentView {
   hasScreenshot: boolean;
   screenshotAt: number | null;
   lastError: string | null;
-  /** A launch crash keeps this desk out of scheduling until Clear desk. */
+  /** A launch crash waits until startupRetry, or for its named manager action. */
   startupFailed?: boolean;
   box: string | null; // their own box, overriding the floor's (null = the floor's)
   deskBox: string; // where their current task's desk and CLI are ('' = the office's machine)
