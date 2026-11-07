@@ -1,6 +1,7 @@
 import { QaHistory } from './QaHistory';
 import { ScoreHistory } from './ScoreHistory';
 import { PrContributions } from './PrContributions';
+import { RunHistory } from './RunHistory';
 import { PromptTextarea } from './PromptTextarea';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -287,6 +288,7 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
           ))}
         </details>
       )}
+      <RunHistory repoId={repo.id} />
       <QaHistory repoId={repoId} />
       <ScoreHistory repoId={repoId} />
       <div className="kanban">

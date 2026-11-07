@@ -61,6 +61,7 @@ interface State {
   qaOutcomes: import('../../shared/types').QaOutcomeView[];
   scoreEvents: import('../../shared/types').ScoreEventView[];
   prContributions: PrContributionView[];
+  runAttempts: NonNullable<WorldSnapshot['runAttempts']>;
   qa: Record<string, QaView>; // `${repoId}#${prNumber}`
   requests: HireRequestView[];
   ceo: CeoInfo;
@@ -176,6 +177,7 @@ export const useStore = create<State>((set, get) => ({
   qaOutcomes: [],
   scoreEvents: [],
   prContributions: [],
+  runAttempts: [],
   requests: [],
   ceo: { queue: [], job: null, lastReviewAt: null, nextReviewAt: null },
   research: { queue: [], job: null, done: [] },
@@ -234,6 +236,7 @@ export const useStore = create<State>((set, get) => ({
           qaOutcomes: d.qaOutcomes ?? [],
           scoreEvents: d.scoreEvents ?? [],
           prContributions: d.prContributions ?? [],
+          runAttempts: d.runAttempts ?? [],
           requests: d.requests,
           ceo: d.ceo,
           research: d.research ?? { queue: [], job: null, done: [] },
@@ -316,6 +319,17 @@ export const useStore = create<State>((set, get) => ({
       case 'prContribution': {
         const h = ev.contribution;
         set({ prContributions: [...get().prContributions.filter((p) => p.repoId !== h.repoId || p.prNumber !== h.prNumber), h] });
+        break;
+      }
+      case 'runAttempt': {
+        const attempts = get().runAttempts;
+        const index = attempts.findIndex((x) => x.id === ev.attempt.id);
+        set({ runAttempts: index < 0 ? [...attempts, ev.attempt] : attempts.map((x, i) => i === index ? ev.attempt : x) });
+        break;
+      }
+      case 'runAttemptsRemoved': {
+        const ids = new Set(ev.ids);
+        set({ runAttempts: get().runAttempts.filter((x) => !ids.has(x.id)) });
         break;
       }
       case 'qa': {

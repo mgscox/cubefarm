@@ -121,6 +121,7 @@ Agents can do anything your own coding agent in a terminal can. Run the office w
 ## Where things live
 
 - `~/.cubefarm/state.json`: floors, agents, settings and terminal history (`SWARM_HOME` overrides the folder)
+- `~/.cubefarm/run-history.json`: every attempt at an issue or PR, kept through restarts and QA cleanup ([run history](run-history.md))
 - `~/.cubefarm/terminals/<agent>.ansi`: each agent's terminal screen and scrollback
 - `~/.cubefarm/sessions/<token>/`: a running CLI session's settings, MCP config and instructions (removed when it ends); `~/.cubefarm/bin/`: the small scripts the CLIs call back to the office with
 - `~/.cubefarm/workspaces/<owner>__<repo>/main`: a clone of each repo

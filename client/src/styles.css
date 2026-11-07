@@ -2800,3 +2800,13 @@ input.inline:focus {
 .claude-auth-command { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; }
 
 .claude-auth-url { overflow-wrap: anywhere; user-select: all; max-height: 7em; overflow-y: auto; }
+
+/* ---------- run history (Kanban) ---------- */
+.run-history summary { cursor: pointer; }
+.run-history-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0; }
+.run-history-bar a.btn { text-decoration: none; color: inherit; }
+.run-history-table { contain: inline-size; overflow-x: auto; max-height: 320px; overflow-y: auto; }
+.run-history-table table { border-collapse: collapse; font-size: 0.8rem; white-space: nowrap; }
+.run-history-table th,
+.run-history-table td { border: 1px solid rgba(31, 29, 43, 0.15); padding: 3px 6px; text-align: left; }
+.run-history-table th { position: sticky; top: 0; background: var(--paper); }
