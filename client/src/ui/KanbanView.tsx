@@ -1,4 +1,5 @@
 import { QaHistory } from './QaHistory';
+import { ScoreHistory } from './ScoreHistory';
 import { PrContributions } from './PrContributions';
 import { RunHistory } from './RunHistory';
 import { PromptTextarea } from './PromptTextarea';
@@ -289,6 +290,7 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
       )}
       <RunHistory repoId={repo.id} />
       <QaHistory repoId={repoId} />
+      <ScoreHistory repoId={repoId} />
       <div className="kanban">
         {column(
           '📋 Backlog',
