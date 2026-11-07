@@ -59,6 +59,7 @@ interface State {
   logs: Record<string, LogLine[]>;
   screens: Record<string, number>; // agentId -> screenshot timestamp (cache buster)
   qaOutcomes: import('../../shared/types').QaOutcomeView[];
+  scoreEvents: import('../../shared/types').ScoreEventView[];
   prContributions: PrContributionView[];
   qa: Record<string, QaView>; // `${repoId}#${prNumber}`
   requests: HireRequestView[];
@@ -173,6 +174,7 @@ export const useStore = create<State>((set, get) => ({
   screens: {},
   qa: {},
   qaOutcomes: [],
+  scoreEvents: [],
   prContributions: [],
   requests: [],
   ceo: { queue: [], job: null, lastReviewAt: null, nextReviewAt: null },
@@ -230,6 +232,7 @@ export const useStore = create<State>((set, get) => ({
           screens,
           qa,
           qaOutcomes: d.qaOutcomes ?? [],
+          scoreEvents: d.scoreEvents ?? [],
           prContributions: d.prContributions ?? [],
           requests: d.requests,
           ceo: d.ceo,
@@ -303,6 +306,11 @@ export const useStore = create<State>((set, get) => ({
       }
       case 'qaOutcome': {
         set({ qaOutcomes: [...get().qaOutcomes.filter((o) => o.id !== ev.outcome.id), ev.outcome] });
+        break;
+      }
+      case 'scoreEvents': {
+        const known = new Set(get().scoreEvents.map((e) => e.id));
+        set({ scoreEvents: [...get().scoreEvents, ...ev.events.filter((e) => !known.has(e.id))] });
         break;
       }
       case 'prContribution': {

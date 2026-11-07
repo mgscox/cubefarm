@@ -53,6 +53,8 @@ interface Internals {
   recordResearchFinished(agent: unknown, job: unknown, repo: Repo, fullName: string, result: SessionResult): Promise<void>;
   onIssueFinished(agent: unknown, repo: Repo, result: SessionResult, released: Promise<void>, generation: number | undefined): Promise<void>;
   onFixFinished(agent: unknown, repo: Repo, result: SessionResult): Promise<void>;
+  startRepairContribution(dev: unknown, repo: Repo, rec: unknown, startingSha: string | null): void;
+  syncScores(repoId: string, prNumber: number): void;
   postMessage(from: string, text: string): void;
   broadcast(event: ServerEvent): void;
   save(): void;
@@ -3745,6 +3747,80 @@ describe('QA rounds', () => {
       await fresh.init();
       expect(fresh.snapshot().qaOutcomes).toEqual(swarm.snapshot().qaOutcomes);
       await fresh.shutdown();
+    });
+
+    describe('Authorship and Repair scores', () => {
+      const scores = (sw: Swarm, id: string) => sw.snapshot().agents.find((a) => a.id === id)?.scores;
+      const ledger = () => swarm.snapshot().scoreEvents!.map((e) => e.id);
+
+      it('worker-blocked unchanged-head merge: the author earns Authorship and the worker result stays neutral', async () => {
+        await complete([{ name: 'Suite', result: 'fail', failureKind: 'environment', details: 'Exit 137: worker OOM; unchanged-base probe passed.' }]);
+        expect(rec).toMatchObject({ status: 'passed', ciRequired: true });
+        s.reconcilePulls(repo, [{ ...pull, state: 'MERGED' }]);
+        s.reconcilePulls(repo, [{ ...pull, state: 'MERGED' }]);
+        expect(scores(swarm, 'a1')).toEqual({ authorship: { points: 2, events: 1 }, repair: { points: 0, events: 0 }, neutral: 1 });
+        expect(ledger()).toEqual(['neutral:qa:attempt-1', `authorship:merge:${repo.id}#13`]);
+      });
+
+      it('inherited-defect repair handoff: merge and defect stay with the author, verified Repair goes to the repairer, through restart', async () => {
+        const events = vi.spyOn(s, 'broadcast');
+        await complete([code]);
+        expect(scores(swarm, 'a1')?.authorship).toEqual({ points: -1, events: 1 });
+        const barbara = addAgent('a2', 'Barbara', 'dev', 1);
+        Object.assign(barbara, { status: 'working', task: 'fix', prNumber: 13 });
+        Object.assign(rec, { status: 'fixing', devAgentId: 'a2', fixReason: 'qa' });
+        s.startRepairContribution(barbara, repo, rec, 'sha-1');
+        vi.mocked(s.backend.prDetails).mockResolvedValue({ ...pull, headSha: 'sha-2', body: '', isCrossRepository: false, baseSha: 'base-1' });
+        await s.onFixFinished(barbara, repo, result(true));
+        Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+        Object.assign(rec, { status: 'testing', testedSha: 'sha-2', attempt: { id: 'attempt-2', startedAt: Date.now(), headSha: 'sha-2', baseSha: 'base-1' } });
+        await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', summary: 'Toolbar fixed', checks: [{ name: 'Feature', result: 'pass', details: 'Button reachable.' }] }));
+        s.reconcilePulls(repo, [{ ...pull, headSha: 'sha-2', state: 'MERGED' }]);
+        expect(scores(swarm, 'a1')).toEqual({ authorship: { points: 1, events: 2 }, repair: { points: 0, events: 0 }, neutral: 0 });
+        expect(scores(swarm, 'a2')).toEqual({ authorship: { points: 0, events: 0 }, repair: { points: 1, events: 1 }, neutral: 0 });
+        expect(ada.score).toBe(-1); // the legacy total is unchanged by the new ledger
+        expect(events).toHaveBeenCalledWith(expect.objectContaining({ type: 'agent', agent: expect.objectContaining({ id: 'a2', scores: expect.objectContaining({ repair: { points: 1, events: 1 } }) }) }));
+
+        vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+        const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+        vi.spyOn(fs, 'rename').mockResolvedValue();
+        await s.writeState();
+        const persisted = JSON.parse(String(write.mock.calls.at(-1)![1]));
+        persisted.repos = [];
+        const fresh = new Swarm(createDemoBackend());
+        const restored = fresh as unknown as Internals;
+        restored.backend.demo = false;
+        vi.spyOn(restored, 'save').mockImplementation(() => {});
+        vi.spyOn(fs, 'readFile').mockResolvedValueOnce(JSON.stringify(persisted));
+        await fresh.init();
+        restored.syncScores(repo.id, 13); // a duplicate sync after restart appends nothing
+        expect(fresh.snapshot().scoreEvents).toEqual(swarm.snapshot().scoreEvents);
+        expect(scores(fresh, 'a1')).toEqual(scores(swarm, 'a1'));
+        expect(scores(fresh, 'a2')).toEqual(scores(swarm, 'a2'));
+        await fresh.shutdown();
+      });
+
+      it('starts an earlier office at zero without reconstructing its history', async () => {
+        await complete([code]);
+        s.reconcilePulls(repo, [{ ...pull, state: 'MERGED' }]);
+        vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+        const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+        vi.spyOn(fs, 'rename').mockResolvedValue();
+        await s.writeState();
+        const persisted = JSON.parse(String(write.mock.calls.at(-1)![1]));
+        delete persisted.scoreLedger;
+        persisted.repos = [];
+        const fresh = new Swarm(createDemoBackend());
+        const restored = fresh as unknown as Internals;
+        restored.backend.demo = false;
+        vi.spyOn(restored, 'save').mockImplementation(() => {});
+        vi.spyOn(fs, 'readFile').mockResolvedValueOnce(JSON.stringify(persisted));
+        await fresh.init();
+        restored.syncScores(repo.id, 13);
+        expect(fresh.snapshot().scoreEvents).toEqual([]);
+        expect(fresh.snapshot().agents.find((a) => a.id === 'a1')).toMatchObject({ score: 1, scores: { authorship: { points: 0, events: 0 }, repair: { points: 0, events: 0 } } });
+        await fresh.shutdown();
+      });
     });
   });
 

@@ -1773,6 +1773,7 @@ input.inline:focus {
 }
 .team-name {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 }

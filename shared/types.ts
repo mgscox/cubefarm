@@ -347,6 +347,7 @@ export interface AgentView {
   endedAt: number | null;
   costUsd: number;
   score: number; // legacy feedback: +2 per merged PR, -1 per QA send-back with eligible defect evidence
+  scores?: DeveloperScoresView; // developers only: Authorship and Repair from the score ledger
   turns: number;
   browserUrl: string | null;
   hasScreenshot: boolean;
@@ -431,6 +432,29 @@ export interface QaOutcomeView {
   commentUrl: string | null;
   corrections: { id: string; findingId: string; previousCorrectionId: string | null; actor: string; reason: string; classification: QaClassification; at: number }[];
   legacyPenalty?: { agentId: string; findingIds: string[]; active: boolean };
+}
+
+/** A developer's separate scores; `events` is the sample count behind each total. */
+export interface DeveloperScoresView {
+  authorship: { points: number; events: number };
+  repair: { points: number; events: number };
+  neutral: number; // recorded outcomes that scored nothing
+}
+
+/** One append-only score ledger entry. Corrections void or restore an earlier event instead of editing it. */
+export interface ScoreEventView {
+  id: string; // stable identity from the evidence: a replay never appends it twice
+  repoId: string;
+  prNumber: number;
+  agentId: string | null; // null: attribution unknown
+  name: string | null;
+  score: 'authorship' | 'repair' | null; // null: neutral history
+  points: number;
+  rule: 'merge' | 'original-defect' | 'repair-fix' | 'repair-regression' | 'neutral' | 'correction';
+  reason: string;
+  evidence: { outcomeId?: string; findingId?: string; attemptId?: string; sha?: string | null; correctionId?: string };
+  corrects?: { eventId: string; active: boolean };
+  at: number;
 }
 
 /** Failed preparations for one PR task and head; kept across office restarts. */
@@ -803,6 +827,7 @@ export interface WorldSnapshot {
   agents: AgentView[];
   qa: QaView[];
   prContributions?: PrContributionView[];
+  scoreEvents?: ScoreEventView[];
   qaOutcomes?: QaOutcomeView[];
   requests: HireRequestView[];
   ceo: CeoInfo;
@@ -838,6 +863,7 @@ export type ServerEvent =
   | { type: 'qa'; qa: QaView }
   | { type: 'qaOutcome'; outcome: QaOutcomeView }
   | { type: 'prContribution'; contribution: PrContributionView }
+  | { type: 'scoreEvents'; events: ScoreEventView[] }
   | { type: 'qaRemoved'; repoId: string; prNumber: number }
   | { type: 'settings'; settings: SwarmSettings }
   | { type: 'request'; request: HireRequestView }
