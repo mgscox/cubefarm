@@ -2809,3 +2809,11 @@ input.inline:focus {
 .run-history-table th,
 .run-history-table td { border: 1px solid rgba(31, 29, 43, 0.15); padding: 3px 6px; text-align: left; }
 .run-history-table th { position: sticky; top: 0; background: var(--paper); }
+.lessons summary { cursor: pointer; }
+.lessons h4 { margin: 10px 0 4px; }
+.lessons .kcard { margin: 6px 0; }
+.lesson-guidance { white-space: pre-wrap; margin: 4px 0; }
+.lesson-sources { margin: 2px 0; padding-left: 18px; overflow-wrap: anywhere; }
+.lesson-actions { flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.lesson-actions input { flex: 1 1 160px; min-width: 0; }
+.lesson-form .row { flex-wrap: wrap; }

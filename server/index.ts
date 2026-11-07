@@ -170,6 +170,14 @@ app.get('/api/run-history', route((req, res) => {
   if (req.query.download) res.attachment(`cubefarm-run-history${filter.repoId ? `-${filter.repoId.replace(/[^\w.-]+/g, '-')}` : ''}.json`);
   return swarm.runHistory(filter);
 }));
+app.get('/api/lessons', route((req, res) => {
+  const filter = { repoId: str(req.query.repoId) || undefined, specialty: str(req.query.specialty) || undefined };
+  if (req.query.download) res.attachment(`cubefarm-lessons${filter.repoId ? `-${filter.repoId.replace(/[^\w.-]+/g, '-')}` : ''}.json`);
+  return swarm.lessons(filter);
+}));
+app.post('/api/repos/:repo/lessons', route((req) => swarm.draftLesson(repoId(req), req.body ?? {})));
+app.post('/api/lessons/:id/versions', route((req) => swarm.reviseLesson(str(req.params.id), req.body ?? {})));
+app.post('/api/lessons/:id/reviews', route((req) => swarm.reviewLesson(str(req.params.id), req.body ?? {})));
 app.patch('/api/fleet/capacity', route((req) => swarm.setMachineCapacity(req.body?.id, req.body?.capacity)));
 app.patch('/api/agents/:id', route((req) => swarm.updateAgent(String(req.params.id), req.body ?? {})));
 app.delete('/api/agents/:id', route((req) => swarm.fireAgent(String(req.params.id))));

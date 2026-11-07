@@ -45,6 +45,8 @@ import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './m
 import { qaOutcome } from './qaOutcome.ts';
 import { qaFindings, workerSnapshot } from './qaEvidence.ts';
 import { scoringFindings } from '../shared/qaEvidence.ts';
+import { lessonExport } from '../shared/lessons.ts';
+import { draftLesson, reviewLesson, reviseLesson } from './lessons.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
 import { pickRequestedStart, retainRequestedStarts } from './requestedStarts.ts';
@@ -57,7 +59,7 @@ import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isPrototypeIssue, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, PROTOTYPE_BRANCH, prototypeIssueNumber, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
-import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView, type PrContributionView, type RunAssignReason, type RunAttemptView, type RunHistoryExport, type QaOutcomeView, type QaClassification } from '../shared/types.ts';
+import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type MachineCapacity, type MachineTelemetry, type PublicationView, type PrContributionView, type RunAssignReason, type RunAttemptView, type RunHistoryExport, type QaOutcomeView, type QaClassification, type LessonExport, type LessonView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
 import { COMPANY_RESEARCH_DOCS, isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
 import type {
@@ -248,6 +250,7 @@ interface Persisted {
   qa: QaRecord[];
   prContributions: PrContributionView[];
   qaOutcomes: QaOutcomeView[];
+  lessons: LessonView[];
   requests: HireRequestView[];
   ceo: CeoState;
   research: ResearchState;
@@ -640,6 +643,7 @@ export class Swarm {
     qa: [],
     prContributions: [],
     qaOutcomes: [],
+    lessons: [],
     requests: [],
     ceo: { queue: [], job: null, lastReviewAt: null, lastFingerprint: null },
     research: { queue: [], job: null, done: [] },
@@ -805,6 +809,7 @@ export class Swarm {
         feedbackEvents: loaded.feedbackEvents ?? {},
         prContributions: loaded.prContributions ?? [],
         qaOutcomes: loaded.qaOutcomes ?? [],
+        lessons: loaded.lessons ?? [],
         qa: (loaded.qa ?? []).map((q) => ({
           ...q,
           reviewId: q.reviewId ?? crypto.randomUUID(),
@@ -1131,6 +1136,7 @@ export class Swarm {
       prContributions: this.state.prContributions,
       runAttempts: this.history.attempts,
       qaOutcomes: this.state.qaOutcomes,
+      lessons: this.state.lessons,
       qa: this.state.qa.filter((q) => !q.closed).map((q) => this.qaView(q)),
       requests: this.state.requests,
       ceo: this.ceoInfo(),
@@ -1454,6 +1460,55 @@ export class Swarm {
     this.emitQaOutcome(outcome);
     await this.writeState();
     return correction;
+  }
+
+  // ---------- lessons ----------
+
+  /** Approved, applicable lessons for a floor and specialty: the lesson view's and evaluations' export. */
+  lessons(filter: { repoId?: string; specialty?: string }): LessonExport {
+    return lessonExport(this.state.lessons, filter, Date.now());
+  }
+
+  private lessonEvidence(repoId: string) {
+    return { repoId: this.repo(repoId).id, outcomes: this.state.qaOutcomes, attempts: this.history.attempts };
+  }
+
+  private lesson(id: string) {
+    const lesson = this.state.lessons.find((l) => l.id === id);
+    if (!lesson) throw new HttpError(404, 'Unknown lesson');
+    return lesson;
+  }
+
+  /** Lessons change only through a saved review history; a failed save undoes the change. */
+  private async saveLesson(lesson: LessonView, undo: () => void) {
+    try {
+      await this.writeState();
+    } catch (err) {
+      undo();
+      throw err;
+    }
+    this.broadcast({ type: 'lesson', lesson });
+    return lesson;
+  }
+
+  async draftLesson(repoId: string, input: unknown) {
+    const lesson = draftLesson(input, this.lessonEvidence(repoId), 'manager', Date.now());
+    this.state.lessons.push(lesson);
+    return this.saveLesson(lesson, () => { this.state.lessons = this.state.lessons.filter((l) => l !== lesson); });
+  }
+
+  async reviseLesson(id: string, input: unknown) {
+    const lesson = this.lesson(id);
+    const before = structuredClone(lesson);
+    reviseLesson(lesson, input, this.lessonEvidence(lesson.repoId), 'manager', Date.now());
+    return this.saveLesson(lesson, () => Object.assign(lesson, before));
+  }
+
+  async reviewLesson(id: string, input: unknown) {
+    const lesson = this.lesson(id);
+    const before = structuredClone(lesson);
+    reviewLesson(lesson, input, this.state.lessons, 'manager', Date.now());
+    return this.saveLesson(lesson, () => Object.assign(lesson, before));
   }
 
   private appendLog(a: PersistedAgent, entries: LogEntry[]) {

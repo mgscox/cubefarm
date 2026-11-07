@@ -415,8 +415,9 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
         });
         return;
       }
-      // Most first rounds pass; some fail so the fix loop can be seen in action.
-      const pass = round > 1 || Math.random() > 0.35;
+      // Most first rounds pass; some fail so the fix loop can be seen in action. A [regression] issue's first round always
+      // fails on the same toolbar defect, so two of them make a recurring finding for a lesson (docs/lessons.md).
+      const pass = round > 1 || (!opts.prompt.includes('[regression]') && Math.random() > 0.35);
       cb.log([{ kind: 'text', text: pass ? '● Everything checks out. Writing up the report.' : '● The toolbar overflows on a 375px screen. Failing this round.' }]);
       cb.finished({
         ok: true,
@@ -433,7 +434,9 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
             { name: 'Unit tests', result: 'pass', details: '41 passed, 0 failed' },
             { name: 'Lint + build', result: 'pass', details: 'No lint errors; production build succeeds' },
             { name: 'Feature works on desktop', result: 'pass', details: 'Clicked through the new flow at 1280x800' },
-            { name: 'Mobile layout (375px)', result: pass ? 'pass' : 'fail', details: pass ? 'Layout wraps correctly' : 'Toolbar overflows horizontally; button unreachable' },
+            pass ? { name: 'Mobile layout (375px)', result: 'pass', details: 'Layout wraps correctly' }
+              : { name: 'Mobile layout (375px)', result: 'fail', failureKind: 'code', findingKey: 'toolbar-overflow', confirmed: true,
+                details: 'Toolbar overflows horizontally; button unreachable. Reproduced at 375px on the head; the base wraps.' },
             { name: 'Console errors', result: 'pass', details: 'None' },
           ],
           commands: [
