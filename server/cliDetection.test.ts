@@ -104,3 +104,22 @@ describe('CLI installer folders outside PATH', () => {
     expect(commandFor('opencode')).toEqual({ file: path.join(dir, 'node_modules', 'opencode-ai', 'bin', 'opencode.exe'), args: [] });
   });
 });
+
+describe('Claude terminal permissions', () => {
+  it.each([undefined, 'previous-session'])('prepares QA for unattended shell commands (resume: %s)', (resumeId) => {
+    install(['.local', 'bin'], 'claude');
+    const plan: CliPlan = {
+      cli: 'claude', token: `qa-${resumeId ?? 'new'}`, sessionId: 'test', resumeId, cwd: home, prompt: 'QA', systemAppend: '',
+      model: '', effort: '', name: 'Grace', role: 'qa', additionalDirectories: [], browserTesting: false, officeUrl: 'http://127.0.0.1:0', officeTools: false,
+    };
+    const launch = writeCliSession(plan, { url: plan.officeUrl, held: false });
+    try {
+      const { args } = launch;
+      expect(args[args.indexOf('--permission-mode') + 1]).toBe('bypassPermissions');
+      const settings = JSON.parse(fs.readFileSync(args[args.indexOf('--settings') + 1], 'utf8'));
+      expect(settings.skipDangerousModePermissionPrompt).toBe(true);
+    } finally {
+      fs.rmSync(launch.dir, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+});
