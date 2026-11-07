@@ -406,7 +406,8 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
             verdict: 'fail', summary: 'The changed behavior passed; local validation stopped because the demo worker exhausted memory. No code defect was found.',
             checks: [
               { name: 'Changed behavior', result: 'pass', details: 'Acceptance criteria passed in the demo fixture.' },
-              { name: 'Local suite', result: 'fail', failureKind: 'environment', details: 'Simulated worker memory exhaustion.' },
+              { name: 'Local suite', result: 'fail', failureKind: 'resources', details: 'Simulated worker memory exhaustion: the suite was cancelled, not timed out.',
+                resources: { freeMemory: '0.8 GB', swap: '0 B', load: '61', cancelled: 204 } },
             ],
             commands: [{ command: 'npm test', result: 'Interrupted by simulated worker memory exhaustion.' }],
             screenshots: [],
@@ -495,6 +496,11 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
     }
     const repo = repos.get(fullName);
     let url = '';
+    if (title.includes('[no-pr]')) { // a run that ends without a pull request, for the run history
+      cb.log([{ kind: 'text', text: '● Stopping here without a pull request (demo [no-pr] issue).' }]);
+      cb.finished({ ok: true, text: '', costUsd, turns, errors: [] });
+      return;
+    }
     if (repo && number) {
       const existing = prototypeBranch && repo.pulls.find((p) => p.state === 'OPEN' && p.headRefName === prototypeBranch);
       if (existing) {
@@ -790,6 +796,7 @@ export function createDemoBackend(): Backend {
   const deskRepo = new Map<string, string>();
   const deskBranches = new Map<string, string | null>();
   const deskPulls = new Map<string, number | undefined>();
+  const workerBlocked = new Set<string>();
   /** Fake desks under a folder: the office's own (/demo), or a box's. */
   const desks = (root: string) => ({
     mainDir: (fullName: string) => `${root}/${fullName}/main`,
@@ -797,6 +804,12 @@ export function createDemoBackend(): Backend {
     deskExists: async (fullName: string, slug: string) => deskRepo.has(`${root}/${fullName}/desks/${slug}`),
     prepareDesk: async (fullName: string, base: { pr?: number }, slug: string, branch: string, note?: (text: string) => void) => {
       await new Promise((r) => setTimeout(r, 900));
+      // A [worker-blocked] PR's first QA desk fails as a full disk would, so the retry shows in the run history.
+      const blocked = repos.get(fullName)?.pulls.find((pr) => pr.number === base.pr && pr.title.includes('[worker-blocked]'));
+      if (blocked && branch.startsWith('qa/') && !workerBlocked.has(`${fullName}#${blocked.number}`)) {
+        workerBlocked.add(`${fullName}#${blocked.number}`);
+        throw new Error('Simulated worker failure: ENOSPC: no space left on device');
+      }
       const dir = `${root}/${fullName}/desks/${slug}`;
       const holder = [...deskBranches].find(([d, b]) => b === branch && d !== dir && deskRepo.get(d) === fullName)?.[0];
       if (holder) note?.(`${branch} is checked out at ${holder}; this desk uses detached HEAD at origin/pr/${base.pr}. Push fixes with git push origin HEAD:${branch}.`);
