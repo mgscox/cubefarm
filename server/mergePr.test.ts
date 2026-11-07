@@ -21,8 +21,8 @@ describe('CEO merge preflight', () => {
   });
 
   describe('incomplete QA', () => {
-    const incomplete = { status: 'needs-human' as const, testedSha: 'tested', failedSha: null };
-    const posted = { headSha: 'tested', commentUrl: 'https://github.com/owner/repo/pull/13#issuecomment-1' };
+    const incomplete = { status: 'needs-human' as const, testedSha: 'tested', failedSha: null, attempt: { id: 'latest' } };
+    const posted = { id: 'latest', headSha: 'tested', commentUrl: 'https://github.com/owner/repo/pull/13#issuecomment-1' };
 
     it('accepts a manager override of a posted incomplete report at the tested SHA', () => {
       expect(checkMergePr(13, 'owner/repo', { ...context(), qa: incomplete, outcome: posted })).toBe('tested');
@@ -32,6 +32,13 @@ describe('CEO merge preflight', () => {
       expect(() => checkMergePr(13, 'owner/repo', { ...context(), qa: incomplete, outcome: { ...posted, commentUrl: null } }))
         .toThrow('no completed QA report');
       expect(() => checkMergePr(13, 'owner/repo', { ...context(), qa: incomplete, outcome: null })).toThrow('no completed QA report');
+    });
+
+    it("refuses an earlier attempt's report when the latest attempt recorded nothing", () => {
+      expect(() => checkMergePr(13, 'owner/repo', { ...context(), qa: { ...incomplete, attempt: { id: 'stalled' } }, outcome: posted }))
+        .toThrow('no completed QA report');
+      expect(() => checkMergePr(13, 'owner/repo', { ...context(), qa: { status: 'needs-human', testedSha: 'tested', failedSha: null }, outcome: posted }))
+        .toThrow('no completed QA report');
     });
 
     it('refuses a new attempted head after the report', () => {
@@ -87,8 +94,8 @@ describe('CEO merge preflight', () => {
   });
 
   describe('incomplete security audit override', () => {
-    const qa = { status: 'needs-human' as const, failedSha: null, securityReview: { qaSha: 'tested', auditBaseSha: 'base' } };
-    const outcome = { headSha: 'tested', baseSha: 'base', commentUrl: 'https://github.com/owner/repo/pull/13#issuecomment-1' };
+    const qa = { status: 'needs-human' as const, failedSha: null, attempt: { id: 'audit' }, securityReview: { qaSha: 'tested', auditBaseSha: 'base' } };
+    const outcome = { id: 'audit', headSha: 'tested', baseSha: 'base', commentUrl: 'https://github.com/owner/repo/pull/13#issuecomment-1' };
     const pr = { headSha: 'tested', baseSha: 'base' };
 
     it('applies to a posted audit at exactly the current head and base', () => {
@@ -105,6 +112,8 @@ describe('CEO merge preflight', () => {
       ['a new head', { pr: { ...pr, headSha: 'unseen' } }],
       ['a new base', { pr: { ...pr, baseSha: 'moved' } }],
       ['a report on another revision', { outcome: { ...outcome, baseSha: 'older' } }],
+      ['regular QA\'s report before an audit that recorded nothing', { outcome: { ...outcome, id: 'regular-qa' } }],
+      ['a record with no attempt', { qa: { ...qa, attempt: undefined } }],
     ])('does not apply to %s', (_name, patch: { qa?: Parameters<typeof incompleteAuditOverride>[0]; outcome?: Parameters<typeof incompleteAuditOverride>[1]; pr?: typeof pr }) => {
       expect(incompleteAuditOverride(patch.qa ?? qa, 'outcome' in patch ? patch.outcome : outcome, patch.pr ?? pr)).toBe(false);
     });
