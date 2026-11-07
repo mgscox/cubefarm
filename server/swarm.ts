@@ -3013,7 +3013,8 @@ export class Swarm {
     a.heldRetry = null;
     const rt = this.agentRt.get(id);
     const postingQa = a.task === 'qa' && !rt?.session;
-    if (!rt?.session) this.nextGeneration(a);
+    // A preparing desk sees the stop itself; bumping its generation would abandon its Idea research as replaced.
+    if (!rt?.session && a.status !== 'preparing') this.nextGeneration(a);
     this.state.deferredResumes = this.state.deferredResumes.filter((id) => id !== a.id);
     a.status = 'stopped';
     a.stoppedBy = 'manager';
@@ -5418,6 +5419,7 @@ export class Swarm {
     if (i >= 0) {
       interrupted.splice(i, 1);
       a.status = 'idle';
+      a.stoppedBy = undefined;
       a.lastError = null;
       this.appendLog(a, [{ kind: 'system', text: '↺ The office server restarted. Picking the job back up.' }]);
     }
@@ -5889,6 +5891,7 @@ export class Swarm {
     if (i >= 0) {
       interrupted.splice(i, 1);
       a.status = 'idle';
+      a.stoppedBy = undefined;
       a.lastError = null;
       this.appendLog(a, [{ kind: 'system', text: '↺ The office server restarted. Starting that research over.' }]);
     }
