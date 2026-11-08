@@ -34,7 +34,7 @@ On Windows, keep it inside your user profile, which other accounts can't read by
 
 | Setting | What it does |
 | --- | --- |
-| `UPSTASH_BOX_API_KEY` | Upstash Box credentials for opt-in disposable worker placement. |
+| `UPSTASH_BOX_API_KEY` | Upstash Box credentials for opt-in disposable worker placement. A key saved in Manager console Settings takes precedence. |
 | `ANTHROPIC_API_KEY` | Anthropic API billing for Claude Code workers on Upstash. Local Claude desks retain their subscription login. |
 | `OPENAI_API_KEY` | OpenAI Platform API billing for Codex workers on Upstash; a ChatGPT subscription does not supply this key. |
 | `OPENROUTER_API_KEY` | OpenRouter API billing for OpenCode workers on Upstash. |
@@ -58,6 +58,14 @@ requested. Remote desk RPCs additionally have their own deadlines (the desk time
 - **It stays out of agents' environments.** The server reads the values it needs and doesn't copy the file into its own environment, which agents, previews and their tools inherit. Gateway tokens are also removed from agent and preview environments when supplied by the shell.
 
 ## Disposable Upstash workers
+
+On the main branch office, Manager console → Settings → Upstash Box accepts a write-only API key through localhost,
+with the same local request restrictions as Manager MCP. Only the key’s source is returned. A saved key lives in
+`<SWARM_HOME>/credentials/upstash-box.json`, apart from office state, and applies immediately to provider operations.
+Clearing it restores the startup process environment value, then the config `.env` value if no process value was set.
+Before saving or clearing, the candidate must list every Box still reserved by the office, by ID or its durable
+name when creation is uncertain. Finish pending cleanup in Fleet if a key change is blocked. Demo mode simulates
+changes in memory without reading or saving credentials or calling Upstash.
 
 In the terminal runtime, choose **Upstash · Small Box per task** when hiring a developer or QA worker,
 on Team, or as a floor's machine in Fleet. Nothing is created until a task starts. The office supplies the

@@ -155,6 +155,44 @@ test('Settings rotates and disables the gateway immediately', async ({ page, req
   }
 });
 
+test('Settings saves and clears a write-only demo Box key and updates other clients', async ({ page, request, baseURL }, testInfo) => {
+  const endpoint = '/api/settings/upstash';
+  const key = 'demo-box-key-' + randomUUID();
+  await page.route((url) => !url.href.startsWith(baseURL!) && !url.protocol.startsWith('data'), (route) => route.fulfill({ status: 200, body: '' }));
+  await page.addInitScript(() => localStorage.setItem('cubefarm:mode', 'dashboard'));
+  const openSettings = async () => {
+    await page.getByRole('button', { name: 'Manager console', exact: true }).click();
+    await page.locator('.panel').getByRole('button', { name: /Settings/ }).click();
+  };
+  try {
+    await page.goto('/');
+    await openSettings();
+    const card = page.getByRole('region', { name: 'Upstash Box', exact: true });
+    const input = card.getByLabel('Upstash Box API key', { exact: true });
+    await expect(input).toHaveAttribute('type', 'password');
+    await input.fill(key);
+    await card.getByRole('button', { name: 'Save key', exact: true }).click();
+    await expect(card.getByRole('status')).toHaveText('Using the key saved in Settings.');
+    await expect(input).toHaveValue('');
+    expect(await (await request.get(endpoint)).json()).toEqual({ available: true, keySource: 'settings', canManage: true });
+    const snapshot = await (await request.get('/api/state')).text();
+    expect(snapshot).not.toContain(key);
+    expect(JSON.parse(snapshot).upstashKey).toEqual({ available: true, keySource: 'settings' });
+    await page.reload();
+    await openSettings();
+    await expect(input).toHaveValue('');
+    await expect(card.getByRole('status')).toHaveText('Using the key saved in Settings.');
+    await card.screenshot({ path: testInfo.outputPath('upstash-box-key-settings.png') });
+    // A command from another client reaches this already-open Settings card through its websocket.
+    expect((await request.patch(endpoint, { data: { key: null } })).ok()).toBe(true);
+    await expect(card.getByRole('status')).toHaveText('No Box API key configured.');
+    await input.fill(key);
+    await card.getByRole('button', { name: 'Save key', exact: true }).click();
+    await card.getByRole('button', { name: 'Clear saved key', exact: true }).click();
+    await expect(card.getByRole('status')).toHaveText('No Box API key configured.');
+  } finally { await request.patch(endpoint, { data: { key: null } }); }
+});
+
 for (const [branch, subOffice] of [['swarm-preview', false], ['main', true]] as const) {
   base(`manager MCP is unavailable on ${subOffice ? 'a marked sub-office on main' : branch}`, async ({ request }) => {
     await withOffice(branch, async (url) => {
@@ -165,6 +203,8 @@ for (const [branch, subOffice] of [['swarm-preview', false], ['main', true]] as 
         available: false, enabled: false, tokenSource: null, canManage: false,
       });
       expect((await request.patch(settingsUrl, { data: { token: randomUUID(), enabled: true } })).status()).toBe(404);
+      expect(await (await request.get(url + '/api/settings/upstash')).json()).toEqual({ available: false, keySource: null, canManage: false });
+      expect((await request.patch(url + '/api/settings/upstash', { data: { key: 'demo-key' } })).status()).toBe(404);
     }, subOffice);
   });
 }

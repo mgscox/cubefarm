@@ -2,7 +2,7 @@ import { useStore } from './store';
 import type { IdeaInput, IdeaReviewCycleView, IdeaView, IssuePlanView, ProposalDecisionInput, ProposalView, AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
 
 import type { LessonKind, LessonView } from '../../shared/types';
-import type { ClaudeAuthenticationView, ManagerMcpSettingsPatch, ManagerMcpSettingsView } from '../../shared/types';
+import type { UpstashKeySettingsView, ClaudeAuthenticationView, ManagerMcpSettingsPatch, ManagerMcpSettingsView } from '../../shared/types';
 
 async function call<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -124,6 +124,8 @@ export const api = {
   closeOffice: () => call('POST', '/api/office/close'),
   reopenOffice: () => call('POST', '/api/office/reopen'),
   updateSettings: (patch: Partial<SwarmSettings>) => call('PATCH', '/api/settings', patch),
+  upstashKeySettings: () => call<UpstashKeySettingsView>('GET', '/api/settings/upstash'),
+  updateUpstashKey: (key: string | null) => call<UpstashKeySettingsView>('PATCH', '/api/settings/upstash', { key }),
   managerMcpSettings: () => call<ManagerMcpSettingsView>('GET', '/api/settings/mcp'),
   updateManagerMcpSettings: (patch: ManagerMcpSettingsPatch) => call<ManagerMcpSettingsView>('PATCH', '/api/settings/mcp', patch),
   updateOffice: async (action: 'now' | 'later') => {

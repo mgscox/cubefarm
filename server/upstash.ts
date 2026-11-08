@@ -1,5 +1,6 @@
 // Durable task reservations: record intent before a provider write, and keep uncertain outcomes recoverable.
 import crypto from 'node:crypto';
+import { HttpError } from './httpError.ts';
 import type { AgentCli, UpstashTask } from '../shared/types.ts';
 import type { BoxConnection, BoxOptions } from './machine.ts';
 
@@ -9,7 +10,7 @@ export const UPSTASH_ROOT = '/workspace/home/.cubefarm-runtime';
 export const UPSTASH_CAP = 10;
 export interface UpstashProvider {
   missing(cli: AgentCli): string | null;
-  list(): Promise<{ id: string; name?: string }[]>;
+  list(apiKey?: string): Promise<{ id: string; name?: string }[]>;
   create(task: UpstashTask): Promise<string>;
   connect(task: UpstashTask, opts: BoxOptions): Promise<BoxConnection>;
   /** Throws unless every worktree is clean and every local commit is on a remote. */
@@ -35,6 +36,22 @@ export class UpstashTasks {
     const next = this.writes.then(fn);
     this.writes = next.catch(() => undefined);
     return next;
+  }
+  /** Keep credential validation and activation between provider lifecycle operations. */
+  changeKey(key: string | undefined, apply: () => Promise<void>) {
+    return this.serial(async () => {
+      const owned = this.tasks.filter((task) => task.phase !== 'create-failed');
+      if (!key && owned.length) throw new HttpError(409, 'Keep a key that can access the office’s Boxes until cleanup finishes in Fleet.');
+      if (key) {
+        let boxes: { id: string; name?: string }[];
+        try { boxes = await this.provider.list(key); }
+        catch { throw new HttpError(400, 'Could not verify the Box API key. Check the key and try again.'); }
+        if (owned.some((task) => !boxes.some((box) => task.boxId ? box.id === task.boxId : box.name === task.name))) {
+          throw new HttpError(409, 'This key cannot access all of the office’s Boxes. Finish cleanup in Fleet or use a key for the same account.');
+        }
+      }
+      await apply();
+    });
   }
   /** Reserve once per task; an uncertain create is found by its durable unique name, never repeated. */
   ensure(input: Pick<UpstashTask, 'agentId' | 'repo' | 'branch' | 'cli' | 'slug' | 'port'>, officeId: string): Promise<UpstashTask | null> {
@@ -86,7 +103,7 @@ export class UpstashTasks {
       const e = err as { statusCode?: number; notCreated?: boolean };
       const rejected = !task.boxId && (e.notCreated || [400, 401, 403, 404, 405, 422].includes(e.statusCode ?? 0));
       task.phase = rejected ? 'create-failed' : 'creating';
-      task.error = rejected ? 'Create rejected before a Box existed. Fix host credentials/config, restart the office, then reconnect in Fleet.' : 'Create outcome uncertain; retry in Fleet to find the Box by name.';
+      task.error = rejected ? 'Create rejected before a Box existed. Fix the Box key in Settings, or fix host config and restart, then reconnect in Fleet.' : 'Create outcome uncertain; retry in Fleet to find the Box by name.';
       await this.commit();
       throw new Error(task.error);
     }

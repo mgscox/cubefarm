@@ -1,5 +1,6 @@
 import { createEvaluation } from './evaluations.ts';
 import type { PlaybookEvaluation } from '../shared/types.ts';
+import type { UpstashKeySettings } from './upstashKeySettings.ts';
 import { UPSTASH, UpstashTasks } from './upstash.ts';
 import type { UpstashTask } from '../shared/types.ts';
 import syncFs from 'node:fs';
@@ -779,7 +780,7 @@ export class Swarm {
   private handoffRetry: ReturnType<typeof setTimeout> | null = null;
   private handoffRetryMs = 1000;
 
-  constructor(private backend: Backend, transport?: TelegramTransport | null) {
+  constructor(private backend: Backend, transport?: TelegramTransport | null, private upstashKeySettings: UpstashKeySettings | null = null) {
     this.demoTelegram = backend.demo ? createDemoTelegram() : null;
     // Explicit demo fixtures keep their fake worker; saved production pairs use the same publisher in both modes.
     this.proposalWorker = backend.demo ? createDemoProposalWorker({
@@ -1332,6 +1333,7 @@ export class Swarm {
       clis: this.clis,
       boxes: this.state.boxes.map((b) => this.boxView(b)),
       upstashTasks: this.state.upstashTasks.map((t) => this.upstashView(t)),
+      upstashKey: this.upstashKeySettings?.status() ?? { available: false, keySource: null },
       officeTelemetry: this.officeTelemetry,
       officeCapacity: this.state.officeCapacity ?? 'unknown',
       officeCommit: this.officeHead?.slice(0, 7) ?? null,
@@ -2180,6 +2182,13 @@ export class Swarm {
   private upstashView(task: UpstashTask): UpstashTask {
     const state = this.boxConns.get(task.id)?.state();
     return { ...task, connection: state ? { status: state.status, error: state.error } : null };
+  }
+
+  async updateUpstashKey(key: string | null) {
+    const settings = this.upstashKeySettings;
+    if (!settings || !this.upstash) throw new HttpError(404, 'Box key settings are unavailable.');
+    await this.upstash.changeKey(key ?? settings.fallbackKey(), () => settings.save(key));
+    this.broadcast({ type: 'upstashKey', status: settings.status() });
   }
 
   private upstash: UpstashTasks | null = null;

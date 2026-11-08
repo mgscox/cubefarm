@@ -130,8 +130,8 @@ export function createUpstashProvider(config?: () => NodeJS.ProcessEnv): Upstash
   const connection = () => ({ apiKey: settings().UPSTASH_BOX_API_KEY, enableTelemetry: false });
   const get = (id: string) => Box.get(id, connection());
   return {
-    missing: (cli) => !settings().UPSTASH_BOX_API_KEY ? 'Set UPSTASH_BOX_API_KEY in the office config.' : !settings()[KEYS[cli]] ? `Set ${KEYS[cli]} in the office config for Upstash ${cli}.` : null,
-    list: async () => (await Box.list(connection())).filter((b) => b.status !== 'deleted'),
+    missing: (cli) => !settings().UPSTASH_BOX_API_KEY ? 'Set the Upstash Box API key in Settings or UPSTASH_BOX_API_KEY in the office config.' : !settings()[KEYS[cli]] ? `Set ${KEYS[cli]} in the office config for Upstash ${cli}.` : null,
+    list: async (apiKey) => (await Box.list(apiKey === undefined ? connection() : { apiKey, enableTelemetry: false })).filter((b) => b.status !== 'deleted'),
     create: async (task) => {
       const token = await gh(['auth', 'token']).catch(() => { throw Object.assign(new Error('GitHub authentication is unavailable.'), { notCreated: true }); });
       return (await Box.create(upstashConfig(settings(), task.cli, task.name, token))).id;
@@ -157,7 +157,7 @@ export function createUpstashProvider(config?: () => NodeJS.ProcessEnv): Upstash
       return connectBox({ ...opts, transport: {
         file: process.execPath,
         args: [...runtimeFlags(), path.join(import.meta.dirname, `upstashBridge${path.extname(import.meta.filename)}`), task.boxId!, opts.officeId],
-        env: { ...process.env, UPSTASH_BOX_API_KEY: settings().UPSTASH_BOX_API_KEY },
+        get env() { return { ...process.env, UPSTASH_BOX_API_KEY: settings().UPSTASH_BOX_API_KEY }; },
       } });
     },
     async saved(task) {

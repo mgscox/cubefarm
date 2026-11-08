@@ -81,7 +81,7 @@ export class ManagerMcpSettings {
 
 const loopback = (address: string | undefined) => address === '::1' || /^(?:::ffff:)?127\.\d+\.\d+\.\d+$/.test(address ?? '');
 
-function canManage(req: Request) {
+export function canManageLocalSettings(req: Request) {
   const host = req.get('Host')?.toLowerCase();
   const origin = req.get('Origin');
   const forwarded = req.get('X-Forwarded-For');
@@ -101,9 +101,9 @@ export function managerMcpSettingsRouter(settings: ManagerMcpSettings | null) {
     router.patch('/', (_req, res) => { res.status(404).json({ error: 'Manager MCP is only available in the main branch office.' }); });
     return router;
   }
-  router.get('/', (req, res) => { res.json(settings.view(canManage(req))); });
+  router.get('/', (req, res) => { res.json(settings.view(canManageLocalSettings(req))); });
   router.patch('/', (req, res, next) => {
-    if (!canManage(req)) return void res.status(403).json({ error: 'Open CubeFarm through localhost to change MCP settings.' });
+    if (!canManageLocalSettings(req)) return void res.status(403).json({ error: 'Open CubeFarm through localhost to change MCP settings.' });
     if (!req.is('application/json')) return void res.status(415).json({ error: 'Send MCP settings as JSON.' });
     parse(req, res, (error) => {
       if (error) return void res.status(400).json({ error: 'Invalid MCP settings request.' });

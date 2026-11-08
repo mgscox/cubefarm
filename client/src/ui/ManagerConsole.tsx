@@ -22,6 +22,7 @@ import { PublicationsCard } from './Publications';
 import { StatusPill } from './TerminalView';
 import { FeedbackScore } from './FeedbackScore';
 import { RepoRefreshStatus } from './RepoRefreshStatus';
+import { UpstashKeySettings } from './UpstashKeySettings';
 import { ManagerMcpSettings } from './ManagerMcpSettings';
 
 const MODELS = ['claude-opus-5-5', 'claude-opus-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-haiku-4-5'];
@@ -859,6 +860,7 @@ function SettingsTab() {
         <MouseSettings />
         <p className="muted small">Saved in this browser. Turning speed already allows for big, high-resolution screens; use the slider to fine-tune it.</p>
         <ManagerMcpSettings />
+        <UpstashKeySettings />
         <ClaudeAuthenticationSettings />
         <h3>ℹ️ Environment</h3>
         <div className="small">

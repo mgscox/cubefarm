@@ -8,7 +8,9 @@ import { createUpstashProvider, SAVED_WORK, upstashConfig } from './upstashProvi
 import { UpstashTasks } from './upstash.ts';
 import type { AgentCli, UpstashTask } from '../shared/types.ts';
 import { launchArgs } from './clis.ts';
+import { connectBox } from './boxLink.ts';
 
+vi.mock('./boxLink.ts', () => ({ connectBox: vi.fn() }));
 vi.mock('./exec.ts', async (original) => ({ ...await original<typeof import('./exec.ts')>(), gh: async () => 'fake-github-token' }));
 afterEach(() => vi.unstubAllGlobals());
 
@@ -144,4 +146,39 @@ it.skipIf(process.platform !== 'linux')('confirms a CLI that ignores SIGTERM is 
     syncFs.closeSync(fd);
     await fs.rm(home, { recursive: true, force: true, maxRetries: 5 });
   }
+});
+
+it('uses the current key without a restart, and verifies candidates without activating them', async () => {
+  let active = 'startup-key';
+  const seen: string[] = [];
+  vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+    seen.push(new Headers(init?.headers).get('X-Box-Api-Key')!);
+    return Response.json([]);
+  });
+  const provider = createUpstashProvider(() => ({ UPSTASH_BOX_API_KEY: active }));
+  await provider.list();
+  await provider.list('candidate-key');
+  await provider.list();
+  active = 'saved-key';
+  await provider.list();
+  active = 'startup-key';
+  await provider.list();
+  expect(seen).toEqual(['startup-key', 'candidate-key', 'startup-key', 'saved-key', 'startup-key']);
+});
+
+it('keeps an existing Box transport environment current after rotation or clear', async () => {
+  let active = 'old-key';
+  vi.stubGlobal('fetch', async (url: string) => new URL(url).pathname.includes('/files/')
+    ? Response.json({ exists: true, isDirectory: false, size: 1 })
+    : Response.json({ id: 'owned-box', status: 'idle' }));
+  const provider = createUpstashProvider(() => ({ UPSTASH_BOX_API_KEY: active }));
+  await provider.connect({ boxId: 'owned-box' } as UpstashTask, {
+    box: { id: 'owned-box', name: 'Owned', destination: '' }, officeId: 'office', changed: () => {}, terminalFor: () => null,
+  });
+  const transport = vi.mocked(connectBox).mock.lastCall![0].transport!;
+  expect(transport.env.UPSTASH_BOX_API_KEY).toBe('old-key');
+  active = 'replacement-key';
+  expect(transport.env.UPSTASH_BOX_API_KEY).toBe('replacement-key');
+  active = 'startup-key';
+  expect(transport.env.UPSTASH_BOX_API_KEY).toBe('startup-key');
 });

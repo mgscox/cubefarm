@@ -128,3 +128,67 @@ describe('disposable Upstash task lifecycle', () => {
     expect(emu.boxes.size).toBe(1);
   });
 });
+
+it('checks replacement access before activation and blocks losing owned or uncertain Boxes', async () => {
+  const emu = emulator();
+  const office = new UpstashTasks([], emu.provider, async () => {});
+  const task = (await office.ensure(input(), 'office'))!;
+  let active = 'old';
+  emu.provider.list = async (key) => {
+    if (key === 'invalid') throw new Error('provider error contains invalid-secret');
+    return key === 'same-account' ? [...emu.boxes.values()] : [];
+  };
+  const change = (key: string | undefined) => office.changeKey(key, async () => { active = key ?? ''; });
+  await expect(change('invalid')).rejects.toThrow('Could not verify');
+  await expect(change('other-account')).rejects.toThrow('cannot access');
+  await expect(change(undefined)).rejects.toThrow('Keep a key');
+  expect(active).toBe('old');
+  await change('same-account');
+  expect(active).toBe('same-account');
+  task.boxId = null; task.phase = 'creating';
+  await expect(change('other-account')).rejects.toThrow('cannot access');
+  await change('same-account'); // The durable name recovers a lost create response even if the old key expired.
+  expect(active).toBe('same-account');
+  task.phase = 'create-failed';
+  await change(undefined);
+  expect(active).toBe('');
+});
+
+it('waits for an in-flight create before validating a new key and resumes after failed validation', async () => {
+  const emu = emulator();
+  const create = emu.provider.create;
+  let finish!: () => void;
+  let started!: () => void;
+  const pending = new Promise<void>((resolve) => { finish = resolve; });
+  const creating = new Promise<void>((resolve) => { started = resolve; });
+  emu.provider.create = async (task) => { started(); await pending; return create(task); };
+  emu.provider.list = async (key) => key === 'other-account' ? [] : [...emu.boxes.values()];
+  const office = new UpstashTasks([], emu.provider, async () => {});
+  const reserved = office.ensure(input(), 'office');
+  await creating;
+  let applied = false;
+  const replacement = office.changeKey('other-account', async () => { applied = true; });
+  finish();
+  await reserved;
+  await expect(replacement).rejects.toThrow('cannot access');
+  expect(applied).toBe(false);
+  await office.cleanup(office.tasks[0], async () => {});
+  await office.changeKey('other-account', async () => { applied = true; });
+  expect(applied).toBe(true);
+});
+
+it('repairs an expired key after a lost create response by checking the candidate against the durable Box name', async () => {
+  const emu = emulator(); emu.loseCreate();
+  const list = emu.provider.list;
+  let active = 'expired';
+  emu.provider.list = async (candidate = active) => {
+    if (candidate === 'expired' && emu.boxes.size) throw new Error('expired key');
+    return list();
+  };
+  const office = new UpstashTasks([], emu.provider, async () => {});
+  await expect(office.ensure(input(), 'office')).rejects.toThrow('uncertain');
+  await expect(office.recover(office.tasks[0])).rejects.toThrow('expired key');
+  await office.changeKey('valid-replacement', async () => { active = 'valid-replacement'; });
+  expect(await office.recover(office.tasks[0])).toMatchObject({ phase: 'active', boxId: 'box-1' });
+  expect(emu.creates()).toBe(1);
+});

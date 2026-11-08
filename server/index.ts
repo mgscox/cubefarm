@@ -8,6 +8,8 @@ import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { DEMO, HOME_DIR, HOST, PORT, STATE_FILE, WORKSPACE_ROOT, readConfigEnv } from './config.ts';
 import { bindMessage, browserUrl, localUrl } from '../bin/officeNetwork.js';
+import { createUpstashProvider } from './upstashProvider.ts';
+import { UpstashKeySettings, upstashKeySettingsRouter } from './upstashKeySettings.ts';
 import { realBackend } from './backend.ts';
 import { handleHook, handleMcp, setOfficeUrl } from './cliRunner.ts';
 import { createDemoBackend } from './demo.ts';
@@ -19,13 +21,20 @@ import { allowUpgrade, officeHostnames } from './wsOrigin.ts';
 import { IMAGE_ROUTE } from './attachments.ts';
 import { imageRouter } from './imageRoutes.ts';
 
-const swarm = new Swarm(DEMO ? createDemoBackend() : realBackend);
+const mainOffice = await isMainMcpOffice(path.resolve(import.meta.dirname, '..'));
+const startupConfig = DEMO ? {} : { ...readConfigEnv(), ...process.env };
+const upstashKeySettings = mainOffice ? new UpstashKeySettings(HOME_DIR, startupConfig.UPSTASH_BOX_API_KEY, DEMO) : null;
+const backend = DEMO ? createDemoBackend() : {
+  ...realBackend,
+  upstash: createUpstashProvider(() => ({ ...startupConfig, UPSTASH_BOX_API_KEY: upstashKeySettings?.activeKey() ?? startupConfig.UPSTASH_BOX_API_KEY })),
+};
+const swarm = new Swarm(backend, undefined, upstashKeySettings);
 // Sessions the office picks back up while it starts need the address their CLIs call back on before it listens.
 if (PORT) setOfficeUrl(localUrl(HOST, PORT));
 await swarm.init();
 
 const app = express();
-const mcpSettings = await isMainMcpOffice(path.resolve(import.meta.dirname, '..')) ? new ManagerMcpSettings(
+const mcpSettings = mainOffice ? new ManagerMcpSettings(
   path.join(path.dirname(STATE_FILE), DEMO ? 'demo-manager-mcp.json' : 'manager-mcp.json'),
   process.env.CUBEFARM_MCP_TOKEN ?? (DEMO ? undefined : readConfigEnv().CUBEFARM_MCP_TOKEN),
 ) : null;
@@ -36,6 +45,7 @@ app.post('/api/mcp/:token', express.json({ limit: '4mb' }), (req, res, next) => 
 app.all('/api/mcp/:token', (_req, res) => void res.status(405).set('Allow', 'POST').end());
 app.use('/mcp', mcpSettings ? managerMcpRouter(swarm, mcpSettings) : (_req, res) => { res.sendStatus(404); });
 app.use('/api/settings/mcp', managerMcpSettingsRouter(mcpSettings));
+app.use('/api/settings/upstash', upstashKeySettingsRouter(upstashKeySettings, (key) => swarm.updateUpstashKey(key)));
 const claudeAuthentication = new ClaudeAuthentication({
   home: HOME_DIR, env: process.env, demo: DEMO,
   origin: process.env.CUBEFARM_AUTH_ORIGIN, proxyAddress: process.env.CUBEFARM_AUTH_PROXY_ADDRESS,

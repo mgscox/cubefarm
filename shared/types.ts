@@ -758,6 +758,15 @@ export interface PhoneMessage {
   mcpRequestId?: string; // retry key retained with the canonical message
 }
 
+/** Source only; the Box API key never enters shared office state. */
+export interface UpstashKeyStatus {
+  available: boolean;
+  keySource: 'settings' | 'startup' | null;
+}
+export interface UpstashKeySettingsView extends UpstashKeyStatus {
+  canManage: boolean;
+}
+
 export interface ManagerMcpSettingsView {
   available: boolean;
   enabled: boolean;
@@ -1042,6 +1051,7 @@ export interface WorldSnapshot {
   clis: CliView[];
   boxes: BoxView[];
   upstashTasks?: UpstashTask[];
+  upstashKey?: UpstashKeyStatus;
   officeTelemetry?: MachineTelemetry | null;
   officeCapacity?: MachineCapacity;
   /** Approved Proposals' publications, newest last. */
@@ -1083,6 +1093,7 @@ export type ServerEvent =
   | { type: 'clis'; clis: CliView[] }
   | { type: 'box'; box: BoxView }
   | { type: 'upstash'; tasks: UpstashTask[] }
+  | { type: 'upstashKey'; status: UpstashKeyStatus }
   | { type: 'boxRemoved'; boxId: string }
   | { type: 'officeTelemetry'; telemetry: MachineTelemetry | null; capacity: MachineCapacity }
   | { type: 'publication'; publication: PublicationView }

@@ -1052,7 +1052,7 @@ export function createDemoBackend(): Backend {
     detectClis: async () => fakeClis(),
     upstash: {
       missing: () => null,
-      list: async () => [...cloudBoxes.values()],
+      list: async (_apiKey) => [...cloudBoxes.values()],
       create: async (task) => { const id = `demo-${task.id}`; cloudBoxes.set(id, { id, name: task.name }); return id; },
       connect: async (task, opts) => {
         cloudBoxes.set(task.boxId!, { id: task.boxId!, name: task.name });
