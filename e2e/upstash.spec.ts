@@ -51,4 +51,42 @@ test('demo placement controls hire on Upstash, update Team and move a whole floo
   }).toBe(true);
   await expect(page.getByText('1/10 task Boxes reserved.', { exact: false })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('upstash-task.png'), animations: 'disabled' });
+
+  const route = '/api/settings/upstash';
+  for (const key of ['demo-first-key', 'demo-replacement-key', null]) {
+    const changed = await request.patch(route, { data: { key } });
+    expect(changed.ok(), await changed.text()).toBe(true);
+    expect(await changed.json()).toEqual({ keySource: key ? 'settings' : null, canManage: true });
+  }
+  await expect(page.getByText('1/10 task Boxes reserved.', { exact: false })).toBeVisible();
+});
+
+test('Settings saves and clears the write-only Upstash Box key on localhost', async ({ page, request, baseURL }, testInfo) => {
+  const route = '/api/settings/upstash';
+  const key = 'box-synthetic-e2e-fixture';
+  expect((await request.patch(route, { headers: { Origin: 'https://outside.example' }, data: { key } })).status()).toBe(403);
+  expect((await request.patch(route, { headers: { 'X-Forwarded-For': '192.0.2.1' }, data: { key } })).status()).toBe(403);
+  expect((await request.patch(route, { data: { key: 'invalid key' } })).status()).toBe(400);
+
+  await page.route((url) => !url.href.startsWith(baseURL!) && !url.protocol.startsWith('data'), (r) => r.fulfill({ status: 200, body: '' }));
+  await page.addInitScript(() => localStorage.setItem('cubefarm:mode', 'dashboard'));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Manager console', exact: true }).click();
+  await page.locator('.panel').getByRole('button', { name: /Settings/ }).click();
+
+  const panel = page.getByRole('region', { name: 'Upstash Box' });
+  const field = panel.getByLabel('Upstash Box API key');
+  await expect(field).toHaveAttribute('type', 'password');
+  await field.fill(key);
+  await panel.getByRole('button', { name: 'Save key', exact: true }).click();
+  await expect(panel.getByRole('status')).toHaveText('Using the Box key saved in Settings.');
+  await expect(field).toHaveValue('');
+  const metadata = await request.get(route);
+  expect(metadata.headers()['cache-control']).toBe('no-store');
+  expect(await metadata.json()).toEqual({ keySource: 'settings', canManage: true });
+  await panel.screenshot({ path: testInfo.outputPath('upstash-key-settings.png') });
+
+  await panel.getByRole('button', { name: 'Clear saved key' }).click();
+  await expect(panel.getByRole('status')).toHaveText('Set a Box API key to use Upstash workers.');
+  expect(await (await request.get(route)).json()).toEqual({ keySource: null, canManage: true });
 });

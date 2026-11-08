@@ -18,8 +18,15 @@ import { HttpError, Swarm } from './swarm.ts';
 import { allowUpgrade, officeHostnames } from './wsOrigin.ts';
 import { IMAGE_ROUTE } from './attachments.ts';
 import { imageRouter } from './imageRoutes.ts';
+import { createUpstashProvider } from './upstashProvider.ts';
+import { UpstashKeySettings, upstashKeySettingsRouter } from './upstashKeySettings.ts';
 
-const swarm = new Swarm(DEMO ? createDemoBackend() : realBackend);
+const startupConfig = DEMO ? {} : { ...readConfigEnv(), ...process.env };
+const upstashKeySettings = new UpstashKeySettings(DEMO ? undefined : HOME_DIR, startupConfig.UPSTASH_BOX_API_KEY);
+const swarm = new Swarm(DEMO ? createDemoBackend() : {
+  ...realBackend,
+  upstash: createUpstashProvider(() => ({ ...startupConfig, UPSTASH_BOX_API_KEY: upstashKeySettings.activeKey() })),
+});
 // Sessions the office picks back up while it starts need the address their CLIs call back on before it listens.
 if (PORT) setOfficeUrl(localUrl(HOST, PORT));
 await swarm.init();
@@ -36,6 +43,16 @@ app.post('/api/mcp/:token', express.json({ limit: '4mb' }), (req, res, next) => 
 app.all('/api/mcp/:token', (_req, res) => void res.status(405).set('Allow', 'POST').end());
 app.use('/mcp', mcpSettings ? managerMcpRouter(swarm, mcpSettings) : (_req, res) => { res.sendStatus(404); });
 app.use('/api/settings/mcp', managerMcpSettingsRouter(mcpSettings));
+app.use('/api/settings/upstash', upstashKeySettingsRouter(upstashKeySettings, (key) => swarm.changeUpstashKey(
+  () => upstashKeySettings.update(key),
+  () => {
+    if (DEMO) return null; // Demo Boxes have no provider account.
+    const replacement = upstashKeySettings.keyAfter(key);
+    if (replacement && replacement === upstashKeySettings.activeKey()) return null;
+    if (!replacement) return Promise.resolve([]);
+    return createUpstashProvider(() => ({ UPSTASH_BOX_API_KEY: replacement })).list();
+  },
+)));
 const claudeAuthentication = new ClaudeAuthentication({
   home: HOME_DIR, env: process.env, demo: DEMO,
   origin: process.env.CUBEFARM_AUTH_ORIGIN, proxyAddress: process.env.CUBEFARM_AUTH_PROXY_ADDRESS,
