@@ -1758,27 +1758,95 @@ input.inline:focus {
 .links {
   font-size: 0.85rem;
 }
-.team {
-  width: 100%;
-  border-collapse: collapse;
+.team-floor-header {
+  gap: 10px 16px;
 }
-.team td {
-  padding: 4px 6px;
-  border-top: 1.5px solid rgba(31, 29, 43, 0.08);
-  vertical-align: middle;
-}
-.team select {
-  width: auto;
-  padding: 4px 6px;
-}
-.team-name {
+.team-floor-name,
+.team-line {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
-.team-name input {
-  width: 120px;
+.team-floor-name {
+  flex: 1 1 12rem;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+.team-line {
+  flex-wrap: wrap;
+}
+.team-hire :is(input, select) {
+  flex: 0 1 10rem;
+  min-width: 0;
+}
+.team-line .btn {
+  white-space: nowrap;
+}
+.team {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.team-agent {
+  border-top: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  padding: 12px 0;
+  overflow-wrap: anywhere;
+}
+.team-agent:last-child {
+  padding-bottom: 4px;
+}
+.team-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px 20px;
+}
+.team-identity {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.team-identity .dot {
+  flex: none;
+}
+.team-work {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+.team-work .status {
+  white-space: nowrap;
+}
+.team-details {
+  margin-top: 12px;
+  padding: 8px 12px 12px;
+  background: var(--paper);
+  border-radius: 10px;
+}
+.team-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+  gap: 0 12px;
+}
+.team-fields .field {
+  min-width: 0;
+}
+@media (max-width: 760px) {
+  .team-summary {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+}
+@media (max-width: 520px) {
+  .team-hire {
+    width: 100%;
+  }
+  .team-hire :is(input, select) {
+    flex: 1 1 8rem;
+    max-width: 10rem;
+  }
 }
 .field {
   display: flex;

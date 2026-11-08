@@ -3,7 +3,7 @@ import { PromptTextarea } from './PromptTextarea';
 import { ClaudeAuthenticationSettings } from './ClaudeAuthenticationSettings';
 import { UpstashKeySettings } from './UpstashKeySettings';
 import { issueWorkNote } from '../../../shared/issues';
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { PreviewPill, PreviewSettings } from './AppViewer';
 import { agentsOnRepo, pendingRequests, useStore, type ManagerTab } from '../store';
@@ -416,12 +416,11 @@ function TeamTab() {
   const boxes = useStore((s) => s.boxes);
   const openOverlay = useStore((s) => s.openOverlay);
   const terminal = settings.runtime === 'terminal';
-  const fleet = terminal;
   // The Agent SDK runtime is Claude Code for everyone.
   const workerCli = (a: { cli: AgentCli | '' }): AgentCli => (terminal ? a.cli || settings.defaultCli : 'claude');
   const [names, setNames] = useState<Record<string, string>>({});
   const [placements, setPlacements] = useState<Record<string, string>>({});
-  const [openBrief, setOpenBrief] = useState<string | null>(null);
+  const [openDetails, setOpenDetails] = useState<string | null>(null);
   if (repos.length === 0) return <p className="muted">Connect a repo first; agents need a floor to sit on.</p>;
   return (
     <div>
@@ -434,207 +433,204 @@ function TeamTab() {
         const team = agentsOnRepo(agents, repo.id);
         return (
           <div key={repo.id} className="card floor-card" style={{ ['--accent' as string]: repo.color }}>
-            <div className="row">
-              <span className="floor-badge">{repo.floor}</span>
-              <b className="grow">{repo.fullName}</b>
-              <input value={names[repo.id] ?? ''} onChange={(e) => setNames({ ...names, [repo.id]: e.target.value })} placeholder="Name (optional)" style={{ maxWidth: 160 }} />
-              {terminal && <select aria-label={`Placement for new workers on floor ${repo.floor}`} value={placements[repo.id] ?? FLOOR_BOX} style={{ width: 160 }} onChange={(e) => setPlacements({ ...placements, [repo.id]: e.target.value })}>
-                <option value={FLOOR_BOX}>Follow floor</option>
-                <option value="">This machine</option>
-                <option value="upstash">Upstash · Small Box per task</option>
-                {boxes.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-              </select>}
-              <button
-                className="btn btn-small btn-good"
-                disabled={team.filter((a) => a.role === 'dev' || a.role === 'researcher').length >= 12}
-                onClick={() =>
-                  void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'dev', box: placements[repo.id] === undefined || placements[repo.id] === FLOOR_BOX ? null : placements[repo.id] })).then(() => setNames({ ...names, [repo.id]: '' }))
-                }
-              >
-                + Developer
-              </button>
-              <button
-                className="btn btn-small"
-                disabled={team.filter((a) => a.role === 'qa').length >= 3}
-                onClick={() =>
-                  void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'qa', box: placements[repo.id] === undefined || placements[repo.id] === FLOOR_BOX ? null : placements[repo.id] })).then(() => setNames({ ...names, [repo.id]: '' }))
-                }
-              >
-                + QA tester
-              </button>
-              <button
-                className="btn btn-small"
-                disabled={team.filter((a) => a.role === 'dev' || a.role === 'researcher').length >= 12}
-                title="Takes swarm:research issues: web research filed as docs in this repo"
-                onClick={() =>
-                  void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'researcher' })).then(() => setNames({ ...names, [repo.id]: '' }))
-                }
-              >
-                + Researcher
-              </button>
+            <div className="row wrap team-floor-header">
+              <div className="team-floor-name">
+                <span className="floor-badge">{repo.floor}</span>
+                <b>{repo.fullName}</b>
+              </div>
+              <div className="team-line team-hire">
+                <input aria-label={`Name for new workers on floor ${repo.floor}`} value={names[repo.id] ?? ''} onChange={(e) => setNames({ ...names, [repo.id]: e.target.value })} placeholder="Name (optional)" />
+                {terminal && <select aria-label={`Placement for new workers on floor ${repo.floor}`} value={placements[repo.id] ?? FLOOR_BOX} onChange={(e) => setPlacements({ ...placements, [repo.id]: e.target.value })}>
+                  <option value={FLOOR_BOX}>Follow floor</option>
+                  <option value="">This machine</option>
+                  <option value="upstash">Upstash · Small Box per task</option>
+                  {boxes.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>}
+                <button
+                  className="btn btn-small btn-good"
+                  disabled={team.filter((a) => a.role === 'dev' || a.role === 'researcher').length >= 12}
+                  onClick={() =>
+                    void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'dev', box: placements[repo.id] === undefined || placements[repo.id] === FLOOR_BOX ? null : placements[repo.id] })).then(() => setNames({ ...names, [repo.id]: '' }))
+                  }
+                >
+                  + Developer
+                </button>
+                <button
+                  className="btn btn-small"
+                  disabled={team.filter((a) => a.role === 'qa').length >= 3}
+                  onClick={() =>
+                    void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'qa', box: placements[repo.id] === undefined || placements[repo.id] === FLOOR_BOX ? null : placements[repo.id] })).then(() => setNames({ ...names, [repo.id]: '' }))
+                  }
+                >
+                  + QA tester
+                </button>
+                <button
+                  className="btn btn-small"
+                  disabled={team.filter((a) => a.role === 'dev' || a.role === 'researcher').length >= 12}
+                  title="Takes swarm:research issues: web research filed as docs in this repo"
+                  onClick={() =>
+                    void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'researcher' })).then(() => setNames({ ...names, [repo.id]: '' }))
+                  }
+                >
+                  + Researcher
+                </button>
+              </div>
             </div>
             {team.length === 0 && <div className="muted small">No one works here yet.</div>}
-            <table className="team">
-              <tbody>
-                {team.map((a) => (
-                  <Fragment key={a.id}>
-                  <tr>
-                    <td>
-                      <span className="dot" style={{ background: a.color }} />
-                    </td>
-                    <td>
-                      <div className="team-name">
-                        <input
-                          className="inline"
-                          defaultValue={a.name}
-                          onBlur={(e) => e.target.value.trim() && e.target.value !== a.name && void attempt(() => api.updateAgent(a.id, { name: e.target.value }))}
-                        />
-                        <FeedbackScore agent={a} />
+            <ul className="team">
+              {team.map((a) => (
+                <li key={a.id} className="team-agent">
+                  <div className="team-summary">
+                    <div className="team-identity">
+                      <div className="team-line">
+                        <span className="dot" style={{ background: a.color }} />
+                        <b>{a.name}</b>
+                        <span className="chip nowrap" title={a.hiredBy === 'ceo' ? 'Hired on the CEO\'s proposal' : undefined}>
+                          {a.role === 'qa' ? '🔍 QA' : a.role === 'researcher' ? '📚 Research' : '💻 Dev'}
+                          {a.hiredBy === 'ceo' ? ' · 🧠' : ''}
+                        </span>
                       </div>
-                    </td>
-                    <td className="nowrap">
-                      <span className="chip" title={a.hiredBy === 'ceo' ? 'Hired on the CEO\'s proposal' : undefined}>
-                        {a.role === 'qa' ? '🔍 QA' : a.role === 'researcher' ? '📚 Research' : '💻 Dev'}
-                        {a.hiredBy === 'ceo' ? ' · 🧠' : ''}
-                      </span>
-                    </td>
-                    <td>
-                      <input
-                        key={`t-${a.title}`}
-                        className="inline"
-                        defaultValue={a.title}
-                        placeholder={a.role === 'qa' ? 'QA tester' : a.role === 'researcher' ? 'Researcher' : 'Developer'}
-                        title="Job title"
-                        onBlur={(e) => e.target.value !== a.title && void attempt(() => api.updateAgent(a.id, { title: e.target.value }))}
-                      />
-                    </td>
-                    <td>
-                      <input
-                        key={`s-${a.specialty}`}
-                        className="inline"
-                        style={{ width: 96 }}
-                        defaultValue={a.specialty}
-                        placeholder="specialty"
-                        title="Issues labelled swarm:<specialty> go to this agent first"
-                        onBlur={(e) => e.target.value !== a.specialty && void attempt(() => api.updateAgent(a.id, { specialty: e.target.value }))}
-                      />
-                    </td>
-                    <td>
-                      <button className="btn btn-small btn-ghost" title="Job description and look" onClick={() => setOpenBrief(openBrief === a.id ? null : a.id)}>
-                        📝{a.brief ? '' : ' +'}
-                      </button>
-                    </td>
-                    <td>
+                      {(a.title || a.specialty) && <span className="muted small">{[a.title, a.specialty].filter(Boolean).join(' · ')}</span>}
+                      {a.role === 'dev' && <div className="team-line"><FeedbackScore agent={a} /></div>}
+                    </div>
+                    <div className="team-work">
                       <StatusPill status={a.status} />
-                    </td>
-                    <td className="small">{a.status === 'idle' ? <span className="muted">—</span> : a.task === 'qa' ? `testing PR #${a.prNumber}` : a.task === 'fix' ? `fixing PR #${a.prNumber}` : `#${a.issueNumber ?? ''} ${a.issueTitle ?? ''}`.slice(0, 40)}</td>
-                    {terminal && (
-                      <td>
-                        <select
-                          value={a.cli}
-                          title="Their coding agent"
-                          style={{ width: 112 }}
-                          onChange={(e) => void attempt(() => api.updateAgent(a.id, { cli: e.target.value as AgentCli | '' }))}
-                        >
-                          <option value="">{cliName(clis, settings.defaultCli)} (default)</option>
-                          <CliOptions clis={clis} />
-                        </select>
-                      </td>
-                    )}
-                    {fleet && (
-                      <td>
-                        {movable(a) && (
-                          <select
-                            value={a.box ?? FLOOR_BOX}
-                            title={`Their machine, from their next task${a.box === null ? ` (the floor's: ${boxName(boxes, repo.box)})` : ''}${a.deskBox !== (a.box ?? repo.box) && busy(a) ? `. This task stays on ${boxName(boxes, a.deskBox)}.` : ''}`}
-                            aria-label={`${a.name}'s machine`}
-                            style={{ width: 112 }}
-                            onChange={(e) => void attempt(() => api.updateAgent(a.id, { box: e.target.value === FLOOR_BOX ? null : e.target.value }))}
-                          >
-                            <option value={FLOOR_BOX}>Floor's box</option>
-                            <option value="">This machine</option>
-                            <option value="upstash">Upstash · Small Box per task</option>
-                            {boxes.map((b) => {
-                              const lacks = missingClis([a], b, settings.defaultCli).length > 0; // their task there wouldn't start
-                              return (
-                                <option key={b.id} value={b.id} disabled={lacks && a.box !== b.id}>
-                                  {b.name}
-                                  {lacks ? ` (no ${cliName(clis, workerCli(a))})` : ''}
-                                </option>
-                              );
-                            })}
-                          </select>
-                        )}
-                      </td>
-                    )}
-                    <td>
-                      <input
-                        key={`m-${a.model}-${workerCli(a)}`}
-                        className="inline"
-                        style={{ minWidth: 110 }}
-                        list={workerCli(a) === 'claude' ? 'models' : undefined}
-                        defaultValue={a.model}
-                        placeholder={effectiveModel('', workerCli(a), settings, MODELS[0]) || 'agent default'}
-                        title="Their model ('' = the default for their coding agent)"
-                        onBlur={(e) => e.target.value !== a.model && void attempt(() => api.updateAgent(a.id, { model: e.target.value }))}
-                      />
-                    </td>
-                    <td>
-                      <select value={a.effort} title="Their effort" style={{ width: 124 }} onChange={(e) => void attempt(() => api.updateAgent(a.id, { effort: e.target.value }))}>
-                        <option value="">default ({settings.defaultEffort})</option>
-                        {EFFORTS.map((x) => (
-                          <option key={x} value={x}>
-                            {x}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="nowrap">
+                      {a.status !== 'idle' && (
+                        <span className="small">
+                          {a.task === 'qa' ? `testing PR #${a.prNumber}` : a.task === 'fix' ? `fixing PR #${a.prNumber}` : [a.issueNumber == null ? '' : `#${a.issueNumber}`, a.issueTitle].filter(Boolean).join(' ')}
+                        </span>
+                      )}
+                    </div>
+                    <div className="team-line">
                       <button className="btn btn-small" onClick={() => openOverlay({ kind: 'terminal', agentId: a.id })}>
                         Terminal
-                      </button>{' '}
+                      </button>
                       <button
                         className="btn btn-small btn-ghost"
-                        onClick={() =>
-                          void confirmDialog({ tone: 'danger', icon: '👋', title: `Let ${a.name} go?`, body: 'Their worktree is removed. Branches they pushed stay on GitHub.', confirm: `Let ${a.name} go` }).then(
-                            (ok) => ok && attempt(() => api.fireAgent(a.id)),
-                          )
-                        }
+                        aria-expanded={openDetails === a.id}
+                        aria-controls={`team-details-${a.id}`}
+                        onClick={() => setOpenDetails(openDetails === a.id ? null : a.id)}
                       >
-                        Let go
+                        Details
                       </button>
-                    </td>
-                  </tr>
-                  {openBrief === a.id && (
-                    <tr>
-                      <td />
-                      <td colSpan={(terminal ? 11 : 10) + (fleet ? 1 : 0)}>
-                        <label className="row small">
-                          <span>Drawn as</span>
-                          <select
-                            value={a.look}
-                            title="Character look"
-                            style={{ width: 'auto' }}
-                            onChange={(e) => void attempt(() => api.updateAgent(a.id, { look: e.target.value as 'feminine' | 'masculine' }))}
-                          >
-                            <option value="feminine">👩 She</option>
-                            <option value="masculine">👨 He</option>
-                          </select>
+                    </div>
+                  </div>
+                  <div id={`team-details-${a.id}`} className="team-details" hidden={openDetails !== a.id}>
+                    {openDetails === a.id && (
+                      <>
+                        <div className="team-fields">
+                          <label className="field">
+                            Name
+                            <input
+                              key={a.name}
+                              defaultValue={a.name}
+                              onBlur={(e) => e.target.value.trim() && e.target.value !== a.name && void attempt(() => api.updateAgent(a.id, { name: e.target.value }))}
+                            />
+                          </label>
+                          <label className="field">
+                            Job title
+                            <input
+                              key={a.title}
+                              defaultValue={a.title}
+                              placeholder={a.role === 'qa' ? 'QA tester' : a.role === 'researcher' ? 'Researcher' : 'Developer'}
+                              onBlur={(e) => e.target.value !== a.title && void attempt(() => api.updateAgent(a.id, { title: e.target.value }))}
+                            />
+                          </label>
+                          <label className="field">
+                            Specialty
+                            <input
+                              key={a.specialty}
+                              defaultValue={a.specialty}
+                              title="Issues labelled swarm:<specialty> go to this agent first"
+                              onBlur={(e) => e.target.value !== a.specialty && void attempt(() => api.updateAgent(a.id, { specialty: e.target.value }))}
+                            />
+                          </label>
+                          <label className="field">
+                            Drawn as
+                            <select value={a.look} onChange={(e) => void attempt(() => api.updateAgent(a.id, { look: e.target.value as 'feminine' | 'masculine' }))}>
+                              <option value="feminine">👩 She</option>
+                              <option value="masculine">👨 He</option>
+                            </select>
+                          </label>
+                        </div>
+                        <div className="team-fields">
+                          {terminal && (
+                            <label className="field">
+                              Coding agent
+                              <select value={a.cli} onChange={(e) => void attempt(() => api.updateAgent(a.id, { cli: e.target.value as AgentCli | '' }))}>
+                                <option value="">{cliName(clis, settings.defaultCli)} (default)</option>
+                                <CliOptions clis={clis} />
+                              </select>
+                            </label>
+                          )}
+                          {terminal && movable(a) && (
+                            <label className="field">
+                              Machine
+                              <select
+                                value={a.box ?? FLOOR_BOX}
+                                title={`Their machine, from their next task${a.box === null ? ` (the floor's: ${boxName(boxes, repo.box)})` : ''}${a.deskBox !== (a.box ?? repo.box) && busy(a) ? `. This task stays on ${boxName(boxes, a.deskBox)}.` : ''}`}
+                                onChange={(e) => void attempt(() => api.updateAgent(a.id, { box: e.target.value === FLOOR_BOX ? null : e.target.value }))}
+                              >
+                                <option value={FLOOR_BOX}>Floor's box</option>
+                                <option value="">This machine</option>
+                                <option value="upstash">Upstash · Small Box per task</option>
+                                {boxes.map((b) => {
+                                  const lacks = missingClis([a], b, settings.defaultCli).length > 0; // their task there wouldn't start
+                                  return (
+                                    <option key={b.id} value={b.id} disabled={lacks && a.box !== b.id}>
+                                      {b.name}
+                                      {lacks ? ` (no ${cliName(clis, workerCli(a))})` : ''}
+                                    </option>
+                                  );
+                                })}
+                              </select>
+                            </label>
+                          )}
+                          <label className="field">
+                            Model
+                            <input
+                              key={`m-${a.model}-${workerCli(a)}`}
+                              list={workerCli(a) === 'claude' ? 'models' : undefined}
+                              defaultValue={a.model}
+                              placeholder={effectiveModel('', workerCli(a), settings, MODELS[0]) || 'agent default'}
+                              title="Leave blank for the coding agent's default model"
+                              onBlur={(e) => e.target.value !== a.model && void attempt(() => api.updateAgent(a.id, { model: e.target.value }))}
+                            />
+                          </label>
+                          <label className="field">
+                            Effort
+                            <select value={a.effort} onChange={(e) => void attempt(() => api.updateAgent(a.id, { effort: e.target.value }))}>
+                              <option value="">default ({settings.defaultEffort})</option>
+                              {EFFORTS.map((x) => <option key={x} value={x}>{x}</option>)}
+                            </select>
+                          </label>
+                        </div>
+                        <label className="field">
+                          Job description
+                          <PromptTextarea
+                            key={a.brief}
+                            rows={3}
+                            defaultValue={a.brief}
+                            placeholder={`What ${a.name} owns on this project and how they should work. It's added to their instructions.`}
+                            onValueCommit={(text) => text !== a.brief && void attempt(() => api.updateAgent(a.id, { brief: text }))}
+                          />
                         </label>
-                        <PromptTextarea
-                          key={`b-${a.brief}`}
-                          rows={3}
-                          defaultValue={a.brief}
-                          placeholder={`What ${a.name} owns on this project and how they should work. It's added to their instructions.`}
-                          onValueCommit={(text) => text !== a.brief && void attempt(() => api.updateAgent(a.id, { brief: text }))}
-                        />
-                      </td>
-                    </tr>
-                  )}
-                  </Fragment>
-                ))}
-              </tbody>
-            </table>
+                        <button
+                          className="btn btn-small btn-ghost"
+                          onClick={() =>
+                            void confirmDialog({ tone: 'danger', icon: '👋', title: `Let ${a.name} go?`, body: 'Their worktree is removed. Branches they pushed stay on GitHub.', confirm: `Let ${a.name} go` }).then(
+                              (ok) => ok && attempt(() => api.fireAgent(a.id)),
+                            )
+                          }
+                        >
+                          Let go
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
           </div>
         );
       })}
