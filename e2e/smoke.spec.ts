@@ -193,9 +193,9 @@ test('the demo backlog marks parents and stalled work for the manager', async ({
     await tab.click();
     await expect(tab).toHaveClass(/tab-on/, { timeout: 1000 });
   }).toPass();
-  await expect(page.getByText('parent: 6/6 sub-issues done', { exact: true })).toBeVisible();
+  await expect(page.getByText('parent: 2/4 sub-issues done', { exact: true })).toBeVisible();
   await expect(page.getByText('ended twice with no work', { exact: true })).toBeVisible();
-  await page.getByText('parent: 6/6 sub-issues done', { exact: true }).scrollIntoViewIfNeeded();
+  await page.getByText('parent: 2/4 sub-issues done', { exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('parent-and-stalled-backlog.png') });
 });
 

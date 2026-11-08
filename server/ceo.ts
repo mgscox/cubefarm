@@ -36,7 +36,7 @@ export interface OfficeHandlers {
   }): string;
   proposeLetGo(a: { agent_id: string; reason: string }): string;
   fileIssue(a: { floor: number; title: string; body: string; specialty?: string; ready_for_human?: boolean }): Promise<string>;
-  closeIssue(a: { floor: number; number: number; reason: string }): Promise<string>;
+  closeIssue(a: { floor: number; number: number; reason: string; completed?: boolean }): Promise<string>;
   commentIssue(a: { floor: number; number: number; body: string }): Promise<string>;
   routeIssue(a: { floor: number; number: number; specialty?: string; depends_on?: number[]; ready_for_human?: boolean; triaged?: boolean }): Promise<string>;
   connectFloor(a: { repo: string; auto_assign?: boolean; auto_merge?: boolean; reason: string }): Promise<string>;
@@ -292,11 +292,12 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
     ),
     tool(
       'close_issue',
-      'Close an unwanted or superseded issue as not planned, posting the reason. Refuses closed or unknown issues and issues an open PR closes; resolve that PR first.',
+      'Close an issue, posting the reason: an unwanted or superseded one as not planned (the default), or finished work, e.g. a parent whose sub-issues are all done, with completed: true. Refuses closed or unknown issues and issues an open PR closes; resolve that PR first.',
       {
         floor: z.number().int(),
         number: z.number().int().positive(),
         reason: z.string().trim().min(1).max(1000).describe('Reason posted as an issue comment'),
+        completed: z.boolean().optional().describe('true closes it as completed instead of not planned'),
       },
       (a) => run(() => h.closeIssue(a)),
     ),
