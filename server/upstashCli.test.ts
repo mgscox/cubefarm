@@ -24,10 +24,10 @@ it.each(['claude', 'codex', 'opencode'] as const)('rehearses %s install, authent
     },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
     Buffer,
-    process: { env: workerEnv, arch: 'x64', argv: ['node', VERSION], exit() { throw new Error('bootstrap failed'); } },
+    process: { env: workerEnv, arch: 'x64', argv: ['node', VERSION, '1.64.1', '^2.9.1'], exit() { throw new Error('bootstrap failed'); } },
   });
   const packages = commands[0];
-  expect(packages).toMatchObject({ file: 'npm', args: ['install', '--prefix', '/workspace/cubefarm', `cubefarm@${VERSION}`, ...(cli === 'codex' ? ['@openai/codex'] : cli === 'opencode' ? ['opencode-ai'] : [])] });
+  expect(packages).toMatchObject({ file: 'npm', args: ['install', '--prefix', '/workspace/home/.cubefarm-runtime', `cubefarm@${VERSION}`, 'playwright@1.64.1', 'yaml@^2.9.1', ...(cli === 'codex' ? ['@openai/codex'] : cli === 'opencode' ? ['opencode-ai'] : [])] });
   expect(commands.some((c) => c.file === 'gh' && c.args.join(' ') === 'auth setup-git')).toBe(true);
   if (cli === 'codex') expect(commands.find((c) => c.file === 'codex')).toMatchObject({ args: ['login', '--with-api-key'], opts: { input: 'platform-emulator' } });
 

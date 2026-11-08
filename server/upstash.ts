@@ -4,6 +4,8 @@ import type { AgentCli, UpstashTask } from '../shared/types.ts';
 import type { BoxConnection, BoxOptions } from './machine.ts';
 
 export const UPSTASH = 'upstash';
+/** Upstash's Box user can write under /workspace/home. */
+export const UPSTASH_ROOT = '/workspace/home/.cubefarm-runtime';
 export const UPSTASH_CAP = 10;
 export interface UpstashProvider {
   missing(cli: AgentCli): string | null;
