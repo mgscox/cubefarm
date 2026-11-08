@@ -1,5 +1,6 @@
 // Durable task reservations: record intent before a provider write, and keep uncertain outcomes recoverable.
 import crypto from 'node:crypto';
+import { HttpError } from './httpError.ts';
 import type { AgentCli, UpstashTask } from '../shared/types.ts';
 import type { BoxConnection, BoxOptions } from './machine.ts';
 
@@ -36,6 +37,23 @@ export class UpstashTasks {
     this.writes = next.catch(() => undefined);
     return next;
   }
+  /** A different account could make a pending deletion look successful. Share the task operations' lock. */
+  changeKey(write: () => void, replacement: () => ReturnType<UpstashProvider['list']> | null): Promise<void> {
+    return this.serial(async () => {
+      const owned = this.tasks.filter((task) => task.phase !== 'create-failed');
+      if (owned.length) {
+        const listing = replacement();
+        if (listing) {
+          const boxes = await listing.catch(() => []);
+          if (owned.some((task) => !boxes.some((box) => task.boxId ? box.id === task.boxId : box.name === task.name))) {
+            throw new HttpError(409, 'The replacement key must be able to access every Box the office owns. Finish or clean up those Boxes before switching accounts.');
+          }
+        }
+      }
+      write();
+    });
+  }
+
   /** Reserve once per task; an uncertain create is found by its durable unique name, never repeated. */
   ensure(input: Pick<UpstashTask, 'agentId' | 'repo' | 'branch' | 'cli' | 'slug' | 'port'>, officeId: string): Promise<UpstashTask | null> {
     return this.serial(async () => {
@@ -86,7 +104,7 @@ export class UpstashTasks {
       const e = err as { statusCode?: number; notCreated?: boolean };
       const rejected = !task.boxId && (e.notCreated || [400, 401, 403, 404, 405, 422].includes(e.statusCode ?? 0));
       task.phase = rejected ? 'create-failed' : 'creating';
-      task.error = rejected ? 'Create rejected before a Box existed. Fix host credentials/config, restart the office, then reconnect in Fleet.' : 'Create outcome uncertain; retry in Fleet to find the Box by name.';
+      task.error = rejected ? 'Create rejected before a Box existed. Check the Box key in Settings and the host credentials, then reconnect in Fleet.' : 'Create outcome uncertain; retry in Fleet to find the Box by name.';
       await this.commit();
       throw new Error(task.error);
     }

@@ -2185,6 +2185,11 @@ export class Swarm {
   }
 
   private upstash: UpstashTasks | null = null;
+
+  changeUpstashKey(...args: Parameters<UpstashTasks['changeKey']>) {
+    if (!this.upstash) throw new HttpError(503, 'Upstash settings are unavailable while the office starts.');
+    return this.upstash.changeKey(...args);
+  }
   private upstashOpening = new Map<string, Promise<ReconnectedCli[]>>();
   private upstashCleaning = new Map<string, Promise<void>>();
 

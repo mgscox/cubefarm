@@ -1,6 +1,7 @@
 import { MessageBox } from './MessageBox';
 import { PromptTextarea } from './PromptTextarea';
 import { ClaudeAuthenticationSettings } from './ClaudeAuthenticationSettings';
+import { UpstashKeySettings } from './UpstashKeySettings';
 import { issueWorkNote } from '../../../shared/issues';
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
@@ -859,6 +860,7 @@ function SettingsTab() {
         <MouseSettings />
         <p className="muted small">Saved in this browser. Turning speed already allows for big, high-resolution screens; use the slider to fine-tune it.</p>
         <ManagerMcpSettings />
+        <UpstashKeySettings />
         <ClaudeAuthenticationSettings />
         <h3>ℹ️ Environment</h3>
         <div className="small">

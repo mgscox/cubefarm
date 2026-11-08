@@ -111,7 +111,7 @@ class BoxLink implements CliHost {
     }
     this.set('connecting');
     this.stderr = '';
-    const child = spawn(cmd.file, cmd.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: this.opts.transport?.env });
+    const child = spawn(cmd.file, cmd.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: this.opts.transport?.env() });
     this.child = child;
     let ready = false;
     const timer = setTimeout(() => {

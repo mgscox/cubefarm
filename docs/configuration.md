@@ -34,7 +34,7 @@ On Windows, keep it inside your user profile, which other accounts can't read by
 
 | Setting | What it does |
 | --- | --- |
-| `UPSTASH_BOX_API_KEY` | Upstash Box credentials for opt-in disposable worker placement. |
+| `UPSTASH_BOX_API_KEY` | Fallback Box API key for disposable workers. A key saved in Settings takes precedence. |
 | `ANTHROPIC_API_KEY` | Anthropic API billing for Claude Code workers on Upstash. Local Claude desks retain their subscription login. |
 | `OPENAI_API_KEY` | OpenAI Platform API billing for Codex workers on Upstash; a ChatGPT subscription does not supply this key. |
 | `OPENROUTER_API_KEY` | OpenRouter API billing for OpenCode workers on Upstash. |
@@ -63,6 +63,12 @@ In the terminal runtime, choose **Upstash · Small Box per task** when hiring a 
 on Team, or as a floor's machine in Fleet. Nothing is created until a task starts. The office supplies the
 Box key, the selected CLI's API key and its GitHub login token; it sends no subscription token or unrelated
 config values to the Box. Demo mode fakes this entire lifecycle without reading credentials.
+
+Open **Manager console → Settings → Upstash Box** on localhost to save or clear the Box API key.
+The saved key is stored privately on the office host. Saving takes effect immediately. Clearing restores
+the startup `UPSTASH_BOX_API_KEY` from the process environment or this file. While the office owns Boxes, a replacement key must
+be able to see all of them. If the saved key cannot be read, Upstash access pauses until the saved
+key is repaired, replaced, or cleared.
 
 Each task retains its worker, repository, CLI and Small Box across reconnects. At ten account Boxes (including
 Boxes created outside CubeFarm), or a provider quota rejection, the task uses its floor's machine. An Upstash

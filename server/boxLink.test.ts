@@ -129,3 +129,36 @@ describe('remote desk cancellation', () => {
     session.stop();
   });
 });
+
+it('uses the current provider key when a dropped transport redials', async () => {
+  vi.useFakeTimers();
+  const children: EventEmitter[] = [];
+  const mockedSpawn = vi.mocked(spawn);
+  mockedSpawn.mockClear().mockImplementation(() => {
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(),
+    });
+    children.push(child);
+    return child as unknown as ReturnType<typeof spawn>;
+  });
+  let key = 'first-key';
+  const box = connectBox({
+    box: { id: 'box', name: 'Disposable', destination: 'fake-box' },
+    officeId: 'test', changed: () => {}, terminalFor: () => null,
+    transport: { file: 'bridge', args: [], env: () => ({ UPSTASH_BOX_API_KEY: key }) },
+  });
+  try {
+    await Promise.resolve();
+    expect(mockedSpawn.mock.lastCall?.[2]).toMatchObject({ env: { UPSTASH_BOX_API_KEY: 'first-key' } });
+    key = 'replacement-key';
+    children[0].emit('close', 1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mockedSpawn).toHaveBeenCalledTimes(2);
+    expect(mockedSpawn.mock.lastCall?.[2]).toMatchObject({ env: { UPSTASH_BOX_API_KEY: 'replacement-key' } });
+  } finally {
+    box.close();
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    mockedSpawn.mockReset();
+  }
+});

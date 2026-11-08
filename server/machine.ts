@@ -163,7 +163,7 @@ export interface BoxConnection {
 export interface BoxOptions {
   box: PersistedBox;
   /** Provider transport; absent for ordinary SSH boxes. Credentials stay in this process. */
-  transport?: { file: string; args: string[]; env: NodeJS.ProcessEnv };
+  transport?: { file: string; args: string[]; env: () => NodeJS.ProcessEnv };
   officeId: string;
   changed(): void;
   terminalFor(agentId: string): AgentTerminal | null;
