@@ -21,6 +21,15 @@ const ready = async (description: string) => {
   await until(() => expect(proposal(idea.id)).toBeDefined());
   return { idea, p: proposal(idea.id) };
 };
+const stopOffice = async () => {
+  await swarm.closeOffice();
+  // Closing stops admission while running work finishes saving its state.
+  await until(() => expect(swarm.snapshot().officeLifecycle.state).toBe('closed'));
+  let stopped = false;
+  const stopping = swarm.shutdown().then(() => { stopped = true; });
+  await until(() => expect(stopped).toBe(true));
+  await stopping;
+};
 
 beforeEach(async () => {
   vi.useFakeTimers();
@@ -35,18 +44,35 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await swarm.closeOffice();
-  await vi.advanceTimersByTimeAsync(2000);
-  let stopped = false;
-  const stopping = swarm.shutdown().then(() => { stopped = true; });
-  await until(() => expect(stopped).toBe(true));
-  await stopping;
+  await stopOffice();
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
   demoTracker.refusedCreates.clear();
   demoTracker.lostCreates = 0;
   await fs.rm(HOME_DIR, { recursive: true, force: true, maxRetries: 5 });
+});
+
+it('waits for the office to save a pending Idea completion before shutting down the fixture', async () => {
+  let finishResearch: (() => void) | undefined;
+  const start = backend.startSession.bind(backend);
+  vi.spyOn(backend, 'startSession').mockImplementation((opts, callbacks) => start(opts, opts.role === 'researcher' ? {
+    ...callbacks,
+    finished: (result) => { finishResearch = () => callbacks.finished(result); },
+  } : callbacks));
+  await swarm.submitIdea({ description: 'Improve onboarding with research still running during closure' });
+  await until(() => expect(finishResearch).toBeDefined());
+
+  setTimeout(() => finishResearch?.(), 2500);
+  let stateAtShutdown: string | undefined;
+  const shutdown = swarm.shutdown.bind(swarm);
+  vi.spyOn(swarm, 'shutdown').mockImplementationOnce(async () => {
+    stateAtShutdown = swarm.snapshot().officeLifecycle.state;
+    await shutdown();
+  });
+
+  await stopOffice();
+  expect(stateAtShutdown).toBe('closed');
 });
 
 it('takes only a description through two independent reviews and publishes the displayed pair once', async () => {
@@ -140,11 +166,7 @@ it('resumes a restart during release using the persisted approval and finds the 
   const current = () => swarm.snapshot().publications!.find((x) => x.proposalId === p.id)!;
   await until(() => expect(current()?.note).toContain('connection reset during release'));
   const identities = current().issues.map((i) => i.number);
-  await swarm.closeOffice();
-  let stopped = false;
-  const stopping = swarm.shutdown().then(() => { stopped = true; });
-  await until(() => expect(stopped).toBe(true));
-  await stopping;
+  await stopOffice();
   vi.clearAllTimers();
   swarm = new Swarm(backend);
   let initialized = false;
