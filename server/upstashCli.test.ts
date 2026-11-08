@@ -7,8 +7,9 @@ import { execFileSync } from 'node:child_process';
 import { afterEach, expect, it, vi } from 'vitest';
 import * as clis from './clis.ts';
 import { writeCliSession } from './cliFiles.ts';
-import { BOOTSTRAP, OPENCODE_VERSION, readyMarker, upstashConfig } from './upstashProvider.ts';
+import { BOOTSTRAP, OPENCODE_VERSION, readyMarker, upstashConfig, verifyUpstashOpenCode } from './upstashProvider.ts';
 import { VERSION } from './config.ts';
+import type { Box, ExecSessionOptions } from '@upstash/box';
 import type { AgentCli } from '../shared/types.ts';
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
@@ -17,7 +18,7 @@ const RUNTIME = '/workspace/home/.cubefarm-runtime';
 const EXTRA: Record<AgentCli, string[]> = { claude: [], codex: ['@openai/codex'], opencode: [`@opencode/cli@${OPENCODE_VERSION}`] };
 
 /** Run the actual bootstrap against an emulated Box filesystem (files: what an earlier bootstrap left) and installed programs. */
-async function bootstrap(env: Record<string, string>, files: Record<string, string> = {}) {
+async function bootstrap(cli: AgentCli, env: Record<string, string>, files: Record<string, string> = {}) {
   const commands: { file: string; args: string[]; opts?: { input?: string } }[] = [];
   await vm.runInNewContext(BOOTSTRAP, {
     require: (name: string) => name === 'node:fs' ? { mkdirSync() {}, writeFileSync() {}, existsSync: (f: string) => f in files, readFileSync: (f: string) => files[f] } : {
@@ -25,7 +26,7 @@ async function bootstrap(env: Record<string, string>, files: Record<string, stri
     },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
     Buffer,
-    process: { env, arch: 'x64', argv: ['node', VERSION, '1.64.1', '^2.9.1'], exit() { throw new Error('bootstrap failed'); } },
+    process: { env, arch: 'x64', argv: ['node', VERSION, '1.64.1', '^2.9.1', cli], exit() { throw new Error('bootstrap failed'); } },
   });
   return commands;
 }
@@ -33,7 +34,7 @@ async function bootstrap(env: Record<string, string>, files: Record<string, stri
 it.each(['claude', 'codex', 'opencode'] as const)('rehearses %s install, authentication and terminal launch inside the emulator', async (cli) => {
   const keys = { ANTHROPIC_API_KEY: 'anthropic-emulator', OPENAI_API_KEY: 'platform-emulator', OPENROUTER_API_KEY: 'router-emulator', UPSTASH_BOX_API_KEY: 'provider-emulator' };
   const config = upstashConfig(keys, cli, 'worker-task', 'github-emulator');
-  const commands = await bootstrap({ ...config.env!, PATH: '/usr/bin' });
+  const commands = await bootstrap(cli, { PATH: '/usr/bin', OPENAI_API_KEY: config.env!.OPENAI_API_KEY ?? '' });
   const packages = commands[0];
   expect(packages).toMatchObject({ file: 'npm', args: ['install', '--prefix', RUNTIME, `cubefarm@${VERSION}`, 'playwright@1.64.1', 'yaml@^2.9.1', ...EXTRA[cli]] });
   expect(commands.some((c) => c.args[0] === 'uninstall')).toBe(false);
@@ -77,7 +78,7 @@ it('migrates an OpenCode v1 runtime so only the pinned v2 package owns the openc
     { [`${RUNTIME}/package.json`]: JSON.stringify({ dependencies: { cubefarm: `^${VERSION}`, 'opencode-ai': '^1.19.5' } }) },
   ];
   for (const files of legacyRuntimes) {
-    const commands = await bootstrap(env, files);
+    const commands = await bootstrap('opencode', env, files);
     expect(commands.slice(0, 3).map((c) => [c.file, ...c.args])).toEqual([
       ['npm', 'uninstall', '--prefix', RUNTIME, 'opencode-ai'],
       ['npm', 'install', '--prefix', RUNTIME, `cubefarm@${VERSION}`, 'playwright@1.64.1', 'yaml@^2.9.1', `@opencode/cli@${OPENCODE_VERSION}`],
@@ -85,9 +86,9 @@ it('migrates an OpenCode v1 runtime so only the pinned v2 package owns the openc
     ]);
   }
   // A runtime that never had v1 is left alone, and other CLIs never touch OpenCode.
-  const v2 = await bootstrap(env, { [`${RUNTIME}/package.json`]: JSON.stringify({ dependencies: { '@opencode/cli': `^${OPENCODE_VERSION}` } }) });
+  const v2 = await bootstrap('opencode', env, { [`${RUNTIME}/package.json`]: JSON.stringify({ dependencies: { '@opencode/cli': `^${OPENCODE_VERSION}` } }) });
   expect(v2.some((c) => c.args[0] === 'uninstall')).toBe(false);
-  const codex = await bootstrap({ ...env, CUBEFARM_UPSTASH_CLI: 'codex' }, { [`${RUNTIME}/package.json`]: JSON.stringify({ dependencies: { 'opencode-ai': '^1.19.5' } }) });
+  const codex = await bootstrap('codex', env, { [`${RUNTIME}/package.json`]: JSON.stringify({ dependencies: { 'opencode-ai': '^1.19.5' } }) });
   expect(codex.some((c) => c.args[0] === 'uninstall' || c.args[0].endsWith('postinstall.mjs'))).toBe(false);
 });
 
@@ -96,4 +97,19 @@ it('re-runs the bootstrap on OpenCode Boxes that an older office marked ready', 
   expect(readyMarker('opencode')).toContain(OPENCODE_VERSION);
   expect(readyMarker('claude')).toBe(`${RUNTIME}/ready-${VERSION}`);
   expect(readyMarker('codex')).toBe(`${RUNTIME}/ready-${VERSION}`);
+});
+
+it.each([
+  [`opencode v${OPENCODE_VERSION}`, 0, true],
+  ['1.19.5', 0, false],
+  ['', 127, false],
+] as const)('checks the installed Upstash executable (version %j, exit %i)', async (version, code, accepted) => {
+  const session = vi.fn(async (options: ExecSessionOptions) => {
+    options.onStdout?.(Buffer.from(version + '\n'));
+    return { wait: async () => code, close() {} };
+  });
+  const result = verifyUpstashOpenCode({ exec: { session } } as unknown as Box);
+  if (accepted) await expect(result).resolves.toBeUndefined();
+  else await expect(result).rejects.toThrow(new RegExp(`expected opencode v${OPENCODE_VERSION}`, 'i'));
+  expect(session).toHaveBeenCalledWith(expect.objectContaining({ argv: [`${RUNTIME}/node_modules/.bin/opencode`, '--version'] }));
 });
