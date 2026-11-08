@@ -1253,6 +1253,13 @@ describe('closing issues', () => {
     expect(s.backend.closeIssue).not.toHaveBeenCalled();
   });
 
+  it.each([[undefined, 'not planned'], [false, 'not planned'], [true, 'completed']] as const)('completed: %s closes as %s', async (completed, as) => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ ...issue(66), repo: repo.fullName, state: 'OPEN' });
+    vi.spyOn(s.backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    expect(await s.officeTools().call('close_issue', { ...args, completed })).toContain(`Closed #66 on floor 1 as ${as}: Superseded by #67`);
+    expect(s.backend.closeIssue).toHaveBeenCalledWith(repo.fullName, 66, as, `Superseded by #67\n\n${AGENT_COMMENT_MARKER}`);
+  });
+
   it('closes unwanted issues as not planned through the demo CEO', async () => {
     vi.mocked(s.backend.closeIssue).mockRestore();
     const number = await s.backend.createIssue(repo.fullName, 'Unwanted task', 'Superseded');
@@ -3008,10 +3015,79 @@ describe('native parent issues', () => {
 
   it('demo supplies a parent that stays out of ready capacity', async () => {
     setIssues(...await s.backend.listIssues(repo.fullName));
-    const parent = s.repoRt.get(repo.id)!.issues.find((i) => i.subIssues?.total);
+    const parent = s.repoRt.get(repo.id)!.issues.find((i) => i.title === 'Sharing plan');
     expect(parent).toBeDefined();
     expect(ready()).not.toContain(parent!.number);
-    expect(JSON.parse(s.companyStatus()).floors[0].backlog.find((i: { number: number }) => i.number === parent!.number).parent).toBe('6/6 sub-issues done');
+    expect(JSON.parse(s.companyStatus()).floors[0].backlog.find((i: { number: number }) => i.number === parent!.number).parent).toBe('2/4 sub-issues done');
+  });
+
+  it('demo closes its finished parent as completed on a sync and keeps the partly done one', async () => {
+    Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
+    vi.spyOn(swarm as unknown as { syncFolder(): Promise<void> }, 'syncFolder').mockResolvedValue();
+    await swarm.syncRepo(repo.id);
+    const issues = s.repoRt.get(repo.id)!.issues;
+    expect(issues.find((i) => i.title === 'Sharing plan')?.subIssues).toEqual({ total: 4, completed: 2 });
+    expect(issues.some((i) => i.subIssues?.total && i.subIssues.completed === i.subIssues.total)).toBe(false);
+    expect(await s.backend.findIssuesByMarker(repo.fullName, 'the office closes this parent', ''))
+      .toEqual([expect.objectContaining({ title: 'Todo release plan', state: 'CLOSED', stateReason: 'completed' })]);
+  });
+});
+
+describe('finished parent issues', () => {
+  const parent = (number: number, total: number, completed: number, labels: string[] = []): IssueInfo => ({ ...issue(number, labels), subIssues: { total, completed } });
+  let listed: IssueInfo[];
+
+  beforeEach(() => {
+    Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
+    Object.assign(s.repoRt.get(repo.id)!, { lastMergedAt: null });
+    listed = [parent(10, 6, 6), parent(11, 4, 2), parent(12, 2, 2, ['ready-for-human'])];
+    vi.spyOn(s.backend, 'listIssues').mockImplementation(async () => listed);
+    vi.spyOn(s.backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    vi.spyOn(s.backend, 'closeIssue').mockImplementation(async (_name, n) => void (listed = listed.filter((i) => i.number !== n)));
+  });
+
+  it('closes them as completed once, with a comment, toast and office message, until a reopened count changes', async () => {
+    const events = vi.spyOn(s, 'broadcast');
+    const messages = vi.spyOn(s, 'postMessage');
+    await swarm.syncRepo(repo.id);
+    for (const [n, total] of [[10, 6], [12, 2]]) {
+      expect(s.backend.closeIssue).toHaveBeenCalledWith(repo.fullName, n, 'completed', `All ${total} sub-issues are done; closed by the office.\n\n${AGENT_COMMENT_MARKER}`);
+    }
+    expect(s.backend.closeIssue).toHaveBeenCalledTimes(2);
+    expect(s.repoRt.get(repo.id)!.issues.map((i) => i.number)).toEqual([11]);
+    expect(events).toHaveBeenCalledWith({ type: 'toast', level: 'success', text: `Closed #10 on ${repo.fullName}: all 6 sub-issues are done.` });
+    expect(messages).toHaveBeenCalledWith('office', expect.stringContaining(`Closed #10 "Issue 10" on ${repo.fullName} as completed`));
+
+    listed = [parent(10, 6, 6), parent(11, 4, 2)]; // the manager reopens #10
+    await swarm.syncRepo(repo.id);
+    expect(s.backend.closeIssue).toHaveBeenCalledTimes(2);
+    listed = [parent(10, 7, 6), parent(11, 4, 2)];
+    await swarm.syncRepo(repo.id);
+    listed = [parent(10, 7, 7), parent(11, 4, 2)];
+    await swarm.syncRepo(repo.id);
+    expect(s.backend.closeIssue).toHaveBeenCalledTimes(3);
+    expect(s.backend.closeIssue).toHaveBeenLastCalledWith(repo.fullName, 10, 'completed', expect.stringContaining('All 7 sub-issues'));
+  });
+
+  it('leaves them open while a PR closes them or a session works on them', async () => {
+    vi.mocked(s.backend.listPulls).mockResolvedValue({ pulls: [{
+      number: 13, title: '', url: '', isCrossRepository: false, headRefName: 'feature', state: 'OPEN', isDraft: false, closesIssues: [10], checks: 'none',
+      mergeable: 'MERGEABLE', headSha: 'sha', reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
+      mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+    }] });
+    Object.assign(s.state.agents[0], { status: 'working', task: 'issue', issueNumber: 12 });
+    await swarm.syncRepo(repo.id);
+    expect(s.backend.closeIssue).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed close once', async () => {
+    vi.mocked(s.backend.closeIssue).mockRejectedValue(new Error('HTTP 403'));
+    const messages = vi.spyOn(s, 'postMessage');
+    await swarm.syncRepo(repo.id);
+    await swarm.syncRepo(repo.id);
+    expect(s.backend.closeIssue).toHaveBeenCalledTimes(2);
+    expect(messages).toHaveBeenCalledWith('office', expect.stringContaining('closing it failed: HTTP 403'));
+    expect(s.repoRt.get(repo.id)!.issues.map((i) => i.number)).toEqual([10, 11, 12]);
   });
 });
 

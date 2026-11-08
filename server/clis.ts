@@ -520,6 +520,12 @@ export function selectedOption(screen: string, question: RegExp): string | null 
   return markers.length === 1 ? markers[0][1].trim() || null : null;
 }
 
+/** The latest question on screen is this one, not other: its menu is the one showing. */
+function askedLast(screen: string, question: RegExp, other: RegExp): boolean {
+  const last = [...screen.matchAll(new RegExp(question.source, question.flags.replace('g', '') + 'g'))].at(-1);
+  return !!last && !other.test(screen.slice(last.index + last[0].length));
+}
+
 /**
  * Keep follow-up text out of a startup menu, even before its selection marker has been drawn. Only Claude Code and
  * Codex show these menus; other CLIs (OpenCode) never hold a follow-up.
@@ -543,6 +549,7 @@ export function startupQuestionOnScreen(screen: string, cli: AgentCli): boolean 
  * question on screen.
  */
 export function trustKey(screen: string): 'enter' | 'down' | null {
+  if (!askedLast(screen, TRUST_PROMPT, HOOK_REVIEW_PROMPT)) return null; // "Trust all" hooks isn't the folder's yes
   const selected = selectedOption(screen, TRUST_PROMPT) ?? '';
   if (/^(yes|trust|continue|proceed)\b/i.test(selected.trim())) return 'enter';
   if (/^(no|exit|quit|cancel)\b/i.test(selected.trim())) return 'down';
@@ -616,6 +623,40 @@ export function hookReviewKey(screen: string): 'enter' | 'down' | null {
   const selected = selectedOption(screen, HOOK_REVIEW_PROMPT);
   if (!selected) return null;
   return /^continue without trusting/i.test(selected.trim()) ? 'enter' : 'down';
+}
+
+/** How often one session answers Codex's hook review before the office says it keeps coming back. */
+export const HOOK_REVIEW_ANSWERS = 3;
+
+/**
+ * Codex asks "Hooks need review" each time its TUI starts, which a slow start can put past the office's startup
+ * window. look(screen) gives hookReviewKey's next key whenever the question is the one on screen, waiting 3 s after
+ * an Enter for it to go; 'stuck' (once) when it is still there after HOOK_REVIEW_ANSWERS answers or 12 keys.
+ */
+export function hookReviewWatch() {
+  let answers = 0;
+  let keys = 0;
+  let answeredAt = -Infinity;
+  let gaveUp = false;
+  return {
+    look(screen: string, at = Date.now()): 'down' | 'enter' | 'stuck' | null {
+      if (gaveUp || at - answeredAt <= 3000 || !startupQuestionOnScreen(screen, 'codex')) return null;
+      // A folder-trust question below it is the startup watch's to answer.
+      if (!askedLast(screen, HOOK_REVIEW_PROMPT, TRUST_PROMPT)) return null;
+      const key = hookReviewKey(screen);
+      if (!key) return null;
+      if (answers >= HOOK_REVIEW_ANSWERS || keys >= 12) {
+        gaveUp = true;
+        return 'stuck';
+      }
+      keys += 1;
+      if (key === 'enter') {
+        answers += 1;
+        answeredAt = at;
+      }
+      return key;
+    },
+  };
 }
 
 /**

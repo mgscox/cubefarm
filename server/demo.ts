@@ -158,9 +158,13 @@ seed('demo-co/pixel-todo', 'A cheerful todo app', [
   ['Register the app in the App Store', 'Needs the company account and a signed agreement.', [READY_FOR_HUMAN]],
 ]);
 const parentRepo = repos.get('demo-co/pixel-todo')!;
-const parent = issue(parentRepo.nextNumber++, 'Todo release plan', 'Implementation is complete; review and close this parent.', parentRepo.fullName);
+// The first sync closes the finished parent as completed; the partly done one stays open.
+const parent = issue(parentRepo.nextNumber++, 'Todo release plan', 'Implementation is complete; the office closes this parent.', parentRepo.fullName);
 parent.subIssues = { total: 6, completed: 6 };
 parentRepo.issues.push(parent);
+const sharing = issue(parentRepo.nextNumber++, 'Sharing plan', 'Share lists with friends, in four parts.', parentRepo.fullName);
+sharing.subIssues = { total: 4, completed: 2 };
+parentRepo.issues.push(sharing);
 repos.get('demo-co/pixel-todo')!.issues[2].nativeBlockers = [{ number: 2, state: 'OPEN' }];
 repos.get('demo-co/pixel-todo')!.issues[2].body += '\n\nDepends on https://github.com/demo-co/pixel-todo/issues/2';
 seed('demo-co/weather-api', 'Tiny weather REST API', [

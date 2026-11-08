@@ -54,6 +54,7 @@ import { lessonExport } from '../shared/lessons.ts';
 import { draftLesson, reviewLesson, reviseLesson } from './lessons.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
+import { parentReadyToClose, retainParentCloses, type ParentClose } from './parentClose.ts';
 import { pickRequestedStart, retainRequestedStarts } from './requestedStarts.ts';
 import { DESK_COOLDOWN_MS, MAX_TASK_FAILURES, deskRecoveryDue, loginFailure, migrateDeskRecovery, nextStartupRetry, taskFailure } from './deskRecovery.ts';
 import { followKeptCli, resumeNote } from './restartRecovery.ts';
@@ -125,6 +126,7 @@ interface PersistedRepo {
   sessionRemedies?: RepoView['sessionRemedies'];
   parkedBranches: ParkedBranch[];
   noWorkEndings: NoWorkEnding[];
+  closedParents?: ParentClose[]; // parents the office closed itself, at their sub-issue counts
   autoMerge: boolean; // PRs merge themselves once QA passes and GitHub's checks are green
   browserTesting: boolean;
   links: string[]; // other connected repos this floor's agents may read
@@ -3191,6 +3193,7 @@ export class Swarm {
       rt.fetchedAt = started;
       this.reconcilePulls(repo, pulls);
       await this.stopClosedWork(repo, issues.status === 'fulfilled' ? issues.value : null, pulls);
+      if (issues.status === 'fulfilled') await this.closeFinishedParents(repo, rt, issues.value, pulls);
       await this.pruneUnlistedQa(repo, pulls);
       // Something was merged since the last look (by the office or anyone else): bring the folder up to date.
       const newest = pulls.reduce<string | null>((m, p) => (p.mergedAt && (!m || p.mergedAt > m) ? p.mergedAt : m), null);
@@ -3346,6 +3349,31 @@ export class Swarm {
       this.endClosedWork(a, repo, work, `■ Stopped: ${closedWorkText(work)}. Ready for new work.`);
       this.postMessage('office', `■ Stopped ${a.name} on ${repo.fullName}: ${closedWorkText(work)}.`);
     }
+  }
+
+  /** Close open parents whose sub-issues are all done as completed, on every floor, once per sub-issue count. */
+  private async closeFinishedParents(repo: PersistedRepo, rt: RepoRuntime, issues: IssueInfo[], pulls: PullInfo[]) {
+    const before = repo.closedParents ?? [];
+    let closed = retainParentCloses(before, issues);
+    for (const issue of issues) {
+      const openPr = pulls.some((p) => p.state === 'OPEN' && p.closesIssues.includes(issue.number));
+      if (!parentReadyToClose(issue, { openPr, working: this.issueTaken(repo, issue.number), closed })) continue;
+      const { total, completed } = issue.subIssues!;
+      // Recorded either way: a failure is reported once, not on every sync.
+      closed = [...closed.filter((c) => c.issueNumber !== issue.number), { issueNumber: issue.number, total, completed }];
+      try {
+        await this.backend.closeIssue(repo.fullName, issue.number, 'completed', `All ${total} sub-issues are done; closed by the office.\n\n${AGENT_COMMENT_MARKER}`);
+      } catch (err) {
+        this.postMessage('office', `All ${total} sub-issues of #${issue.number} on ${repo.fullName} are done, but closing it failed: ${oneLine(err)}. Close it as completed on GitHub.`);
+        continue;
+      }
+      rt.issues = rt.issues.filter((i) => i.number !== issue.number);
+      this.toast('success', `Closed #${issue.number} on ${repo.fullName}: all ${total} sub-issues are done.`);
+      this.postMessage('office', `✅ Closed #${issue.number} "${issue.title}" on ${repo.fullName} as completed: all ${total} sub-issues are done.`);
+    }
+    if (JSON.stringify(closed) === JSON.stringify(before)) return;
+    repo.closedParents = closed;
+    this.save();
   }
 
   /** End an agent's task on closed work: its session, its desk and the QA record it was testing or fixing. */
@@ -7646,7 +7674,7 @@ export class Swarm {
     return `Filed #${n}${x.ready_for_human ? ' for a person' : ''} on floor ${repo.floor}: ${title}${slug ? ` (routed to ${slug})` : ''}.`;
   }
 
-  private async closeIssue(x: { floor: number; number: number; reason: string }) {
+  private async closeIssue(x: { floor: number; number: number; reason: string; completed?: boolean }) {
     const repo = this.floorRepo(x.floor);
     const reason = x.reason.trim();
     if (!reason || reason.length > 1000) throw new Error('Give a short closing reason (1–1000 characters).');
@@ -7656,12 +7684,13 @@ export class Swarm {
     const { pulls } = await this.backend.listPulls(repo.fullName);
     const pr = pulls.find((p) => p.state === 'OPEN' && p.closesIssues.includes(x.number));
     if (pr) throw new Error(`Open PR #${pr.number} closes #${x.number}. Merge or park that PR first.`);
-    await this.backend.closeIssue(repo.fullName, x.number, 'not planned', `${reason}\n\n${AGENT_COMMENT_MARKER}`);
+    const as = x.completed ? 'completed' : 'not planned';
+    await this.backend.closeIssue(repo.fullName, x.number, as, `${reason}\n\n${AGENT_COMMENT_MARKER}`);
     const rt = this.repoRt.get(repo.id)!;
     rt.issues = rt.issues.filter((i) => i.number !== x.number);
     this.setRequestedStarts(repo, repo.requestedStarts.filter((r) => r.issueNumber !== x.number));
     this.emitRepo(repo);
-    return `Closed #${x.number} on floor ${repo.floor} as not planned: ${reason}`;
+    return `Closed #${x.number} on floor ${repo.floor} as ${as}: ${reason}`;
   }
 
   /** The CEO's comment on an open issue, also passed into any session working on that issue right now. */
