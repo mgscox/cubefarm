@@ -3,7 +3,7 @@ import { planCli, type CliHost } from './machine.ts';
 import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
 import { STUCK_MS, type ClaudeTurn } from './clis.ts';
 import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
-import { CONSOLE_PERMISSION, NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
+import { BASH_EXPANSION_PERMISSION, CONSOLE_PERMISSION, NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
 import type { SessionCallbacks, SessionOptions } from './agentRunner.ts';
 import type { AgentTerminal } from './terminal.ts';
 
@@ -40,7 +40,7 @@ describe('startCliSession on a host', () => {
   const callbacks = (): SessionCallbacks => ({
     activity: vi.fn(), log: vi.fn(), tool: vi.fn(), sessionId: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), finished: vi.fn(),
   });
-  const terminal = () => ({ cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), screen: () => '' }) as unknown as AgentTerminal;
+  const terminal = () => ({ cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), flush: async () => {}, screen: () => '' }) as unknown as AgentTerminal;
   const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
   const host = (prepare: CliHost['prepare']): CliHost => ({
     prepare, recoverTurn: () => null, hasFile: () => false, claudeTurn: () => null, newShots: () => [], savedShot: () => null, codexThread: async () => undefined,
@@ -516,6 +516,45 @@ describe('startCliSession on a host', () => {
     hook({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } });
     expect(cb.boot).toHaveBeenLastCalledWith(null);
     expect(vi.mocked(cb.log).mock.calls.flat(2).some((e) => /receiving Claude Code's hooks now/.test(e.text))).toBe(true);
+  });
+
+  it('continues a QA Bash command when Claude asks about a shell expansion', async () => {
+    let screen = '✻ Running… (esc to interrupt)';
+    const { cb, hook, term } = claude(() => screen, () => null, { role: 'qa' });
+    hook({ hook_event_name: 'UserPromptSubmit', prompt: 'Check both runs' });
+    pty.write.mockClear();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write).not.toHaveBeenCalled();
+    term.flush = async () => { screen = BASH_EXPANSION_PERMISSION; };
+    hook({ hook_event_name: 'Notification', notification_type: 'permission_prompt' });
+    expect(pty.write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(0);
+    term.lastOutputAt = Date.now(); // the same modal can redraw before a duplicate notification
+    hook({ hook_event_name: 'Notification', notification_type: 'permission_prompt' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pty.write).toHaveBeenCalledExactlyOnceWith('\r');
+    screen = '✻ Running… (esc to interrupt)';
+    hook({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_response: 'Test logs checked' });
+    hook({ hook_event_name: 'Stop', last_assistant_message: 'QA finished' });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'QA finished' }));
+  });
+
+  it.each([
+    { role: 'ceo', screen: BASH_EXPANSION_PERMISSION },
+    { role: 'dev', screen: BASH_EXPANSION_PERMISSION.replace('Contains simple_expansion', 'This command requires approval') },
+    { role: 'dev', screen: BASH_EXPANSION_PERMISSION.replace('❯ 1. Yes', '  1. Yes').replace('  3. No', '❯ 3. No') },
+    { role: 'dev', screen: `${BASH_EXPANSION_PERMISSION}\n❯ What next?` },
+    { role: 'dev', screen: `${BASH_EXPANSION_PERMISSION}\n${BASH_EXPANSION_PERMISSION.replace(/  2\. Yes[^]*?  3\. No\n/, '')}` },
+  ] as const)('does not answer an excluded Bash permission screen ($role)', async ({ role, screen }) => {
+    const { cb, hook, session } = claude(() => screen, () => null, { role });
+    hook({ hook_event_name: 'UserPromptSubmit', prompt: 'Check both runs' });
+    pty.write.mockClear();
+    hook({ hook_event_name: 'Notification', notification_type: 'permission_prompt' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pty.write).not.toHaveBeenCalled();
+    expect(errors(cb)).toEqual([expect.stringContaining('waiting for a permission answer')]);
+    session.stop();
   });
 
   const replies = (cb: SessionCallbacks, text: string) => vi.mocked(cb.log).mock.calls.flat(2).filter((e) => e.text === `● ${text}`).length;

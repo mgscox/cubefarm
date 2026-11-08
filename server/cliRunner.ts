@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cliStartupFailed, codexTurnThread, hookReviewKey, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, startupQuestionOnScreen, STUCK_MS, trustKey } from './clis.ts';
+import { bashExpansionPermission, bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cliStartupFailed, codexTurnThread, hookReviewKey, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, startupQuestionOnScreen, STUCK_MS, trustKey } from './clis.ts';
 import { terminalsAvailable, type Pty } from './ptyClient.ts';
 import { ALLOW } from './ptyProtocol.ts';
 import { localCliHost } from './localCliHost.ts';
@@ -406,6 +406,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let checkingIdle = false;
   let permissionScreen = '';
   let permissionOutputAt = 0;
+  let bashApprovalSent = false;
   let trustKeys = 0; // keys pressed on a folder-trust question (a few at most)
   let trustedAt = 0;
   const pendingPrompts: string[] = [];
@@ -579,6 +580,29 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     if (cli === 'codex' && !mainThread && typeof b.session_id === 'string' && b.session_id) mainThread = b.session_id;
   };
 
+  const permissionNotice = async (sub: boolean) => {
+    const proc = live?.proc;
+    if (cli === 'claude' && !sub && working && proc && (opts.role === 'dev' || opts.role === 'qa')) {
+      const outputAt = term.lastOutputAt ?? 0;
+      const before = activity;
+      try {
+        await term.flush();
+        if (done || !working || live?.proc !== proc || activity !== before) return;
+        // The notification must describe the screen we read, even if xterm was still rendering it.
+        if (outputAt === (term.lastOutputAt ?? 0) && bashExpansionPermission(term.screen())) {
+          if (bashApprovalSent) return;
+          proc.write('\r');
+          bashApprovalSent = true;
+          log([{ kind: 'system', text: 'Approved Bash shell expansion once' }]);
+          return;
+        }
+      } catch {
+        // Fall through to the existing human prompt if terminal output or input failed.
+      }
+    }
+    log([{ kind: 'error', text: `⚠ ${label} is waiting for a permission answer: open the terminal to answer it.` }]);
+  };
+
   const hook = (b: Record<string, unknown>): Record<string, unknown> => {
     const event = String(b.hook_event_name ?? '');
     if (done) return event === 'PreToolUse' ? ALLOW : {};
@@ -587,6 +611,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     if (fromMain(b)) {
       heardAt = Date.now();
       stir();
+      if (event === 'PostToolUse' || event === 'PostToolUseFailure' || event === 'UserPromptSubmit' || event === 'Stop') bashApprovalSent = false;
     }
     if (fromMain(b) && !heard) {
       heard = true;
@@ -680,7 +705,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         return {};
       }
       case 'Notification': {
-        if (b.notification_type === 'permission_prompt') log([{ kind: 'error', text: `⚠ ${label} is waiting for a permission answer: open the terminal to answer it.` }]);
+        if (b.notification_type === 'permission_prompt') void permissionNotice(sub);
         return {};
       }
       case 'StatusLine':
@@ -830,6 +855,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     stuckTimer = setInterval(async () => {
       if (done || !live?.proc || checkingIdle) return;
       const screen = term.screen();
+      if (bashApprovalSent && !bashExpansionPermission(screen)) bashApprovalSent = false;
       const permission = cli === 'claude' && working ? officePermission(screen) : null;
       if (!permission) permissionScreen = '';
       else {
