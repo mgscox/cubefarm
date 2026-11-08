@@ -33,7 +33,7 @@ await fs.writeFile(gitConfig, '[user]\n\tname = Sync Test\n\temail = sync-test@e
 process.env.GIT_CONFIG_GLOBAL = gitConfig;
 
 const { git, run } = await import('./exec.ts');
-const { branchHolder, deskDir, deskLockPath, deskQaDiffBase, errorLine, isStaleLock, leftoversInDesk, mainDir, parseWorktrees, prepareDesk, realPath, repoDir, samePath, setLocalPath, STALE_LOCK_MS, syncMain: sync } =
+const { branchHolder, deskDir, deskLockPath, deskQaDiffBase, errorLine, isStaleLock, leftoversInDesk, mainDir, mergeQueueTree, parseWorktrees, prepareDesk, realPath, repoDir, samePath, setLocalPath, STALE_LOCK_MS, syncMain: sync } =
   await import('./workspace.ts');
 // Most tests only care about the status line.
 const syncMain = async (...args: Parameters<typeof sync>) => (await sync(...args))?.status ?? null;
@@ -117,6 +117,36 @@ it('narrows QA only when the prior head is an ancestor and the PR merge base is 
   await git(['switch', '-q', '-c', 'rewritten', original], { cwd });
   await commitFile(cwd, 'feature', 'rewritten change');
   expect(await deskQaDiffBase(fullName, slug, advanced, await head(cwd), original, previous)).toBeNull();
+});
+
+it('computes the exact rebase tree without using the floor config or changing its checkout', { timeout: 60_000 }, async () => {
+  const r = await makeRepos();
+  const lines = Array.from({ length: 20 }, (_, index) => `line ${index}`).join('\n');
+  await commitFile(r.upstream, '.gitattributes', 'notes.txt merge=custom\n');
+  await commitFile(r.upstream, 'notes.txt', `${lines}\n`);
+  await git(['switch', '-c', 'reviewed'], { cwd: r.upstream });
+  await commitFile(r.upstream, 'notes.txt', `${lines.replace('line 0', 'reviewed change')}\n`);
+  const approved = await head(r.upstream);
+  await git(['push', 'origin', 'reviewed'], { cwd: r.upstream });
+  await git(['switch', 'main'], { cwd: r.upstream });
+  await commitFile(r.upstream, 'notes.txt', `${lines.replace('line 19', 'target change')}\n`);
+  const advanced = await head(r.upstream);
+  await git(['push', 'origin', 'main'], { cwd: r.upstream });
+  await git(['merge', '--no-commit', '--no-ff', 'reviewed'], { cwd: r.upstream });
+  const expected = await git(['write-tree'], { cwd: r.upstream });
+
+  const floorHead = await head(r.dir);
+  const tracking = await originMain(r.dir);
+  const readme = path.join(r.dir, 'README.md');
+  await fs.writeFile(readme, 'local edit');
+  await git(['config', 'merge.custom.driver', 'false'], { cwd: r.dir });
+  vi.stubEnv('GIT_CONFIG_COUNT', '1');
+  vi.stubEnv('GIT_CONFIG_KEY_0', 'merge.custom.driver');
+  vi.stubEnv('GIT_CONFIG_VALUE_0', 'false');
+  expect(await mergeQueueTree(r.fullName, advanced, approved)).toBe(expected);
+  expect(await head(r.dir)).toBe(floorHead);
+  expect(await originMain(r.dir)).toBe(tracking);
+  expect(await fs.readFile(readme, 'utf8')).toBe('local edit');
 });
 
 describe('syncMain', { timeout: 60_000 }, () => {

@@ -2960,6 +2960,7 @@ export class Swarm {
     }
     if (this.holdForSecurityReview(repo, rec, pr, false)) return false;
     if (hasLabel(pr.labels, NEEDS_REVIEW) && step.do !== 'ready') return false;
+    if (pr.baseRefName && !pr.baseSha && step.do !== 'ready') return this.mergeNote(rec, `waiting for the current ${pr.baseRefName} revision`);
     const candidate = rec.mergeCandidate;
     let baseInHead: boolean | undefined;
     if (candidate && !rec.securityReview && pr.baseSha && pr.baseSha !== candidate.baseSha &&
@@ -2991,7 +2992,10 @@ export class Swarm {
     const latest = await this.backend.prDetails(repo.fullName, pr.number);
     rec.crossRepository ??= latest.isCrossRepository;
     if (this.state.officeHeld || latest.state !== 'OPEN' || latest.isDraft || hasLabel(latest.labels, NEEDS_HUMAN) || hasLabel(latest.labels, NEEDS_REVIEW)) return false;
-    if ((rec.securityReview && !latest.baseSha) || this.holdForSecurityReview(repo, rec, latest)) return false;
+    if ((latest.baseRefName || rec.securityReview) && !latest.baseSha) {
+      return this.mergeNote(rec, `waiting for the current ${latest.baseRefName ?? repo.defaultBranch} revision`);
+    }
+    if (this.holdForSecurityReview(repo, rec, latest)) return false;
     if (latest.headSha !== pr.headSha) return this.mergeNote(rec, 'head changed; refreshing before merge');
     const baseRef = latest.baseRefName ?? repo.defaultBranch;
     if (rec.mergeCandidate && rec.mergeCandidate.baseRef !== baseRef) {
@@ -2999,7 +3003,7 @@ export class Swarm {
       setTimeout(() => this.schedule(), 200);
       return false;
     }
-    if (pr.baseSha && pr.baseSha !== latest.baseSha) return this.mergeNote(rec, `waiting for a fresh view of ${baseRef}`);
+    if ((pr.baseSha && pr.baseSha !== latest.baseSha) || (pr.baseRefName && pr.baseRefName !== baseRef)) return this.mergeNote(rec, `waiting for a fresh view of ${baseRef}`);
     if (rec.status !== 'passed') return false;
     const behind = latest.mergeState === 'BEHIND' || baseInHead === false;
     const needsHuman = rec.mergeFixes >= MAX_MERGE_FIXES;
