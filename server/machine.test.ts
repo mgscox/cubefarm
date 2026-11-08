@@ -4,6 +4,7 @@ import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
 import { STUCK_MS, type ClaudeTurn } from './clis.ts';
 import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
 import { BASH_EXPANSION_PERMISSION, CONSOLE_PERMISSION, NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
+import { CODEX_IDLE, codexHookReview } from './fixtures/codexScreens.ts';
 import type { SessionCallbacks, SessionOptions } from './agentRunner.ts';
 import type { AgentTerminal } from './terminal.ts';
 
@@ -304,6 +305,50 @@ describe('startCliSession on a host', () => {
     expect(first.cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: ['Claude Code is still showing a startup question after 2 minutes; follow-up was not sent.'] }));
     await vi.advanceTimersByTimeAsync(STUCK_MS);
     expect(first.cb.finished).toHaveBeenCalledTimes(1);
+  });
+
+  /** A Codex screen that follows the keys sent to its hook-review question; start: the selected option. */
+  const hookReview = (start: 1 | 2 | 3 | null) => {
+    let selected = start;
+    pty.write.mockImplementation((key: string) => {
+      if (selected && key === '\x1b[B') selected = Math.min(selected + 1, 3) as 1 | 2 | 3;
+      if (selected === 3 && key === '\r') selected = null;
+    });
+    return {
+      screen: () => (selected ? codexHookReview(selected) : CODEX_IDLE),
+      show: () => (selected = 1),
+    };
+  };
+
+  it("answers Codex's hook review after the startup window and the turn carries on", async () => {
+    const review = hookReview(null);
+    try {
+      const c = claude(review.screen, () => null, { cli: 'codex' });
+      c.hook({ hook_event_name: 'SessionStart', session_id: 'codex-1' });
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      pty.write.mockClear();
+      review.show();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(pty.write.mock.calls).toEqual([['\x1b[B'], ['\x1b[B'], ['\r']]);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(pty.write).toHaveBeenCalledTimes(3);
+      expect(errors(c.cb)).toEqual([]);
+      c.hook({ hook_event_name: 'TurnComplete', session_id: 'codex-1', input: 'Fix #12', last_assistant_message: 'Done' });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(c.cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'Done' }));
+    } finally {
+      pty.write.mockReset();
+    }
+  });
+
+  it('ends a Codex session whose hook review keeps coming back, with a desk error', async () => {
+    pty.write.mockClear();
+    const c = claude(() => codexHookReview(3), () => null, { cli: 'codex' });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write.mock.calls).toEqual([['\r'], ['\r'], ['\r']]);
+    const error = `Codex kept asking "Hooks need review" after the office answered "Continue without trusting" 3 times, so the office ended the session. Open the terminal to see why; trusting the office's hooks once (/hooks, then t) stops the question.`;
+    expect(c.cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: [error] }));
+    expect(errors(c.cb)).toEqual([error]);
   });
 
   it('leaves an idle Codex prompt alone when earlier output quotes the hook-review question', async () => {

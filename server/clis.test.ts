@@ -5,10 +5,11 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, cliStartupFailed, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, hookReviewKey, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, selectedOption, startupQuestionOnScreen, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, cliStartupFailed, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, HOOK_REVIEW_ANSWERS, hookReviewKey, hookReviewWatch, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, selectedOption, startupQuestionOnScreen, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
 import { CONSOLE_PERMISSION, NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
+import { CODEX_IDLE, codexHookReview } from './fixtures/codexScreens.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
 
@@ -147,6 +148,13 @@ describe('trustKey', () => {
     expect(trustKey('❯ No, keep working\nDo you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit')).toBe('enter');
   });
 
+  it("leaves a hook review below the folder question alone, never taking its Trust all", () => {
+    const trusted = 'Do you trust the contents of this directory?\n  1. Yes, continue\n  2. No, quit\n';
+    expect(trustKey(`${trusted}${codexHookReview(2)}`)).toBeNull();
+    expect(trustKey(`${trusted}${codexHookReview(3)}`)).toBeNull();
+    expect(hookReviewWatch().look(`${trusted}${codexHookReview(2)}`)).toBe('down');
+  });
+
   it('uses the latest trust question and waits for a single selection', () => {
     expect(trustKey('Do you trust this folder?\n❯ No\nDo you trust this folder?\n❯ Yes')).toBe('enter');
     expect(trustKey('Do you trust this folder?\n❯ Yes\n› No')).toBeNull();
@@ -169,6 +177,37 @@ describe('hookReviewKey', () => {
     expect(hookReviewKey(`${review(1)}\n${review(3)}`)).toBe('enter');
     expect(hookReviewKey('Hooks need review\n› Review hooks\n❯ Trust all')).toBeNull();
     expect(hookReviewKey('Hooks need review\n  Review hooks')).toBeNull();
+  });
+});
+
+describe('hookReviewWatch', () => {
+  it("walks Codex's own screen to Continue without trusting, never Trust all", () => {
+    const watch = hookReviewWatch();
+    expect(watch.look(codexHookReview(1), 0)).toBe('down');
+    expect(watch.look(codexHookReview(2), 1000)).toBe('down');
+    expect(watch.look(codexHookReview(3), 2000)).toBe('enter');
+    expect(watch.look(codexHookReview(3), 4000)).toBeNull(); // still going: don't answer twice
+    expect(watch.look(CODEX_IDLE, 6000)).toBeNull();
+  });
+
+  it('leaves idle prompts, quoted questions and a later folder-trust question alone', () => {
+    const watch = hookReviewWatch();
+    expect(watch.look(CODEX_IDLE)).toBeNull();
+    expect(watch.look('const pattern = /Hooks need review/i;\n› Ask Codex to do anything')).toBeNull();
+    expect(watch.look(`${codexHookReview(3)}\nDo you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit`)).toBeNull();
+  });
+
+  it('says once that a question that keeps coming back is stuck', () => {
+    const watch = hookReviewWatch();
+    for (let i = 0; i < HOOK_REVIEW_ANSWERS; i++) expect(watch.look(codexHookReview(3), i * 4000)).toBe('enter');
+    expect(watch.look(codexHookReview(3), HOOK_REVIEW_ANSWERS * 4000)).toBe('stuck');
+    expect(watch.look(codexHookReview(3), HOOK_REVIEW_ANSWERS * 8000)).toBeNull();
+  });
+
+  it('gives up on a selection that Down never moves', () => {
+    const watch = hookReviewWatch();
+    for (let i = 0; i < 12; i++) expect(watch.look(codexHookReview(1), i * 1000)).toBe('down');
+    expect(watch.look(codexHookReview(1), 12_000)).toBe('stuck');
   });
 });
 
