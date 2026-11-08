@@ -15,7 +15,9 @@ test('demo placement controls hire on Upstash, update Team and move a whole floo
   await card.getByPlaceholder('Name (optional)').fill('Box worker');
   await page.getByLabel(`Placement for new workers on floor ${floor.floor}`).selectOption('upstash');
   await card.getByRole('button', { name: '+ Developer', exact: true }).click();
-  const picker = page.getByLabel("Box worker's machine");
+  const workerRow = card.locator('.team-agent').filter({ has: page.getByText('Box worker', { exact: true }) });
+  await workerRow.getByRole('button', { name: 'Details', exact: true }).click();
+  const picker = workerRow.getByRole('combobox', { name: 'Machine', exact: true });
   await expect(picker).toHaveValue('upstash');
   await picker.selectOption('');
   await expect(picker).toHaveValue('');
