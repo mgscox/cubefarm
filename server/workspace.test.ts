@@ -33,7 +33,7 @@ await fs.writeFile(gitConfig, '[user]\n\tname = Sync Test\n\temail = sync-test@e
 process.env.GIT_CONFIG_GLOBAL = gitConfig;
 
 const { git, run } = await import('./exec.ts');
-const { branchHolder, deskDir, deskLockPath, deskQaDiffBase, isStaleLock, leftoversInDesk, mainDir, parseWorktrees, prepareDesk, realPath, repoDir, samePath, setLocalPath, STALE_LOCK_MS, syncMain: sync } =
+const { branchHolder, deskDir, deskLockPath, deskQaDiffBase, errorLine, isStaleLock, leftoversInDesk, mainDir, parseWorktrees, prepareDesk, realPath, repoDir, samePath, setLocalPath, STALE_LOCK_MS, syncMain: sync } =
   await import('./workspace.ts');
 // Most tests only care about the status line.
 const syncMain = async (...args: Parameters<typeof sync>) => (await sync(...args))?.status ?? null;
@@ -400,6 +400,17 @@ describe('stale desk locks', { timeout: 60_000 }, () => {
     expect(deskLockPath('C:\\Users\\me\\other\\.git\\worktrees\\ada-01df', 'C:\\Users\\me\\project\\.git', 'D:\\desks\\ada-01df', 'win32')).toBeNull();
   });
 
+  it("keeps a long error's command and its end, within the limit", () => {
+    expect(errorLine('git status failed: fatal: not a git repository\nmore')).toBe('git status failed: fatal: not a git repository');
+    const lock = `fatal: Unable to create '/${'deep/'.repeat(80)}.git/worktrees/ada-01df/index.lock': File exists.`;
+    const line = errorLine(`git checkout --force -B failed: ${lock}\nAnother git process seems to be running.`);
+    expect(line).toHaveLength(240);
+    expect(line).toMatch(/^git checkout --force -B failed: ….*\/index\.lock': File exists\.$/);
+    // No command to keep: the start and the end still survive.
+    const plain = errorLine('x'.repeat(100) + 'y'.repeat(300), 60);
+    expect(plain).toBe(`${'x'.repeat(20)}…${'y'.repeat(39)}`);
+  });
+
   it('clears a stale index.lock and reuses the desk in place, keeping ignored files', async () => {
     const r = await makeRepos();
     const desk = await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'tim-1a2b', 'swarm/issue-108-tim');
@@ -424,7 +435,7 @@ describe('stale desk locks', { timeout: 60_000 }, () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
       expect(await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'ada-01df', 'swarm/issue-109-ada', (t) => notes.push(t))).toBe(desk);
-      expect(notes).toEqual([expect.stringMatching(/^Couldn't reuse the desk in place, so it's rebuilt: .*index\.lock/)]);
+      expect(notes).toEqual([expect.stringMatching(/^Couldn't reuse the desk in place, so it's rebuilt: git checkout .*index\.lock/)]);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("Couldn't reuse the desk in place"));
     } finally {
       warn.mockRestore();

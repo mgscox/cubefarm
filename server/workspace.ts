@@ -320,7 +320,7 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
       } catch (err) {
         operationSignal()?.throwIfAborted();
         // Rebuild the worktree from scratch, but say why: the rebuild can fail in its own way.
-        const why = `Couldn't reuse the desk in place, so it's rebuilt: ${(err as Error).message.split(/\r?\n/)[0].slice(0, 240)}`;
+        const why = `Couldn't reuse the desk in place, so it's rebuilt: ${errorLine((err as Error).message)}`;
         console.warn(`${wt}: ${why}`);
         note?.(why);
       }
@@ -341,6 +341,18 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
     await git(['worktree', 'add', ...(local ? ['-B', local] : ['--detach']), wt, ref], { cwd: main });
     return wt;
   });
+}
+
+/**
+ * An error's first line in at most `max` characters. A long one keeps the command that failed and the end of the
+ * line, where git names the file and the reason (`Unable to create '<long path>/index.lock': File exists.`).
+ */
+export function errorLine(message: string, max = 240): string {
+  const line = message.split(/\r?\n/)[0];
+  if (line.length <= max) return line;
+  const failed = line.indexOf(' failed: ');
+  const head = failed >= 0 && failed + 9 <= max / 2 ? line.slice(0, failed + 9) : line.slice(0, Math.floor(max / 3));
+  return `${head}…${line.slice(line.length - (max - head.length - 1))}`;
 }
 
 /** A git lock file this old was left by a git that died: nothing still running holds it. */
