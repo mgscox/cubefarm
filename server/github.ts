@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CommandError, gh, ghJson } from './exec.ts';
 import type { GhRepoSummary, IssueInfo, PullInfo, PullRefresh, QaCiEvidence } from '../shared/types.ts';
-import { AGENT_COMMENT_MARKER, dependencyUrls, READY_FOR_SECURITY_REVIEW } from '../shared/issues.ts';
+import { AGENT_COMMENT_MARKER, dependencyUrls, NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_SECURITY_REVIEW } from '../shared/issues.ts';
 
 // All GitHub access goes through the gh CLI so it reuses the user's existing `gh auth login`.
 
@@ -285,6 +285,7 @@ const BAD = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'S
 const failed = (c: Check) => BAD.includes(c.conclusion ?? '') || BAD.includes(c.state ?? '');
 const pending = (c: Check) => (!!c.status && c.status !== 'COMPLETED') || c.state === 'PENDING' || c.state === 'EXPECTED';
 const checkName = (c: Check) => c.name || c.context || 'check';
+const succeeded = (c: Check) => (c.status === 'COMPLETED' && c.conclusion === 'SUCCESS') || c.state === 'SUCCESS';
 
 function checksOf(rollup: RawPull['statusCheckRollup']): PullInfo['checks'] {
   if (!rollup || rollup.length === 0) return 'none';
@@ -311,9 +312,10 @@ function toPull(p: RawPull): PullInfo {
     additions: p.additions,
     deletions: p.deletions,
     checks: checksOf(p.statusCheckRollup),
-    hasSuccessfulChecks: (p.statusCheckRollup ?? []).some((c) => (c.status === 'COMPLETED' && c.conclusion === 'SUCCESS') || c.state === 'SUCCESS'),
+    hasSuccessfulChecks: (p.statusCheckRollup ?? []).some(succeeded),
+    successfulChecks: [...new Set((p.statusCheckRollup ?? []).filter(succeeded).map(checkName))],
     headSha: p.headRefOid,
-    baseSha: p.baseRefOid,
+    baseSha: p.state === 'OPEN' ? undefined : p.baseRefOid,
     baseRefName: p.baseRefName,
     mergeState: p.mergeStateStatus || 'UNKNOWN',
     failedChecks: (p.statusCheckRollup ?? []).filter(failed).map((c) => ({ name: checkName(c), url: c.detailsUrl || c.targetUrl || null })),
@@ -373,6 +375,16 @@ async function restChecks(fullName: string, sha: string, api: RestQuery): Promis
   return checks;
 }
 
+async function targetBranchTip(fullName: string, branch: string, api: BoardQuery<unknown>): Promise<string> {
+  const ref = await api(['api', `repos/${fullName}/git/ref/heads/${encodeURIComponent(branch)}`], SYNC_READ) as {
+    ref?: string; object?: { type?: string; sha?: string };
+  } | null;
+  if (ref?.ref !== `refs/heads/${branch}` || ref.object?.type !== 'commit' || !ref.object.sha) {
+    throw new Error(`GitHub did not return the current tip of ${branch}`);
+  }
+  return ref.object.sha;
+}
+
 export async function listPulls(fullName: string, query: BoardQuery<RawPull[]> = ghJson, api: RestQuery = ghJson): Promise<PullRefresh> {
   const list = async (state: string, limit: string): Promise<PullRefresh> => {
     const args = ['pr', 'list', '-R', fullName, '--state', state, '--limit', limit, '--json'];
@@ -407,6 +419,15 @@ export async function listPulls(fullName: string, query: BoardQuery<RawPull[]> =
   };
   // A check-field denial can still complete through the fallback within the same attempt.
   const [open, merged] = await Promise.all([readTwice(() => list('open', '50')), readTwice(() => list('merged', '8'))]);
+  // A PR's stored base OID can lag the target branch. Read each open target once per refresh.
+  const branches = [...new Set(open.pulls.flatMap((pr) => pr.baseRefName ? [pr.baseRefName] : []))];
+  const tips = new Map<string, string | undefined>();
+  for (let i = 0; i < branches.length; i += 3) {
+    await Promise.all(branches.slice(i, i + 3).map(async (branch) => {
+      tips.set(branch, await targetBranchTip(fullName, branch, api).catch(() => undefined));
+    }));
+  }
+  for (const pr of open.pulls) if (pr.baseRefName) pr.baseSha = tips.get(pr.baseRefName);
   return { pulls: [...open.pulls, ...merged.pulls], checksError: [open.checksError, merged.checksError].filter(Boolean).join('\n') || undefined };
 }
 
@@ -537,9 +558,57 @@ export async function mergePull(fullName: string, number: number, method: 'squas
   }
 }
 
-/** Merge the base branch into a PR's branch on GitHub, for repos that only merge up-to-date branches. */
-export async function updateBranch(fullName: string, number: number): Promise<void> {
-  await gh(['pr', 'update-branch', String(number), '-R', fullName], { timeoutMs: 60_000 });
+/** Rebase only the expected head and accept only the independently verified tree for its target. */
+export async function rebasePull(
+  fullName: string, number: number, headSha: string, baseSha: string,
+  mergeTree: (fullName: string, baseSha: string, headSha: string) => Promise<string>, api: BoardQuery<unknown> = ghJson,
+): Promise<string | null> {
+  const [owner, name] = fullName.split('/');
+  type BaseRef = { name: string; target: { oid: string } | null } | null;
+  const read = async () => {
+    const result = await api(['api', 'graphql', '-f', `query=query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+        id headRefOid baseRef { name target { oid } }
+        state isDraft labels(first: 100) { nodes { name } }
+        potentialMergeCommit { tree { oid } parents(first: 2) { nodes { oid } } }
+      } }
+    }`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${number}`], SYNC_READ) as {
+      data: { repository: { pullRequest: {
+        id: string; headRefOid: string; baseRef: BaseRef; state: string; isDraft: boolean; labels: { nodes: { name: string }[] } | null;
+        potentialMergeCommit: { tree: { oid: string }; parents: { nodes: { oid: string }[] } } | null;
+      } | null } };
+    };
+    const pr = result.data.repository.pullRequest;
+    if (pr?.state !== 'OPEN' || pr.isDraft || !pr.labels || pr.labels.nodes.some(({ name }) =>
+      [NEEDS_HUMAN, NEEDS_REVIEW, READY_FOR_SECURITY_REVIEW].includes(name.toLowerCase()))) return null;
+    return pr;
+  };
+  const pr = await read();
+  if (pr?.headRefOid !== headSha || pr.baseRef?.target?.oid !== baseSha) return null;
+  const cached = pr.potentialMergeCommit;
+  let expectedTree: string;
+  if (cached?.parents.nodes[0]?.oid === baseSha && cached.parents.nodes[1]?.oid === headSha) {
+    expectedTree = cached.tree.oid;
+  } else {
+    expectedTree = await mergeTree(fullName, baseSha, headSha);
+    // Fetching objects can take time. Recheck the target before attempting the rewrite.
+    const current = await read();
+    if (current?.headRefOid !== headSha || current.baseRef?.target?.oid !== baseSha || current.baseRef.name !== pr.baseRef.name) return null;
+  }
+
+  const update = await api(['api', 'graphql', '-f', `query=mutation($id: ID!, $head: GitObjectID!) {
+    updatePullRequestBranch(input: {pullRequestId: $id, expectedHeadOid: $head, updateMethod: REBASE}) {
+      pullRequest { baseRef { name target { oid } } headRef { target { ... on Commit { oid tree { oid } } } } }
+    }
+  }`, '-f', `id=${pr.id}`, '-f', `head=${headSha}`], SYNC_READ) as {
+    data: { updatePullRequestBranch: { pullRequest: {
+      baseRef: BaseRef; headRef: { target: { oid: string; tree: { oid: string } } } | null;
+    } | null } };
+  };
+  const updated = update.data.updatePullRequestBranch.pullRequest;
+  if (updated?.baseRef?.target?.oid !== baseSha || updated.baseRef.name !== pr.baseRef.name) return null;
+  const commit = updated.headRef?.target;
+  return commit && commit.oid !== headSha && commit.tree.oid === expectedTree ? commit.oid : null;
 }
 
 /** Retry only the failed jobs in each GitHub Actions run. */
@@ -655,25 +724,38 @@ export async function qaCi(fullName: string, headSha: string, api: RestQuery = g
   return { headSha, observedAt, availability: results.every((r) => r.status === 'fulfilled') ? 'available' : 'unavailable', checks };
 }
 
-export async function prDetails(fullName: string, number: number): Promise<PrDetails> {
-  const raw = await ghJson<{
-    number: number;
-    title: string;
-    createdAt: string;
-    labels: { name: string }[];
-    body: string;
-    url: string;
-    headRefName: string;
-    headRefOid: string;
-    baseRefOid: string;
-    baseRefName: string;
-    isDraft: boolean;
-    isCrossRepository: boolean;
-    closingIssuesReferences: { number: number }[] | null;
-    state: PrDetails['state'];
-    mergeable: string;
-    mergeStateStatus: string;
-  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,createdAt,labels,body,url,headRefName,headRefOid,baseRefOid,baseRefName,isDraft,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
+type RawPrDetails = Pick<RawPull, 'number' | 'title' | 'createdAt' | 'labels' | 'url' | 'headRefName' | 'headRefOid' |
+  'baseRefOid' | 'baseRefName' | 'isDraft' | 'closingIssuesReferences' | 'state' | 'mergeable' | 'mergeStateStatus'> & { body?: string; isCrossRepository: boolean };
+
+export async function prDetails(fullName: string, number: number, api: BoardQuery<unknown> = ghJson): Promise<PrDetails> {
+  const [owner, name] = fullName.split('/');
+  let raw: RawPrDetails;
+  let liveBase: string | undefined;
+  try {
+    // Read the live target with the head and review holds, so a slow ref lookup cannot age the approval snapshot.
+    const response = await api(['api', 'graphql', '-f', `query=query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+        number title createdAt body url headRefName headRefOid baseRefOid baseRefName isDraft isCrossRepository state mergeable mergeStateStatus
+        baseRef { target { oid } }
+        labels(first: 100) { nodes { name } }
+        closingIssuesReferences(first: 100) { nodes { number } }
+      } }
+    }`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${number}`], SYNC_READ) as {
+      data: { repository: { pullRequest: (Omit<RawPrDetails, 'labels' | 'closingIssuesReferences'> & {
+        baseRef: { target: { oid: string } | null } | null;
+        labels: { nodes: RawPrDetails['labels'] } | null;
+        closingIssuesReferences: { nodes: RawPrDetails['closingIssuesReferences'] } | null;
+      }) | null } | null };
+    };
+    const pr = response.data.repository?.pullRequest;
+    if (!pr) throw new Error(`GitHub did not return pull request #${number} in ${fullName}`);
+    liveBase = pr.baseRef?.target?.oid;
+    raw = { ...pr, labels: pr.labels?.nodes, closingIssuesReferences: pr.closingIssuesReferences?.nodes ?? null };
+  } catch (error) {
+    if (!(error instanceof CommandError) || !/Resource not accessible[^\r\n]*\.baseRef(?:\.target(?:\.oid)?)?\)/i.test(error.stderr)) throw error;
+    // Keep metadata available to callers that do not need a base. The queue and audit hold on an unknown tip.
+    raw = await api(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,createdAt,labels,body,url,headRefName,headRefOid,baseRefOid,baseRefName,isDraft,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus'], SYNC_READ) as RawPrDetails;
+  }
   return {
     number: raw.number,
     title: raw.title,
@@ -683,7 +765,7 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     url: raw.url,
     headRefName: raw.headRefName,
     headSha: raw.headRefOid,
-    baseSha: raw.baseRefOid,
+    baseSha: raw.state === 'OPEN' ? liveBase : raw.baseRefOid,
     baseRefName: raw.baseRefName,
     isDraft: raw.isDraft,
     isCrossRepository: raw.isCrossRepository,

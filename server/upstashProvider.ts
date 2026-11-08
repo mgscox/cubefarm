@@ -42,9 +42,12 @@ const fs = require('node:fs'), cp = require('node:child_process');
   const cli = process.env.CUBEFARM_UPSTASH_CLI;
   const extra = cli === 'codex' ? ['@openai/codex'] : cli === 'opencode' ? ['@opencode/cli@${OPENCODE_VERSION}'] : [];
   const [version, playwright, yaml] = process.argv.slice(1);
-  // An older runtime's v1 package also links bin/opencode: remove it so only v2 owns the command.
+  // Remove v1 if installed or declared, so only v2 owns the opencode command.
   const manifest = root + '/package.json';
-  if (cli === 'opencode' && fs.existsSync(manifest) && JSON.parse(fs.readFileSync(manifest, 'utf8')).dependencies?.['opencode-ai']) {
+  if (cli === 'opencode' && (
+    fs.existsSync(root + '/node_modules/opencode-ai') ||
+    (fs.existsSync(manifest) && JSON.parse(fs.readFileSync(manifest, 'utf8')).dependencies?.['opencode-ai'])
+  )) {
     cp.execFileSync('npm', ['uninstall', '--prefix', root, 'opencode-ai'], { stdio: 'ignore' });
   }
   cp.execFileSync('npm', ['install', '--prefix', root, 'cubefarm@' + version, 'playwright@' + playwright, 'yaml@' + yaml, ...extra], { stdio: 'ignore' });

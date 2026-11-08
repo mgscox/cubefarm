@@ -72,12 +72,18 @@ it.each(['claude', 'codex', 'opencode'] as const)('rehearses %s install, authent
 
 it('migrates an OpenCode v1 runtime so only the pinned v2 package owns the opencode command', async () => {
   const env = { ...upstashConfig({ OPENROUTER_API_KEY: 'router-emulator' }, 'opencode', 'worker-task', 'github-emulator').env!, PATH: '/usr/bin' };
-  const commands = await bootstrap(env, { [`${RUNTIME}/package.json`]: JSON.stringify({ dependencies: { cubefarm: `^${VERSION}`, 'opencode-ai': '^1.19.5' } }) });
-  expect(commands.slice(0, 3).map((c) => [c.file, ...c.args])).toEqual([
-    ['npm', 'uninstall', '--prefix', RUNTIME, 'opencode-ai'],
-    ['npm', 'install', '--prefix', RUNTIME, `cubefarm@${VERSION}`, 'playwright@1.64.1', 'yaml@^2.9.1', `@opencode/cli@${OPENCODE_VERSION}`],
-    ['node', `${RUNTIME}/node_modules/@opencode/cli/postinstall.mjs`],
-  ]);
+  const legacyRuntimes: Record<string, string>[] = [
+    { [`${RUNTIME}/node_modules/opencode-ai`]: '' },
+    { [`${RUNTIME}/package.json`]: JSON.stringify({ dependencies: { cubefarm: `^${VERSION}`, 'opencode-ai': '^1.19.5' } }) },
+  ];
+  for (const files of legacyRuntimes) {
+    const commands = await bootstrap(env, files);
+    expect(commands.slice(0, 3).map((c) => [c.file, ...c.args])).toEqual([
+      ['npm', 'uninstall', '--prefix', RUNTIME, 'opencode-ai'],
+      ['npm', 'install', '--prefix', RUNTIME, `cubefarm@${VERSION}`, 'playwright@1.64.1', 'yaml@^2.9.1', `@opencode/cli@${OPENCODE_VERSION}`],
+      ['node', `${RUNTIME}/node_modules/@opencode/cli/postinstall.mjs`],
+    ]);
+  }
   // A runtime that never had v1 is left alone, and other CLIs never touch OpenCode.
   const v2 = await bootstrap(env, { [`${RUNTIME}/package.json`]: JSON.stringify({ dependencies: { '@opencode/cli': `^${OPENCODE_VERSION}` } }) });
   expect(v2.some((c) => c.args[0] === 'uninstall')).toBe(false);
