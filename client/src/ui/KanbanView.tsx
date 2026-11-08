@@ -1,3 +1,5 @@
+import { Evaluations } from './Evaluations';
+import { Lessons } from './Lessons';
 import { QaHistory } from './QaHistory';
 import { ScoreHistory } from './ScoreHistory';
 import { PrContributions } from './PrContributions';
@@ -290,6 +292,8 @@ export function KanbanView({ repoId, inline }: { repoId: string; inline?: boolea
       )}
       <RunHistory repoId={repo.id} />
       <QaHistory repoId={repoId} />
+      <Lessons repoId={repoId} />
+      <Evaluations repoId={repoId} />
       <ScoreHistory repoId={repoId} />
       <div className="kanban">
         {column(

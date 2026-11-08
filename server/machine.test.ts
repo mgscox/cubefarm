@@ -3,7 +3,8 @@ import { planCli, type CliHost } from './machine.ts';
 import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
 import { STUCK_MS, type ClaudeTurn } from './clis.ts';
 import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
-import { CONSOLE_PERMISSION, NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
+import { BASH_EXPANSION_PERMISSION, CONSOLE_PERMISSION, NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
+import { CODEX_IDLE, codexHookReview } from './fixtures/codexScreens.ts';
 import type { SessionCallbacks, SessionOptions } from './agentRunner.ts';
 import type { AgentTerminal } from './terminal.ts';
 
@@ -40,7 +41,7 @@ describe('startCliSession on a host', () => {
   const callbacks = (): SessionCallbacks => ({
     activity: vi.fn(), log: vi.fn(), tool: vi.fn(), sessionId: vi.fn(), browserUrl: vi.fn(), screenshot: vi.fn(), finished: vi.fn(),
   });
-  const terminal = () => ({ cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), screen: () => '' }) as unknown as AgentTerminal;
+  const terminal = () => ({ cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), flush: async () => {}, screen: () => '' }) as unknown as AgentTerminal;
   const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
   const host = (prepare: CliHost['prepare']): CliHost => ({
     prepare, recoverTurn: () => null, hasFile: () => false, claudeTurn: () => null, newShots: () => [], savedShot: () => null, codexThread: async () => undefined,
@@ -306,6 +307,50 @@ describe('startCliSession on a host', () => {
     expect(first.cb.finished).toHaveBeenCalledTimes(1);
   });
 
+  /** A Codex screen that follows the keys sent to its hook-review question; start: the selected option. */
+  const hookReview = (start: 1 | 2 | 3 | null) => {
+    let selected = start;
+    pty.write.mockImplementation((key: string) => {
+      if (selected && key === '\x1b[B') selected = Math.min(selected + 1, 3) as 1 | 2 | 3;
+      if (selected === 3 && key === '\r') selected = null;
+    });
+    return {
+      screen: () => (selected ? codexHookReview(selected) : CODEX_IDLE),
+      show: () => (selected = 1),
+    };
+  };
+
+  it("answers Codex's hook review after the startup window and the turn carries on", async () => {
+    const review = hookReview(null);
+    try {
+      const c = claude(review.screen, () => null, { cli: 'codex' });
+      c.hook({ hook_event_name: 'SessionStart', session_id: 'codex-1' });
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      pty.write.mockClear();
+      review.show();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(pty.write.mock.calls).toEqual([['\x1b[B'], ['\x1b[B'], ['\r']]);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(pty.write).toHaveBeenCalledTimes(3);
+      expect(errors(c.cb)).toEqual([]);
+      c.hook({ hook_event_name: 'TurnComplete', session_id: 'codex-1', input: 'Fix #12', last_assistant_message: 'Done' });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(c.cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'Done' }));
+    } finally {
+      pty.write.mockReset();
+    }
+  });
+
+  it('ends a Codex session whose hook review keeps coming back, with a desk error', async () => {
+    pty.write.mockClear();
+    const c = claude(() => codexHookReview(3), () => null, { cli: 'codex' });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write.mock.calls).toEqual([['\r'], ['\r'], ['\r']]);
+    const error = `Codex kept asking "Hooks need review" after the office answered "Continue without trusting" 3 times, so the office ended the session. Open the terminal to see why; trusting the office's hooks once (/hooks, then t) stops the question.`;
+    expect(c.cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: false, errors: [error] }));
+    expect(errors(c.cb)).toEqual([error]);
+  });
+
   it('leaves an idle Codex prompt alone when earlier output quotes the hook-review question', async () => {
     const first = claude(() => 'const pattern = /Hooks need review/i;\n› Ask Codex to do anything', () => null, { cli: 'codex' });
     pty.write.mockClear();
@@ -516,6 +561,45 @@ describe('startCliSession on a host', () => {
     hook({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } });
     expect(cb.boot).toHaveBeenLastCalledWith(null);
     expect(vi.mocked(cb.log).mock.calls.flat(2).some((e) => /receiving Claude Code's hooks now/.test(e.text))).toBe(true);
+  });
+
+  it('continues a QA Bash command when Claude asks about a shell expansion', async () => {
+    let screen = '✻ Running… (esc to interrupt)';
+    const { cb, hook, term } = claude(() => screen, () => null, { role: 'qa' });
+    hook({ hook_event_name: 'UserPromptSubmit', prompt: 'Check both runs' });
+    pty.write.mockClear();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(pty.write).not.toHaveBeenCalled();
+    term.flush = async () => { screen = BASH_EXPANSION_PERMISSION; };
+    hook({ hook_event_name: 'Notification', notification_type: 'permission_prompt' });
+    expect(pty.write).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(0);
+    term.lastOutputAt = Date.now(); // the same modal can redraw before a duplicate notification
+    hook({ hook_event_name: 'Notification', notification_type: 'permission_prompt' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pty.write).toHaveBeenCalledExactlyOnceWith('\r');
+    screen = '✻ Running… (esc to interrupt)';
+    hook({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_response: 'Test logs checked' });
+    hook({ hook_event_name: 'Stop', last_assistant_message: 'QA finished' });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(cb.finished).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ok: true, text: 'QA finished' }));
+  });
+
+  it.each([
+    { role: 'ceo', screen: BASH_EXPANSION_PERMISSION },
+    { role: 'dev', screen: BASH_EXPANSION_PERMISSION.replace('Contains simple_expansion', 'This command requires approval') },
+    { role: 'dev', screen: BASH_EXPANSION_PERMISSION.replace('❯ 1. Yes', '  1. Yes').replace('  3. No', '❯ 3. No') },
+    { role: 'dev', screen: `${BASH_EXPANSION_PERMISSION}\n❯ What next?` },
+    { role: 'dev', screen: `${BASH_EXPANSION_PERMISSION}\n${BASH_EXPANSION_PERMISSION.replace(/  2\. Yes[^]*?  3\. No\n/, '')}` },
+  ] as const)('does not answer an excluded Bash permission screen ($role)', async ({ role, screen }) => {
+    const { cb, hook, session } = claude(() => screen, () => null, { role });
+    hook({ hook_event_name: 'UserPromptSubmit', prompt: 'Check both runs' });
+    pty.write.mockClear();
+    hook({ hook_event_name: 'Notification', notification_type: 'permission_prompt' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pty.write).not.toHaveBeenCalled();
+    expect(errors(cb)).toEqual([expect.stringContaining('waiting for a permission answer')]);
+    session.stop();
   });
 
   const replies = (cb: SessionCallbacks, text: string) => vi.mocked(cb.log).mock.calls.flat(2).filter((e) => e.text === `● ${text}`).length;

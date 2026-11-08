@@ -481,19 +481,30 @@ export function officePermission(screen: string): { tool: string; key: 'enter' |
   const header = [...screen.matchAll(/^[ \t]*((?:playwright|office) — [^\n]+?) Tool: \(MCP\)[ \t]*$/gm)].at(-1);
   if (!header) return null;
   const dialog = screen.slice(header.index + header[0].length);
-  // A current dialog ends at its controls. Output or a new input below them makes it stale transcript text.
-  if (!/\n[ \t]*Esc to cancel · Tab to amend\s*$/.test(dialog)) return null;
-  const question = dialog.match(/\n[ \t]*Do you want to proceed\?[ \t]*\n/);
-  if (!question) return null;
+  const choice = claudePermissionChoice(dialog);
   // Don't attribute a later tool's question to an older MCP heading still on screen.
-  if (dialog.slice(0, question.index).split('\n').some((line) => line.trim() && !/^[ \t]*\w+:[ \t]/.test(line))) return null;
+  if (!choice || choice.context.split('\n').some((line) => line.trim() && !/^[ \t]*\w+:[ \t]/.test(line))) return null;
+  return { tool: header[1], key: choice.key };
+}
+
+/** The Bash header can scroll out of view when the command wraps. Its shell analysis reason sits above the menu. */
+export function bashExpansionPermission(screen: string): boolean {
+  const choice = claudePermissionChoice(screen);
+  return choice?.key === 'enter' && choice.hasNo && /(?:^|\n)[ \t]*Contains simple_expansion\s*$/.test(choice.context);
+}
+
+function claudePermissionChoice(dialog: string): { context: string; key: 'enter' | 'up'; hasNo: boolean } | null {
+  // A current dialog ends at its controls. Output or a new input below them makes it stale transcript text.
+  if (!/\n[ \t]*Esc to cancel · Tab to amend(?: ·[ \t]*(?:\n[ \t]*)?ctrl\+e to explain)?\s*$/.test(dialog)) return null;
+  const question = [...dialog.matchAll(/\n[ \t]*Do you want to proceed\?[ \t]*\n/g)].at(-1);
+  if (!question) return null;
   const menu = dialog.slice(question.index! + question[0].length, dialog.lastIndexOf('Esc to cancel'));
   const options = [...menu.matchAll(/^[ \t]*(❯)?[ \t]*(\d+)\.[ \t]*([^\n]+)$/gm)];
   const selected = options.filter((o) => o[1]);
   if (selected.length !== 1 || options[0]?.[2] !== '1' || options[0][3].trim() !== 'Yes') return null;
   if (options.some((o, i) => Number(o[2]) !== i + 1 || (i > 0 && !/^(?:Yes, and don['’]t ask again\b.*|No)[ \t]*$/.test(o[3])))) return null;
   if (selectedOption(`Do you want to proceed?\n${menu}`, /Do you want to proceed\?/) === null) return null;
-  return { tool: header[1], key: selected[0][2] === '1' ? 'enter' : 'up' };
+  return { context: dialog.slice(0, question.index), key: selected[0][2] === '1' ? 'enter' : 'up', hasNo: options.at(-1)?.[3].trim() === 'No' };
 }
 
 const TRUST_PROMPT = /Quick safety check|Do you trust the (files|contents) (in|of) this|^[ \t]*(?:Do you )?trust this folder\b|^[ \t]*(?:Do you want to )?allow Codex to work in this folder/im;
@@ -509,17 +520,19 @@ export function selectedOption(screen: string, question: RegExp): string | null 
   return markers.length === 1 ? markers[0][1].trim() || null : null;
 }
 
-const CLAUDE_API_KEY_PROMPT = /Do you want to use this API key\?/i;
+/** The latest question on screen is this one, not other: its menu is the one showing. */
+function askedLast(screen: string, question: RegExp, other: RegExp): boolean {
+  const last = [...screen.matchAll(new RegExp(question.source, question.flags.replace('g', '') + 'g'))].at(-1);
+  return !!last && !other.test(screen.slice(last.index + last[0].length));
+}
 
 /**
  * Keep follow-up text out of a startup menu, even before its selection marker has been drawn. Only Claude Code and
  * Codex show these menus; other CLIs (OpenCode) never hold a follow-up.
  */
-export function startupQuestionOnScreen(screen: string, cli: AgentCli, upstash = false): boolean {
+export function startupQuestionOnScreen(screen: string, cli: AgentCli): boolean {
   if (cli !== 'claude' && cli !== 'codex') return false;
-  const prompts = [TRUST_PROMPT.source, HOOK_REVIEW_PROMPT.source];
-  if (upstash && cli === 'claude') prompts.push(CLAUDE_API_KEY_PROMPT.source);
-  const last = [...screen.matchAll(new RegExp(prompts.join('|'), 'gim'))].at(-1);
+  const last = [...screen.matchAll(new RegExp(`${TRUST_PROMPT.source}|${HOOK_REVIEW_PROMPT.source}`, 'gim'))].at(-1);
   if (!last) return false;
   const lineStart = screen.lastIndexOf('\n', last.index) + 1;
   const previousLine = screen.lastIndexOf('\n', lineStart - 2) + 1;
@@ -536,17 +549,11 @@ export function startupQuestionOnScreen(screen: string, cli: AgentCli, upstash =
  * question on screen.
  */
 export function trustKey(screen: string): 'enter' | 'down' | null {
+  if (!askedLast(screen, TRUST_PROMPT, HOOK_REVIEW_PROMPT)) return null; // "Trust all" hooks isn't the folder's yes
   const selected = selectedOption(screen, TRUST_PROMPT) ?? '';
   if (/^(yes|trust|continue|proceed)\b/i.test(selected.trim())) return 'enter';
   if (/^(no|exit|quit|cancel)\b/i.test(selected.trim())) return 'down';
   return null;
-}
-
-/** The office already opted into the API key on this Box. The Claude menu puts Yes above No. */
-export function upstashApiKeyChoice(screen: string): 'enter' | 'up' | null {
-  const option = selectedOption(screen, CLAUDE_API_KEY_PROMPT)?.trim() ?? '';
-  if (/^yes\b/i.test(option)) return 'enter';
-  return /^no\b/i.test(option) ? 'up' : null;
 }
 
 /** A working CLI waiting this long, its screen unchanged and nothing from its hooks or the keyboard, is stuck. */
@@ -616,6 +623,40 @@ export function hookReviewKey(screen: string): 'enter' | 'down' | null {
   const selected = selectedOption(screen, HOOK_REVIEW_PROMPT);
   if (!selected) return null;
   return /^continue without trusting/i.test(selected.trim()) ? 'enter' : 'down';
+}
+
+/** How often one session answers Codex's hook review before the office says it keeps coming back. */
+export const HOOK_REVIEW_ANSWERS = 3;
+
+/**
+ * Codex asks "Hooks need review" each time its TUI starts, which a slow start can put past the office's startup
+ * window. look(screen) gives hookReviewKey's next key whenever the question is the one on screen, waiting 3 s after
+ * an Enter for it to go; 'stuck' (once) when it is still there after HOOK_REVIEW_ANSWERS answers or 12 keys.
+ */
+export function hookReviewWatch() {
+  let answers = 0;
+  let keys = 0;
+  let answeredAt = -Infinity;
+  let gaveUp = false;
+  return {
+    look(screen: string, at = Date.now()): 'down' | 'enter' | 'stuck' | null {
+      if (gaveUp || at - answeredAt <= 3000 || !startupQuestionOnScreen(screen, 'codex')) return null;
+      // A folder-trust question below it is the startup watch's to answer.
+      if (!askedLast(screen, HOOK_REVIEW_PROMPT, TRUST_PROMPT)) return null;
+      const key = hookReviewKey(screen);
+      if (!key) return null;
+      if (answers >= HOOK_REVIEW_ANSWERS || keys >= 12) {
+        gaveUp = true;
+        return 'stuck';
+      }
+      keys += 1;
+      if (key === 'enter') {
+        answers += 1;
+        answeredAt = at;
+      }
+      return key;
+    },
+  };
 }
 
 /**

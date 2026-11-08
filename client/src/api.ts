@@ -1,6 +1,7 @@
 import { useStore } from './store';
 import type { IdeaInput, IdeaReviewCycleView, IdeaView, IssuePlanView, ProposalDecisionInput, ProposalView, AgentCli, BoxView, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
 
+import type { LessonKind, LessonView } from '../../shared/types';
 import type { ClaudeAuthenticationView, ManagerMcpSettingsPatch, ManagerMcpSettingsView } from '../../shared/types';
 
 async function call<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
@@ -18,6 +19,16 @@ async function call<T = unknown>(method: string, url: string, body?: unknown): P
   return data as T;
 }
 
+/** A lesson draft: links to evidence the office holds, never the evidence itself (docs/lessons.md). */
+export interface LessonInput {
+  kind: LessonKind;
+  specialty: string | null;
+  title: string;
+  guidance: string;
+  sources: ({ qaOutcomeId: string; findingId: string } | { attemptId: string } | { url: string; summary: string })[];
+  verification: { kind: 'fix' | 'regression-test'; test?: string; qaOutcomeId?: string; attemptId?: string };
+}
+
 const r = (repoId: string) => `/api/repos/${encodeURIComponent(repoId)}`;
 
 /** Choices made when a project moves in: a brief for the CEO, and whether work starts on its own. */
@@ -27,8 +38,14 @@ export interface FloorOptions {
 }
 
 export const api = {
+  evaluatePlaybook: (repoId: string, input: unknown) => call('POST', `${r(repoId)}/evaluations`, input),
+  demoPlaybookEvaluation: (repoId: string) => call('POST', `${r(repoId)}/evaluations/demo`),
   correctQaFinding: (id: string, findingId: string, classification: import('../../shared/types').QaClassification, reason: string) =>
     call('POST', `/api/qa-outcomes/${encodeURIComponent(id)}/corrections`, { findingId, classification, reason, actor: 'manager' }),
+  draftLesson: (repoId: string, input: LessonInput) => call<LessonView>('POST', `${r(repoId)}/lessons`, input),
+  reviseLesson: (id: string, input: LessonInput & { reason?: string }) => call<LessonView>('POST', `/api/lessons/${encodeURIComponent(id)}/versions`, input),
+  reviewLesson: (id: string, action: 'approve' | 'request-revision' | 'reject' | 'supersede', reason: string) =>
+    call<LessonView>('POST', `/api/lessons/${encodeURIComponent(id)}/reviews`, { action, reason }),
   uploadImage: async (file: File): Promise<string> => {
     const response = await fetch('/api/attachments/images', { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
     const data = await response.json() as { path?: string; error?: string };
@@ -94,6 +111,7 @@ export const api = {
   ) =>
     call('PATCH', `/api/agents/${id}`, patch),
   fireAgent: (id: string) => call('DELETE', `/api/agents/${id}`),
+  retryUpstash: (id: string, cleanup = false) => call('POST', `/api/upstash/${id}/retry`, { cleanup }),
   addBox: (name: string, destination: string) => call<BoxView>('POST', '/api/boxes', { name, destination }),
   removeBox: (id: string) => call('DELETE', `/api/boxes/${id}`),
   checkBox: (id: string) => call<BoxView>('POST', `/api/boxes/${id}/check`),

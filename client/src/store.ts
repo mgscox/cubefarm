@@ -51,6 +51,7 @@ interface State {
   workspaceRoot: string;
   settings: SwarmSettings;
   clis: CliView[]; // the coding-agent CLIs installed where the office runs
+  upstashTasks: NonNullable<WorldSnapshot['upstashTasks']>;
   boxes: BoxView[]; // other machines agents' desks and CLIs can run on
   officeTelemetry: WorldSnapshot['officeTelemetry'];
   officeCapacity: WorldSnapshot['officeCapacity'];
@@ -59,6 +60,8 @@ interface State {
   logs: Record<string, LogLine[]>;
   screens: Record<string, number>; // agentId -> screenshot timestamp (cache buster)
   qaOutcomes: import('../../shared/types').QaOutcomeView[];
+  lessons: import('../../shared/types').LessonView[];
+  evaluations: NonNullable<WorldSnapshot['evaluations']>;
   scoreEvents: import('../../shared/types').ScoreEventView[];
   prContributions: PrContributionView[];
   runAttempts: NonNullable<WorldSnapshot['runAttempts']>;
@@ -169,12 +172,15 @@ export const useStore = create<State>((set, get) => ({
   },
   clis: [],
   boxes: [],
+  upstashTasks: [],
   repos: [],
   agents: {},
   logs: {},
   screens: {},
   qa: {},
   qaOutcomes: [],
+  lessons: [],
+  evaluations: [],
   scoreEvents: [],
   prContributions: [],
   runAttempts: [],
@@ -234,6 +240,8 @@ export const useStore = create<State>((set, get) => ({
           screens,
           qa,
           qaOutcomes: d.qaOutcomes ?? [],
+          lessons: d.lessons ?? [],
+          evaluations: d.evaluations ?? [],
           scoreEvents: d.scoreEvents ?? [],
           prContributions: d.prContributions ?? [],
           runAttempts: d.runAttempts ?? [],
@@ -255,6 +263,7 @@ export const useStore = create<State>((set, get) => ({
           usage: d.usage,
           clis: d.clis ?? [],
           boxes: d.boxes ?? [],
+          upstashTasks: d.upstashTasks ?? [],
           officeTelemetry: d.officeTelemetry ?? null,
           officeCapacity: d.officeCapacity ?? 'unknown',
           restarting: false,
@@ -311,6 +320,16 @@ export const useStore = create<State>((set, get) => ({
         set({ qaOutcomes: [...get().qaOutcomes.filter((o) => o.id !== ev.outcome.id), ev.outcome] });
         break;
       }
+      case 'evaluation': {
+        set({ evaluations: [...get().evaluations.filter((e) => e.id !== ev.evaluation.id), ev.evaluation] });
+        break;
+      }
+      case 'lesson': {
+        const lessons = get().lessons;
+        const index = lessons.findIndex((l) => l.id === ev.lesson.id);
+        set({ lessons: index < 0 ? [...lessons, ev.lesson] : lessons.map((l, i) => i === index ? ev.lesson : l) });
+        break;
+      }
       case 'scoreEvents': {
         const known = new Set(get().scoreEvents.map((e) => e.id));
         set({ scoreEvents: [...get().scoreEvents, ...ev.events.filter((e) => !known.has(e.id))] });
@@ -356,6 +375,9 @@ export const useStore = create<State>((set, get) => ({
         set({ boxes: boxes.some((b) => b.id === ev.box.id) ? boxes.map((b) => (b.id === ev.box.id ? ev.box : b)) : [...boxes, ev.box] });
         break;
       }
+      case 'upstash':
+        set({ upstashTasks: ev.tasks });
+        break;
       case 'boxRemoved':
         set({ boxes: get().boxes.filter((b) => b.id !== ev.boxId) });
         break;

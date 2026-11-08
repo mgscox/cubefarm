@@ -1,4 +1,3 @@
-import { UPSTASH } from '../../shared/types';
 import type { AgentCli, AgentStatus, AgentView, BoxView, RepoView } from '../../shared/types';
 
 // The fleet as the manager's console shows it: which machine each agent works on, and what moving a floor does.
@@ -24,8 +23,9 @@ export const busy = (a: Pick<AgentView, 'status'>) => BUSY.includes(a.status);
 
 /** A box's name for the console, mid-sentence: '' is the office's own machine. */
 export function boxName(boxes: Pick<BoxView, 'id' | 'name'>[], id: string): string {
-  if (id === UPSTASH) return 'Upstash Box';
   if (!id) return 'this machine';
+  if (id === 'upstash') return 'Upstash (Small Box per task)';
+  if (id.startsWith('upstash-')) return 'the task’s Upstash Box';
   return boxes.find((b) => b.id === id)?.name ?? 'a removed box';
 }
 
@@ -54,7 +54,7 @@ export function workerLists(agents: Pick<AgentView, 'repoId' | 'name'>[], repos:
 
 /** Moving a whole floor to a box: who ends up somewhere new, how many of them finish a task first, and how many own boxes it clears. */
 export function floorMove(repo: Pick<RepoView, 'box'>, agents: Pick<AgentView, 'role' | 'box' | 'status'>[], to: string) {
-  const team = agents.filter((a) => movable(a) && a.box !== UPSTASH);
+  const team = agents.filter(movable);
   const moving = team.filter((a) => agentBox(a, repo) !== to);
   return { moving: moving.length, busy: moving.filter(busy).length, overrides: team.filter((a) => a.box !== null).length };
 }
@@ -64,7 +64,7 @@ export function floorMoveText(move: ReturnType<typeof floorMove>, where: string)
   if (!move.moving && !move.overrides) return null;
   const parts = [`${move.moving} ${move.moving === 1 ? 'agent moves' : 'agents move'} to ${where} as their next task starts.`];
   if (move.busy) parts.push(move.busy === 1 ? '1 of them is mid-task and moves once that task is done.' : `${move.busy} of them are mid-task and move once their tasks are done.`);
-  if (move.overrides) parts.push(`Clears ${move.overrides} agent${move.overrides === 1 ? "'s own box" : "s' own boxes"}, so those agents follow the floor.`);
+  if (move.overrides) parts.push(`Clears ${move.overrides} agent${move.overrides === 1 ? "'s own box" : "s' own boxes"}, so the whole floor follows it.`);
   return parts.join(' ');
 }
 

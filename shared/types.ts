@@ -146,6 +146,68 @@ export interface RunHistoryExport {
   attempts: (RunAttemptView & { queueMs: number | null; runMs: number | null; prState: PullInfo['state'] | null })[];
 }
 
+export type EvaluationMetric = 'firstPassQa' | 'verifiedRepair' | 'workerBlocked';
+export type EvaluationResult = 'yes' | 'no' | 'incomplete' | 'unknown' | 'not-applicable';
+
+/** Compact facts retained with an evaluation even after the underlying attempts are pruned. */
+export interface EvaluationObservation {
+  attemptId: string;
+  repoId: string;
+  specialty: string | null;
+  task: RunAttemptView['task'];
+  prNumber: number | null;
+  runtime: RunAttemptView['runtime'];
+  worker: RunAttemptView['worker'];
+  revisions: RunAttemptView['revisions'];
+  result: RunResult | null;
+  cause: RunCause | null;
+  metrics: Record<EvaluationMetric, EvaluationResult>;
+  evidence: {
+    outcomeId: string;
+    sha: string | null;
+    revision: QaOutcomeView['revision'];
+    verdict: QaOutcomeView['verdict'];
+    worker: { box: string | null; health: RunHealth | null };
+    url: string | null;
+    summary: string;
+  }[];
+}
+
+export interface EvaluationReport {
+  format: 'cubefarm-evaluation-report';
+  version: 1;
+  generatedAt: number;
+  basePlaybook: string;
+  candidatePlaybook: string;
+  observations: EvaluationObservation[];
+  cohorts: {
+    context: Pick<EvaluationObservation, 'repoId' | 'specialty' | 'task' | 'runtime' | 'worker'>;
+    attempts: number;
+    smallSample: boolean;
+    metrics: Record<EvaluationMetric, Record<EvaluationResult, number> & { numerator: number; denominator: number }>;
+  }[];
+}
+
+/** Immutable comparison of recorded pinned runs; adopting guidance remains a manager decision. */
+export interface PlaybookEvaluation {
+  id: string;
+  repoId: string;
+  at: number;
+  lesson: LessonExport['lessons'][number];
+  cases: {
+    id: string;
+    expectedBehavior: string;
+    metric: EvaluationMetric;
+    expected: boolean;
+    base: EvaluationObservation;
+    candidate: EvaluationObservation;
+    baseResult: EvaluationResult;
+    candidateResult: EvaluationResult;
+    comparable: boolean;
+  }[];
+  report: EvaluationReport;
+}
+
 export interface PullRefresh {
   pulls: PullInfo[];
   checksError?: string; // diagnostic details from optional check enrichment
@@ -344,11 +406,7 @@ export interface RebootStatus {
 }
 
 /** Another machine agents' desks and CLIs can run on, reached over ssh. */
-export const UPSTASH = 'upstash';
-
 export interface BoxView {
-  /** A task-owned Box cannot be selected as a permanent placement. */
-  disposable?: boolean;
   id: string;
   name: string;
   destination: string; // what ssh is given: user@host, an ~/.ssh/config alias, a Tailscale name
@@ -511,6 +569,61 @@ export interface QaOutcomeView {
   commentUrl: string | null;
   corrections: { id: string; findingId: string; previousCorrectionId: string | null; actor: string; reason: string; classification: QaClassification; at: number }[];
   legacyPenalty?: { agentId: string; findingIds: string[]; active: boolean };
+}
+
+/** Agent-quality guidance (from code findings) or operational guidance (from worker findings), never mixed. */
+export type LessonKind = 'agent' | 'operational';
+
+/**
+ * A lesson's link to its evidence. The summary is redacted and bounded, and stays when the QA outcome, attempt or
+ * external artifact behind it is pruned or expires. No logs, prompts, transcripts or screenshots.
+ */
+export interface LessonSource {
+  kind: 'finding' | 'attempt' | 'link';
+  /** The finding id, the attempt id, or the URL. */
+  ref: string;
+  qaOutcomeId: string | null;
+  prNumber: number | null;
+  sha: string | null; // the revision it was observed at
+  classification: QaClassification | null; // findings: after corrections
+  url: string | null;
+  summary: string;
+}
+
+/** One reviewable version of a lesson. */
+export interface LessonVersion {
+  version: number;
+  title: string;
+  /** The proposed checklist or playbook guidance. */
+  guidance: string;
+  kind: LessonKind;
+  specialty: string | null; // null: every specialty on the floor
+  sources: LessonSource[];
+  /** The verified fix or regression test, and the passing review or attempt that verified it. */
+  verification: { kind: 'fix' | 'regression-test'; test: string | null; evidence: LessonSource };
+  /** Source revisions: where the findings were seen and where the fix was verified. */
+  revisions: string[];
+  author: string;
+  at: number;
+}
+
+export type LessonReviewAction = 'drafted' | 'revised' | 'approved' | 'revision-requested' | 'rejected' | 'superseded';
+
+/** A lesson on one floor: its versions and an append-only review history. */
+export interface LessonView {
+  id: string;
+  repoId: string;
+  versions: LessonVersion[];
+  reviews: { id: string; version: number; action: LessonReviewAction; actor: string; reason: string; at: number; supersededBy?: string }[];
+}
+
+/** GET /api/lessons: approved, applicable lesson versions only, for maintainers and evaluations. */
+export interface LessonExport {
+  format: 'cubefarm-lessons';
+  version: 1;
+  generatedAt: number;
+  filter: { repoId: string | null; specialty: string | null };
+  lessons: (LessonVersion & { id: string; repoId: string; approvedAt: number; approvedBy: string })[];
 }
 
 /** A developer's separate scores; `events` is the sample count behind each total. */
@@ -909,6 +1022,8 @@ export interface WorldSnapshot {
   scoreEvents?: ScoreEventView[];
   runAttempts?: RunAttemptView[];
   qaOutcomes?: QaOutcomeView[];
+  lessons?: LessonView[];
+  evaluations?: PlaybookEvaluation[];
   requests: HireRequestView[];
   ceo: CeoInfo;
   research: ResearchInfo;
@@ -926,6 +1041,7 @@ export interface WorldSnapshot {
   usage: UsageView;
   clis: CliView[];
   boxes: BoxView[];
+  upstashTasks?: UpstashTask[];
   officeTelemetry?: MachineTelemetry | null;
   officeCapacity?: MachineCapacity;
   /** Approved Proposals' publications, newest last. */
@@ -942,6 +1058,8 @@ export type ServerEvent =
   | { type: 'screen'; agentId: string; url: string | null; at: number }
   | { type: 'qa'; qa: QaView }
   | { type: 'qaOutcome'; outcome: QaOutcomeView }
+  | { type: 'lesson'; lesson: LessonView }
+  | { type: 'evaluation'; evaluation: PlaybookEvaluation }
   | { type: 'prContribution'; contribution: PrContributionView }
   | { type: 'scoreEvents'; events: ScoreEventView[] }
   | { type: 'runAttempt'; attempt: RunAttemptView }
@@ -964,6 +1082,7 @@ export type ServerEvent =
   | { type: 'usage'; usage: UsageView }
   | { type: 'clis'; clis: CliView[] }
   | { type: 'box'; box: BoxView }
+  | { type: 'upstash'; tasks: UpstashTask[] }
   | { type: 'boxRemoved'; boxId: string }
   | { type: 'officeTelemetry'; telemetry: MachineTelemetry | null; capacity: MachineCapacity }
   | { type: 'publication'; publication: PublicationView }
@@ -1062,4 +1181,23 @@ export interface ClaudeAuthenticationView {
   flowExpiresAt: number | null;
   setupCommand: string | null;
   authorizationUrl: string | null;
+}
+
+/** One disposable Small Box, tied to the worker and repository until work is saved. No credentials. */
+export interface UpstashTask {
+  id: string;
+  name: string;
+  boxId: string | null;
+  agentId: string;
+  repo: string;
+  branch: string;
+  cli: AgentCli;
+  /** Persisted before the first remote desk operation; false means no task work could have started. */
+  deskStarted?: boolean;
+  /** Connection metadata in snapshots/events only. */
+  connection?: { status: BoxStatus; error: string | null } | null;
+  slug: string;
+  port: number;
+  phase: 'creating' | 'create-failed' | 'active' | 'cleanup-blocked' | 'deleting';
+  error: string | null;
 }

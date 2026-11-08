@@ -151,6 +151,7 @@ app.post(
     swarm.hireAgent(repoId(req), {
       name: str(req.body.name),
       box: req.body.box,
+      cli: str(req.body.cli),
       model: str(req.body.model),
       effort: str(req.body.effort),
       role: str(req.body.role),
@@ -162,6 +163,7 @@ app.post(
   ),
 );
 
+app.post('/api/upstash/:id/retry', route((req) => swarm.retryUpstash(String(req.params.id), req.body?.cleanup === true)));
 app.post('/api/boxes', route((req) => swarm.addBox(req.body?.name, req.body?.destination)));
 app.delete('/api/boxes/:id', route((req) => swarm.removeBox(String(req.params.id))));
 app.post('/api/boxes/:id/check', route((req) => swarm.checkBox(String(req.params.id))));
@@ -171,6 +173,20 @@ app.get('/api/run-history', route((req, res) => {
   if (req.query.download) res.attachment(`cubefarm-run-history${filter.repoId ? `-${filter.repoId.replace(/[^\w.-]+/g, '-')}` : ''}.json`);
   return swarm.runHistory(filter);
 }));
+app.post('/api/repos/:repo/evaluations/demo', route((req) => swarm.demoPlaybookEvaluation(repoId(req))));
+app.get('/api/evaluations', route((req, res) => {
+  if (req.query.download) res.attachment('cubefarm-evaluations.json');
+  return swarm.evaluationExport(str(req.query.repoId) || undefined);
+}));
+app.post('/api/repos/:repo/evaluations', route((req) => swarm.evaluatePlaybook(repoId(req), req.body ?? {})));
+app.get('/api/lessons', route((req, res) => {
+  const filter = { repoId: str(req.query.repoId) || undefined, specialty: str(req.query.specialty) || undefined };
+  if (req.query.download) res.attachment(`cubefarm-lessons${filter.repoId ? `-${filter.repoId.replace(/[^\w.-]+/g, '-')}` : ''}.json`);
+  return swarm.lessons(filter);
+}));
+app.post('/api/repos/:repo/lessons', route((req) => swarm.draftLesson(repoId(req), req.body ?? {})));
+app.post('/api/lessons/:id/versions', route((req) => swarm.reviseLesson(str(req.params.id), req.body ?? {})));
+app.post('/api/lessons/:id/reviews', route((req) => swarm.reviewLesson(str(req.params.id), req.body ?? {})));
 app.patch('/api/fleet/capacity', route((req) => swarm.setMachineCapacity(req.body?.id, req.body?.capacity)));
 app.patch('/api/agents/:id', route((req) => swarm.updateAgent(String(req.params.id), req.body ?? {})));
 app.delete('/api/agents/:id', route((req) => swarm.fireAgent(String(req.params.id))));

@@ -1,9 +1,13 @@
+import { createEvaluation } from './evaluations.ts';
+import type { PlaybookEvaluation } from '../shared/types.ts';
+import { UPSTASH, UpstashTasks } from './upstash.ts';
+import type { UpstashTask } from '../shared/types.ts';
 import syncFs from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { emptyTelegram, TelegramMirror, telegramToken, telegramTransport, type TelegramState, type TelegramTransport } from './telegram.ts';
-import { createDemoUpstash, createDemoTelegram, demoApprovedProposal, demoCrossFloorProposal, demoTracker } from './demo.ts';
+import { createDemoTelegram, demoEvaluation, demoApprovedProposal, demoCrossFloorProposal, demoTracker } from './demo.ts';
 import { loadPublications, Publisher } from './publication.ts';
 import { approvedHold, blockerKey, readBlocker, type BlockerReading } from './approvedBlockers.ts';
 import type { WebSocket } from 'ws';
@@ -12,7 +16,6 @@ import type { BoxConnection, Machine } from './machine.ts';
 import { agentBox, boxCliCheckDue, boxSync, boxSyncText, startPlace, syncRetryDue, validDestination, type BoxStep, type BoxSyncState, type PersistedBox, type StartPlace } from './fleet.ts';
 import type { LogEntry, SessionHandle, SessionResult } from './agentRunner.ts';
 import { images } from './attachments.ts';
-import { UpstashBoxes, UpstashCreateUncertain, upstashConfig, upstashDestination, upstashFallback } from './upstash.ts';
 import type { ReconnectedCli } from './cliRunner.ts';
 import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, readConfigEnv, RUN_HISTORY_FILE, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, VERSION, WORKSPACE_ROOT } from './config.ts';
@@ -21,7 +24,7 @@ import { developerFeedback, type FeedbackEvent } from './feedback.ts';
 import { submittedContribution, finishedContribution } from './prContributions.ts';
 import { compactHealth, errorCause, exportAttempts, finishedOutcome, playbookVersion, redact, RunHistory, addUsage } from './runHistory.ts';
 import { checkParkPr } from './parkPr.ts';
-import { checkMergePr } from './mergePr.ts';
+import { checkMergePr, incompleteAuditOverride } from './mergePr.ts';
 import { issueHolder, duplicateIssueSessions, issueTaken } from './issueClaims.ts';
 import { orphanedQa } from './qaOwnership.ts';
 import { closedWork, closedWorkText, issueClosed, restartClosedWork, type ClosedWork } from './closedWork.ts';
@@ -47,8 +50,11 @@ import { qaOutcome } from './qaOutcome.ts';
 import { qaFindings, workerSnapshot } from './qaEvidence.ts';
 import { deriveScoreEvents, projectScores, reconcileScores, SCORE_LEDGER_VERSION, ZERO_SCORES, type ScoreLedger } from './scores.ts';
 import { scoringFindings } from '../shared/qaEvidence.ts';
+import { lessonExport } from '../shared/lessons.ts';
+import { draftLesson, reviewLesson, reviseLesson } from './lessons.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
+import { parentReadyToClose, retainParentCloses, type ParentClose } from './parentClose.ts';
 import { pickRequestedStart, retainRequestedStarts } from './requestedStarts.ts';
 import { DESK_COOLDOWN_MS, MAX_TASK_FAILURES, deskRecoveryDue, loginFailure, migrateDeskRecovery, nextStartupRetry, taskFailure } from './deskRecovery.ts';
 import { followKeptCli, resumeNote } from './restartRecovery.ts';
@@ -60,7 +66,7 @@ import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isPrototypeIssue, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, PROTOTYPE_BRANCH, prototypeIssueNumber, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
 import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
-import { CEO_ID, RESEARCHER_ID, UPSTASH, type ApprovedSnapshot, type DeskRecovery, type MachineCapacity, type MachineTelemetry, type PublicationView, type PrContributionView, type RunAssignReason, type RunAttemptView, type RunHistoryExport, type QaOutcomeView, type QaClassification, type DeveloperScoresView } from '../shared/types.ts';
+import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type DeskRecovery, type MachineCapacity, type MachineTelemetry, type PublicationView, type PrContributionView, type RunAssignReason, type RunAttemptView, type RunHistoryExport, type QaOutcomeView, type QaClassification, type DeveloperScoresView, type LessonExport, type LessonView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
 import { COMPANY_RESEARCH_DOCS, isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
 import type {
@@ -120,6 +126,7 @@ interface PersistedRepo {
   sessionRemedies?: RepoView['sessionRemedies'];
   parkedBranches: ParkedBranch[];
   noWorkEndings: NoWorkEnding[];
+  closedParents?: ParentClose[]; // parents the office closed itself, at their sub-issue counts
   autoMerge: boolean; // PRs merge themselves once QA passes and GitHub's checks are green
   browserTesting: boolean;
   links: string[]; // other connected repos this floor's agents may read
@@ -251,6 +258,8 @@ interface Persisted {
   qa: QaRecord[];
   prContributions: PrContributionView[];
   qaOutcomes: QaOutcomeView[];
+  lessons: LessonView[];
+  evaluations: PlaybookEvaluation[];
   scoreLedger: ScoreLedger;
   requests: HireRequestView[];
   ceo: CeoState;
@@ -267,6 +276,7 @@ interface Persisted {
   /** Names this office to its boxes (each keeps a home per office). */
   officeId: string;
   boxes: PersistedBox[];
+  upstashTasks: UpstashTask[];
   officeCapacity?: MachineCapacity;
   /** Approved Proposals' publications by proposal id: their snapshot, issue identities and progress. */
   publications: Record<string, PublicationView>;
@@ -644,6 +654,8 @@ export class Swarm {
     qa: [],
     prContributions: [],
     qaOutcomes: [],
+    lessons: [],
+    evaluations: [],
     scoreLedger: { version: SCORE_LEDGER_VERSION, cutoverAt: 0, events: [] }, // a new office has no legacy history
     requests: [],
     ceo: { queue: [], job: null, lastReviewAt: null, lastFingerprint: null },
@@ -659,16 +671,11 @@ export class Swarm {
     managerInputs: [],
     officeId: '',
     boxes: [],
+    upstashTasks: [],
     publications: {},
   };
   /** Links to the boxes: removed ones stay until the CLIs still running there have ended. */
   private boxConns = new Map<string, BoxConnection>();
-  private upstash: Pick<UpstashBoxes, 'allocate' | 'find' | 'bootstrap' | 'safeToDelete' | 'present' | 'remove'>;
-  private upstashOperations = new Set<string>();
-  private upstashFinishing = new Set<string>();
-  private upstashFullUntil = 0;
-  private upstashSweepAfter = 0;
-  private upstashClosing = false;
   private officeTelemetry: MachineTelemetry | null = null;
   private scoreTotals = new Map<string, DeveloperScoresView>(); // projected from state.scoreLedger
   private stopResources?: () => void;
@@ -735,7 +742,6 @@ export class Swarm {
   private handoffRetryMs = 1000;
 
   constructor(private backend: Backend, transport?: TelegramTransport | null) {
-    this.upstash = backend.demo ? createDemoUpstash() : new UpstashBoxes(upstashConfig(process.env, readConfigEnv()));
     this.demoTelegram = backend.demo ? createDemoTelegram() : null;
     // Explicit demo fixtures keep their fake worker; saved production pairs use the same publisher in both modes.
     this.proposalWorker = backend.demo ? createDemoProposalWorker({
@@ -819,6 +825,8 @@ export class Swarm {
         feedbackEvents: loaded.feedbackEvents ?? {},
         prContributions: loaded.prContributions ?? [],
         qaOutcomes: loaded.qaOutcomes ?? [],
+        lessons: loaded.lessons ?? [],
+        evaluations: loaded.evaluations ?? [],
         // Earlier offices start Authorship and Repair at zero; their combined score stays as the legacy total.
         scoreLedger: loaded.scoreLedger ?? { version: SCORE_LEDGER_VERSION, cutoverAt: Date.now(), events: [] },
         qa: (loaded.qa ?? []).map((q) => ({
@@ -852,6 +860,7 @@ export class Swarm {
         telegram: loaded.telegram ?? emptyTelegram(),
         managerInputs: loaded.managerInputs ?? [],
         officeId: typeof loaded.officeId === 'string' ? loaded.officeId : '',
+        upstashTasks: loaded.upstashTasks ?? [],
         boxes: (loaded.boxes ?? []).filter((b) => b && typeof b.id === 'string' && typeof b.destination === 'string'),
         officeCapacity: loaded.officeCapacity ?? 'unknown',
         publications: loadPublications(loaded.publications),
@@ -897,7 +906,35 @@ export class Swarm {
         return [];
       });
     // The boxes' CLIs too, from the boxes that answer in time; one that answers later is picked up then (boxBack).
-    const early = await Promise.all(this.state.boxes.filter((b) => b.destination).map((b) => this.openBox(b)));
+    this.upstash = new UpstashTasks(this.state.upstashTasks, this.backend.upstash, async () => {
+      // Clear desk references in the same durable write that removes a deleted reservation.
+      for (const a of this.state.agents) {
+        if (!a.deskBox?.startsWith('upstash-') || this.state.upstashTasks.some((t) => t.id === a.deskBox)) continue;
+        a.deskBox = '';
+        a.sessionId = null;
+        a.sessionCli = null;
+        for (const rec of this.state.qa) if (rec.devAgentId === a.id) rec.devSessionId = null;
+        this.emitAgent(a);
+      }
+      await this.writeState();
+      this.broadcast({ type: 'upstash', tasks: this.state.upstashTasks.map((t) => this.upstashView(t)) });
+    });
+    const cloudBack = await Promise.all(this.state.upstashTasks.map(async (task) => {
+      try {
+        if (task.phase === 'deleting' || task.phase === 'cleanup-blocked' || !this.state.agents.some((a) => a.id === task.agentId)) {
+          await this.cleanupUpstash(task);
+          return [];
+        }
+        await this.upstash!.recover(task);
+        return await this.openUpstash(task);
+      } catch {
+        task.error ??= 'Upstash reconnect needs attention. Retry in Fleet.';
+        this.save();
+        return [];
+      }
+    }));
+    const early = await Promise.all(this.state.boxes.map((b) => this.openBox(b)));
+    back.push(...cloudBack.flat());
     back.push(...early.flat());
     this.repairDuplicateIssues();
     const carryOn: PersistedAgent[] = [];
@@ -961,7 +998,7 @@ export class Swarm {
     await Promise.all([
       ...this.state.agents.map((a) => {
         const repo = this.state.repos.find((r) => r.id === a.repoId);
-        if (!repo || back.some((c) => c.agentId === a.id)) return undefined;
+        if (!repo || back.some((c) => c.agentId === a.id) || (a.deskBox?.startsWith('upstash-') && !this.boxConns.has(a.deskBox))) return undefined;
         return this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a)).catch(() => undefined);
       }),
       this.previews.clearOrphans(this.state.repos),
@@ -1003,7 +1040,7 @@ export class Swarm {
       if (a.status === 'idle' || a.stoppedBy === 'manager' || this.agentRt.get(a.id)?.session) continue;
       const repo = this.state.repos.find((r) => r.id === a.repoId);
       if (!repo) continue; // lobby jobs have their own queues
-      if (a.deskBox && this.state.boxes.some((b) => b.id === a.deskBox) && this.boxConns.get(a.deskBox)?.state().status !== 'online') continue;
+      if (a.deskBox && (this.state.boxes.some((b) => b.id === a.deskBox) || this.state.upstashTasks.some((t) => t.id === a.deskBox)) && this.boxConns.get(a.deskBox)?.state().status !== 'online') continue;
       this.endAttempt(a, { result: 'interrupted', cause: 'office', excerpt: redact(a.lastError) ?? 'The office restarted.' });
       this.nextGeneration(a); // old keeper/update callbacks no longer own this task
       this.state.deferredResumes = this.state.deferredResumes.filter((id) => id !== a.id);
@@ -1088,7 +1125,7 @@ export class Swarm {
       if (this.agentRt.get(a.id)?.session) continue;
       if (a.status === 'stopped' && a.stoppedBy === 'office') {
         // A disconnected keeper may still be running its CLI. Redial before releasing its claim.
-        if (a.deskBox && this.state.boxes.some((b) => b.id === a.deskBox) && this.boxConns.get(a.deskBox)?.state().status !== 'online') continue;
+        if (a.deskBox && (this.state.boxes.some((b) => b.id === a.deskBox) || this.state.upstashTasks.some((t) => t.id === a.deskBox)) && this.boxConns.get(a.deskBox)?.state().status !== 'online') continue;
         if (!deskRecoveryDue(a, now)) continue;
         this.recover([a]);
       }
@@ -1238,6 +1275,8 @@ export class Swarm {
       prContributions: this.state.prContributions,
       runAttempts: this.history.attempts,
       qaOutcomes: this.state.qaOutcomes,
+      lessons: this.state.lessons,
+      evaluations: this.state.evaluations,
       scoreEvents: this.state.scoreLedger.events,
       qa: this.state.qa.filter((q) => !q.closed).map((q) => this.qaView(q)),
       requests: this.state.requests,
@@ -1254,6 +1293,7 @@ export class Swarm {
       usage: this.usageNow(),
       clis: this.clis,
       boxes: this.state.boxes.map((b) => this.boxView(b)),
+      upstashTasks: this.state.upstashTasks.map((t) => this.upstashView(t)),
       officeTelemetry: this.officeTelemetry,
       officeCapacity: this.state.officeCapacity ?? 'unknown',
       officeCommit: this.officeHead?.slice(0, 7) ?? null,
@@ -1361,6 +1401,21 @@ export class Swarm {
     return compactHealth(st?.status === 'online' ? st.telemetry : null);
   }
 
+  /** The routing policy and selected match stay inspectable after a desk or issue is cleared. */
+  private assignmentFactors(a: PersistedAgent, task: RunAttemptView['task'], issue?: IssueInfo): RunAttemptView['assignment']['factors'] {
+    const qa = task === 'qa';
+    if (a.role !== 'dev' && !qa) return {};
+    const specialty = qa ? 'qa' : issue ? issueSpecialty(issue.labels) : '';
+    const match = !!specialty && (qa ? a.role === 'qa' || /test|qa/i.test(a.specialty) : (a.specialty ?? '').toLowerCase() === specialty);
+    const scoreKind = a.role === 'dev' && !qa ? task === 'fix' ? 'repair' : 'authorship' : null;
+    return {
+      policyVersion: qa ? 'qa-workload-v1' : 'specialty-first-v2',
+      specialty: specialty || null, agentSpecialty: a.specialty || null,
+      specialtyMatch: match, specialtyFallback: !!specialty && !match,
+      scoreKind, score: scoreKind ? (this.scoreTotals.get(a.id) ?? ZERO_SCORES)[scoreKind].points : null,
+    };
+  }
+
   /**
    * A new attempt for the agent's task (or, with `waiting`, for work that waits for a desk). The latest attempt on the
    * same issue or PR is its parent; one still waiting for a desk hands over to it.
@@ -1388,7 +1443,7 @@ export class Swarm {
       issueNumber: work.issueNumber,
       prNumber: work.prNumber,
       agent: { id: a.id, name: a.name, role: a.role, specialty: a.specialty ?? '' },
-      assignment: { reason: route.reason, factors: route.factors ?? {} },
+      assignment: { reason: route.reason, factors: { ...this.assignmentFactors(a, task, issue), ...route.factors } },
       runtime: { cli: null, model: null, effort: null, playbook: null, office: VERSION },
       worker: { box: a.deskBox ?? '', name: a.deskBox ? this.boxName(a.deskBox) : 'office', healthAtStart: null, healthAtEnd: null },
       sessionIds: [],
@@ -1580,6 +1635,85 @@ export class Swarm {
     this.syncScores(outcome.repoId, outcome.prNumber);
     await this.writeState();
     return correction;
+  }
+
+  // ---------- lessons ----------
+
+  /** Approved, applicable lessons for a floor and specialty: the lesson view's and evaluations' export. */
+  lessons(filter: { repoId?: string; specialty?: string }): LessonExport {
+    return lessonExport(this.state.lessons, filter, Date.now());
+  }
+
+  private lessonEvidence(repoId: string) {
+    return { repoId: this.repo(repoId).id, outcomes: this.state.qaOutcomes, attempts: this.history.attempts };
+  }
+
+  private lesson(id: string) {
+    const lesson = this.state.lessons.find((l) => l.id === id);
+    if (!lesson) throw new HttpError(404, 'Unknown lesson');
+    return lesson;
+  }
+
+  /** Lessons change only through a saved review history; a failed save undoes the change. */
+  private async saveLesson(lesson: LessonView, undo: () => void) {
+    try {
+      await this.writeState();
+    } catch (err) {
+      undo();
+      throw err;
+    }
+    this.broadcast({ type: 'lesson', lesson });
+    return lesson;
+  }
+
+  async draftLesson(repoId: string, input: unknown) {
+    const lesson = draftLesson(input, this.lessonEvidence(repoId), 'manager', Date.now());
+    this.state.lessons.push(lesson);
+    return this.saveLesson(lesson, () => { this.state.lessons = this.state.lessons.filter((l) => l !== lesson); });
+  }
+
+  async reviseLesson(id: string, input: unknown) {
+    const lesson = this.lesson(id);
+    const before = structuredClone(lesson);
+    reviseLesson(lesson, input, this.lessonEvidence(lesson.repoId), 'manager', Date.now());
+    return this.saveLesson(lesson, () => Object.assign(lesson, before));
+  }
+
+  async reviewLesson(id: string, input: unknown) {
+    const lesson = this.lesson(id);
+    const before = structuredClone(lesson);
+    reviewLesson(lesson, input, this.state.lessons, 'manager', Date.now());
+    return this.saveLesson(lesson, () => Object.assign(lesson, before));
+  }
+
+  /** Save an immutable evaluation; subsequent runs or evidence corrections require a new comparison. */
+  async evaluatePlaybook(repoId: string, input: unknown) {
+    const evaluation = createEvaluation(input, { ...this.lessonEvidence(repoId), lessons: this.state.lessons }, Date.now());
+    this.state.evaluations.push(evaluation);
+    try {
+      await this.writeState();
+    } catch (err) {
+      this.state.evaluations = this.state.evaluations.filter((e) => e !== evaluation);
+      throw err;
+    }
+    this.broadcast({ type: 'evaluation', evaluation });
+    return evaluation;
+  }
+
+  async demoPlaybookEvaluation(repoId: string) {
+    if (!this.backend.demo) throw new HttpError(404, 'Pinned fixtures are only available in the demo office');
+    const fixture = demoEvaluation(this.repo(repoId).id);
+    this.state.lessons.push(fixture.lesson);
+    this.state.qaOutcomes.push(...fixture.outcomes);
+    for (const attempt of fixture.attempts) this.history.add(attempt);
+    const evaluation = await this.evaluatePlaybook(repoId, fixture.input);
+    this.broadcast({ type: 'lesson', lesson: fixture.lesson });
+    for (const outcome of fixture.outcomes) this.broadcast({ type: 'qaOutcome', outcome });
+    return evaluation;
+  }
+
+  evaluationExport(repoId?: string) {
+    return { format: 'cubefarm-evaluations', version: 1, evaluations: this.state.evaluations.filter((e) => !repoId || e.repoId === repoId) };
   }
 
   private appendLog(a: PersistedAgent, entries: LogEntry[]) {
@@ -1934,33 +2068,44 @@ export class Swarm {
   }
 
   private agentSlug(a: PersistedAgent) {
+    const task = this.state.upstashTasks.find((t) => t.id === a.deskBox);
+    if (task) return task.slug;
     return `${slugify(a.name)}-${a.id.slice(0, 4)}`;
   }
 
   /** The machine an agent's desk and sessions are on: their task's box, or the office's own. The CEO and researchers stay on the office. */
   private machineFor(a: PersistedAgent): Machine {
     if (a.role === 'ceo' || a.role === 'researcher') return this.backend;
+    if (a.deskBox?.startsWith('upstash-')) {
+      const machine = this.boxConns.get(a.deskBox)?.machine;
+      if (!machine) throw new Error('Upstash task is disconnected; retry in Fleet.');
+      return machine;
+    }
     return (a.deskBox && this.boxConns.get(a.deskBox)?.machine) || this.backend;
   }
 
   /** Where an agent's next session starts (see fleet.ts): a new task on their box, anything inside one on their desk's. */
   private place(a: PersistedAgent, kind: 'new' | 'within'): StartPlace {
-    if (a.role === 'ceo' || a.role === 'researcher' || this.state.settings.runtime !== 'terminal') return { box: '' };
+    if (a.role === 'ceo' || a.role === 'researcher' || (this.state.settings.runtime !== 'terminal' && !(kind === 'within' && a.deskBox?.startsWith('upstash-')))) return { box: '' };
     const floor = this.state.repos.find((r) => r.id === a.repoId)?.box;
     const cli = a.cli || this.state.settings.defaultCli;
-    const wanted = agentBox(a.box, floor);
-    if (kind === 'new') {
-      const retained = this.state.boxes.find((b) => b.upstash?.agentId === a.id);
-      if (retained) return { wait: retained.id };
-      if (wanted === UPSTASH) {
-        if (Date.now() >= this.upstashFullUntil) return { box: UPSTASH };
-        return this.upstashFallbackPlace(a, floor);
-      }
+    const want = agentBox(a.box, floor);
+    const reservation = this.state.upstashTasks.find((t) => t.agentId === a.id);
+    if (kind === 'new' && reservation && (want !== UPSTASH || reservation.phase === 'cleanup-blocked' || reservation.phase === 'deleting')) return { wait: reservation.id };
+    if (kind === 'within' && a.deskBox?.startsWith('upstash-')) {
+      return this.boxConns.get(a.deskBox)?.state().status === 'online' ? { box: a.deskBox } : { wait: a.deskBox };
     }
-    if (kind === 'within' && this.upstashOperations.has(a.deskBox)) return { wait: a.deskBox };
+    if (kind === 'new' && want === UPSTASH) {
+      const held = this.state.upstashTasks.find((t) => t.agentId === a.id);
+      if (held?.phase === 'cleanup-blocked' || held?.phase === 'deleting') return { wait: held.id };
+      const missing = this.backend.upstash.missing(cli);
+      if (missing) return { wait: UPSTASH, lacks: missing };
+      if (held || !this.upstash?.full()) return { box: UPSTASH };
+      return this.upstashFallback(a);
+    }
     return startPlace(
       kind,
-      wanted,
+      want,
       a.deskBox,
       (id) => {
         if (!this.state.boxes.some((b) => b.id === id)) return null;
@@ -1974,174 +2119,125 @@ export class Swarm {
     );
   }
 
-  private upstashFallbackPlace(a: PersistedAgent, floor?: string): StartPlace {
-    const target = upstashFallback(floor);
-    const cli = a.cli || this.state.settings.defaultCli;
-    if (!target) return this.clis.some((c) => c.id === cli && c.installed)
-      ? { box: '', fellBack: UPSTASH } : { wait: '', lacks: cli };
-    const conn = this.boxConns.get(target);
-    const place = startPlace('new', target, '', () => conn?.state().status === 'online' && !this.boxMoving(target),
-      () => conn?.state().clis.some((c) => c.id === cli && c.installed) ? null : cli);
-    return 'box' in place ? { ...place, fellBack: UPSTASH } : place;
-  }
-
-  private upstashLabel() { return `cf-${this.state.officeId}`; }
-
-  private async provisionUpstash(a: PersistedAgent, repo: PersistedRepo, gone: () => boolean): Promise<StartPlace> {
-    const cli = a.cli || this.state.settings.defaultCli;
-    const id = `cf-${crypto.randomBytes(8).toString('hex')}`;
-    const task = { agentId: a.id, repo: repo.fullName, slug: this.agentSlug(a), createdAt: Date.now() };
-    const b: PersistedBox = { id, name: `Upstash · ${a.name}`, destination: '', upstash: task };
-    this.upstashOperations.add(id);
-    this.state.boxes.push(b);
-    this.broadcast({ type: 'box', box: this.boxView(b) });
-    this.appendLog(a, [{ kind: 'system', text: 'Preparing a disposable Upstash Box…' }]);
-    try {
-      await this.writeState(); // Save the name before creating, so a lost response can be reconciled.
-      if (gone() || this.upstashClosing) throw new Error('Upstash setup was cancelled');
-      const remoteId = await this.upstash.allocate(id, this.upstashLabel(), cli, this.modelFor(a, cli), () =>
-        this.state.boxes.filter((b) => b.upstash && (b.upstash.remoteId || !this.upstashOperations.has(b.id))).map((b) => b.id));
-      if (!remoteId) {
-        this.forgetUpstash(b);
-        this.upstashFullUntil = Date.now() + SCHEDULER_INTERVAL_MS;
-        return this.upstashFallbackPlace(a, repo.box);
-      }
-      b.upstash!.remoteId = remoteId;
-      await this.writeState();
-      if (gone() || this.upstashClosing) throw new Error('Upstash setup was cancelled');
-      await this.upstash.bootstrap(remoteId, cli);
-      if (gone() || this.upstashClosing) throw new Error('Upstash setup was cancelled');
-      b.destination = upstashDestination(remoteId);
-      await this.writeState();
-      void this.openBox(b, false);
-      const conn = this.boxConns.get(id)!;
-      await conn.check();
-      const state = conn.state();
-      if (state.status !== 'online' || !state.info?.ghReady || state.info.hookError ||
-          !state.clis.some((c) => c.id === cli && c.installed)) {
-        throw new Error('Upstash Box did not report a ready terminal, GitHub CLI and coding agent');
-      }
-      if (gone() || this.upstashClosing) throw new Error('Upstash setup was cancelled');
-      // Persist the binding before anything can write to the remote desk.
-      b.upstash!.used = true;
-      a.deskBox = id;
-      await this.writeState();
-      return { box: id };
-    } catch (err) {
-      if (!b.upstash!.remoteId && !(err instanceof UpstashCreateUncertain)) this.forgetUpstash(b);
-      else this.upstashSweepAfter = 0;
-      throw err;
-    } finally {
-      this.upstashOperations.delete(id);
-    }
-  }
-
-  private forgetUpstash(box: PersistedBox) {
-    this.state.boxes = this.state.boxes.filter((b) => b !== box);
-    this.boxConns.get(box.id)?.close();
-    this.boxConns.delete(box.id);
-    this.boxStatus.delete(box.id);
-    this.broadcast({ type: 'boxRemoved', boxId: box.id });
-    for (const a of this.state.agents.filter((a) => a.deskBox === box.id)) {
-      if (a.sessionId) {
-        for (const q of this.state.qa.filter((q) => q.devAgentId === a.id && q.devSessionId === a.sessionId)) this.setQa(q, { devSessionId: null });
-      }
-      a.deskBox = '';
-      a.sessionId = null;
-      a.sessionCli = null;
-      this.emitAgent(a);
-    }
-    this.save();
-  }
-
-  private sweepUpstash() {
-    if (this.upstashClosing || this.upstashSweepAfter > Date.now()) return;
-    this.upstashSweepAfter = Date.now() + SCHEDULER_INTERVAL_MS;
-    for (const b of this.state.boxes) {
-      const task = b.upstash;
-      if (!task || (task.retryAt ?? 0) > Date.now() || this.upstashOperations.has(b.id) || this.upstashFinishing.has(b.id)) continue;
-      const a = this.state.agents.find((a) => a.id === task.agentId);
-      const conn = this.boxConns.get(b.id);
-      const recovering = () => a && (a.heldRetry || (a.task && a.status === 'stopped' && a.stoppedBy === 'office') ||
-        this.state.deferredResumes.includes(a.id));
-      const active = () => (a?.deskBox === b.id && (BUSY.includes(a.status) || recovering() ||
-        this.agentRt.get(a.id)?.session)) || conn?.state().running;
-      const online = () => conn?.state().status === 'online';
-      if (active() && (!task.used || online())) continue;
-      this.upstashOperations.add(b.id);
-      void (async () => {
-        const remoteId = task.remoteId ?? await this.upstash.find(b.id, this.upstashLabel());
-        if (!remoteId) {
-          // The create may still be running at the provider after an ambiguous response.
-          if (Date.now() - task.createdAt > 10 * 60_000) this.forgetUpstash(b);
-          return;
-        }
-        task.remoteId = remoteId;
-        if (task.used) {
-          if (!await this.upstash.present(remoteId)) {
-            if (!task.saved && a?.deskBox === b.id) {
-              const rt = this.agentRt.get(a.id);
-              const repo = this.state.repos.find((r) => r.id === a.repoId);
-              const retry = BUSY.includes(a.status) || recovering();
-              this.nextGeneration(a);
-              rt?.session?.stop();
-              if (rt) rt.session = null;
-              if (BUSY.includes(a.status)) a.status = 'stopped';
-              a.heldRetry = null;
-              this.state.deferredResumes = this.state.deferredResumes.filter((id) => id !== a.id);
-              if (retry && repo) this.requeueTask(a, repo);
-              a.lastErrorAt = Date.now();
-              a.lastError = 'The Upstash Box was removed before its work could be verified.';
-              this.appendLog(a, [{ kind: 'error', text: a.lastError }]);
-            }
-            this.forgetUpstash(b);
-            await this.writeState();
-            return;
-          }
-          if (active()) {
-            task.retryAt = Date.now() + 60_000;
-            return;
-          }
-          if (!conn || !online() || !b.layout) throw new Error('Reconnect the Box to verify its work');
-          if (!await this.upstash.safeToDelete(remoteId, conn.machine.deskDir(task.repo, task.slug), conn.machine.mainDir(task.repo))) {
-            throw new Error('Save local changes and push commits before this Box can be deleted');
-          }
-        }
-        if (active()) return;
-        task.saved = true;
-        await this.writeState();
-        await this.upstash.remove(remoteId);
-        this.forgetUpstash(b);
-        this.upstashFullUntil = 0;
-        await this.writeState();
-      })().catch((err: Error) => {
-        task.retryAt = Date.now() + 60_000;
-        const error = `Cleanup blocked · ${err.message}`;
-        if (task.error === error) return;
-        task.error = error;
-        this.broadcast({ type: 'box', box: this.boxView(b) });
-        this.save();
-      }).finally(() => this.upstashOperations.delete(b.id));
-    }
-  }
-
   /** Why an agent waits for a box. */
   private waitReason(where: { wait: string; lacks?: string }) {
-    const retained = this.state.boxes.find((b) => b.id === where.wait)?.upstash;
-    if (retained) return retained.error ?? 'waiting for the previous Upstash Box to close';
-    if (!where.wait && where.lacks) return `Upstash quota full and the office has no ${cliLabel(where.lacks as AgentCli)}`;
+    if (where.wait === UPSTASH) return where.lacks ?? 'Upstash is unavailable';
+    const cloud = this.state.upstashTasks.find((t) => t.id === where.wait);
+    if (cloud?.error) return cloud.error;
     const name = this.boxName(where.wait);
     if (this.boxMoving(where.wait)) return `${name} is moving to the office's version`;
+    if (!where.wait && where.lacks) return `The main office hasn't got ${where.lacks}; the fallback task stays queued`;
     if (!where.lacks) return `${name} is offline`;
     if (!this.boxConns.get(where.wait)?.state().clis.length) return `${name} is still looking for its coding agents`;
     return isCli(where.lacks) ? `${name} hasn't got ${cliLabel(where.lacks)} (not on the login-shell ${cliSearchLocations(where.lacks)})` : `${name} hasn't got ${where.lacks}`;
   }
 
   private boxName(id: string) {
-    return id === UPSTASH ? 'Upstash Box' : this.state.boxes.find((b) => b.id === id)?.name ?? this.removedBoxes.get(id) ?? id;
+    if (id === UPSTASH) return 'Upstash (Small Box per task)';
+    return this.state.upstashTasks.find((t) => t.id === id)?.name ?? this.state.boxes.find((b) => b.id === id)?.name ?? this.removedBoxes.get(id) ?? id;
   }
   /** Names of boxes removed since the office started, for what agents whose desk was there are told. */
   private removedBoxes = new Map<string, string>();
+
+  private upstashView(task: UpstashTask): UpstashTask {
+    const state = this.boxConns.get(task.id)?.state();
+    return { ...task, connection: state ? { status: state.status, error: state.error } : null };
+  }
+
+  private upstash: UpstashTasks | null = null;
+  private upstashOpening = new Map<string, Promise<ReconnectedCli[]>>();
+  private upstashCleaning = new Map<string, Promise<void>>();
+
+  private upstashFallback(a: PersistedAgent): StartPlace {
+    const floor = this.state.repos.find((r) => r.id === a.repoId)?.box ?? '';
+    const target = floor === UPSTASH ? '' : floor;
+    const cli = a.cli || this.state.settings.defaultCli;
+    if (!target) return this.clis.some((c) => c.id === cli && c.installed) ? { box: '' } : { wait: '', lacks: cli };
+    return startPlace('new', target, '', (id) => this.boxConns.get(id)?.state().status === 'online',
+      (id) => this.boxConns.get(id)?.state().clis.some((c) => c.id === cli && c.installed) ? null : cli);
+  }
+
+  private openUpstash(task: UpstashTask): Promise<ReconnectedCli[]> {
+    if (this.boxConns.has(task.id)) return this.boxConns.get(task.id)!.check().then(() => []);
+    const pending = this.upstashOpening.get(task.id);
+    if (pending) return pending;
+    const opening = (async () => {
+      const box: PersistedBox = { id: task.id, name: task.name, destination: task.boxId!, layout: { workspaces: '/workspace/cubefarm/home/workspaces', sep: '/' } };
+      const conn = await this.backend.upstash.connect(task, { box, officeId: this.state.officeId,
+        changed: () => this.broadcast({ type: 'upstash', tasks: this.state.upstashTasks.map((t) => this.upstashView(t)) }), terminalFor: (id) => id === task.agentId ? this.keptTerminal(id) : null });
+      this.boxConns.set(task.id, conn);
+      let timer: NodeJS.Timeout | undefined;
+      let back: ReconnectedCli[];
+      try {
+        back = await Promise.race([conn.reconnected, new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Upstash keeper did not reconnect in time. Retry in Fleet.')), 180_000);
+        })]);
+        await conn.check();
+      } catch (err) {
+        conn.close();
+        this.boxConns.delete(task.id);
+        throw err;
+      } finally { clearTimeout(timer); }
+      return back;
+    })();
+    this.upstashOpening.set(task.id, opening);
+    void opening.finally(() => this.upstashOpening.delete(task.id)).catch(() => undefined);
+    return opening;
+  }
+
+  private finishUpstash(a: PersistedAgent) {
+    const task = this.state.upstashTasks.find((t) => t.id === a.deskBox || t.agentId === a.id);
+    if (task) void this.cleanupUpstash(task).catch(() => undefined);
+  }
+
+  private cleanupUpstash(task: UpstashTask): Promise<void> {
+    const pending = this.upstashCleaning.get(task.id);
+    if (pending) return pending;
+    const cleanup = this.upstash!.cleanup(task, async () => {
+      const a = this.state.agents.find((x) => x.id === task.agentId);
+      const rt = this.agentRt.get(task.agentId);
+      rt?.session?.stop();
+      await rt?.scratchCleanup;
+      await rt?.terminal?.releaseIdle?.();
+      await rt?.terminal?.closing;
+      if (a && this.boxConns.has(task.id)) await this.boxConns.get(task.id)!.machine.releaseDesk(task.repo, this.agentSlug(a), this.port(a));
+      this.boxConns.get(task.id)?.close();
+      this.boxConns.delete(task.id);
+    }).then(async () => {
+      const a = this.state.agents.find((x) => x.id === task.agentId);
+      if (a?.deskBox === task.id) {
+        a.deskBox = '';
+        a.sessionId = null;
+        a.sessionCli = null;
+        for (const rec of this.state.qa) if (rec.devAgentId === a.id) rec.devSessionId = null;
+        this.emitAgent(a);
+      }
+      await this.writeState();
+    });
+    this.upstashCleaning.set(task.id, cleanup);
+    void cleanup.finally(() => this.upstashCleaning.delete(task.id)).catch(() => undefined);
+    return cleanup;
+  }
+
+  async retryUpstash(id: string, cleanup: boolean) {
+    const task = this.state.upstashTasks.find((t) => t.id === id);
+    if (!task) throw new HttpError(404, 'Unknown Upstash task');
+    const a = this.state.agents.find((x) => x.id === task.agentId);
+    if (cleanup) {
+      if (a && BUSY.includes(a.status)) throw new HttpError(409, 'Stop the active task before cleanup.');
+      await this.cleanupUpstash(task);
+    } else {
+      if (this.upstashCleaning.has(id)) throw new HttpError(409, 'Cleanup is still checking saved work. Wait for it to finish.');
+      if (task.phase === 'deleting') throw new HttpError(409, 'Deletion has started; retry cleanup to confirm it.');
+      await this.upstash!.recover(task);
+      task.phase = 'active';
+      task.error = null;
+      await this.writeState();
+      const back = await this.openUpstash(task);
+      await this.boxBack(task.id, back);
+    }
+    this.broadcast({ type: 'upstash', tasks: this.state.upstashTasks.map((t) => this.upstashView(t)) });
+  }
 
   // ---------- boxes ----------
 
@@ -2208,9 +2304,8 @@ export class Swarm {
       id: b.id,
       name: b.name,
       destination: b.destination,
-      ...(b.upstash && { disposable: true }),
-      status: st?.status ?? (b.upstash && !b.upstash.error ? 'connecting' : 'offline'),
-      error: b.upstash?.error ?? st?.error ?? null,
+      status: st?.status ?? 'offline',
+      error: st?.error ?? null,
       platform: st?.info?.platform ?? null,
       version: st?.info?.version ?? null,
       git: st?.info?.git ?? null,
@@ -2278,7 +2373,6 @@ export class Swarm {
     if (!this.scheduling) return;
     const office = { version: VERSION, commit: this.officeHead };
     for (const b of this.state.boxes) {
-      if (b.upstash) continue; // A running disposable Box keeps the version it started on.
       const conn = this.boxConns.get(b.id);
       const s = this.boxSyncs.get(b.id);
       if (!conn || (s && s.state !== 'draining' && s.state !== 'failed')) continue; // updating, relinking or restarting
@@ -2381,14 +2475,7 @@ export class Swarm {
   async checkBox(id: string): Promise<BoxView> {
     const box = this.state.boxes.find((b) => b.id === id);
     const conn = box && this.boxConns.get(id);
-    if (!box) throw new HttpError(404, 'No such box');
-    if (box.upstash?.error) {
-      box.upstash.retryAt = 0;
-      this.upstashSweepAfter = 0;
-      this.sweepUpstash();
-      return this.boxView(box);
-    }
-    if (!conn) throw new HttpError(box.upstash ? 409 : 404, box.upstash ? 'The Box is still provisioning' : 'No such box');
+    if (!box || !conn) throw new HttpError(404, 'No such box');
     if (this.boxSyncs.get(id)?.state === 'failed') {
       this.boxSyncs.delete(id);
       this.broadcast({ type: 'box', box: this.boxView(box) });
@@ -2415,7 +2502,6 @@ export class Swarm {
   removeBox(id: string) {
     const box = this.state.boxes.find((b) => b.id === id);
     if (!box) throw new HttpError(404, 'No such box');
-    if (box.upstash) throw new HttpError(409, 'Upstash Boxes are cleaned up after their task');
     this.state.boxes = this.state.boxes.filter((b) => b !== box);
     this.removedBoxes.set(id, box.name);
     this.boxSyncs.delete(id);
@@ -2439,7 +2525,7 @@ export class Swarm {
   /** A box id from a request: '' (the office's machine) or a box's; null where allowed (follow the floor). */
   private boxRef(v: unknown, nullable: boolean): string | null {
     if (v === null && nullable) return null;
-    if (v === '' || v === UPSTASH || (typeof v === 'string' && this.state.boxes.some((b) => b.id === v && !b.upstash))) return v as string;
+    if (v === UPSTASH || v === '' || (typeof v === 'string' && this.state.boxes.some((b) => b.id === v))) return v as string;
     throw new HttpError(400, `No box "${String(v)}". Use '' for the office's machine${nullable ? ', or null to follow the floor' : ''}.`);
   }
 
@@ -2501,6 +2587,7 @@ export class Swarm {
 
   /** Revoke the old task before stopping it: runners and remote checkouts may answer late. */
   private failedStart(a: PersistedAgent) {
+    if (a.deskBox?.startsWith('upstash-') && !this.boxConns.has(a.deskBox)) return false;
     const stalled = this.startStall(a);
     const repo = this.state.repos.find((r) => r.id === a.repoId);
     if (!stalled || !repo) return false;
@@ -2561,6 +2648,7 @@ export class Swarm {
 
   private clearTask(a: PersistedAgent, outcome: NonNullable<RunAttemptView['outcome']> = { result: 'cleared', cause: 'unknown' }) {
     this.endAttempt(a, outcome);
+    this.finishUpstash(a);
     this.nextGeneration(a);
     Object.assign(a, { status: a.startupFailed ? 'error' : 'idle', task: null, issueNumber: null, issueTitle: null, branch: null, prNumber: null, prUrl: null, lastError: a.stoppedBy === 'manager' ? null : a.lastError ?? null, heldRetry: null, stoppedBy: undefined });
     this.reconcileOrphanedQa();
@@ -2734,7 +2822,7 @@ export class Swarm {
       const before = new Map(floor.map((a) => [a, agentBox(a.box, repo.box)]));
       repo.box = box;
       for (const a of floor) {
-        if (patch.everyone === true && a.box !== UPSTASH) a.box = null;
+        if (patch.everyone === true) a.box = null;
         this.noteMove(a, before.get(a)!);
       }
     }
@@ -2965,7 +3053,6 @@ export class Swarm {
    * through a restart (the terminal keeper holds them for the next start) and stop when the office quits.
    */
   async shutdown(restart = false): Promise<void> {
-    this.upstashClosing = true;
     this.stopResources?.();
     this.publisher.stop();
     await this.telegram.stop();
@@ -3062,6 +3149,7 @@ export class Swarm {
       rt.fetchedAt = started;
       this.reconcilePulls(repo, pulls);
       await this.stopClosedWork(repo, issues.status === 'fulfilled' ? issues.value : null, pulls);
+      if (issues.status === 'fulfilled') await this.closeFinishedParents(repo, rt, issues.value, pulls);
       await this.pruneUnlistedQa(repo, pulls);
       // Something was merged since the last look (by the office or anyone else): bring the folder up to date.
       const newest = pulls.reduce<string | null>((m, p) => (p.mergedAt && (!m || p.mergedAt > m) ? p.mergedAt : m), null);
@@ -3219,6 +3307,31 @@ export class Swarm {
     }
   }
 
+  /** Close open parents whose sub-issues are all done as completed, on every floor, once per sub-issue count. */
+  private async closeFinishedParents(repo: PersistedRepo, rt: RepoRuntime, issues: IssueInfo[], pulls: PullInfo[]) {
+    const before = repo.closedParents ?? [];
+    let closed = retainParentCloses(before, issues);
+    for (const issue of issues) {
+      const openPr = pulls.some((p) => p.state === 'OPEN' && p.closesIssues.includes(issue.number));
+      if (!parentReadyToClose(issue, { openPr, working: this.issueTaken(repo, issue.number), closed })) continue;
+      const { total, completed } = issue.subIssues!;
+      // Recorded either way: a failure is reported once, not on every sync.
+      closed = [...closed.filter((c) => c.issueNumber !== issue.number), { issueNumber: issue.number, total, completed }];
+      try {
+        await this.backend.closeIssue(repo.fullName, issue.number, 'completed', `All ${total} sub-issues are done; closed by the office.\n\n${AGENT_COMMENT_MARKER}`);
+      } catch (err) {
+        this.postMessage('office', `All ${total} sub-issues of #${issue.number} on ${repo.fullName} are done, but closing it failed: ${oneLine(err)}. Close it as completed on GitHub.`);
+        continue;
+      }
+      rt.issues = rt.issues.filter((i) => i.number !== issue.number);
+      this.toast('success', `Closed #${issue.number} on ${repo.fullName}: all ${total} sub-issues are done.`);
+      this.postMessage('office', `✅ Closed #${issue.number} "${issue.title}" on ${repo.fullName} as completed: all ${total} sub-issues are done.`);
+    }
+    if (JSON.stringify(closed) === JSON.stringify(before)) return;
+    repo.closedParents = closed;
+    this.save();
+  }
+
   /** End an agent's task on closed work: its session, its desk and the QA record it was testing or fixing. */
   private endClosedWork(a: PersistedAgent, repo: PersistedRepo, work: ClosedWork, log: string, prState: 'CLOSED' | 'MERGED' = 'CLOSED') {
     const rt = this.agentRt.get(a.id);
@@ -3333,9 +3446,12 @@ export class Swarm {
     const repo = this.repo(repoId);
     const rt = this.repoRt.get(repo.id)!;
     if (rt.parking || rt.merging) throw new HttpError(409, `Wait until PR parking or merging finishes on ${repo.fullName}`);
+    const record = () => this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number);
+    const outcome = () => this.state.qaOutcomes.findLast((o) => o.repoId === repo.id && o.prNumber === number && o.reviewId === record()?.reviewId);
     const preflight = (pr: PullInfo | PrDetails | undefined, reserved = false) => checkMergePr(number, repo.fullName, {
       merging: !reserved && rt.merging, parking: !reserved && !!rt.parking, syncing: rt.syncing,
-      qa: this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number),
+      qa: record(),
+      outcome: outcome(),
       pull: pr,
       busy: this.state.agents.some((a) => a.repoId === repo.id && (
         a.prNumber === number || (pr && (a.branch === pr.headRefName ||
@@ -3355,7 +3471,7 @@ export class Swarm {
         if (!rec && labeled && current.state === 'OPEN') {
           rec = this.queueQa(repo, number, null, current.closesIssues[0] ?? null, current.isCrossRepository);
         }
-        const held = rec ? this.holdForSecurityReview(repo, rec, current) : labeled;
+        const held = rec ? !(approval && incompleteAuditOverride(rec, outcome(), current)) && this.holdForSecurityReview(repo, rec, current) : labeled;
         if (held || (rec?.securityReview && !current.baseSha)) {
           throw new HttpError(409, `PR #${number} requires a passing security review for its current head and base`);
         }
@@ -3420,8 +3536,8 @@ export class Swarm {
       specialty?: string;
       brief?: string;
       cli?: string;
-      hiredBy?: 'manager' | 'ceo';
       box?: unknown;
+      hiredBy?: 'manager' | 'ceo';
       appearance?: { color: string; hair: string; skin: string };
     },
   ) {
@@ -3466,7 +3582,7 @@ export class Swarm {
       sessionId: null,
       sessionCli: null,
       lastError: null,
-      box: role === 'researcher' || opts.box === undefined ? null : this.boxRef(opts.box, true),
+      box: role === 'researcher' ? null : opts.box === undefined ? null : this.boxRef(opts.box, true),
       deskBox: '',
       logTail: [],
     };
@@ -3559,15 +3675,15 @@ export class Swarm {
       if (q.devAgentId === null && q.status === 'fixing') this.setQa(q, { status: 'failed' });
     }
     const repo = this.state.repos.find((r) => r.id === a.repoId);
-    if (repo) {
+    if (repo && !a.deskBox?.startsWith('upstash-')) {
       const slug = this.agentSlug(a);
       const machine = this.machineFor(a);
-      const disposable = this.state.boxes.some((b) => b.id === a.deskBox && b.upstash);
       void Promise.resolve(idle)
         .then(() => machine.releaseDesk(repo.fullName, slug, this.port(a)))
-        .then(() => disposable ? undefined : machine.removeDesk(repo.fullName, slug))
+        .then(() => machine.removeDesk(repo.fullName, slug))
         .catch(() => undefined);
     }
+    this.finishUpstash(a);
     this.state.agents = this.state.agents.filter((x) => x.id !== id);
     this.agentRt.delete(id);
     this.save();
@@ -3787,6 +3903,8 @@ export class Swarm {
   }
 
   private port(a: PersistedAgent) {
+    const task = this.state.upstashTasks.find((t) => t.id === a.deskBox);
+    if (task) return task.port;
     return 5200 + (parseInt(a.id.slice(0, 4), 16) % 700);
   }
 
@@ -3799,9 +3917,10 @@ export class Swarm {
    * SDK. A session can only be resumed by the CLI that made it, so a follow-up stays with that CLI.
    */
   private sessionRuntime(a: PersistedAgent, resume?: string): { terminal?: AgentTerminal; cli?: AgentCli; label?: string; resumeSessionId?: string } {
-    const inTerminal = this.state.settings.runtime === 'terminal' && this.machineFor(a).terminals;
+    const inTerminal = (this.state.settings.runtime === 'terminal' || !!a.deskBox?.startsWith('upstash-')) && this.machineFor(a).terminals;
     // Researchers run Claude Code too: its web search is what they work with.
     let cli: AgentCli = a.role === 'ceo' || a.role === 'researcher' ? 'claude' : a.cli || this.state.settings.defaultCli;
+    cli = this.state.upstashTasks.find((t) => t.id === a.deskBox)?.cli ?? cli;
     if (resume && a.sessionCli && a.sessionCli !== cli) {
       if (inTerminal) cli = a.sessionCli;
       else if (a.sessionCli !== 'claude') resume = undefined;
@@ -3965,26 +4084,34 @@ export class Swarm {
         if (this.repoRt.get(repo.id)?.cloneStatus !== 'ready') await this.cloneRepo(repo.id);
         if (gone()) return null;
         // A fix round for the PR's own author stays on the desk with their conversation; anything else is a new task.
-        const desired = agentBox(a.box, repo.box);
-        const within = job?.task === 'fix' && job.author === a.id && desired !== UPSTASH;
-        const previousBox = a.deskBox;
+        const within = job?.task === 'fix' && job.author === a.id && (agentBox(a.box, repo.box) !== UPSTASH || a.deskBox?.startsWith('upstash-'));
         let where = this.place(a, within ? 'within' : 'new');
-        if ('box' in where && where.box === UPSTASH) where = await this.provisionUpstash(a, repo, gone);
-        if (gone()) return null;
+        if ('box' in where && where.box === UPSTASH) {
+          const previous = this.state.upstashTasks.find((t) => t.agentId === a.id);
+          if (previous && (previous.branch !== branch || previous.repo !== repo.fullName)) await this.cleanupUpstash(previous);
+          const task = await this.upstash!.ensure({ agentId: a.id, slug: this.agentSlug(a), port: this.port(a), repo: repo.fullName, branch, cli: previous?.cli ?? (a.cli || this.state.settings.defaultCli) }, this.state.officeId);
+          if (task) {
+            // Persist task placement before remote preparation so a restart finds the same Box.
+            a.deskBox = task.id;
+            await this.writeState();
+            this.emitAgent(a);
+            await this.openUpstash(task);
+            this.boxConns.get(task.id)?.hooksReady();
+            if (gone()) { await this.cleanupUpstash(task); return null; }
+            where = this.place(a, 'within');
+          } else {
+            where = this.upstashFallback(a);
+            this.appendLog(a, [{ kind: 'system', text: 'Upstash quota reached; using the floor fallback when its CLI is available.' }]);
+          }
+        }
         if ('wait' in where) {
-          if (desired !== UPSTASH) throw new Error(`Waiting: ${this.waitReason(where)}.`);
-          this.appendLog(a, [{ kind: 'system', text: `⏸ Waiting: ${this.waitReason(where)}.` }]);
-          this.deferPrepared(a, repo, this.waitReason(where));
-          this.save();
+          this.appendLog(a, [{ kind: 'system', text: `Waiting: ${this.waitReason(where)}.` }]);
+          this.deferPrepared(a, repo);
           return null;
         }
-        if (where.fellBack === UPSTASH) {
-          this.appendLog(a, [{ kind: 'system', text: `ℹ Upstash quota full: running on ${where.box ? this.boxName(where.box) : "the office's machine"}.` }]);
-        } else if (where.fellBack) {
-          this.appendLog(a, [{ kind: 'system', text: `ℹ ${this.boxName(where.fellBack)} was removed: this task runs on the office's machine.` }]);
-        }
+        if (where.fellBack) this.appendLog(a, [{ kind: 'system', text: `ℹ ${this.boxName(where.fellBack)} was removed: this task runs on the office's machine.` }]);
         const rt = this.agentRt.get(a.id);
-        const moved = where.box !== previousBox || (!within && job?.task === 'fix' && desired === UPSTASH);
+        const moved = where.box !== a.deskBox || (where.box.startsWith('upstash-') && !within);
         if (rt) rt.deskMoved = moved;
         if (moved) {
           a.deskBox = where.box;
@@ -4006,6 +4133,13 @@ export class Swarm {
         if (gone()) return null;
         await this.machineFor(a).releaseDesk(repo.fullName, this.agentSlug(a), this.port(a));
         if (gone()) return null;
+        const cloudTask = this.state.upstashTasks.find((t) => t.id === a.deskBox);
+        if (cloudTask?.deskStarted) {
+          if (!await this.machineFor(a).deskExists(repo.fullName, this.agentSlug(a))) throw new Error('Existing Upstash task desk is unavailable; inspect it before retrying.');
+          this.appendLog(a, [{ kind: 'system', text: 'Reusing the task’s existing Upstash worktree, including unsaved work.' }]);
+          return this.machineFor(a).deskDir(repo.fullName, this.agentSlug(a));
+        }
+        if (cloudTask && !cloudTask.deskStarted) { cloudTask.deskStarted = true; await this.writeState(); }
         const cwd = await this.machineFor(a).prepareDesk(repo.fullName, { defaultBranch: repo.defaultBranch, pr: base.pr }, this.agentSlug(a), branch, (text) => { if (!gone()) this.appendLog(a, [{ kind: 'system', text }]); });
         if (gone()) return null;
         if (job) this.setQa(job.rec, { preparation: { ...job.rec.preparation, [job.task]: undefined } });
@@ -4173,7 +4307,6 @@ export class Swarm {
     }
     let session: SessionHandle | undefined; // undefined while startSession runs, should a runner finish synchronously
     rt.activityAt = Date.now();
-    const upstash = this.state.boxes.some((b) => b.id === a.deskBox && b.upstash);
     try {
       this.sessionStarted(a, how, mode);
       session = rt.session = this.machineFor(a).startSession(
@@ -4188,8 +4321,7 @@ export class Swarm {
           role: a.task === 'qa' ? 'qa' : a.role, // a developer covering QA works under QA's rules
           outputSchema,
           // A developer's CLI stays at its prompt afterwards, for the manager and for follow-ups; QA's closes.
-          keepAlive: a.task !== 'qa' && !upstash,
-          upstash,
+          keepAlive: a.task !== 'qa' && !a.deskBox?.startsWith('upstash-'),
           typed: mode === 'typed',
           reattach: mode === 'reattach',
           reattachSince: a.startedAt ?? undefined,
@@ -4255,16 +4387,7 @@ export class Swarm {
 
   /** `generation`: the agent's when this session started. A session that ends after its task was cleared or replaced changes nothing. */
   private async onFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, generation: number | undefined, session: SessionHandle | undefined) {
-    const box = a.deskBox;
-    if (this.state.boxes.some((b) => b.id === box && b.upstash)) this.upstashFinishing.add(box);
-    try {
-      await this.trackOfficeActivity(a.id, () => this.recordFinished(a, repo, result, generation, session));
-    } finally {
-      if (this.upstashFinishing.delete(box)) {
-        this.upstashSweepAfter = 0;
-        this.sweepUpstash();
-      }
-    }
+    await this.trackOfficeActivity(a.id, () => this.recordFinished(a, repo, result, generation, session));
   }
 
   private async recordFinished(a: PersistedAgent, repo: PersistedRepo, result: SessionResult, generation: number | undefined, session: SessionHandle | undefined) {
@@ -4323,6 +4446,7 @@ export class Swarm {
 
     await released;
     if (!a.startupFailed && a.status === 'error') this.parkFailedTask(a, repo);
+    if (!BUSY.includes(a.status) && a.status !== 'stopped' && !a.heldRetry) this.finishUpstash(a);
     this.emitAgent(a);
     this.save();
     void this.syncRepo(repo.id);
@@ -5175,11 +5299,12 @@ export class Swarm {
       const { status: nextStatus, conflictFix } = outcome();
       if (evidence) {
         const current = await this.backend.prDetails(repo.fullName, rec.prNumber).catch(() => null);
+        // A stopped attempt never writes its failedSha, so its posted report must not count as merge evidence.
+        if (gone()) return;
         this.observeQaRevision(evidence, current);
         evidence.commentUrl = commentUrl;
         this.emitQaOutcome(evidence);
         this.save();
-        if (gone()) return;
         if (nextStatus === 'failed') {
           const candidates = scoringFindings(evidence).filter((f) => f.attributableTo?.agentId === rec.devAgentId);
           const change = this.recordFeedback({ kind: 'qa-send-back', ...rec, findingIds: candidates.map((f) => f.id) });
@@ -5206,7 +5331,8 @@ export class Swarm {
         fixReason: pass || incomplete ? null : conflictFix ? 'conflict' : 'qa',
         ...(conflictFix ? { mergeFixes: rec.mergeFixes + 1 } : {}),
         passedSha: pass && !escalate ? rec.testedSha : null,
-        failedSha: pass || incomplete ? null : rec.testedSha,
+        // The report's own verdict, even if a later read left the workflow incomplete: a manager override must not see a pass.
+        failedSha: report.verdict === 'fail' ? rec.testedSha : null,
         ...(!security ? { ciRequired: environmentOnly } : resourceFallback ? { ciRequired: true } : {}),
         securityReview: security && pass && rec.testedSha ? { ...review, approvedSha: rec.testedSha } : rec.securityReview,
         ...(security && pass ? { securityLabel: false } : {}), // the office removed it, not the manager
@@ -5309,7 +5435,7 @@ export class Swarm {
         rec.fixReason === 'conflict' ? `Resolving conflicts on PR #${rec.prNumber}` :
         rec.fixReason === 'checks' ? `Fixing checks on PR #${rec.prNumber}` : `Fixing PR #${rec.prNumber} after QA round ${rec.round}`,
       `Checking out PR #${rec.prNumber}…`,
-      { reason: 'repair', factors: { fixReason: rec.fixReason, to: original ? 'author' : 'teammate', agentSpecialty: dev.specialty || null, score: dev.score ?? null, priorCrashes: rec.fixCrashes?.length ?? 0 } },
+      { reason: 'repair', factors: { fixReason: rec.fixReason, to: original ? 'author' : 'teammate', priorCrashes: rec.fixCrashes?.length ?? 0 } },
     );
     this.setQa(rec, { status: 'fixing', devAgentId: dev.id });
     const generation = this.agentRt.get(dev.id)?.generation;
@@ -5605,14 +5731,14 @@ export class Swarm {
   }
 
   /**
-   * The free developer to put on a job: highest score, then one it `suits`, then fewest ready
-   * issues in their specialty, then the least open work in it, then desk order.
+   * Prefer a free specialist, then the relevant score, ready/open specialty workload and desk.
+   * QA cover uses its own suitability and workload, without development scores.
    */
-  private pickDev(repo: PersistedRepo, devs: PersistedAgent[], suits: (a: PersistedAgent) => boolean) {
+  private pickDev(repo: PersistedRepo, devs: PersistedAgent[], suits: (a: PersistedAgent) => boolean, score: 'authorship' | 'repair' | null = 'authorship') {
     if (devs.length <= 1) return devs[0];
     const ready = this.readyIssues(repo).map((r) => r.want);
     const open = this.repoRt.get(repo.id)!.issues.map((i) => issueSpecialty(i.labels));
-    return pickDeveloper(devs, suits, ready, open);
+    return pickDeveloper(devs, suits, ready, open, (a) => score ? (this.scoreTotals.get(a.id) ?? ZERO_SCORES)[score].points : 0);
   }
 
   /**
@@ -5645,6 +5771,7 @@ export class Swarm {
           repo,
           devs.filter((a) => a.id !== rec.devAgentId),
           (a) => /test|qa/i.test(a.specialty),
+          null,
         );
       if (!tester) continue;
       void this.runQa(tester, repo, rec);
@@ -5661,7 +5788,7 @@ export class Swarm {
       const headRef = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.headRefName ?? null;
       const to = fixGoesTo(author, !!author && pool.includes(author) && !('wait' in this.place(author, 'within')), rec.prNumber, headRef);
       if (to === 'wait') continue;
-      const dev = to === 'author' ? author : this.pickDev(repo, pool, (a) => a.specialty.toLowerCase() === want);
+      const dev = to === 'author' ? author : this.pickDev(repo, pool, (a) => !!want && a.specialty.toLowerCase() === want, 'repair');
       if (!dev || issueHolder(this.state.agents, repo.id, rec.issueNumber, dev.id)) continue;
       void this.runFix(dev, repo, rec);
       return true;
@@ -5673,8 +5800,8 @@ export class Swarm {
    * Restart explicit requests on manual floors, or give a free developer the next auto-assigned backlog issue.
    * Returns true if work started.
    * Issues that say "Depends on #N" wait until #N is closed; the rest go in readyIssues() order. A swarm:<specialty>
-   * label is a preference, not a lock: the highest-scoring free developer gets first pick; ties prefer a specialist
-   * and then whoever is least needed elsewhere.
+   * label prefers a free specialist, then Authorship, workload and desk order. Without a specialist, the
+   * eligible pool uses the same score and workload order.
    */
   private startIssueWork(repo: PersistedRepo): boolean {
     if (this.state.officeHeld) return false;
@@ -5706,12 +5833,11 @@ export class Swarm {
     }
     const ready = free.length ? all.filter((r) => r.want !== RESEARCH) : [];
     if (ready.length === 0) return false;
-    const fits = (a: PersistedAgent, want: string) => a.specialty.toLowerCase() === want;
+    const fits = (a: PersistedAgent, want: string) => !!want && a.specialty.toLowerCase() === want;
     // Of the issues holding up the most, take one a free specialist fits.
     const pick = ready.find((r) => r.empty === ready[0].empty && r.chain === ready[0].chain && free.some((a) => fits(a, r.want))) ?? ready[0];
     const agent = this.pickDev(repo, free, (a) => fits(a, pick.want))!;
     const factors = {
-      specialty: pick.want || null, agentSpecialty: agent.specialty || null, specialtyMatch: !!pick.want && fits(agent, pick.want), score: agent.score,
       freeDevelopers: free.length, freeSpecialists: pick.want ? free.filter((a) => fits(a, pick.want)).length : null, holdsUp: pick.chain, emptyEndings: pick.empty,
     };
     // assign() flips the agent to 'preparing' synchronously, so the next pass sees it as busy.
@@ -5790,7 +5916,6 @@ export class Swarm {
    */
   private schedule() {
     this.recoverDesks();
-    this.sweepUpstash();
     for (const p of this.state.proposals) if (p.prd.recordId && p.decision?.publication?.status === 'queued') this.handOffDecision(p);
     for (const a of this.state.agents) if (a.repoId && this.startStall(a)) this.failedStart(a);
     this.watchSilentSessions();
@@ -5927,7 +6052,7 @@ export class Swarm {
     return this.officeLifecycleView();
   }
 
-  private deferPrepared(a: PersistedAgent, repo: PersistedRepo, reason = 'The office is closed or its desk is missing.') {
+  private deferPrepared(a: PersistedAgent, repo: PersistedRepo) {
     const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === a.prNumber);
     if (a.task === 'qa' && rec) this.setQa(rec, { status: 'queued', qaAgentId: null });
     else if (a.task === 'fix' && rec) this.setQa(rec, { status: 'failed' });
@@ -5937,7 +6062,7 @@ export class Swarm {
         issueNumber: a.issueNumber, preferredAgentId: a.id, note: previous?.note, restartPending: true,
       }]);
     }
-    this.clearTask(a, { result: 'deferred', cause: 'office', excerpt: reason });
+    this.clearTask(a, { result: 'deferred', cause: 'office', excerpt: 'The office is closed or its desk is missing.' });
   }
 
   private resumingDeferred = new Set<string>();
@@ -7505,7 +7630,7 @@ export class Swarm {
     return `Filed #${n}${x.ready_for_human ? ' for a person' : ''} on floor ${repo.floor}: ${title}${slug ? ` (routed to ${slug})` : ''}.`;
   }
 
-  private async closeIssue(x: { floor: number; number: number; reason: string }) {
+  private async closeIssue(x: { floor: number; number: number; reason: string; completed?: boolean }) {
     const repo = this.floorRepo(x.floor);
     const reason = x.reason.trim();
     if (!reason || reason.length > 1000) throw new Error('Give a short closing reason (1–1000 characters).');
@@ -7515,12 +7640,13 @@ export class Swarm {
     const { pulls } = await this.backend.listPulls(repo.fullName);
     const pr = pulls.find((p) => p.state === 'OPEN' && p.closesIssues.includes(x.number));
     if (pr) throw new Error(`Open PR #${pr.number} closes #${x.number}. Merge or park that PR first.`);
-    await this.backend.closeIssue(repo.fullName, x.number, 'not planned', `${reason}\n\n${AGENT_COMMENT_MARKER}`);
+    const as = x.completed ? 'completed' : 'not planned';
+    await this.backend.closeIssue(repo.fullName, x.number, as, `${reason}\n\n${AGENT_COMMENT_MARKER}`);
     const rt = this.repoRt.get(repo.id)!;
     rt.issues = rt.issues.filter((i) => i.number !== x.number);
     this.setRequestedStarts(repo, repo.requestedStarts.filter((r) => r.issueNumber !== x.number));
     this.emitRepo(repo);
-    return `Closed #${x.number} on floor ${repo.floor} as not planned: ${reason}`;
+    return `Closed #${x.number} on floor ${repo.floor} as ${as}: ${reason}`;
   }
 
   /** The CEO's comment on an open issue, also passed into any session working on that issue right now. */
@@ -7577,10 +7703,11 @@ export class Swarm {
       agents: this.state.agents,
       available: this.available(repo, 'dev'),
       ready: this.readyIssues(repo).map((r) => r.want),
+      score: (a) => (this.scoreTotals.get(a.id) ?? ZERO_SCORES).authorship.points,
       inProgress: this.issueTaken(repo, x.number),
       usagePaused: this.limited(),
     });
-    await this.assign(agent.id, issue.number, x.note, { reason: 'ceo', factors: { pickedBy: x.agent ? 'ceo' : 'office', specialty: issueSpecialty(issue.labels) || null, agentSpecialty: agent.specialty || null, score: agent.score } });
+    await this.assign(agent.id, issue.number, x.note, { reason: 'ceo', factors: { pickedBy: x.agent ? 'ceo' : 'office' } });
     const warning = issueParent(issue) ? ` Warning: parent: ${issueParent(issue)}.` : issue.subIssues === null ? ' Warning: sub-issues have not loaded.' : '';
     return `${agent.name} started #${issue.number} ${issue.title} on floor ${repo.floor}.${warning}`;
   }
@@ -7698,7 +7825,9 @@ export class Swarm {
       preferred = dev.id;
     }
     const free = this.available(repo, 'dev');
-    const dev = free.find((a) => a.id === preferred) ?? free[0];
+    if (x.agent !== undefined && !free.some((a) => a.id === preferred)) throw new HttpError(409, 'The chosen developer is not available; wait for their desk or choose another developer.');
+    const want = issueSpecialty(rt.issues.find((i) => i.number === rec.issueNumber)?.labels ?? []);
+    const dev = free.find((a) => a.id === preferred) ?? this.pickDev(repo, free, (a) => !!want && a.specialty.toLowerCase() === want, 'repair');
     const chosen = dev?.id ?? preferred;
     this.setQa(rec, {
       preparation: undefined,

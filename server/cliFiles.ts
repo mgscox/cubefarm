@@ -103,7 +103,9 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
   const launch = launchArgs(plan.cli, {
     prompt,
     systemAppend,
-    model: plan.model,
+    model: process.env.CUBEFARM_UPSTASH_CLI === 'opencode' && plan.cli === 'opencode'
+      ? plan.model.startsWith('openrouter/') ? plan.model : `openrouter/${plan.model || 'anthropic/claude-sonnet-4.6'}`
+      : plan.model,
     effort: plan.effort,
     resumeId: plan.resumeId,
     sessionId: plan.sessionId,
@@ -119,17 +121,17 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
     browser,
   });
 
-  // Each agent must be a clean instance on the account its CLI is logged into: no API keys (they would switch Claude
-  // Code's billing to the API) and nothing inherited from a Claude Code session the office itself was started from.
+  // Local desks use their CLI login. An Upstash desk restores only its explicitly selected API key below.
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(claudeEnv(projectEnv(process.env), { login: plan.cli !== 'claude' || !!process.env.CUBEFARM_UPSTASH_WORKER }))) {
+  for (const [k, v] of Object.entries(claudeEnv(projectEnv(process.env), { login: plan.cli !== 'claude' }))) {
     if (v === undefined) continue;
     if (/^(NO_COLOR|FORCE_COLOR|TERM_PROGRAM|TERM_PROGRAM_VERSION|CODEX_THREAD_ID|OPENCODE_CONFIG_CONTENT)$/i.test(k)) continue;
     env[k] = v;
   }
-  // The dedicated Box has exactly one API-backed CLI; ordinary desks retain their existing auth.
-  if (process.env.CUBEFARM_UPSTASH_WORKER === 'claude' && plan.cli === 'claude' && process.env.ANTHROPIC_API_KEY) {
-    env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  // A disposable Box explicitly uses the host-supplied API account, rather than a subscription login.
+  if (process.env.CUBEFARM_UPSTASH_CLI === plan.cli && plan.cli === 'claude') {
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY ?? '';
   }
   if (scratch) env.CUBEFARM_JOB_SCRATCH = scratch;
   Object.assign(env, { TERM: 'xterm-256color', COLORTERM: 'truecolor' }, launch.env);

@@ -35,11 +35,9 @@ interface Internals {
   backend: Backend;
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[]; prContributions: PrContributionView[]; qaOutcomes: import('../shared/types.ts').QaOutcomeView[]; feedbackEvents: Record<string, true> };
   writeState(): Promise<void>;
-  upstash: Pick<import('./upstash.ts').UpstashBoxes, 'allocate' | 'find' | 'bootstrap' | 'safeToDelete' | 'present' | 'remove'>;
-  clis: import('../shared/types.ts').CliView[];
-  sweepUpstash(): void;
   repoRt: Map<string, { issues: IssueInfo[]; pulls: PullInfo[]; lastSync?: number; cloneStatus?: string; issuesFetchedAt?: number }>;
   agentRt: Map<string, { log: unknown[]; pending: unknown[]; terminal: null; shots?: unknown[]; qaResume?: unknown }>;
+  scoreTotals: Map<string, import('../shared/types.ts').DeveloperScoresView>;
   issueFailures: Map<string, number>;
   pausedUntil: number;
   readyIssues(repo: Repo): { issue: IssueInfo }[];
@@ -53,6 +51,7 @@ interface Internals {
   runFix(agent: unknown, repo: Repo, rec: unknown): Promise<void>;
   recordFinished(agent: unknown, repo: Repo, result: SessionResult, generation: number | undefined, session: undefined): Promise<void>;
   onQaFinished(agent: unknown, repo: Repo, result: SessionResult, released?: Promise<void>): Promise<void>;
+  jobDeskFailed(agent: unknown, repo: Repo, job: { rec: unknown; task: 'qa' | 'fix' }, error: string): void;
   recordResearchFinished(agent: unknown, job: unknown, repo: Repo, fullName: string, result: SessionResult): Promise<void>;
   onIssueFinished(agent: unknown, repo: Repo, result: SessionResult, released: Promise<void>, generation: number | undefined): Promise<void>;
   onFixFinished(agent: unknown, repo: Repo, result: SessionResult): Promise<void>;
@@ -115,111 +114,6 @@ afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.restoreAllMocks();
-});
-
-describe('disposable Upstash worker placement', () => {
-  beforeEach(async () => {
-    s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
-    Object.assign(repo, { box: '', defaultBranch: 'main' });
-    Object.assign(s.state.agents[0], { model: '' });
-    s.repoRt.get(repo.id)!.cloneStatus = 'ready';
-    s.clis = await s.backend.detectClis();
-    setIssues(issue(35), issue(36));
-    vi.spyOn(s, 'writeState').mockResolvedValue();
-    runTask.mockImplementation(async (a, r) => {
-      await s.prepare(a, r, {}, (a as { branch: string }).branch);
-    });
-  });
-
-  it.each(['claude', 'codex', 'opencode'] as const)('routes %s to a dedicated Box, then removes it after the desk is saved', async (cli) => {
-    swarm.updateAgent('a1', { cli, box: 'upstash' });
-    const prepare = swarm.assign('a1', 35);
-    await vi.advanceTimersByTimeAsync(2_000);
-    await prepare;
-    const worker = () => swarm.snapshot().agents.find((a) => a.id === 'a1')!;
-    const boxes = () => swarm.snapshot().boxes;
-    expect(boxes()).toEqual([expect.objectContaining({ disposable: true, name: 'Upstash · Ada', status: 'online' })]);
-    expect(worker().deskBox).toBe(boxes()[0].id);
-    swarm.stopAgent('a1');
-    s.sweepUpstash();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(boxes()).toHaveLength(0);
-    expect(worker().box).toBe('upstash');
-  });
-
-  it.each(['claude', 'codex', 'opencode'] as const)('uses %s for a QA tester inheriting an Upstash floor', async (cli) => {
-    swarm.updateRepo(repo.id, { box: 'upstash' });
-    const tester = swarm.hireAgent(repo.id, { name: 'QA pilot', role: 'qa', cli, model: cli === 'opencode' ? 'openrouter/example/model' : '' });
-    const fixture = demoPull(repo.fullName, 'swarm/issue-35-ada', false);
-    try {
-      s.repoRt.get(repo.id)!.pulls = [fixture.pull];
-      const allocate = vi.spyOn(s.upstash, 'allocate');
-      vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
-      const rec = s.queueQa(repo, fixture.pull.number, undefined, 35);
-      const run = s.runQa(s.state.agents.find((a) => a.id === tester.id)!, repo, rec);
-      await vi.advanceTimersByTimeAsync(10_000);
-      await run;
-      const box = swarm.snapshot().boxes[0];
-      expect(box?.disposable).toBe(true);
-      expect(allocate.mock.calls[0]?.[2]).toBe(cli);
-      expect(swarm.snapshot().agents.find((a) => a.id === tester.id)).toMatchObject({ role: 'qa', box: null, deskBox: box.id });
-    } finally {
-      fixture.remove();
-    }
-  });
-
-  it('holds a pending task and verifies its desk again after a failed delete', async () => {
-    swarm.updateAgent('a1', { box: 'upstash' });
-    await swarm.assign('a1', 35);
-    await vi.advanceTimersByTimeAsync(2_000);
-    const box = () => swarm.snapshot().boxes[0];
-    const saved = vi.spyOn(s.upstash, 'safeToDelete').mockResolvedValue(true);
-    const remove = vi.spyOn(s.upstash, 'remove').mockRejectedValueOnce(new Error('provider unavailable'));
-    swarm.stopAgent('a1');
-    s.state.agents[0].heldRetry = { kind: 'finish-pushed-work' };
-    s.sweepUpstash();
-    await vi.advanceTimersByTimeAsync(8_001);
-    expect(saved).not.toHaveBeenCalled();
-    s.state.agents[0].heldRetry = null;
-    s.sweepUpstash();
-    await vi.advanceTimersByTimeAsync(60_001);
-    expect(box()?.error).toMatch(/Cleanup blocked/);
-    expect(remove).toHaveBeenCalledTimes(1);
-
-    saved.mockResolvedValueOnce(false);
-    s.sweepUpstash();
-    await vi.advanceTimersByTimeAsync(60_001);
-    expect(box()?.error).toMatch(/Save local changes/);
-    expect(remove).toHaveBeenCalledTimes(1);
-
-    s.sweepUpstash();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(box()).toBeUndefined();
-    expect(remove).toHaveBeenCalledTimes(2);
-  });
-
-  it.each(['local', 'ssh', 'upstash'] as const)('uses the correct machine on a %s floor only at quota', async (floor) => {
-    const destination = floor === 'ssh' ? swarm.addBox('Floor machine', 'ssh-test').id : floor === 'upstash' ? floor : '';
-    swarm.updateRepo(repo.id, { box: destination });
-    swarm.updateAgent('a1', { box: 'upstash' });
-    await vi.advanceTimersByTimeAsync(2_000);
-    const allocate = vi.spyOn(s.upstash, 'allocate').mockResolvedValue(null);
-    await swarm.assign('a1', 35);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(allocate).toHaveBeenCalledTimes(1);
-    expect(swarm.snapshot().agents.find((a) => a.id === 'a1')).toMatchObject({ box: 'upstash', deskBox: floor === 'ssh' ? destination : '' });
-  });
-
-  it('queues work when a full Upstash account would fall back to an offline floor', async () => {
-    const remote = swarm.addBox('Offline floor', 'offline-test');
-    swarm.updateRepo(repo.id, { box: remote.id });
-    swarm.updateAgent('a1', { box: 'upstash' });
-    vi.spyOn(s.upstash, 'allocate').mockResolvedValue(null);
-    await swarm.assign('a1', 35);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(swarm.snapshot().agents.find((a) => a.id === 'a1')).toMatchObject({ status: 'idle', box: 'upstash' });
-    expect(repo.requestedStarts).toEqual([expect.objectContaining({ issueNumber: 35, preferredAgentId: 'a1', restartPending: true })]);
-  });
 });
 
 describe('automatic desk recovery', () => {
@@ -656,7 +550,7 @@ describe('run history', () => {
       s.beginTask(ada, { task: 'issue', issueNumber: 67, issueTitle: 'Other', branch: 'swarm/issue-67-ada', prNumber: null, prUrl: null, sessionId: null }, 'Issue #67', 'Preparing…');
       s.sessionStarted(ada, {}, null);
       await s.recordFinished(ada, repo, ok, generation('a1'), undefined);
-      expect(swarm.runHistory({ issue: 67 }).attempts).toEqual([expect.objectContaining({ assignment: { reason: 'manager', factors: {} }, prNumber: null, outcome: expect.objectContaining({ result: 'no-pr', cause: 'agent' }), usage: { sessions: 1, costUsd: 0.5, turns: 7 } })]);
+      expect(swarm.runHistory({ issue: 67 }).attempts).toEqual([expect.objectContaining({ assignment: expect.objectContaining({ reason: 'manager' }), prNumber: null, outcome: expect.objectContaining({ result: 'no-pr', cause: 'agent' }), usage: { sessions: 1, costUsd: 0.5, turns: 7 } })]);
 
       // Merging the PR removes its QA card, not its history.
       swarm.stopAgent('q1');
@@ -691,6 +585,233 @@ describe('run history', () => {
     s.beginTask(ada, { task: 'issue', issueNumber: 70, issueTitle: 'Stop me', branch: 'swarm/issue-70-ada', prNumber: null, prUrl: null, sessionId: null }, 'Issue #70', 'Preparing…');
     swarm.stopAgent('a1');
     expect(swarm.runHistory({ issue: 70 }).attempts[0].outcome).toMatchObject({ result: 'stopped', cause: 'manager' });
+  });
+});
+
+describe('lessons', () => {
+  beforeEach(() => s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null }));
+  const report = (pass: boolean): SessionResult => ({ ok: true, text: '', errors: [], costUsd: 0, turns: 1, structured: pass
+    ? { verdict: 'pass', summary: 'Wraps now.', checks: [{ name: 'Mobile layout (375px)', result: 'pass', details: 'Layout wraps correctly' }] }
+    : { verdict: 'fail', summary: 'Toolbar overflows.', checks: [{ name: 'Mobile layout (375px)', result: 'fail', failureKind: 'code', findingKey: 'toolbar-overflow', confirmed: true,
+      details: 'Toolbar overflows at 375px; the base wraps. Authorization: Bearer abcdefghijklmnop' }] } });
+
+  it('turns a regression confirmed on two PRs into an approved lesson that survives a restart', async () => {
+    const tester = swarm.hireAgent(repo.id, { name: 'Quinn', role: 'qa' });
+    const testerRecord = s.state.agents.find((a) => a.id === tester.id)!;
+    const review = async (prNumber: number, round: number, pass: boolean) => {
+      const headSha = `head-${prNumber}-${round}`;
+      vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...demoPull(repo.fullName, `swarm/issue-${prNumber}`, false).pull, number: prNumber, headSha, baseSha: 'base', state: 'OPEN', body: '', isCrossRepository: false } as never);
+      s.state.qa = s.state.qa.filter((q) => q.prNumber !== prNumber);
+      s.state.qa.push({ repoId: repo.id, prNumber, reviewId: `review-${prNumber}`, crossRepository: false, status: 'testing', round, retests: 0, sessionFailures: 0,
+        testedSha: headSha, passedSha: null, devAgentId: 'a1', qaAgentId: tester.id, summary: null, checks: [], commentUrl: null, mergeNote: null, updatedAt: 0 });
+      Object.assign(testerRecord, { task: 'qa', status: 'working', prNumber });
+      await s.onQaFinished(testerRecord, repo, report(pass));
+      vi.advanceTimersByTime(1000);
+    };
+    await review(21, 1, false);
+    await review(21, 2, true);
+    await review(22, 1, false);
+    await review(22, 2, true);
+
+    const { recurringFindings } = await import('../shared/lessons.ts');
+    const [suggestion] = recurringFindings(swarm.snapshot().qaOutcomes!, []);
+    expect(suggestion).toMatchObject({ key: 'toolbar-overflow', kind: 'agent', fix: { prNumber: 22 } });
+    const events = vi.spyOn(s, 'broadcast');
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+    vi.spyOn(fs, 'rename').mockResolvedValue();
+    const lesson = await swarm.draftLesson(repo.id, {
+      kind: 'agent', specialty: 'frontend', title: 'Check the toolbar at 375px', guidance: 'Load the page at 375px before handing off.',
+      sources: suggestion.findings.map((f) => ({ qaOutcomeId: f.qaOutcomeId, findingId: f.findingId })),
+      verification: { kind: 'fix', qaOutcomeId: suggestion.fix!.qaOutcomeId },
+    });
+    expect(lesson.versions[0].sources.map((x) => x.summary).join(' ')).not.toContain('abcdefghijklmnop');
+    expect(swarm.lessons({ repoId: repo.id }).lessons).toEqual([]);
+    await swarm.reviewLesson(lesson.id, { action: 'approve', reason: 'Seen twice.' });
+    expect(events).toHaveBeenLastCalledWith({ type: 'lesson', lesson: expect.objectContaining({ id: lesson.id }) });
+    expect(swarm.lessons({ repoId: repo.id, specialty: 'frontend' }).lessons).toMatchObject([{ id: lesson.id, version: 1, approvedBy: 'manager', revisions: ['head-21-1', 'head-22-1', 'head-22-2'] }]);
+    expect(swarm.lessons({ repoId: repo.id, specialty: 'server' }).lessons).toEqual([]);
+    await expect(swarm.reviewLesson(lesson.id, { action: 'approve' })).rejects.toMatchObject({ status: 409 });
+
+    const persisted = String(write.mock.calls.findLast((c) => c[0] === `${STATE_FILE}.tmp`)![1]);
+    const fresh = new Swarm(createDemoBackend());
+    (fresh as unknown as Internals).backend.demo = false;
+    vi.spyOn(fresh as unknown as Internals, 'save').mockImplementation(() => {});
+    vi.spyOn(fs, 'readFile').mockImplementation(async (file) => String(file) === STATE_FILE ? persisted : Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' })));
+    await fresh.init();
+    expect(fresh.snapshot().lessons).toEqual(swarm.snapshot().lessons);
+    expect(fresh.lessons({ repoId: repo.id }).lessons.map((l) => l.id)).toEqual([lesson.id]);
+  });
+
+  it('undoes a lesson change the office could not save', async () => {
+    s.state.qaOutcomes.push({ id: 'pass', repoId: repo.id, prNumber: 5, verdict: 'pass', findings: [], corrections: [], attemptId: 'pass', round: 1, summary: 'ok', headSha: 'h', commentUrl: null } as never);
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    vi.spyOn(fs, 'writeFile').mockRejectedValue(new Error('EACCES'));
+    await expect(swarm.draftLesson(repo.id, { kind: 'agent', title: 'T', guidance: 'G', sources: [{ url: 'https://example.com/ci/1', summary: 'CI log' }], verification: { kind: 'fix', qaOutcomeId: 'pass' } }))
+      .rejects.toThrow('EACCES');
+    expect(swarm.snapshot().lessons).toEqual([]);
+    await expect(swarm.draftLesson('nope', {})).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('playbook evaluations', () => {
+  beforeEach(() => s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null }));
+  it('saves a demo comparison, broadcasts it and restores the same report after restart', async () => {
+    const events = vi.spyOn(s, 'broadcast');
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    const write = vi.spyOn(fs, 'writeFile').mockResolvedValue();
+    vi.spyOn(fs, 'rename').mockResolvedValue();
+    const evaluation = await swarm.demoPlaybookEvaluation(repo.id);
+    expect(events).toHaveBeenCalledWith({ type: 'evaluation', evaluation });
+    expect(swarm.snapshot().evaluations).toEqual([evaluation]);
+    expect(swarm.evaluationExport(repo.id).evaluations).toEqual([evaluation]);
+    expect(swarm.evaluationExport('other/repo').evaluations).toEqual([]);
+    const persisted = String(write.mock.calls.findLast((c) => c[0] === `${STATE_FILE}.tmp`)![1]);
+    const fresh = new Swarm(createDemoBackend());
+    (fresh as unknown as Internals).backend.demo = false;
+    vi.spyOn(fresh as unknown as Internals, 'save').mockImplementation(() => {});
+    vi.spyOn(fs, 'readFile').mockImplementation(async (file) => String(file) === STATE_FILE ? persisted : Promise.reject(Object.assign(new Error('missing'), { code: 'ENOENT' })));
+    await fresh.init();
+    expect(fresh.snapshot().evaluations).toEqual([evaluation]);
+    expect(fresh.evaluationExport(repo.id)).toEqual(swarm.evaluationExport(repo.id));
+  });
+
+  it('does not publish an evaluation that could not be saved or expose demo fixtures in real mode', async () => {
+    vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined);
+    vi.spyOn(fs, 'writeFile').mockResolvedValue();
+    vi.spyOn(fs, 'rename').mockResolvedValue();
+    const e = await swarm.demoPlaybookEvaluation(repo.id);
+    const events = vi.spyOn(s, 'broadcast');
+    vi.spyOn(s, 'writeState').mockRejectedValue(new Error('EACCES'));
+    await expect(swarm.evaluatePlaybook(repo.id, {
+      lessonId: e.lesson.id, basePlaybook: e.report.basePlaybook, candidatePlaybook: e.report.candidatePlaybook,
+      cases: e.cases.map((c) => ({ ...c, baseAttemptId: c.base.attemptId, candidateAttemptId: c.candidate.attemptId })),
+    })).rejects.toThrow('EACCES');
+    expect(swarm.snapshot().evaluations).toEqual([e]);
+    expect(events).not.toHaveBeenCalled();
+    s.backend.demo = false;
+    await expect(swarm.demoPlaybookEvaluation(repo.id)).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe('specialty-first assignment', () => {
+  const addDev = (id: string, specialty: string, authorship: number, repair: number, desk: number) => {
+    const a: Record<string, unknown> = { ...s.state.agents[0], id, name: id, specialty, desk, score: 100 - desk };
+    s.state.agents.push(a);
+    s.agentRt.set(id, { log: [], pending: [], terminal: null });
+    scores(id, authorship, repair);
+    return a;
+  };
+  const scores = (id: string, authorship: number, repair: number) => s.scoreTotals.set(id, {
+    authorship: { points: authorship, events: 2 }, repair: { points: repair, events: 2 }, neutral: 0,
+  });
+  beforeEach(() => {
+    s.agentRt.set(CEO_ID, { log: [], pending: [], terminal: null });
+    Object.assign(repo, { links: [], defaultBranch: 'main' });
+    Object.assign(s.state.agents[0], { specialty: 'server', score: -100 });
+    scores('a1', -1, 10);
+  });
+
+  describe.each(['backlog', 'ceo'] as const)('%s', (source) => {
+    it.each([
+      { name: 'specialist beats a higher Authorship generalist', want: 'server', other: 'frontend', points: 9, expected: 'a1' },
+      { name: 'Authorship breaks a same-specialty tie', want: 'server', other: 'server', points: 2, expected: 'a2' },
+      { name: 'desk breaks a same-specialty score tie', want: 'server', other: 'server', points: -1, expected: 'a1' },
+      { name: 'no specialist falls back by Authorship', want: 'engine', other: 'frontend', points: 2, expected: 'a2' },
+      { name: 'unlabelled work is open to any specialty', want: '', other: '', points: 2, expected: 'a2' },
+      { name: 'legacy points do not break score ties', want: '', other: 'frontend', points: -1, expected: 'a1' },
+      { name: 'unavailable specialists permit fallback', want: 'server', other: 'frontend', points: 2, expected: 'a2', unavailable: true },
+    ])('$name', async ({ want, other, points, expected, unavailable }) => {
+      addDev('a2', other, points, -10, 1);
+      if (unavailable) s.state.agents[0].startupFailed = true;
+      setIssues(issue(66, want ? [`swarm:${want}`] : []));
+      if (source === 'backlog') expect(s.startIssueWork(repo)).toBe(true);
+      else expect(await s.officeTools().call('start_issue', { floor: 1, number: 66 })).toContain('started #66');
+      expect(runTask).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: expected }), repo, expect.objectContaining({ number: 66 }), undefined);
+      const attempt = swarm.runHistory({ issue: 66 }).attempts[0];
+      const match = !!want && (expected === 'a1' ? 'server' : other) === want;
+      expect(attempt.assignment).toMatchObject({
+        reason: source === 'backlog' ? 'auto' : 'ceo',
+        factors: { policyVersion: 'specialty-first-v2', specialty: want || null, specialtyMatch: match,
+          specialtyFallback: !!want && !match, scoreKind: 'authorship', score: expected === 'a1' ? -1 : points },
+      });
+    });
+  });
+
+  it('honours an explicit CEO pick ahead of an available specialist', async () => {
+    addDev('a2', '', -5, 0, 1);
+    setIssues(issue(66, ['swarm:server']));
+    await s.officeTools().call('start_issue', { floor: 1, number: 66, agent: 'a2' });
+    expect(runTask).toHaveBeenCalledWith(expect.objectContaining({ id: 'a2' }), repo, expect.anything(), undefined);
+    expect(swarm.runHistory({ issue: 66 }).attempts[0].assignment.factors).toMatchObject({ pickedBy: 'ceo', specialtyFallback: true });
+  });
+
+  it.each(['specialist', 'repair score', 'no specialist', 'same-agent', 'explicit'] as const)('repair takeover respects %s', async (scenario) => {
+    const fixture = demoPull(repo.fullName, 'swarm/issue-66-author', false);
+    try {
+      const { pull } = fixture;
+      s.repoRt.get(repo.id)!.pulls = [pull];
+      setIssues(issue(66, ['swarm:server']));
+      const rec = s.queueQa(repo, pull.number, null, 66);
+      Object.assign(rec, { status: 'failed', fixReason: 'qa', fixInstructions: 'Repair this defect', fixCrashes: [] });
+      const other = addDev('a2', scenario === 'repair score' ? 'server' : 'frontend', 20, scenario === 'repair score' ? 11 : -2, 1);
+      if (scenario === 'no specialist') s.state.agents[0].specialty = 'engine';
+      if (scenario === 'same-agent') rec.devAgentId = 'a2';
+      if (scenario === 'explicit') rec.devAgentId = 'a1';
+      if (scenario === 'explicit') await swarm.sendBackToDev({ floor: 1, number: pull.number, agent: 'a2' });
+      const chosen = ['repair score', 'same-agent', 'explicit'].includes(scenario) ? other : s.state.agents[0];
+      vi.spyOn(s, 'prepare').mockResolvedValue('fake-desk');
+      vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+      expect(s.startPipelineWork(repo)).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rec).toMatchObject({ status: 'fixing', devAgentId: chosen.id });
+      expect(swarm.runHistory({ pr: pull.number }).attempts[0].assignment).toMatchObject({
+        reason: 'repair', factors: { policyVersion: 'specialty-first-v2', specialty: 'server', scoreKind: 'repair',
+          score: chosen.id === 'a1' ? 10 : scenario === 'repair score' ? 11 : -2,
+          specialtyMatch: ['specialist', 'repair score'].includes(scenario),
+          specialtyFallback: !['specialist', 'repair score'].includes(scenario) },
+      });
+    } finally { fixture.remove(); }
+  });
+
+  it('refuses an unavailable explicit repair owner instead of silently assigning a teammate', async () => {
+    const fixture = demoPull(repo.fullName, 'swarm/issue-66-author', false);
+    try {
+      s.repoRt.get(repo.id)!.pulls = [fixture.pull];
+      setIssues(issue(66, ['swarm:server']));
+      const rec = s.queueQa(repo, fixture.pull.number, null, 66);
+      rec.status = 'failed';
+      Object.assign(addDev('a2', 'frontend', 20, 20, 1), { status: 'working', issueNumber: 70 });
+      await expect(swarm.sendBackToDev({ floor: 1, number: fixture.pull.number, agent: 'a2' })).rejects.toMatchObject({ status: 409, message: expect.stringContaining('not available') });
+      expect(rec.devAgentId).toBeNull();
+    } finally { fixture.remove(); }
+  });
+
+  it('CEO repair handoff ranks a new owner by specialty and Repair', async () => {
+    const fixture = demoPull(repo.fullName, 'swarm/issue-66-author', false);
+    try {
+      s.repoRt.get(repo.id)!.pulls = [fixture.pull];
+      setIssues(issue(66, ['swarm:server']));
+      const rec = s.queueQa(repo, fixture.pull.number, null, 66);
+      rec.status = 'failed';
+      addDev('a2', 'frontend', 20, 20, 1);
+      await swarm.sendBackToDev({ floor: 1, number: fixture.pull.number });
+      expect(rec.devAgentId).toBe('a1');
+    } finally { fixture.remove(); }
+  });
+
+  it.each(['suitability', 'ready workload', 'open workload', 'desk'] as const)('QA fallback uses %s and excludes the owner regardless of scores', (criterion) => {
+    const owner = s.state.agents[0];
+    Object.assign(owner, { specialty: 'qa', desk: -1 });
+    const other = addDev('a2', 'frontend', 100, 100, 1);
+    const cover = addDev('a3', criterion === 'suitability' ? 'testing' : 'server', -10, -10, criterion === 'desk' ? 0 : 2);
+    const rec = s.queueQa(repo, 13, owner, 66);
+    if (criterion === 'ready workload') setIssues(issue(70, ['swarm:frontend']));
+    if (criterion === 'open workload') setIssues(issue(70, ['swarm:frontend'], 'Depends on #71'), issue(71, ['swarm:skip']));
+    const qa = vi.spyOn(s, 'runQa').mockResolvedValue();
+    expect(s.startPipelineWork(repo)).toBe(true);
+    expect(qa).toHaveBeenCalledExactlyOnceWith(cover, repo, rec);
+    expect(other.status).toBe('idle');
   });
 });
 
@@ -771,14 +892,14 @@ describe('developer scores', () => {
     expect(runTask).toHaveBeenCalledWith(dev(), repo, issue(66), undefined);
   });
 
-  it('chooses the highest score ahead of specialty', () => {
+  it('chooses a free specialist ahead of a higher-scoring generalist', () => {
     dev().specialty = 'server';
     const higher = { ...dev(), id: 'a2', name: 'Barbara', specialty: '', score: 2, desk: 1 };
     s.state.agents.push(higher);
     s.agentRt.set('a2', { log: [], pending: [], terminal: null });
     setIssues(issue(66, ['swarm:server']));
     expect(s.startIssueWork(repo)).toBe(true);
-    expect(runTask).toHaveBeenCalledWith(higher, repo, expect.objectContaining({ number: 66 }), undefined);
+    expect(runTask).toHaveBeenCalledWith(dev(), repo, expect.objectContaining({ number: 66 }), undefined);
   });
 
   describe('PR attribution', () => {
@@ -1130,6 +1251,13 @@ describe('closing issues', () => {
     vi.spyOn(s.backend, 'readIssue').mockRejectedValue(new Error('GitHub rate limit exceeded; retry later'));
     expect(await s.officeTools().call('close_issue', args)).toContain('GitHub rate limit exceeded; retry later');
     expect(s.backend.closeIssue).not.toHaveBeenCalled();
+  });
+
+  it.each([[undefined, 'not planned'], [false, 'not planned'], [true, 'completed']] as const)('completed: %s closes as %s', async (completed, as) => {
+    vi.spyOn(s.backend, 'readIssue').mockResolvedValue({ ...issue(66), repo: repo.fullName, state: 'OPEN' });
+    vi.spyOn(s.backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    expect(await s.officeTools().call('close_issue', { ...args, completed })).toContain(`Closed #66 on floor 1 as ${as}: Superseded by #67`);
+    expect(s.backend.closeIssue).toHaveBeenCalledWith(repo.fullName, 66, as, `Superseded by #67\n\n${AGENT_COMMENT_MARKER}`);
   });
 
   it('closes unwanted issues as not planned through the demo CEO', async () => {
@@ -2886,10 +3014,79 @@ describe('native parent issues', () => {
 
   it('demo supplies a parent that stays out of ready capacity', async () => {
     setIssues(...await s.backend.listIssues(repo.fullName));
-    const parent = s.repoRt.get(repo.id)!.issues.find((i) => i.subIssues?.total);
+    const parent = s.repoRt.get(repo.id)!.issues.find((i) => i.title === 'Sharing plan');
     expect(parent).toBeDefined();
     expect(ready()).not.toContain(parent!.number);
-    expect(JSON.parse(s.companyStatus()).floors[0].backlog.find((i: { number: number }) => i.number === parent!.number).parent).toBe('6/6 sub-issues done');
+    expect(JSON.parse(s.companyStatus()).floors[0].backlog.find((i: { number: number }) => i.number === parent!.number).parent).toBe('2/4 sub-issues done');
+  });
+
+  it('demo closes its finished parent as completed on a sync and keeps the partly done one', async () => {
+    Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
+    vi.spyOn(swarm as unknown as { syncFolder(): Promise<void> }, 'syncFolder').mockResolvedValue();
+    await swarm.syncRepo(repo.id);
+    const issues = s.repoRt.get(repo.id)!.issues;
+    expect(issues.find((i) => i.title === 'Sharing plan')?.subIssues).toEqual({ total: 4, completed: 2 });
+    expect(issues.some((i) => i.subIssues?.total && i.subIssues.completed === i.subIssues.total)).toBe(false);
+    expect(await s.backend.findIssuesByMarker(repo.fullName, 'the office closes this parent', ''))
+      .toEqual([expect.objectContaining({ title: 'Todo release plan', state: 'CLOSED', stateReason: 'completed' })]);
+  });
+});
+
+describe('finished parent issues', () => {
+  const parent = (number: number, total: number, completed: number, labels: string[] = []): IssueInfo => ({ ...issue(number, labels), subIssues: { total, completed } });
+  let listed: IssueInfo[];
+
+  beforeEach(() => {
+    Object.assign(repo, { defaultBranch: 'main', links: [], parkedBranches: [] });
+    Object.assign(s.repoRt.get(repo.id)!, { lastMergedAt: null });
+    listed = [parent(10, 6, 6), parent(11, 4, 2), parent(12, 2, 2, ['ready-for-human'])];
+    vi.spyOn(s.backend, 'listIssues').mockImplementation(async () => listed);
+    vi.spyOn(s.backend, 'listPulls').mockResolvedValue({ pulls: [] });
+    vi.spyOn(s.backend, 'closeIssue').mockImplementation(async (_name, n) => void (listed = listed.filter((i) => i.number !== n)));
+  });
+
+  it('closes them as completed once, with a comment, toast and office message, until a reopened count changes', async () => {
+    const events = vi.spyOn(s, 'broadcast');
+    const messages = vi.spyOn(s, 'postMessage');
+    await swarm.syncRepo(repo.id);
+    for (const [n, total] of [[10, 6], [12, 2]]) {
+      expect(s.backend.closeIssue).toHaveBeenCalledWith(repo.fullName, n, 'completed', `All ${total} sub-issues are done; closed by the office.\n\n${AGENT_COMMENT_MARKER}`);
+    }
+    expect(s.backend.closeIssue).toHaveBeenCalledTimes(2);
+    expect(s.repoRt.get(repo.id)!.issues.map((i) => i.number)).toEqual([11]);
+    expect(events).toHaveBeenCalledWith({ type: 'toast', level: 'success', text: `Closed #10 on ${repo.fullName}: all 6 sub-issues are done.` });
+    expect(messages).toHaveBeenCalledWith('office', expect.stringContaining(`Closed #10 "Issue 10" on ${repo.fullName} as completed`));
+
+    listed = [parent(10, 6, 6), parent(11, 4, 2)]; // the manager reopens #10
+    await swarm.syncRepo(repo.id);
+    expect(s.backend.closeIssue).toHaveBeenCalledTimes(2);
+    listed = [parent(10, 7, 6), parent(11, 4, 2)];
+    await swarm.syncRepo(repo.id);
+    listed = [parent(10, 7, 7), parent(11, 4, 2)];
+    await swarm.syncRepo(repo.id);
+    expect(s.backend.closeIssue).toHaveBeenCalledTimes(3);
+    expect(s.backend.closeIssue).toHaveBeenLastCalledWith(repo.fullName, 10, 'completed', expect.stringContaining('All 7 sub-issues'));
+  });
+
+  it('leaves them open while a PR closes them or a session works on them', async () => {
+    vi.mocked(s.backend.listPulls).mockResolvedValue({ pulls: [{
+      number: 13, title: '', url: '', isCrossRepository: false, headRefName: 'feature', state: 'OPEN', isDraft: false, closesIssues: [10], checks: 'none',
+      mergeable: 'MERGEABLE', headSha: 'sha', reviewDecision: null, createdAt: '', mergedAt: null, additions: 0, deletions: 0,
+      mergeState: 'CLEAN', failedChecks: [], pendingChecks: [],
+    }] });
+    Object.assign(s.state.agents[0], { status: 'working', task: 'issue', issueNumber: 12 });
+    await swarm.syncRepo(repo.id);
+    expect(s.backend.closeIssue).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed close once', async () => {
+    vi.mocked(s.backend.closeIssue).mockRejectedValue(new Error('HTTP 403'));
+    const messages = vi.spyOn(s, 'postMessage');
+    await swarm.syncRepo(repo.id);
+    await swarm.syncRepo(repo.id);
+    expect(s.backend.closeIssue).toHaveBeenCalledTimes(2);
+    expect(messages).toHaveBeenCalledWith('office', expect.stringContaining('closing it failed: HTTP 403'));
+    expect(s.repoRt.get(repo.id)!.issues.map((i) => i.number)).toEqual([10, 11, 12]);
   });
 });
 
@@ -5148,6 +5345,119 @@ describe('QA rounds', () => {
       expect(rec).toMatchObject({ status: gap === 'explicit failure' ? 'failed' : 'needs-human', passedSha: null, round: 2 });
     });
 
+    it.each(['posted', 'crashed', 'new head', 'new base'] as const)('lets only a manager merge over an incomplete audit posted at its head and base: %s', async (variant) => {
+      const { tester } = await securityDesk();
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+      Object.assign(s.agentRt.get('q2')!, { qaResume: null });
+      rec.sessionFailures = 1;
+      await s.onQaFinished(tester, repo, variant === 'crashed' ? result(false) : result(true, { ...sandboxReport, validationGap: 'other' }));
+      expect(rec).toMatchObject({ status: 'needs-human', testedSha: 'sha-1', passedSha: null });
+      expect(rec.failedSha).not.toBe('sha-1');
+      Object.assign(repo, { autoMerge: true });
+      s.repoRt.get(repo.id)!.pulls = [{ ...pull, labels: ['ready-for-review'] }];
+      await (s as unknown as { advanceMerges(repo: Repo): Promise<void> }).advanceMerges(repo);
+      expect(merge).not.toHaveBeenCalled();
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('requires a passing security review');
+      if (variant === 'new head' || variant === 'new base') {
+        const moved = variant === 'new head' ? { headSha: 'sha-2' } : { baseSha: 'base-2' };
+        vi.mocked(s.backend.prDetails).mockResolvedValue({ ...pull, labels: ['ready-for-review'], baseSha: 'base-1', body: '', isCrossRepository: false, ...moved });
+        s.repoRt.get(repo.id)!.pulls = [{ ...pull, labels: ['ready-for-review'], ...moved }];
+      }
+      const approved = swarm.mergePr({ floor: repo.floor, number: 13, reason: 'Manager requested merge; validation gaps accepted' });
+      if (variant !== 'posted') {
+        await expect(approved).rejects.toMatchObject({ status: 409 });
+        expect(merge).not.toHaveBeenCalled();
+        return;
+      }
+      expect(await approved).toContain('Merged PR #13');
+      expect(merge).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'squash', 'sha-1');
+    });
+
+    it.each(['desk never started', 'stopped'] as const)("doesn't count regular QA's report as the audit's when the audit ends unrecorded: %s", async (variant) => {
+      const tester = addAgent('q2', 'Morse', 'qa', 1);
+      const pr = { ...pull, labels: [] as string[], baseSha: 'base-1', body: '', isCrossRepository: false };
+      vi.mocked(s.backend.prDetails).mockImplementation(async () => pr);
+      vi.spyOn(s.backend, 'deskHead').mockResolvedValue(pr.headSha);
+      vi.spyOn(s, 'prepare').mockResolvedValue('/fake-desk');
+      vi.spyOn(s, 'startAgentSession').mockImplementation((agent) => {
+        Object.assign(agent as object, { status: 'working', sessionId: 'qa-session' });
+      });
+      vi.spyOn(s.backend, 'commentPull').mockResolvedValue('comment-url');
+      vi.spyOn(s.backend, 'setSecurityReviewLabel').mockImplementation(async () => { pr.labels = ['ready-for-review']; });
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+      Object.assign(rec, { status: 'queued', failedSha: null, qaAgentId: null });
+      await s.runQa(tester, repo, rec);
+      await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', summary: 'QA passed', checks: [], securityReviewReason: 'Changes authentication' }));
+      expect(rec).toMatchObject({ securityReview: { qaSha: 'sha-1' }, passedSha: null });
+      expect(s.state.qaOutcomes.at(-1)).toMatchObject({ verdict: 'pass', headSha: 'sha-1', baseSha: 'base-1', commentUrl: 'comment-url' });
+      s.reconcilePulls(repo, [pr]);
+      tester.status = 'idle';
+      await s.runQa(tester, repo, rec);
+      expect(rec).toHaveProperty('securityReview.auditBaseSha', 'base-1');
+      if (variant === 'stopped') swarm.stopAgent('q2');
+      else {
+        rec.preparation = { qa: { headSha: 'sha-1', failures: 1, holds: 1, holdUntil: 0 } };
+        s.jobDeskFailed(tester, repo, { rec, task: 'qa' }, 'Session never started on office: spawn');
+      }
+      expect(rec).toMatchObject({ status: 'needs-human', testedSha: 'sha-1', failedSha: null });
+      s.repoRt.get(repo.id)!.pulls = [{ ...pull, labels: ['ready-for-review'] }];
+      await expect(swarm.mergePr({ floor: repo.floor, number: 13, reason: 'Manager requested merge' })).rejects.toMatchObject({ status: 409 });
+      expect(merge).not.toHaveBeenCalled();
+    });
+
+    it.each(['explicit fail', 'confirmed finding'] as const)('keeps a posted %s audit blocked when a later revision read fails', async (variant) => {
+      const { tester, comment } = await securityDesk();
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+      let posted = false;
+      let failedRead = false;
+      comment.mockImplementation(async () => { posted = true; return 'comment-url'; });
+      const pr = { ...pull, labels: ['ready-for-review'], baseSha: 'base-1', body: '', isCrossRepository: false };
+      vi.mocked(s.backend.prDetails).mockImplementation(async () => {
+        if (posted && !failedRead) {
+          failedRead = true;
+          throw new Error('HTTP 502');
+        }
+        return pr;
+      });
+      await s.onQaFinished(tester, repo, result(true, {
+        ...sandboxReport, checks: auditChecks, validationGap: 'none', summary: 'Tenant boundary bypass',
+        ...(variant === 'explicit fail' ? { verdict: 'fail' } : { verdict: 'pass', blockingFindings: 'confirmed' }),
+      }));
+      expect(failedRead).toBe(true);
+      expect(rec).toMatchObject({ status: 'needs-human', testedSha: 'sha-1', failedSha: 'sha-1', commentUrl: 'comment-url' });
+      s.repoRt.get(repo.id)!.pulls = [{ ...pull, labels: ['ready-for-review'] }];
+      await expect(swarm.mergePr({ floor: repo.floor, number: 13, reason: 'Manager requested merge' })).rejects.toMatchObject({ status: 409 });
+      expect(merge).not.toHaveBeenCalled();
+    });
+
+    it.each(['explicit fail', 'confirmed finding'] as const)('keeps a posted %s audit blocked when the manager stops it during the last revision read', async (variant) => {
+      const { tester, comment } = await securityDesk();
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      vi.spyOn(swarm, 'syncRepo').mockResolvedValue();
+      let readsAfterPost = -1;
+      comment.mockImplementation(async () => { readsAfterPost = 0; return 'comment-url'; });
+      const pr = { ...pull, labels: ['ready-for-review'], baseSha: 'base-1', body: '', isCrossRepository: false };
+      // The send-back check reads the PR first; the evidence's revision read comes last.
+      vi.mocked(s.backend.prDetails).mockImplementation(async () => {
+        if (readsAfterPost >= 0 && ++readsAfterPost === 2) swarm.stopAgent('q2');
+        return pr;
+      });
+      await s.onQaFinished(tester, repo, result(true, {
+        ...sandboxReport, checks: auditChecks, validationGap: 'none', summary: 'Tenant boundary bypass',
+        ...(variant === 'explicit fail' ? { verdict: 'fail' } : { verdict: 'pass', blockingFindings: 'confirmed' }),
+      }));
+      expect(readsAfterPost).toBe(2);
+      expect(tester).toMatchObject({ status: 'stopped' });
+      expect(rec).toMatchObject({ status: 'needs-human', testedSha: 'sha-1' });
+      expect(s.state.qaOutcomes.at(-1)).toMatchObject({ commentUrl: null });
+      s.repoRt.get(repo.id)!.pulls = [{ ...pull, labels: ['ready-for-review'] }];
+      await expect(swarm.mergePr({ floor: repo.floor, number: 13, reason: 'Manager requested merge' })).rejects.toMatchObject({ status: 409 });
+      expect(merge).not.toHaveBeenCalled();
+    });
+
     it('queues a labeled PR that already passed regular QA, even when automatic merge is off', () => {
       Object.assign(rec, { status: 'passed', passedSha: pull.headSha, testedSha: pull.headSha });
       s.reconcilePulls(repo, [{ ...pull, labels: ['ready-for-review'] }]);
@@ -5708,9 +6018,6 @@ describe('manual office closure', () => {
     officeLifecycleView(): { state: string; running: number };
     refreshOfficeLifecycle(): Promise<void>;
     writeState(): Promise<void>;
-  upstash: Pick<import('./upstash.ts').UpstashBoxes, 'allocate' | 'find' | 'bootstrap' | 'safeToDelete' | 'present' | 'remove'>;
-  clis: import('../shared/types.ts').CliView[];
-  sweepUpstash(): void;
     buildSystemAppend(...args: unknown[]): string;
     syncRepo(id: string): Promise<void>;
     newTerminal(id: string): { allowInput(): boolean; dispose(): void };
@@ -7307,4 +7614,70 @@ describe('silent session recovery', () => {
     expect(dev()).toMatchObject({ status: 'stopped', task: 'issue', sessionId: 'running-thread', issueNumber: 66 });
     expect(s.backend.startSession).not.toHaveBeenCalled();
   });
+});
+
+describe('Upstash placement', () => {
+  const cloud = () => swarm as unknown as {
+    state: { upstashTasks: import('../shared/types.ts').UpstashTask[]; repos: { box?: string }[]; settings: { runtime: string } };
+    clis: { id: string; installed: boolean }[];
+    upstash: { full(): boolean };
+    place(a: unknown, kind: 'new' | 'within'): { box?: string; wait?: string; lacks?: string };
+  };
+  const task = (): import('../shared/types.ts').UpstashTask => ({ id: 'upstash-task', name: 'task', boxId: 'box-1', agentId: 'a1', repo: repo.fullName, branch: 'task', cli: 'codex', slug: 'ada-a1', port: 5324, phase: 'active', error: null });
+
+  it('offers opt-in placement when hiring, for individual workers and for a whole floor', () => {
+    const hired = swarm.hireAgent(repo.id, { name: 'Cloud Ada', box: 'upstash', cli: 'codex' });
+    expect(hired.box).toBe('upstash');
+    swarm.updateAgent(hired.id, { box: '' });
+    expect(s.state.agents.find((a) => a.id === hired.id)?.box).toBe('');
+    swarm.updateRepo(repo.id, { box: 'upstash', everyone: true });
+    expect((s.state.repos[0] as Repo & { box: string }).box).toBe('upstash');
+    expect(s.state.agents.find((a) => a.id === hired.id)?.box).toBeNull();
+  });
+
+  it('falls back to the floor machine, or queues if an Upstash floor’s main-office fallback lacks the CLI', () => {
+    const c = cloud(); c.state.settings.runtime = 'terminal'; c.upstash = { full: () => true };
+    Object.assign(s.state.agents[0], { box: 'upstash', cli: 'codex', deskBox: '' });
+    c.clis = [{ id: 'claude', installed: true }];
+    c.state.repos[0].box = 'upstash';
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ wait: '', lacks: 'codex' });
+    c.clis.push({ id: 'codex', installed: true });
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ box: '' });
+    const floor = swarm.addBox('Floor machine', 'floor-machine');
+    c.state.repos[0].box = floor.id;
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ wait: floor.id });
+  });
+
+  it('reuses an active reservation even at capacity and holds new work behind cleanup after a placement change', () => {
+    const c = cloud(); c.state.settings.runtime = 'terminal'; c.upstash = { full: () => true };
+    Object.assign(s.state.agents[0], { box: 'upstash', cli: 'codex', deskBox: 'upstash-task' });
+    c.state.upstashTasks.push(task());
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ box: 'upstash' });
+    // An active task cannot silently move to local disk when its connection is missing.
+    expect(c.place(s.state.agents[0], 'within')).toEqual({ wait: 'upstash-task' });
+    s.state.agents[0].box = '';
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ wait: 'upstash-task' });
+    s.state.agents[0].box = 'upstash'; c.state.upstashTasks[0].phase = 'cleanup-blocked';
+    expect(c.place(s.state.agents[0], 'new')).toEqual({ wait: 'upstash-task' });
+  });
+});
+
+
+it('reconnects a stopped Upstash task without resetting its unsaved worktree', async () => {
+  const a = s.state.agents[0];
+  Object.assign(a, { status: 'preparing', deskBox: 'upstash-task', box: 'upstash', branch: 'task', cli: 'codex' });
+  const task: import('../shared/types.ts').UpstashTask = { id: 'upstash-task', name: 'task', boxId: 'box-1', agentId: 'a1', repo: repo.fullName, branch: 'task', cli: 'codex', slug: 'ada-a1', port: 5324, phase: 'active', error: null, deskStarted: true };
+  const internals = swarm as unknown as { state: { upstashTasks: typeof task[] }; upstash: import('./upstash.ts').UpstashTasks; boxConns: Map<string, BoxConnection>; openUpstash(): Promise<unknown>; writeState(): Promise<void> };
+  internals.state.upstashTasks.push(task);
+  const { UpstashTasks } = await import('./upstash.ts');
+  internals.upstash = new UpstashTasks(internals.state.upstashTasks, s.backend.upstash, async () => {});
+  const machine = { ...s.backend, prepareDesk: vi.fn(), deskExists: vi.fn(async () => true), deskDir: () => 'existing-cloud-desk' };
+  a.name = 'Renamed worker';
+  internals.boxConns.set(task.id, { machine, hooksReady: () => undefined, state: () => ({ status: 'online' }) } as unknown as BoxConnection);
+  vi.spyOn(internals, 'openUpstash').mockResolvedValue([]);
+  vi.spyOn(internals, 'writeState').mockResolvedValue();
+  s.repoRt.get(repo.id)!.cloneStatus = 'ready';
+  expect(await s.prepare(a, repo, {}, 'task')).toBe('existing-cloud-desk');
+  expect(machine.prepareDesk).not.toHaveBeenCalled();
+  expect(machine.deskExists).toHaveBeenCalledWith(repo.fullName, task.slug);
 });

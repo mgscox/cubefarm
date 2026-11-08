@@ -1,3 +1,6 @@
+import type { QaOutcomeView, RunAttemptView } from '../shared/types.ts';
+import { draftLesson, reviewLesson } from './lessons.ts';
+import { playbookVersion } from './runHistory.ts';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -155,9 +158,13 @@ seed('demo-co/pixel-todo', 'A cheerful todo app', [
   ['Register the app in the App Store', 'Needs the company account and a signed agreement.', [READY_FOR_HUMAN]],
 ]);
 const parentRepo = repos.get('demo-co/pixel-todo')!;
-const parent = issue(parentRepo.nextNumber++, 'Todo release plan', 'Implementation is complete; review and close this parent.', parentRepo.fullName);
+// The first sync closes the finished parent as completed; the partly done one stays open.
+const parent = issue(parentRepo.nextNumber++, 'Todo release plan', 'Implementation is complete; the office closes this parent.', parentRepo.fullName);
 parent.subIssues = { total: 6, completed: 6 };
 parentRepo.issues.push(parent);
+const sharing = issue(parentRepo.nextNumber++, 'Sharing plan', 'Share lists with friends, in four parts.', parentRepo.fullName);
+sharing.subIssues = { total: 4, completed: 2 };
+parentRepo.issues.push(sharing);
 repos.get('demo-co/pixel-todo')!.issues[2].nativeBlockers = [{ number: 2, state: 'OPEN' }];
 repos.get('demo-co/pixel-todo')!.issues[2].body += '\n\nDepends on https://github.com/demo-co/pixel-todo/issues/2';
 seed('demo-co/weather-api', 'Tiny weather REST API', [
@@ -415,8 +422,9 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
         });
         return;
       }
-      // Most first rounds pass; some fail so the fix loop can be seen in action.
-      const pass = round > 1 || Math.random() > 0.35;
+      // Most first rounds pass; some fail so the fix loop can be seen in action. A [regression] issue's first round always
+      // fails on the same toolbar defect, so two of them make a recurring finding for a lesson (docs/lessons.md).
+      const pass = round > 1 || (!opts.prompt.includes('[regression]') && Math.random() > 0.35);
       const introducedBySha = opts.prompt.match(/Known contribution SHAs: ([0-9a-f]+)/)?.[1];
       cb.log([{ kind: 'text', text: pass ? '● Everything checks out. Writing up the report.' : '● The toolbar overflows on a 375px screen. Failing this round.' }]);
       cb.finished({
@@ -697,14 +705,11 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
   let pulled = commit;
   let keeperStale = /^restart-demo/i.test(opts.box.destination);
   const keeperChanges = /^stale-keeper/i.test(opts.box.destination);
-  let ready: (() => void) | undefined;
-  const connected = opts.box.upstash ? new Promise<void>((resolve) => { ready = resolve; }) : Promise.resolve();
   let timer = setTimeout(async () => {
     status = offline ? 'offline' : 'online';
     if (!offline) clis = await machine.detectClis();
     if (!offline) stopResources = monitorResources(async () => demoResources(opts.box.destination), (value) => { telemetry = value; opts.changed(); });
     opts.changed();
-    ready?.();
   }, 1500);
   const workspaces = `/boxes/${opts.box.name}/workspaces`;
   const machine: Machine = {
@@ -748,11 +753,10 @@ function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 
       refused: false,
       telemetry,
     }),
-    reconnected: connected.then(() => []), // fake sessions end with the office
+    reconnected: Promise.resolve([]), // fake sessions end with the office
     hooksReady: () => undefined,
     // An online box detects again on the same link; an offline one tries connecting and still fails.
     check: async () => {
-      if (opts.box.upstash) await connected;
       if (status === 'online') {
         clis = await machine.detectClis();
         return opts.changed();
@@ -807,6 +811,7 @@ export function createDemoBackend(): Backend {
   const deskBranches = new Map<string, string | null>();
   const deskPulls = new Map<string, number | undefined>();
   const workerBlocked = new Set<string>();
+  const cloudBoxes = new Map<string, { id: string; name: string }>();
   /** Fake desks under a folder: the office's own (/demo), or a box's. */
   const desks = (root: string) => ({
     mainDir: (fullName: string) => `${root}/${fullName}/main`,
@@ -1039,6 +1044,19 @@ export function createDemoBackend(): Backend {
     hooksReady: () => undefined,
     releaseClis: async () => undefined,
     detectClis: async () => fakeClis(),
+    upstash: {
+      missing: () => null,
+      list: async () => [...cloudBoxes.values()],
+      create: async (task) => { const id = `demo-${task.id}`; cloudBoxes.set(id, { id, name: task.name }); return id; },
+      connect: async (task, opts) => {
+        cloudBoxes.set(task.boxId!, { id: task.boxId!, name: task.name });
+        const conn = fakeBox(opts, desks(`/upstash/${task.id}`), startSession);
+        await new Promise((resolve) => setTimeout(resolve, 1600));
+        return conn;
+      },
+      saved: async () => undefined,
+      delete: async (id) => { cloudBoxes.delete(id); },
+    },
     connectBox: (opts) => fakeBox(opts, desks(`/boxes/${opts.box.name.replace(/[^\w.-]+/g, '-')}`), startSession),
     previews: demoPreviews,
     office: demoOffice,
@@ -1619,20 +1637,42 @@ export function createDemoTelegram(): import('./telegram.ts').TelegramTransport 
   return fake;
 }
 
-
-// Demo Boxes never contact the provider, even when the office host has real credentials.
-export function createDemoUpstash() {
-  const boxes = new Set<string>();
-  return {
-    allocate: async (name: string) => {
-      if (boxes.size >= 10) return null;
-      boxes.add(name);
-      return name;
-    },
-    find: async (name: string) => boxes.has(name) ? name : null,
-    bootstrap: async () => {},
-    present: async (id: string) => boxes.has(id),
-    safeToDelete: async () => true,
-    remove: async (id: string) => { boxes.delete(id); },
-  };
+/** A pinned viewport regression, its candidate replay, and small live cohorts; no sessions or external artifacts. */
+export function demoEvaluation(repoId: string, at = Date.now()) {
+  const prefix = `eval-${crypto.randomUUID()}`;
+  const basePlaybook = playbookVersion('developer', 'Check desktop layout.')!;
+  const candidatePlaybook = playbookVersion('developer', 'Check desktop and 375px toolbar layout.')!;
+  const run = (id: string, pr: number, candidate: boolean, patch: Partial<RunAttemptView> = {}): RunAttemptView => ({
+    id: `${prefix}-${id}`, parentId: null, repoId, repo: repoId, task: 'issue', specialty: 'frontend', issueNumber: pr - 10, prNumber: pr,
+    agent: { id: 'demo-eval-dev', name: 'Demo developer', role: 'dev', specialty: 'frontend' }, assignment: { reason: 'manager', factors: {} },
+    runtime: { cli: 'codex', model: null, effort: 'high', playbook: candidate ? candidatePlaybook : basePlaybook, office: 'demo-evaluation-v1' },
+    worker: { box: '', name: 'office', healthAtStart: null, healthAtEnd: null }, revisions: { start: 'base', submitted: `head-${pr}` },
+    sessionIds: [], review: null, times: { assignedAt: at - 100, startedAt: at - 90, endedAt: at - 80 },
+    usage: { sessions: 0, costUsd: 0, turns: 0 }, events: [], outcome: { result: 'delivered', cause: 'agent' }, ...patch,
+  });
+  const qa = (id: string, pr: number, patch: Partial<QaOutcomeView> = {}): QaOutcomeView => ({
+    id: `${prefix}-${id}`, repoId, prNumber: pr, reviewId: `${prefix}-review-${pr}`, round: 1, attemptId: `${prefix}-qa-${pr}`,
+    reviewer: { agentId: 'demo-eval-qa', name: 'Demo QA' }, startedAt: at - 70, finishedAt: at - 60, baseSha: 'base', headSha: `head-${pr}`,
+    revision: 'exact', classification: 'pass', observed: null, verdict: 'pass', summary: 'The toolbar buttons are reachable at 375px.',
+    checks: [], commands: [], findings: [], worker: { boxId: null, from: null, to: null, telemetry: null }, terminalReason: null, ci: null,
+    commentUrl: null, corrections: [], ...patch,
+  });
+  const defect = { id: `${prefix}-finding`, key: 'toolbar-overflow', check: '375px toolbar', classification: 'code' as const,
+    evidence: 'The toolbar overflows at 375px; the base wraps.', confirmed: true, attributableTo: null };
+  const outcomes = [qa('before', 9001, { verdict: 'fail', classification: 'code', findings: [defect], summary: defect.evidence }), qa('candidate', 9002),
+    qa('repair', 9001, { round: 2, headSha: 'fixed', startedAt: at - 20, finishedAt: at - 10 })];
+  const attempts = [run('base', 9001, false), run('candidate', 9002, true),
+    run('fix', 9001, true, { task: 'fix', revisions: { start: 'head-9001', submitted: 'fixed' },
+      times: { assignedAt: at - 50, startedAt: at - 45, endedAt: at - 30 }, outcome: { result: 'repaired', cause: 'agent' } }),
+    run('worker', 9003, true, { outcome: { result: 'start-failed', cause: 'worker' }, revisions: { start: null, submitted: null } }),
+    run('pending', 9004, true, { outcome: null, times: { assignedAt: at - 5, startedAt: null, endedAt: null } }),
+    run('unknown', 9005, true, { outcome: { result: 'failed', cause: 'unknown' }, revisions: { start: null, submitted: null } })];
+  const lesson = draftLesson({ kind: 'agent', specialty: 'frontend', title: 'Check the toolbar at 375px',
+    guidance: 'Before handing off, check that every toolbar button is reachable at 375px.',
+    sources: [{ qaOutcomeId: outcomes[0].id, findingId: defect.id }], verification: { kind: 'regression-test', test: 'toolbar at 375px', qaOutcomeId: outcomes[2].id } },
+  { repoId, outcomes, attempts }, 'demo reviewer', at);
+  reviewLesson(lesson, { action: 'approve', reason: 'Pinned regression and independent QA verify the recovery.' }, [lesson], 'demo reviewer', at);
+  return { attempts, outcomes, lesson, input: { lessonId: lesson.id, basePlaybook, candidatePlaybook, cases: [{ id: 'toolbar-375px',
+    expectedBehavior: 'All toolbar buttons are reachable at 375px on the first QA pass.', metric: 'firstPassQa', expected: true,
+    baseAttemptId: attempts[0].id, candidateAttemptId: attempts[1].id }] } };
 }

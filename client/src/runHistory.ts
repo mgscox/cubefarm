@@ -22,6 +22,15 @@ export function workLabel(x: Pick<Row, 'issueNumber' | 'prNumber' | 'prState'>):
   return [x.issueNumber === null ? '' : `#${x.issueNumber}`, pr].filter(Boolean).join(' · ') || '—';
 }
 
+/** Older attempts have only a reason; current routing also explains the specialty and relevant score. */
+export function assignmentLabel(x: Pick<Row, 'assignment'>): string {
+  const { reason, factors: f } = x.assignment;
+  if (!f.policyVersion) return reason;
+  const match = f.specialty ? `${f.specialty} ${f.specialtyMatch ? 'match' : 'fallback'}` : 'any specialty';
+  const score = f.scoreKind === 'authorship' ? 'Authorship' : f.scoreKind === 'repair' ? 'Repair' : null;
+  return [reason, match, score ? `${score} ${f.score}` : ''].filter(Boolean).join(' · ');
+}
+
 export function outcomeLabel(x: Pick<Row, 'outcome' | 'times'>): string {
   if (x.outcome) return `${x.outcome.result} · ${x.outcome.cause}`;
   return x.times.startedAt === null ? 'pending' : 'running';

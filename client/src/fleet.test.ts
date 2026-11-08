@@ -49,10 +49,6 @@ describe('floorMove', () => {
     expect(floorMove({ box: '' }, team, 'b1')).toEqual({ moving: 3, busy: 2, overrides: 2 });
   });
 
-  it('preserves a developer’s explicit Upstash placement when the floor moves', () => {
-    expect(floorMove({ box: '' }, [dev('upstash'), dev(null)], 'b1')).toEqual({ moving: 1, busy: 0, overrides: 0 });
-  });
-
   it('says nothing when everyone already works there', () => {
     const move = floorMove({ box: 'b1' }, [dev(null), dev(null)], 'b1');
     expect(floorMoveText(move, 'Tower')).toBeNull();
@@ -60,7 +56,7 @@ describe('floorMove', () => {
 
   it('says what happens, mid-task agents and cleared settings included', () => {
     const move = floorMove({ box: '' }, [dev(null, 'working'), dev('')], 'b1');
-    expect(floorMoveText(move, 'Tower')).toBe("2 agents move to Tower as their next task starts. 1 of them is mid-task and moves once that task is done. Clears 1 agent's own box, so those agents follow the floor.");
+    expect(floorMoveText(move, 'Tower')).toBe("2 agents move to Tower as their next task starts. 1 of them is mid-task and moves once that task is done. Clears 1 agent's own box, so the whole floor follows it.");
   });
 });
 
