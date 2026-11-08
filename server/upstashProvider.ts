@@ -130,7 +130,7 @@ export function createUpstashProvider(config?: () => NodeJS.ProcessEnv): Upstash
   const connection = () => ({ apiKey: settings().UPSTASH_BOX_API_KEY, enableTelemetry: false });
   const get = (id: string) => Box.get(id, connection());
   return {
-    missing: (cli) => !settings().UPSTASH_BOX_API_KEY ? 'Set UPSTASH_BOX_API_KEY in the office config.' : !settings()[KEYS[cli]] ? `Set ${KEYS[cli]} in the office config for Upstash ${cli}.` : null,
+    missing: (cli) => !settings().UPSTASH_BOX_API_KEY ? 'Set the Upstash Box API key in Settings or UPSTASH_BOX_API_KEY in the office config.' : !settings()[KEYS[cli]] ? `Set ${KEYS[cli]} in the office config for Upstash ${cli}.` : null,
     list: async () => (await Box.list(connection())).filter((b) => b.status !== 'deleted'),
     create: async (task) => {
       const token = await gh(['auth', 'token']).catch(() => { throw Object.assign(new Error('GitHub authentication is unavailable.'), { notCreated: true }); });

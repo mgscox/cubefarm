@@ -770,6 +770,11 @@ export interface ManagerMcpSettingsPatch {
   token?: string | null;
 }
 
+export interface UpstashKeySettingsView {
+  keySource: 'settings' | 'startup' | 'unreadable' | null;
+  canManage: boolean;
+}
+
 /** Non-secret Telegram connection state; delivery never changes phone read state. */
 export interface TelegramView {
   configured: boolean;

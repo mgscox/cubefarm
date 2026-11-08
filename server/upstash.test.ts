@@ -57,6 +57,22 @@ describe('disposable Upstash task lifecycle', () => {
     expect(await office.ensure(input('0'), 'office')).toBe(records[0]);
   });
 
+  it('serializes a key change with Box creation and only accepts a replacement that can see owned Boxes', async () => {
+    const emu = emulator();
+    const office = new UpstashTasks([], emu.provider, async () => {});
+    let changed = false;
+    const creating = office.ensure(input(), 'office');
+    await expect(office.changeKey(() => { changed = true; }, async () => [])).rejects.toMatchObject({ status: 409 });
+    expect(changed).toBe(false);
+
+    const task = await creating;
+    await office.changeKey(() => { changed = true; }, emu.provider.list);
+    expect(changed).toBe(true);
+    await office.cleanup(task!, async () => {});
+    await office.changeKey(() => { changed = false; }, async () => { throw new Error('No Box lookup needed'); });
+    expect(changed).toBe(false);
+  });
+
   it('uses fallback only for quota rejection, holding other provider errors for recovery', async () => {
     const emu = emulator(); emu.quota();
     const office = new UpstashTasks([], emu.provider, async () => {});

@@ -295,7 +295,7 @@ export function FleetTab() {
         <div className="card">
           <h3>Upstash workers</h3>
           <p className="small">Opt in when hiring, in Team, or for a whole floor. Each task gets one Small Box. At the ten-Box cap or a provider quota rejection it uses the floor’s machine, or the main office for an Upstash floor. Tasks wait if that machine lacks their CLI.</p>
-          <p className="small muted">The office config supplies UPSTASH_BOX_API_KEY and the selected CLI’s ANTHROPIC_API_KEY, OPENAI_API_KEY (OpenAI Platform), or OPENROUTER_API_KEY. Subscription sign-ins stay on your machines.</p>
+          <p className="small muted">Set the Box key in Settings or with UPSTASH_BOX_API_KEY. The office config supplies the selected CLI’s ANTHROPIC_API_KEY, OPENAI_API_KEY (OpenAI Platform), or OPENROUTER_API_KEY. Subscription sign-ins stay on your machines.</p>
           <p className="small">{tasks.length}/10 task Boxes reserved. Cleanup checks for dirty files and unpushed commits before deletion.</p>
           {tasks.map((t) => <div className="card small" key={t.id}>
             <b>{agents[t.agentId]?.name ?? 'Former worker'}</b> · {t.repo} · {t.cli}
