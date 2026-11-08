@@ -24,7 +24,10 @@ const ready = async (description: string) => {
 const stopOffice = async () => {
   await swarm.closeOffice();
   // Closing stops admission while running work finishes saving its state.
-  await until(() => expect(swarm.snapshot().officeLifecycle.state).toBe('closed'));
+  await until(() => {
+    vi.advanceTimersByTime(1000); // Drain demo sessions faster than their scripted wall-clock delays.
+    expect(swarm.snapshot().officeLifecycle.state).toBe('closed');
+  });
   let stopped = false;
   const stopping = swarm.shutdown().then(() => { stopped = true; });
   await until(() => expect(stopped).toBe(true));
