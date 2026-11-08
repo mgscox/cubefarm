@@ -12,22 +12,27 @@ import { VERSION } from './config.ts';
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-it.each(['claude', 'codex', 'opencode'] as const)('rehearses %s install, authentication and terminal launch inside the emulator', async (cli) => {
+it.each([
+  ['claude', false], ['codex', false], ['opencode', false], ['opencode', true],
+] as const)('rehearses %s install and terminal launch with legacy OpenCode present: %s', async (cli, legacyOpenCode) => {
   const keys = { ANTHROPIC_API_KEY: 'anthropic-emulator', OPENAI_API_KEY: 'platform-emulator', OPENROUTER_API_KEY: 'router-emulator', UPSTASH_BOX_API_KEY: 'provider-emulator' };
   const config = upstashConfig(keys, cli, 'worker-task', 'github-emulator');
   const workerEnv = { ...config.env!, PATH: '/usr/bin' };
   const commands: { file: string; args: string[]; opts?: { input?: string } }[] = [];
   // Run the actual bootstrap against an emulated Box filesystem and installed programs.
   await vm.runInNewContext(BOOTSTRAP, {
-    require: (name: string) => name === 'node:fs' ? { mkdirSync() {}, writeFileSync() {} } : {
+    require: (name: string) => name === 'node:fs' ? { mkdirSync() {}, writeFileSync() {}, existsSync: () => legacyOpenCode } : {
       execFileSync(file: string, args: string[], opts?: { input?: string }) { commands.push({ file, args, opts }); },
     },
     fetch: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0) }),
     Buffer,
     process: { env: workerEnv, arch: 'x64', argv: ['node', VERSION, '1.64.1', '^2.9.1'], exit() { throw new Error('bootstrap failed'); } },
   });
+  if (legacyOpenCode) {
+    expect(commands.shift()).toMatchObject({ file: 'npm', args: ['uninstall', '--prefix', '/workspace/home/.cubefarm-runtime', 'opencode-ai'] });
+  }
   const packages = commands[0];
-  expect(packages).toMatchObject({ file: 'npm', args: ['install', '--prefix', '/workspace/home/.cubefarm-runtime', `cubefarm@${VERSION}`, 'playwright@1.64.1', 'yaml@^2.9.1', ...(cli === 'codex' ? ['@openai/codex'] : cli === 'opencode' ? ['opencode-ai'] : [])] });
+  expect(packages).toMatchObject({ file: 'npm', args: ['install', '--prefix', '/workspace/home/.cubefarm-runtime', `cubefarm@${VERSION}`, 'playwright@1.64.1', 'yaml@^2.9.1', ...(cli === 'codex' ? ['@openai/codex'] : cli === 'opencode' ? ['@opencode/cli@2.2.5'] : [])] });
   expect(commands.some((c) => c.file === 'gh' && c.args.join(' ') === 'auth setup-git')).toBe(true);
   if (cli === 'codex') expect(commands.find((c) => c.file === 'codex')).toMatchObject({ args: ['login', '--with-api-key'], opts: { input: 'platform-emulator' } });
 

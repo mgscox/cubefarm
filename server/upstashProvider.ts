@@ -10,6 +10,7 @@ import { connectBox } from './boxLink.ts';
 import { PTY_PROTOCOL, runtimeFlags } from './ptyProtocol.ts';
 
 const PACKAGE = `${ROOT}/node_modules/cubefarm`;
+const OPENCODE_VERSION = '2.2.5';
 const KEYS: Record<AgentCli, string> = { claude: 'ANTHROPIC_API_KEY', codex: 'OPENAI_API_KEY', opencode: 'OPENROUTER_API_KEY' };
 export function upstashConfig(env: NodeJS.ProcessEnv, cli: AgentCli, name: string, gitToken: string): BoxConfig {
   return {
@@ -38,7 +39,11 @@ const fs = require('node:fs'), cp = require('node:child_process');
   const root = '${ROOT}';
   fs.mkdirSync(root, { recursive: true });
   const cli = process.env.CUBEFARM_UPSTASH_CLI;
-  const extra = cli === 'codex' ? ['@openai/codex'] : cli === 'opencode' ? ['opencode-ai'] : [];
+  const extra = cli === 'codex' ? ['@openai/codex'] : cli === 'opencode' ? ['@opencode/cli@${OPENCODE_VERSION}'] : [];
+  // Both OpenCode packages own the opencode shim. Remove v1 before installing v2 on older Boxes.
+  if (cli === 'opencode' && fs.existsSync(root + '/node_modules/opencode-ai')) {
+    cp.execFileSync('npm', ['uninstall', '--prefix', root, 'opencode-ai'], { stdio: 'ignore' });
+  }
   const [version, playwright, yaml] = process.argv.slice(1);
   cp.execFileSync('npm', ['install', '--prefix', root, 'cubefarm@' + version, 'playwright@' + playwright, 'yaml@' + yaml, ...extra], { stdio: 'ignore' });
   cp.execFileSync('node', [root + '/node_modules/playwright/cli.js', 'install', 'chromium'], { stdio: 'ignore' });
@@ -139,7 +144,9 @@ export function createUpstashProvider(config?: () => NodeJS.ProcessEnv): Upstash
     async connect(task, opts) {
       const box = await get(task.boxId!);
       // A durable marker avoids reinstalling packages beneath live CLIs after a reconnect.
-      const marker = `${ROOT}/ready-${VERSION}`;
+      const marker = task.cli === 'opencode'
+        ? `${ROOT}/ready-${VERSION}-opencode-${OPENCODE_VERSION}`
+        : `${ROOT}/ready-${VERSION}`;
       const ready = await box.files.stat(marker).then(() => true, (err: { statusCode?: number }) => {
         if (err.statusCode !== 404) throw err;
         return false;
