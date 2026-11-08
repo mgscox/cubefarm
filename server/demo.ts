@@ -949,11 +949,13 @@ export function createDemoBackend(): Backend {
       }
       r.issues = r.issues.filter((i) => !pr.closesIssues.includes(i.number));
     },
-    updateBranch: async (fullName, number) => {
+    rebasePull: async (fullName, number, headSha) => {
       const pr = repos.get(fullName)?.pulls.find((p) => p.number === number);
       if (!pr) throw new Error('Unknown PR');
+      if (pr.headSha !== headSha) return null;
       Object.assign(pr, { headSha: fakeSha(), mergeState: 'CLEAN' });
       runChecks(pr, false);
+      return pr.headSha;
     },
     rerunFailedJobs: async (fullName, runIds) => {
       for (const pr of repos.get(fullName)?.pulls ?? []) {

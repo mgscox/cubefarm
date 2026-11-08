@@ -59,6 +59,7 @@ export interface PullInfo {
   checks: 'pending' | 'passing' | 'failing' | 'none' | 'unavailable';
   /** At least one completed check or commit status succeeded; skipped/neutral checks alone are insufficient. */
   hasSuccessfulChecks?: boolean;
+  successfulChecks?: string[];
   headSha: string;
   baseSha?: string;
   baseRefName?: string;
