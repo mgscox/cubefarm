@@ -96,7 +96,7 @@ export const realBackend: Backend = {
   readIssue: (fullName, number) => github.readIssue(fullName, number),
   findIssuesByMarker: (fullName, marker, since) => github.findIssuesByMarker(fullName, marker, since),
   mergePull: github.mergePull,
-  rebasePull: github.rebasePull,
+  rebasePull: (fullName, number, headSha, baseSha) => github.rebasePull(fullName, number, headSha, baseSha, workspace.mergeQueueTree),
   rerunFailedJobs: github.rerunFailedJobs,
   markPullReady: github.markPullReady,
   setSecurityReviewLabel: github.setSecurityReviewLabel,
