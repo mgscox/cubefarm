@@ -15,9 +15,8 @@ export default defineConfig({
     port: clientPort,
     strictPort: true,
     proxy: {
-      '/api/settings/mcp': { target: localUrl(host, serverPort), xfwd: true },
-      '/api/settings/upstash': { target: localUrl(host, serverPort), xfwd: true },
-      '/api': localUrl(host, serverPort),
+      // Preserve authorization inputs for every API path, including Express's case-insensitive aliases.
+      '/api': { target: localUrl(host, serverPort), xfwd: true },
       '/ws': { target: localUrl(host, serverPort, 'ws'), ws: true },
     },
   },

@@ -44,9 +44,7 @@ describe('office bind configuration', () => {
     expect(HOST).toBe(host);
     expect(vite.server?.host).toBe(host);
     expect(vite.server?.proxy).toEqual({
-      '/api/settings/mcp': { target: 'http://127.0.0.1:5324', xfwd: true },
-      '/api/settings/upstash': { target: 'http://127.0.0.1:5324', xfwd: true },
-      '/api': 'http://127.0.0.1:5324',
+      '/api': { target: 'http://127.0.0.1:5324', xfwd: true },
       '/ws': { target: 'ws://127.0.0.1:5324', ws: true },
     });
   });
@@ -60,9 +58,7 @@ describe('office bind configuration', () => {
     expect(HOST).toBe('192.168.1.20');
     expect(vite.server?.host).toBe('192.168.1.20');
     expect(vite.server?.proxy).toEqual({
-      '/api/settings/mcp': { target: 'http://192.168.1.20:5324', xfwd: true },
-      '/api/settings/upstash': { target: 'http://192.168.1.20:5324', xfwd: true },
-      '/api': 'http://192.168.1.20:5324',
+      '/api': { target: 'http://192.168.1.20:5324', xfwd: true },
       '/ws': { target: 'ws://192.168.1.20:5324', ws: true },
     });
     expect(bindMessage(HOST, 5324)).toContain('remote: http://192.168.1.20:5324');

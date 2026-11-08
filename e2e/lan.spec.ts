@@ -94,20 +94,31 @@ test('CLI binding defaults to loopback and wildcard serves the office through bu
         await expect.poll(vite.output).toMatch(/Local:\s+http:\/\/localhost:\d+/);
         const clientPort = Number(vite.output().match(/Local:\s+http:\/\/localhost:(\d+)/)![1]);
         const route = '/api/settings/upstash';
+        const aliases = [route, '/api/settings/UPSTASH', '/api/Settings/upstash', '/api/SETTINGS/UpStAsH/?probe=1'];
         const localhost = `http://127.0.0.1:${clientPort}`;
         const keyPatch = { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'synthetic-box-key' }) };
         // A LAN client can set Host and omit Origin. Vite must forward the actual peer address.
         if (!lanHost.startsWith('127.')) {
-          const spoofed = await fetch(`http://${lanHost}:${clientPort}${route}`, {
-            ...keyPatch, headers: { ...keyPatch.headers, Host: `127.0.0.1:${clientPort}` },
-          });
-          expect(spoofed.status).toBe(403);
+          for (const alias of aliases) {
+            for (const forwarded of [undefined, '127.0.0.1']) {
+              const spoofed = await fetch(`http://${lanHost}:${clientPort}${alias}`, {
+                ...keyPatch, headers: {
+                  ...keyPatch.headers, Host: `127.0.0.1:${clientPort}`,
+                  ...(forwarded ? { 'X-Forwarded-For': forwarded } : {}),
+                },
+              });
+              expect(spoofed.status, `${alias}, X-Forwarded-For=${forwarded}`).toBe(403);
+            }
+          }
+          expect(await fetch(`${localhost}${route}`).then((r) => r.json())).toEqual({ keySource: null, canManage: true });
         }
-        const saved = await fetch(`${localhost}${route}`, {
-          ...keyPatch, headers: { ...keyPatch.headers, Origin: localhost },
-        });
-        expect(saved.status).toBe(200);
-        expect(await saved.json()).toEqual({ keySource: 'settings', canManage: true });
+        for (const alias of aliases) {
+          const saved = await fetch(`${localhost}${alias}`, {
+            ...keyPatch, headers: { ...keyPatch.headers, Origin: localhost },
+          });
+          expect(saved.status, alias).toBe(200);
+          expect(await saved.json()).toEqual({ keySource: 'settings', canManage: true });
+        }
         await browserFlow(page, `http://${lanHost}:${clientPort}`);
       }
       await stop(server.proc);
