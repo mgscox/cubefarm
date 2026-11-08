@@ -45,7 +45,7 @@ describe('office bind configuration', () => {
     expect(vite.server?.host).toBe(host);
     expect(vite.server?.proxy).toEqual({
       '/api': { target: 'http://127.0.0.1:5324', xfwd: true, headers: { 'x-cubefarm-dev-proxy': '1' } },
-      '/ws': { target: 'ws://127.0.0.1:5324', ws: true },
+      '/ws': { target: 'ws://127.0.0.1:5324', ws: true, xfwd: true, headers: { 'x-cubefarm-dev-proxy': '1' } },
     });
   });
 
@@ -59,7 +59,7 @@ describe('office bind configuration', () => {
     expect(vite.server?.host).toBe('192.168.1.20');
     expect(vite.server?.proxy).toEqual({
       '/api': { target: 'http://192.168.1.20:5324', xfwd: true, headers: { 'x-cubefarm-dev-proxy': '1' } },
-      '/ws': { target: 'ws://192.168.1.20:5324', ws: true },
+      '/ws': { target: 'ws://192.168.1.20:5324', ws: true, xfwd: true, headers: { 'x-cubefarm-dev-proxy': '1' } },
     });
     expect(bindMessage(HOST, 5324)).toContain('remote: http://192.168.1.20:5324');
   });

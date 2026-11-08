@@ -8,11 +8,14 @@ import { test, expect, type Page } from '@playwright/test';
 // Local non-loopback coverage of the built CLI and Vite. A second-device LAN drill is still separate.
 const root = path.resolve(import.meta.dirname, '..');
 const lanHost = Object.values(os.networkInterfaces()).flat().find((a) => a?.family === 'IPv4' && !a.internal)?.address ?? '127.0.0.2';
+const dotSegmentPrefixes = ['/ws/..', '/ws/%2e%2e', '/wss/..', '/ws/term/../..'];
 
 // Node fetch rewrites Host; use the raw HTTP client for proxy authorization probes.
 async function send(url: string, init: { method: string; headers: Record<string, string>; body: string }) {
   return new Promise<Response>((resolve, reject) => {
-    const request = http.request(url, init, (response) => {
+    // Override the parsed URL's path so dot segments reach Vite unchanged.
+    const pathStart = url.indexOf('/', url.indexOf('://') + 3);
+    const request = http.request(url, { ...init, path: pathStart < 0 ? '/' : url.slice(pathStart) }, (response) => {
       const chunks: Buffer[] = [];
       response.on('data', (chunk) => chunks.push(chunk));
       response.on('end', () => resolve(new Response(Buffer.concat(chunks), { status: response.statusCode })));
@@ -114,7 +117,7 @@ test('CLI binding defaults to loopback and wildcard serves the office through bu
         const keyPatch = { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'synthetic-box-key' }) };
         // A LAN client can set Host and omit Origin. Vite must forward the actual peer address.
         if (!lanHost.startsWith('127.')) {
-          for (const alias of aliases) {
+          for (const alias of [...aliases, ...dotSegmentPrefixes.map((prefix) => prefix + route)]) {
             for (const forwarded of [undefined, '127.0.0.1']) {
               const spoofed = await send(`http://${lanHost}:${clientPort}${alias}`, {
                 ...keyPatch, headers: {
@@ -171,7 +174,7 @@ test('Vite cannot act as the trusted Claude authentication proxy for any route s
       const started = await post(local, '/start', { mode: 'manual-token' }, { 'X-Forwarded-For': lanHost });
       expect(started.status).toBe(200);
       const { flowId } = await started.json();
-      for (const alias of [route, '/api/settings/CLAUDE', '/api/Settings/ClAuDe']) {
+      for (const alias of [route, '/api/settings/CLAUDE', '/api/Settings/ClAuDe', ...dotSegmentPrefixes.map((prefix) => prefix + route)]) {
         const base = `http://${lanHost}:${clientPort}${alias}`;
         for (const [action, body] of [
           ['/status', {}], ['/start', { mode: 'manual-token' }], ['/code', { flowId, code: 'synthetic-code' }],

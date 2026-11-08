@@ -6,6 +6,8 @@ const serverPort = Number(process.env.SWARM_PORT ?? 4317);
 // strictPort: a second office must fail loudly, not quietly take the next port while proxying to this SWARM_PORT.
 const clientPort = Number(process.env.SWARM_CLIENT_PORT || 5317);
 const host = officeHost();
+// Both entries can forward HTTP, including paths normalized after proxy matching.
+const proxyOptions = { xfwd: true, headers: { 'x-cubefarm-dev-proxy': '1' } };
 
 export default defineConfig({
   root: 'client',
@@ -15,12 +17,8 @@ export default defineConfig({
     port: clientPort,
     strictPort: true,
     proxy: {
-      // Preserve authorization inputs for every API path, including Express's case-insensitive aliases.
-      '/api': {
-        target: localUrl(host, serverPort), xfwd: true,
-        headers: { 'x-cubefarm-dev-proxy': '1' },
-      },
-      '/ws': { target: localUrl(host, serverPort, 'ws'), ws: true },
+      '/api': { target: localUrl(host, serverPort), ...proxyOptions },
+      '/ws': { target: localUrl(host, serverPort, 'ws'), ws: true, ...proxyOptions },
     },
   },
   build: {
