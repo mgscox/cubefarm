@@ -1,7 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { WORKSPACE_ROOT } from './config.ts';
-import { gh, git, run } from './exec.ts';
+import { CommandError, gh, git, run } from './exec.ts';
 import { projectEnv } from './projectEnv.ts';
 import { operationSignal } from './operation.ts';
 import { clearSessionScratch, sessionScratchDir } from './jobScratch.ts';
@@ -77,6 +78,35 @@ export function ensureClone(fullName: string): Promise<void> {
       await gh(['repo', 'clone', fullName, dir], { timeoutMs: 600_000 });
     }
     await addLocalExcludes(dir);
+  });
+}
+
+/** Compute a merge tree for exact commits without using the floor's merge drivers, index, or checkout. */
+export function mergeQueueTree(fullName: string, baseSha: string, headSha: string): Promise<string> {
+  return withRepoLock(fullName, async () => {
+    if (![baseSha, headSha].every((sha) => /^[0-9a-f]{40}$/.test(sha))) throw new Error('Expected full GitHub commit SHAs');
+    const cwd = mainDir(fullName);
+    await git(['fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--refmap=', 'origin', baseSha, headSha], { cwd, timeoutMs: 180_000 });
+    const objects = await git(['rev-parse', '--path-format=absolute', '--git-path', 'objects'], { cwd });
+    if (!path.isAbsolute(objects) || /[\r\n]/.test(objects)) throw new Error('Unexpected Git object directory');
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'cubefarm-merge-'));
+    try {
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/i.test(key)));
+      const opts = { cwd: scratch, env: { ...env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(scratch, 'empty-config'), GIT_ATTR_NOSYSTEM: '1' } };
+      await run('git', ['init', '--bare', '--template='], opts);
+      await fs.writeFile(path.join(scratch, 'objects', 'info', 'alternates'), `${objects}\n`);
+      const tree = await run('git', [
+        '--no-replace-objects', '-c', `core.attributesFile=${path.join(scratch, 'empty-attributes')}`,
+        'merge-tree', '--write-tree', '--no-messages', baseSha, headSha,
+      ], opts).catch((err: unknown) => {
+        if (err instanceof CommandError && err.code === 1) throw new Error('merge conflict computing the rebase tree');
+        throw err;
+      });
+      if (!/^[0-9a-f]{40}$/.test(tree)) throw new Error('Git did not return a merge tree');
+      return tree;
+    } finally {
+      await fs.rm(scratch, { recursive: true, force: true, maxRetries: 5 });
+    }
   });
 }
 

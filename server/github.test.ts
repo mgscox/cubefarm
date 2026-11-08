@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
-import { branchAhead, closeIssue, containsCommit, ensureLabel, findIssuesByMarker, isCheckAccessError, listPulls, prForBranch, readIssue, readTwice, rebasePull } from './github.ts';
+import { branchAhead, closeIssue, containsCommit, ensureLabel, findIssuesByMarker, isCheckAccessError, listPulls, prDetails, prForBranch, readIssue, readTwice, rebasePull } from './github.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { mergeStep } from './mergeGate.ts';
 
@@ -56,24 +56,85 @@ describe('audited base ancestry', () => {
 });
 
 describe('merge queue rebase', () => {
-  it.each(['expected', 'different'] as const)('accepts only the test merge tree, got %s', async (tree) => {
-    const api = vi.fn().mockResolvedValueOnce({ data: { repository: { pullRequest: {
-      id: 'pr-id', potentialMergeCommit: { tree: { oid: 'expected' }, parents: { nodes: [{ oid: 'base' }, { oid: 'reviewed' }] } },
-    } } } }).mockResolvedValueOnce({ data: { updatePullRequestBranch: { pullRequest: {
-      headRef: { target: { oid: 'rebased', tree: { oid: tree } } },
-    } } } });
-    await expect(rebasePull('demo/repo', 12, 'reviewed', 'base', api)).resolves.toBe(tree === 'expected' ? 'rebased' : null);
-    expect(api.mock.calls[1][0]).toEqual(expect.arrayContaining([
+  const ref = (oid: string) => ({ name: 'main', target: { oid } });
+  const lookup = (liveBase: string, cachedBase: string | null, head = 'reviewed', labels: string[] = []) => ({ data: { repository: { pullRequest: {
+    id: 'pr-id', headRefOid: head, baseRefOid: cachedBase, baseRef: ref(liveBase), mergeStateStatus: 'BEHIND',
+    state: 'OPEN', isDraft: false, labels: { nodes: labels.map((name) => ({ name })) },
+    potentialMergeCommit: cachedBase ? { tree: { oid: 'cached-tree' }, parents: { nodes: [{ oid: cachedBase }, { oid: 'reviewed' }] } } : null,
+  } } } });
+  const rebased = (base: string, tree: string) => ({ data: { updatePullRequestBranch: { pullRequest: {
+    baseRef: ref(base), headRef: { target: { oid: 'rebased', tree: { oid: tree } } },
+  } } } });
+
+  it.each(['old-base', null])('verifies a clean rebase when the cached test merge is based on %s', async (cached) => {
+    const api = vi.fn().mockResolvedValueOnce(lookup('live-base', cached))
+      .mockResolvedValueOnce(lookup('live-base', cached)).mockResolvedValueOnce(rebased('live-base', 'fresh-tree'));
+    const tree = vi.fn().mockResolvedValue('fresh-tree');
+    await expect(rebasePull('demo/repo', 12, 'reviewed', 'live-base', tree, api)).resolves.toBe('rebased');
+    expect(tree).toHaveBeenCalledExactlyOnceWith('demo/repo', 'live-base', 'reviewed');
+    expect(api.mock.calls[2][0]).toEqual(expect.arrayContaining([
       expect.stringContaining('expectedHeadOid: $head, updateMethod: REBASE'), 'id=pr-id', 'head=reviewed',
     ]));
   });
 
-  it('waits for a test merge of the expected head and base before rewriting the branch', async () => {
-    const api = vi.fn().mockResolvedValue({ data: { repository: { pullRequest: {
-      id: 'pr-id', potentialMergeCommit: { tree: { oid: 'tree' }, parents: { nodes: [{ oid: 'old-base' }, { oid: 'reviewed' }] } },
-    } } } });
-    await expect(rebasePull('demo/repo', 12, 'reviewed', 'base', api)).resolves.toBeNull();
-    expect(api).toHaveBeenCalledOnce();
+  it.each(['cached-tree', 'different'] as const)('checks the exact cached tree when both parents match, got %s', async (tree) => {
+    const api = vi.fn().mockResolvedValueOnce(lookup('base', 'base')).mockResolvedValueOnce(rebased('base', tree));
+    const local = vi.fn();
+    await expect(rebasePull('demo/repo', 12, 'reviewed', 'base', local, api)).resolves.toBe(tree === 'cached-tree' ? 'rebased' : null);
+    expect(local).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['base advances', lookup('new-base', 'old-base')],
+    ['head advances', lookup('live-base', 'old-base', 'new-head')],
+    ['security hold appears', lookup('live-base', 'old-base', 'reviewed', ['ready-for-review'])],
+  ])('skips the mutation if the %s while computing the tree', async (_reason, current) => {
+    const api = vi.fn().mockResolvedValueOnce(lookup('live-base', 'old-base')).mockResolvedValueOnce(current);
+    const tree = vi.fn().mockResolvedValue('fresh-tree');
+    await expect(rebasePull('demo/repo', 12, 'reviewed', 'live-base', tree, api)).resolves.toBeNull();
+    expect(api.mock.calls.every(([args]) => args[3].startsWith('query=query'))).toBe(true);
+  });
+
+  it('rejects the same tree if the mutation reports a newer base', async () => {
+    const api = vi.fn().mockResolvedValueOnce(lookup('base', 'base')).mockResolvedValueOnce(rebased('new-base', 'cached-tree'));
+    await expect(rebasePull('demo/repo', 12, 'reviewed', 'base', vi.fn(), api)).resolves.toBeNull();
+  });
+});
+
+describe('current pull request targets', () => {
+  const pull = { ...raw, baseRefName: 'release/v1', baseRefOid: 'stored-base', mergeStateStatus: 'BEHIND' };
+  const tip = { ref: 'refs/heads/release/v1', object: { type: 'commit', sha: 'current-base' } };
+  const snapshot = (baseRef: { target: { oid: string } } | null) => ({ data: { repository: { pullRequest: {
+    ...pull, baseRef, labels: { nodes: pull.labels }, closingIssuesReferences: { nodes: pull.closingIssuesReferences },
+  } } } });
+
+  it('reads each open target once, regardless of the base cached on its PRs', async () => {
+    const query = vi.fn<Query>(async (args) => args.includes('open') ? [pull, { ...pull, number: 13 }] : []);
+    const api = vi.fn<Api>().mockResolvedValue(tip);
+    const result = await listPulls('demo/repo', query, api);
+    expect(result.pulls.map((p) => p.baseSha)).toEqual(['current-base', 'current-base']);
+    expect(api).toHaveBeenCalledExactlyOnceWith(['api', 'repos/demo/repo/git/ref/heads/release%2Fv1'], { timeoutMs: 60_000 });
+  });
+
+  it('reads the live tip and holds in the same details snapshot', async () => {
+    const api = vi.fn().mockResolvedValue(snapshot({ target: { oid: 'current-base' } }));
+    await expect(prDetails('demo/repo', 12, api)).resolves.toMatchObject({ baseSha: 'current-base', labels: ['needs-review'], closesIssues: [11] });
+    expect(api).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves PR metadata without reporting a cached base when the live tip is unavailable', async () => {
+    const query = vi.fn<Query>(async (args) => args.includes('open') ? [pull] : []);
+    const api = vi.fn<Api>().mockRejectedValue(new Error('offline'));
+    const result = await listPulls('demo/repo', query, api);
+    expect(result.pulls[0].baseSha).toBeUndefined();
+    const detail = vi.fn().mockResolvedValue(snapshot(null));
+    await expect(prDetails('demo/repo', 12, detail)).resolves.toMatchObject({ headSha: raw.headRefOid, baseSha: undefined });
+  });
+
+  it('can still read ordinary PR metadata if access to the live ref is denied', async () => {
+    const denied = new CommandError('Forbidden', 'GraphQL: Resource not accessible by personal access token (repository.pullRequest.baseRef)', 1);
+    const api = vi.fn().mockRejectedValueOnce(denied).mockResolvedValueOnce(pull);
+    await expect(prDetails('demo/repo', 12, api)).resolves.toMatchObject({ headSha: raw.headRefOid, baseSha: undefined, labels: ['needs-review'] });
   });
 });
 

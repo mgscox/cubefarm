@@ -6518,7 +6518,7 @@ describe('manual office closure', () => {
   it('rebases queued PRs one at a time and merges after fresh CI without another QA round', async () => {
     Object.assign(repo, { autoMerge: true });
     let baseSha = 'base-1';
-    const first = { ...qaPull(), hasSuccessfulChecks: true, successfulChecks: ['CI', 'e2e'] };
+    const first = { ...qaPull(), baseRefName: 'main', hasSuccessfulChecks: true, successfulChecks: ['CI', 'e2e'] };
     const second = { ...first, number: 14, headRefName: 'swarm/14', headSha: 'sha-2' };
     const third = { ...first, number: 15, headRefName: 'swarm/15', headSha: 'sha-3' };
     const pulls = [first, second, third];
@@ -6546,11 +6546,14 @@ describe('manual office closure', () => {
       heads.set(pr.headSha, base);
       return pr.headSha;
     });
-    const poll = async () => {
-      Object.assign(s.repoRt.get(repo.id)!, { fetchedAt: Date.now(), pulls: pulls.map((pr) => ({ ...pr, baseSha })) });
+    const poll = async (hasBase = true) => {
+      Object.assign(s.repoRt.get(repo.id)!, { fetchedAt: Date.now(), pulls: pulls.map((pr) => ({ ...pr, baseSha: hasBase ? baseSha : undefined })) });
       await f.advanceMerges(repo);
     };
 
+    await poll(false);
+    expect(merge).not.toHaveBeenCalled();
+    expect(rebase).not.toHaveBeenCalled();
     await poll();
     expect(merge).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'squash', 'sha-1');
     expect(rebase).not.toHaveBeenCalled();
