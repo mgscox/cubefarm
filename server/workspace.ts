@@ -320,7 +320,10 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
       } catch (err) {
         operationSignal()?.throwIfAborted();
         // Rebuild the worktree from scratch, but say why: the rebuild can fail in its own way.
-        const why = `Couldn't reuse the desk in place, so it's rebuilt: ${(err as Error).message.split(/\r?\n/)[0].slice(0, 240)}`;
+        const firstLine = (err as Error).message.split(/\r?\n/, 1)[0];
+        // Keep the command and the end of the error when a long path dominates the line.
+        const detail = firstLine.length > 240 ? `${firstLine.slice(0, 119)}…${firstLine.slice(-120)}` : firstLine;
+        const why = `Couldn't reuse the desk in place, so it's rebuilt: ${detail}`;
         console.warn(`${wt}: ${why}`);
         note?.(why);
       }
