@@ -1,3 +1,6 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { bindMessage, browserUrl, localAddress, localUrl, officeHost } from '../bin/officeNetwork.js';
 
@@ -45,6 +48,7 @@ describe('office bind configuration', () => {
     expect(vite.server?.host).toBe(host);
     expect(vite.server?.proxy).toEqual({
       '/api/settings/mcp': { target: 'http://127.0.0.1:5324', xfwd: true },
+      '/api/settings/upstash': { target: 'http://127.0.0.1:5324', xfwd: true },
       '/api': 'http://127.0.0.1:5324',
       '/ws': { target: 'ws://127.0.0.1:5324', ws: true },
     });
@@ -60,10 +64,26 @@ describe('office bind configuration', () => {
     expect(vite.server?.host).toBe('192.168.1.20');
     expect(vite.server?.proxy).toEqual({
       '/api/settings/mcp': { target: 'http://192.168.1.20:5324', xfwd: true },
+      '/api/settings/upstash': { target: 'http://192.168.1.20:5324', xfwd: true },
       '/api': 'http://192.168.1.20:5324',
       '/ws': { target: 'ws://192.168.1.20:5324', ws: true },
     });
     expect(bindMessage(HOST, 5324)).toContain('remote: http://192.168.1.20:5324');
+  });
+
+  it('proxies every localhost-only settings route with X-Forwarded-For and its own Host', async () => {
+    const dir = path.dirname(fileURLToPath(import.meta.url));
+    const routers = readdirSync(dir).filter((file) => file.endsWith('.ts') && !file.endsWith('.test.ts'))
+      .map((file) => readFileSync(path.join(dir, file), 'utf8'))
+      .filter((source) => /canManageLocalSettings\(req\)/.test(source))
+      .flatMap((source) => [...source.matchAll(/export function (\w+Router)\(/g)].map((match) => match[1]));
+    const index = readFileSync(path.join(dir, 'index.ts'), 'utf8');
+    const gated = routers.flatMap((name) => [...index.matchAll(new RegExp(`app\\.use\\('(/api/[^']+)', ${name}\\(`, 'g'))].map((match) => match[1]));
+    expect(gated).toEqual(expect.arrayContaining(['/api/settings/mcp', '/api/settings/upstash']));
+    vi.stubEnv('SWARM_HOST', '0.0.0.0');
+    vi.resetModules();
+    const { default: vite } = await import('../vite.config.ts');
+    for (const route of gated) expect(vite.server?.proxy?.[route], route).toEqual({ target: expect.any(String), xfwd: true });
   });
 
   it('says loopback only for every loopback address', () => {
