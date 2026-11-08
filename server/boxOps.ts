@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { validClaudeToken } from '../bin/claudeAuth.js';
 import { images, type ImageAttachment } from './attachments.ts';
 import { recoverCliTurn } from './cliTranscript.ts';
 import type { AgentCli } from '../shared/types.ts';
@@ -75,12 +76,15 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
       images.receive(attachments as ImageAttachment[]);
       return images.prompt(str(text));
     },
-    prepare(plan, attachments) {
+    prepare(plan, attachments, claudeToken) {
+      const p = plan as CliPlan;
+      if (claudeToken !== undefined && (p.cli !== 'claude' || !validClaudeToken(claudeToken))) {
+        throw new Error('Invalid office Claude credential for this session.');
+      }
       if (attachments) images.receive(attachments as ImageAttachment[]);
       const now = Date.now();
       for (const [t, p] of prepared) if (now - p.at > PREPARED_MS) prepared.delete(t);
-      const p = plan as CliPlan;
-      const cli = writeCliSession({ ...p, prompt: images.prompt(p.prompt), systemAppend: images.prompt(p.systemAppend) }, { url: ctx.hookUrl(), held: true });
+      const cli = writeCliSession({ ...p, prompt: images.prompt(p.prompt), systemAppend: images.prompt(p.systemAppend) }, { url: ctx.hookUrl(), held: true }, claudeToken);
       prepared.set((plan as CliPlan).token, { cli, at: now });
       return { dir: cli.dir, jobScratch: !!cli.env.CUBEFARM_JOB_SCRATCH, prompt: cli.prompt, hookUrl: `${ctx.hookUrl()}/api/hooks` };
     },
