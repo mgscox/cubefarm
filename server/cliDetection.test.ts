@@ -8,6 +8,7 @@ import { commandFor, detectClis } from './clis.ts';
 import { writeCliSession } from './cliFiles.ts';
 import { run } from './exec.ts';
 import type { CliPlan } from './machine.ts';
+import { saveClaudeToken } from '../bin/claudeAuth.js';
 
 // Version probes are faked: no installed agent CLI is run by these tests.
 vi.mock('./exec.ts', () => ({ run: vi.fn(async () => 'test version'), git: async () => '' }));
@@ -107,6 +108,32 @@ describe('CLI installer folders outside PATH', () => {
       expect(fs.readFileSync(path.join(home, 'uncommitted.txt'), 'utf8')).toBe('keep');
     } finally {
       fs.rmSync(launch.dir, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
+  it('uses the office credential only for the prepared Claude process', async () => {
+    install(['.local', 'bin'], 'claude');
+    vi.stubEnv('SWARM_HOME', home);
+    const local = 'sk-ant-oat01-' + 'l'.repeat(36);
+    const office = 'sk-ant-oat01-' + 'o'.repeat(36);
+    await saveClaudeToken(home, local);
+    const box = createBoxOps({ hookUrl: () => 'http://127.0.0.1:45678', pids: () => [], root: home });
+    const plan: CliPlan = {
+      cli: 'claude', token: 'box-auth', sessionId: 'test', cwd: home, prompt: 'Test', systemAppend: '',
+      model: '', effort: '', name: 'Test', role: 'dev', additionalDirectories: [], browserTesting: false, officeUrl: 'http://office.invalid', officeTools: false,
+    };
+    await expect(box.rpc('prepare', [{ ...plan, cli: 'codex' }, [], office])).rejects.toThrow('Invalid office Claude credential');
+    await expect(box.rpc('prepare', [plan, [], 'bad-format'])).rejects.toThrow('Invalid office Claude credential');
+    for (const [credential, expected] of [[office, office], [undefined, local]] as const) {
+      const reply = await box.rpc('prepare', [plan, [], credential]);
+      const launch = box.take(plan.token)!;
+      try {
+        expect(launch.env.CLAUDE_CODE_OAUTH_TOKEN).toBe(expected);
+        expect(JSON.stringify(reply)).not.toContain(office);
+        expect(launch.args.join(' ')).not.toContain(office);
+      } finally {
+        fs.rmSync(launch.dir, { recursive: true, force: true, maxRetries: 5 });
+      }
     }
   });
 

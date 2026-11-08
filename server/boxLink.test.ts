@@ -9,6 +9,11 @@ import type { BoxConnection } from './machine.ts';
 import { images, IMAGE_ROUTE } from './attachments.ts';
 import { BASH_EXPANSION_PERMISSION, NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
 import type { AgentTerminal } from './terminal.ts';
+import { saveClaudeToken } from '../bin/claudeAuth.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import type { CliPlan } from './machine.ts';
 
 vi.mock('node:child_process', async (original) => ({ ...await original<typeof import('node:child_process')>(), spawn: vi.fn() }));
 vi.mock('./machineHealth.ts', () => ({ monitorResources: () => () => {} }));
@@ -16,10 +21,14 @@ vi.mock('./machineHealth.ts', () => ({ monitorResources: () => () => {} }));
 describe('remote desk cancellation', () => {
   let box: BoxConnection;
   let sent: ToHost[];
+  let authHome: string;
   let child: EventEmitter & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
     vi.useFakeTimers();
+    authHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-box-auth-'));
+    vi.stubEnv('SWARM_HOME', authHome);
+    vi.stubEnv('CUBEFARM_CLAUDE_AUTH_BOXES', 'other-box, fake-box');
     sent = [];
     child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(() => child.emit('close', 0)) });
     child.stdin.on('data', (line: Buffer) => {
@@ -32,7 +41,7 @@ describe('remote desk cancellation', () => {
     vi.mocked(spawn).mockReturnValue(child as unknown as ReturnType<typeof spawn>);
     box = connectBox({ box: { id: 'box', name: 'Attic', destination: 'fake-box' }, officeId: 'test', changed: () => {}, terminalFor: () => null });
     await Promise.resolve();
-    child.stdout.write(encode({ op: 'ready', version: PTY_PROTOCOL, hookPort: 0, ptys: [] }));
+    child.stdout.write(encode({ op: 'ready', version: PTY_PROTOCOL, hookPort: 0, ptys: [], officeClaudeAuth: true }));
     await box.reconnected;
   });
 
@@ -41,6 +50,8 @@ describe('remote desk cancellation', () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    fs.rmSync(authHome, { recursive: true, force: true, maxRetries: 5 });
   });
 
   it.each(['prepareDesk', 'releaseDesk'] as const)('times out and cancels its own %s RPC without dropping other desks', async (method) => {
@@ -88,6 +99,31 @@ describe('remote desk cancellation', () => {
     expect(await pending).toMatchObject({ dir: 'remote-session', prompt: 'remote prompt' });
   });
 
+  it('sends the current office token only for Claude on an opted-in SSH link', async () => {
+    const plan: CliPlan = {
+      cli: 'claude', token: 'auth-task', sessionId: 'auth-session', cwd: 'remote-desk', prompt: 'Test',
+      systemAppend: '', model: '', effort: '', name: 'Test', role: 'dev', additionalDirectories: [],
+      browserTesting: false, officeUrl: 'http://localhost:1234', officeTools: false,
+    };
+    const first = 'sk-ant-oat01-' + 'a'.repeat(36);
+    const second = 'sk-ant-oat01-' + 'b'.repeat(36);
+    async function prepare(cli: CliPlan['cli']) {
+      const pending = box.machine.cliHost!.prepare({ ...plan, cli });
+      const call = sent.at(-1) as Extract<ToHost, { op: 'rpc' }>;
+      child.stdout.write(encode({ op: 'rpcReply', rid: call.rid, ok: true, value: { dir: 'remote-session', prompt: 'Test' } }));
+      await pending;
+      return call.args.slice(2);
+    }
+    expect(vi.mocked(spawn).mock.lastCall?.[1]).toEqual(expect.arrayContaining(['StrictHostKeyChecking=yes', 'ControlPath=none']));
+    await saveClaudeToken(authHome, first);
+    expect(await prepare('claude')).toEqual([first]);
+    await saveClaudeToken(authHome, second);
+    expect(await prepare('claude')).toEqual([second]);
+    expect(await prepare('codex')).toEqual([]);
+    expect(await prepare('opencode')).toEqual([]);
+    vi.stubEnv('CUBEFARM_CLAUDE_AUTH_BOXES', 'fake-box-alias');
+    expect(await prepare('claude')).toEqual([]);
+  });
   it.each([
     { tool: 'Playwright', dialog: NAVIGATE_PERMISSION, log: 'Approved playwright — Navigate to a URL (hook missed)' },
     { tool: 'Bash', dialog: BASH_EXPANSION_PERMISSION, log: 'Approved Bash shell expansion once' },

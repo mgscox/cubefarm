@@ -6,8 +6,14 @@ async function main() {
   process.stdin.pause();
   const box = await Box.get(process.argv[2], { apiKey: process.env.UPSTASH_BOX_API_KEY, enableTelemetry: false });
   const session = await box.exec.session({
-    argv: ['node', `${ROOT}/node_modules/cubefarm/dist-server/boxStdio.js`, '--stdio', '--office', process.argv[3]],
-    env: [`SWARM_BOX_HOME=${ROOT}/home`, `PATH=${ROOT}/node_modules/.bin:${ROOT}/gh/bin:/usr/local/bin:/usr/bin:/bin`],
+    // Set PATH inside the Box so provider environment filtering can't select the image's CLI.
+    argv: [
+      '/usr/bin/env',
+      `PATH=${ROOT}/node_modules/.bin:${ROOT}/gh/bin:/usr/local/bin:/usr/bin:/bin`,
+      `SWARM_BOX_HOME=${ROOT}/home`,
+      `CUBEFARM_UPSTASH_CLI=${process.argv[4]}`,
+      'node', `${ROOT}/node_modules/cubefarm/dist-server/boxStdio.js`, '--stdio', '--office', process.argv[3],
+    ],
     onStdout: (b) => process.stdout.write(b),
     onStderr: () => undefined,
   });

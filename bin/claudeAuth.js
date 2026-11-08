@@ -31,15 +31,15 @@ export function claudeAuthMetadata(env = process.env, demo = isDemo(env)) {
   return { source: savedCredential(homeFor(env)) ? 'saved' : env.CLAUDE_CODE_OAUTH_TOKEN ? 'startup' : 'cli', expiresAt: null };
 }
 
-export function claudeEnv(inherited = process.env, { login = false, demo = isDemo(inherited) } = {}) {
+export function claudeEnv(inherited = process.env, { login = false, demo = isDemo(inherited), sessionToken } = {}) {
   const env = {};
   for (const [key, value] of Object.entries(inherited)) {
     if (/^(ANTHROPIC_|CLAUDE)/i.test(key) && key !== 'CLAUDE_CONFIG_DIR' && (login || demo || key !== 'CLAUDE_CODE_OAUTH_TOKEN')) continue;
     if (value !== undefined) env[key] = value;
   }
   if (!login && !demo) {
-    const saved = savedCredential(homeFor(inherited));
-    if (saved) env.CLAUDE_CODE_OAUTH_TOKEN = saved.token;
+    const token = sessionToken ?? savedCredential(homeFor(inherited))?.token;
+    if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token;
   }
   return env;
 }

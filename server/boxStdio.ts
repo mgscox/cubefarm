@@ -123,7 +123,7 @@ export async function main(argv: string[]): Promise<void> {
 
   // To the office: the keeper's whole lines (it's watched for the CLIs it starts and ends), and the methods' replies.
   const out = (m: FromHost) => process.stdout.write(encode(m));
-  out(ready);
+  out({ ...ready, officeClaudeAuth: true });
   let kept = Buffer.alloc(0);
   const fromKeeper = (chunk: Buffer) => {
     kept = Buffer.concat([kept, chunk]);

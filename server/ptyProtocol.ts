@@ -36,7 +36,7 @@ export type ToHost =
   | { op: 'launch'; id: string; token: string; cols: number; rows: number; meta: unknown }; // start the CLI a 'prepare' rpc wrote
 
 export type FromHost =
-  | { op: 'ready'; version: number; hookPort: number; ptys: HeldPty[]; pid?: number; build?: string | null } // build: keeperBuild when it started
+  | { op: 'ready'; version: number; hookPort: number; ptys: HeldPty[]; pid?: number; build?: string | null; officeClaudeAuth?: true }
   | { op: 'spawned'; id: string; pid: number }
   | { op: 'failed'; id: string; error: string }
   | { op: 'data'; id: string; data: string }

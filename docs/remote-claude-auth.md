@@ -2,7 +2,13 @@
 
 Settings → Claude authentication is available in the manager console and the phone's Settings tab. **Sign in with Claude** runs the installed official CLI's fixed `setup-token` command in a private PTY on the office computer. Open its sign-in link on your phone, approve access, return to Settings, and enter the returned code. No terminal access is needed on the phone. **Use manual token fallback** remains available when CLI UI automation is incompatible with a future version.
 
-This fork preserves `CLAUDE_CODE_OAUTH_TOKEN` for new local Claude SDK/terminal sessions and doctor while removing other inherited `ANTHROPIC_*` / `CLAUDE*` overrides except `CLAUDE_CONFIG_DIR`. Interactive `cubefarm login` strips the token too. Codex and OpenCode do not receive Claude subscription tokens. Existing sessions retain their original environment; remote boxes keep their own credential stores. No office restart is needed for subsequent local sessions to use a saved replacement.
+This fork preserves `CLAUDE_CODE_OAUTH_TOKEN` for new local Claude SDK/terminal sessions and doctor while removing other inherited `ANTHROPIC_*` / `CLAUDE*` overrides except `CLAUDE_CONFIG_DIR`. Interactive `cubefarm login` strips the token too. Codex and OpenCode do not receive Claude subscription tokens. Existing sessions retain their original environment.
+
+## Trusted SSH workers
+
+Set `CUBEFARM_CLAUDE_AUTH_BOXES=build-worker,operator@qa-worker` in the [office config file](configuration.md) or the office's startup environment. Use the exact SSH destination registered in Fleet for a direct SSH worker. Add only workers whose accounts and operators you trust with the office credential. Both the office and the worker bridge must support credential forwarding. The office requires a known SSH host key and opens a fresh SSH connection when it connects to an opted-in worker.
+
+After adding a destination, restart the office or wait for the worker's next SSH connection. Each new Claude process receives the current office credential over the SSH link. Saving a replacement in Settings takes effect for new sessions without reconnecting or writing credential files on the worker. Workers use their own Claude authentication when forwarding is disabled, unsupported, or the office has no setup token. Removing a destination stops forwarding for new session preparations. Already running processes keep their environment until they exit.
 
 ## HTTPS and nginx boundary
 
