@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CommandError } from './exec.ts';
-import { branchAhead, closeIssue, containsCommit, ensureLabel, findIssuesByMarker, isCheckAccessError, listPulls, prForBranch, readIssue, readTwice } from './github.ts';
+import { branchAhead, closeIssue, containsCommit, ensureLabel, findIssuesByMarker, isCheckAccessError, listPulls, prForBranch, readIssue, readTwice, rebasePull } from './github.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { mergeStep } from './mergeGate.ts';
 
@@ -52,6 +52,28 @@ describe('audited base ancestry', () => {
     const api = vi.fn().mockRejectedValueOnce(unavailable).mockResolvedValue([]);
     await expect(containsCommit('demo/repo', 'head-sha', 'base-sha', api)).rejects.toBe(unavailable);
     expect(api).toHaveBeenCalledExactlyOnceWith(['api', 'repos/demo/repo/compare/head-sha...base-sha?per_page=1']);
+  });
+});
+
+describe('merge queue rebase', () => {
+  it.each(['expected', 'different'] as const)('accepts only the test merge tree, got %s', async (tree) => {
+    const api = vi.fn().mockResolvedValueOnce({ data: { repository: { pullRequest: {
+      id: 'pr-id', potentialMergeCommit: { tree: { oid: 'expected' }, parents: { nodes: [{ oid: 'base' }, { oid: 'reviewed' }] } },
+    } } } }).mockResolvedValueOnce({ data: { updatePullRequestBranch: { pullRequest: {
+      headRef: { target: { oid: 'rebased', tree: { oid: tree } } },
+    } } } });
+    await expect(rebasePull('demo/repo', 12, 'reviewed', 'base', api)).resolves.toBe(tree === 'expected' ? 'rebased' : null);
+    expect(api.mock.calls[1][0]).toEqual(expect.arrayContaining([
+      expect.stringContaining('expectedHeadOid: $head, updateMethod: REBASE'), 'id=pr-id', 'head=reviewed',
+    ]));
+  });
+
+  it('waits for a test merge of the expected head and base before rewriting the branch', async () => {
+    const api = vi.fn().mockResolvedValue({ data: { repository: { pullRequest: {
+      id: 'pr-id', potentialMergeCommit: { tree: { oid: 'tree' }, parents: { nodes: [{ oid: 'old-base' }, { oid: 'reviewed' }] } },
+    } } } });
+    await expect(rebasePull('demo/repo', 12, 'reviewed', 'base', api)).resolves.toBeNull();
+    expect(api).toHaveBeenCalledOnce();
   });
 });
 

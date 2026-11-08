@@ -37,7 +37,7 @@ export interface Backend extends Machine {
   /** Issues (open or closed) updated since `since` (ISO time) whose body carries `marker`. */
   findIssuesByMarker(fullName: string, marker: string, since: string): Promise<github.TrackedIssue[]>;
   mergePull(fullName: string, number: number, method: 'squash' | 'merge' | 'rebase', headSha?: string): Promise<void>;
-  updateBranch(fullName: string, number: number): Promise<void>;
+  rebasePull(fullName: string, number: number, headSha: string, baseSha: string): Promise<string | null>;
   rerunFailedJobs(fullName: string, runIds: number[]): Promise<void>;
   /** Marks a draft PR ready for review. */
   markPullReady(fullName: string, number: number): Promise<void>;
@@ -96,7 +96,7 @@ export const realBackend: Backend = {
   readIssue: (fullName, number) => github.readIssue(fullName, number),
   findIssuesByMarker: (fullName, marker, since) => github.findIssuesByMarker(fullName, marker, since),
   mergePull: github.mergePull,
-  updateBranch: github.updateBranch,
+  rebasePull: github.rebasePull,
   rerunFailedJobs: github.rerunFailedJobs,
   markPullReady: github.markPullReady,
   setSecurityReviewLabel: github.setSecurityReviewLabel,

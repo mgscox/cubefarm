@@ -13,6 +13,7 @@ export interface MergeRecord {
   /** Local validation was blocked by the worker, so absent CI checks cannot satisfy the merge gate. */
   ciRequired?: boolean;
   passedSha: string | null;
+  mergeCandidate?: { headSha: string; approvedSha: string; baseSha: string; baseRef: string; expectedChecks: string[] };
   mergeFixes: number;
   pendingSince: number | null;
   mergeRetryAt: number | null;
@@ -24,7 +25,7 @@ export interface MergeRecord {
 /** Bookkeeping the caller writes onto the record as it is (it doesn't count as a change to the record). */
 export type MergeBookkeeping = Partial<Pick<MergeRecord, 'passedSha' | 'pendingSince' | 'alerted'>>;
 
-export type MergePull = Pick<PullInfo, 'isDraft' | 'mergeable' | 'mergeState' | 'headSha' | 'checks' | 'hasSuccessfulChecks' | 'failedChecks' | 'pendingChecks'>;
+export type MergePull = Pick<PullInfo, 'isDraft' | 'mergeable' | 'mergeState' | 'headSha' | 'checks' | 'hasSuccessfulChecks' | 'successfulChecks' | 'failedChecks' | 'pendingChecks'>;
 
 /** What auto-merge does next with a QA-passed PR. */
 export type MergeStep = { set: MergeBookkeeping } & (
@@ -46,7 +47,8 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
   if (!opts.detailed && (pr.mergeable === 'UNKNOWN' || pr.mergeState === 'UNKNOWN')) return { do: 'details', set: {} };
   const set: MergeBookkeeping = {};
   if (rec.passedSha == null) set.passedSha = pr.headSha; // signed off before the office tracked commits
-  if (pr.headSha !== (set.passedSha ?? rec.passedSha)) return { do: 'requeue', set };
+  const candidate = rec.mergeCandidate?.approvedSha === rec.passedSha ? rec.mergeCandidate : undefined;
+  if (pr.headSha !== (candidate?.headSha ?? set.passedSha ?? rec.passedSha)) return { do: 'requeue', set };
   // Workers open drafts when they think something is left, often a hand check they can't run (another OS, real
   // devices). QA has passed this exact commit, so it's done: a draft would otherwise wait here forever.
   if (pr.isDraft) return { do: 'ready', set };
@@ -67,12 +69,15 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
     const instructions = pr.failedChecks.map((c) => `- ${c.name}${c.url ? `: ${c.url}` : ''}`).join('\n');
     return { do: 'send-back', reason: 'checks', instructions, needsHuman, set };
   }
-  if (pr.checks === 'pending') {
+  const waitingForRebaseChecks = candidate && (pr.checks !== 'passing' || pr.hasSuccessfulChecks !== true ||
+    candidate.expectedChecks.some((name) => !pr.successfulChecks?.includes(name)));
+  if (pr.checks === 'pending' || waitingForRebaseChecks) {
     const since = rec.pendingSince ?? now;
     if (rec.pendingSince == null) set.pendingSince = since;
     const alert = now - since > CHECKS_ALERT_MS && !rec.alerted;
     if (alert) set.alerted = true;
-    return { do: 'wait', note: `waiting for checks: ${pr.pendingChecks.join(', ') || 'running'}`, alert, set };
+    const note = waitingForRebaseChecks ? 'waiting for CI on the rebased head' : `waiting for checks: ${pr.pendingChecks.join(', ') || 'running'}`;
+    return { do: 'wait', note, alert, set };
   }
   if (rec.ciRequired && (pr.checks !== 'passing' || pr.hasSuccessfulChecks !== true)) {
     return { do: 'wait', note: 'waiting for passing GitHub checks to cover environment-blocked local validation', set };

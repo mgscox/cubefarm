@@ -3,6 +3,7 @@ import type { IdeaView, WorldSnapshot } from '../shared/types';
 
 // Isolated manual planning: stable tracker inputs, inspectable revisions, and no writes from drafting.
 test('draft and inspect a demo Issue Plan on an Idea', async ({ page, request, baseURL }) => {
+  test.setTimeout(240_000);
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await page.route((url) => !url.href.startsWith(baseURL!) && !url.protocol.startsWith('data'), (route) => route.fulfill({ status: 200, body: '' }));
@@ -12,7 +13,8 @@ test('draft and inspect a demo Issue Plan on an Idea', async ({ page, request, b
   await request.patch('/api/settings', { data: { tutorialStep: -1 } });
   try {
     const state = async () => await (await request.get('/api/state')).json() as WorldSnapshot;
-    await expect.poll(async () => (await state()).officeLifecycle.state, { timeout: 60_000 }).toBe('closed');
+    // Closing waits for running demo sessions: a developer's script alone takes 35-115 s.
+    await expect.poll(async () => (await state()).officeLifecycle.state, { timeout: 150_000 }).toBe('closed');
     // Earlier tests let demo agents finish these issues; restore missing inputs before measuring fixture writes.
     const settled = await state();
     for (const [repoId, title, body] of [
