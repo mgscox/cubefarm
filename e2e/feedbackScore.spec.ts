@@ -37,20 +37,38 @@ test('Authorship, Repair and legacy scores appear on Team and terminal headers a
   const authorship = (scope: ReturnType<typeof page.locator>) => scope.locator('.chip', { hasText: /^Authorship / });
   const repair = (scope: ReturnType<typeof page.locator>) => scope.locator('.chip', { hasText: /^Repair / });
   const legacy = (scope: ReturnType<typeof page.locator>) => scope.locator('.chip', { hasText: /^Legacy / });
-  const rows = page.locator('.team tr');
+  const rows = page.locator('.team-agent');
   for (const row of await rows.all()) {
-    const dev = await row.getByText('💻 Dev', { exact: true }).count();
+    const dev = await row.getByText(/^💻 Dev/).count();
     if (dev) {
       await expect(authorship(row)).toHaveText('Authorship +1 · 2 events');
       await expect(repair(row)).toHaveText('Repair +1 · 1 event');
       await expect(legacy(row)).toHaveText('Legacy +4');
     } else await expect(authorship(row)).toHaveCount(0);
   }
-  const devRow = rows.filter({ has: page.locator(`input[value=${JSON.stringify(developer!.name)}]`) });
+  const devRow = rows.filter({ has: page.getByText(developer!.name, { exact: true }) });
   await expect(authorship(devRow)).toBeVisible();
   await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('scores-team-desktop.png') });
 
+  const details = devRow.getByRole('button', { name: 'Details', exact: true });
+  await expect(details).toHaveAttribute('aria-expanded', 'false');
+  await expect(devRow.getByLabel('Model', { exact: true })).toBeHidden();
+  await details.focus();
+  await page.keyboard.press('Enter');
+  await expect(details).toHaveAttribute('aria-expanded', 'true');
+  await expect(devRow.getByLabel('Model', { exact: true })).toBeVisible();
+  await expect(devRow.getByLabel('Job description')).toBeVisible();
+  await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('scores-team-details.png') });
+
+  const teamTab = page.locator('.tab-body');
+  for (const width of [1280, 768, 414, 375, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    const { scrollWidth, clientWidth } = await teamTab.evaluate((el) => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth }));
+    expect(scrollWidth, `Team tab width at ${width}px`).toBeLessThanOrEqual(clientWidth);
+  }
   await page.setViewportSize({ width: 390, height: 844 });
+  await details.click();
+  await expect(details).toHaveAttribute('aria-expanded', 'false');
   await expect(authorship(devRow)).toBeInViewport();
   sendScores(scores(-1, 1, 0, 0));
   await expect(authorship(devRow)).toHaveText('Authorship -1 · 1 event');
