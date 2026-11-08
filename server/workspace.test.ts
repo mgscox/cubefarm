@@ -33,7 +33,7 @@ await fs.writeFile(gitConfig, '[user]\n\tname = Sync Test\n\temail = sync-test@e
 process.env.GIT_CONFIG_GLOBAL = gitConfig;
 
 const { git, run } = await import('./exec.ts');
-const { branchHolder, deskDir, deskLockPath, isStaleLock, leftoversInDesk, mainDir, parseWorktrees, prepareDesk, realPath, repoDir, samePath, setLocalPath, STALE_LOCK_MS, syncMain: sync } =
+const { branchHolder, deskDir, deskLockPath, deskQaDiffBase, isStaleLock, leftoversInDesk, mainDir, parseWorktrees, prepareDesk, realPath, repoDir, samePath, setLocalPath, STALE_LOCK_MS, syncMain: sync } =
   await import('./workspace.ts');
 // Most tests only care about the status line.
 const syncMain = async (...args: Parameters<typeof sync>) => (await sync(...args))?.status ?? null;
@@ -93,6 +93,31 @@ afterAll(async () => {
   }
   await fs.rm(ROOT, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
 }, 60_000); // dozens of git repos: removing them outlasts the default 10s on a busy CI disk
+
+it('narrows QA only when the prior head is an ancestor and the PR merge base is unchanged', { timeout: 30_000 }, async () => {
+  const fullName = 'test/qa-review';
+  const slug = 'tester';
+  const cwd = deskDir(fullName, slug);
+  await fs.mkdir(cwd, { recursive: true });
+  await git(['init', '-q', '--initial-branch=main'], { cwd });
+  await commitFile(cwd, 'base', 'original base');
+  const original = await head(cwd);
+  await git(['switch', '-q', '-c', 'pr'], { cwd });
+  await commitFile(cwd, 'feature', 'reviewed change');
+  const previous = await head(cwd);
+  await commitFile(cwd, 'feature', 'fix after review');
+  const fixed = await head(cwd);
+  await git(['switch', '-q', 'main'], { cwd });
+  await commitFile(cwd, 'base', 'advanced base');
+  const advanced = await head(cwd);
+  await git(['switch', '-q', 'pr'], { cwd });
+  expect(await deskQaDiffBase(fullName, slug, advanced, fixed, original, previous)).toBe(previous);
+  await git(['merge', '--no-edit', 'main'], { cwd });
+  expect(await deskQaDiffBase(fullName, slug, advanced, await head(cwd), original, previous)).toBeNull();
+  await git(['switch', '-q', '-c', 'rewritten', original], { cwd });
+  await commitFile(cwd, 'feature', 'rewritten change');
+  expect(await deskQaDiffBase(fullName, slug, advanced, await head(cwd), original, previous)).toBeNull();
+});
 
 describe('syncMain', { timeout: 60_000 }, () => {
   beforeAll(() => {

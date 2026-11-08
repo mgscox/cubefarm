@@ -474,6 +474,7 @@ export function connectBox(opts: BoxOptions): BoxConnection {
     removeDesk: (fullName, slug) => link.call('removeDesk', fullName, slug),
     releaseDesk: (fullName, slug, port, finishedScratchSession) => link.releaseDesk(fullName, slug, port, finishedScratchSession),
     deskHead: (fullName, slug) => link.call('deskHead', fullName, slug),
+    deskQaDiffBase: (fullName, slug, base, head, previousBase, previousHead) => link.call('deskQaDiffBase', fullName, slug, base, head, previousBase, previousHead),
     deskExists: (fullName, slug) => link.call('deskExists', fullName, slug),
     deskAhead: (fullName, slug, base) => link.call('deskAhead', fullName, slug, base),
     startSession(o, cb): SessionHandle {

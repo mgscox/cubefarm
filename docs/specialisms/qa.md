@@ -14,7 +14,7 @@ Read `cubefarm-tdd`. Read the PR, linked issue, and floor QA brief. Turn the acc
 
 ## 2. Test
 
-Read `cubefarm-diagnosing-bugs`. Run the applicable repository checks and exercise the changed behaviour directly. For a failure, reproduce it, narrow the conditions, and record the expected and actual result. Keep evidence from the assigned PR head. On a retest, reproduce the previous findings first and then check the rest of the change. Capture browser evidence as directed by the office and floor QA brief.
+Read `cubefarm-diagnosing-bugs`. Run the applicable repository checks and exercise the changed behaviour directly. For a failure, reproduce it, narrow the conditions, and record the expected and actual result. Keep evidence from the assigned PR head. On a retest, explicitly verify every open finding. Capture browser evidence as directed by the office and floor QA brief.
 
 If Chrome or Playwright hits a proxy error, blank page, or navigation timeout on a local or LAN preview, read `cubefarm-browser-proxy-resolve` before recording a verdict. Rerun the original browser assertions after restoring access. If access remains blocked, record the browser check as `skip` and include the proxy or navigation evidence.
 
@@ -24,12 +24,10 @@ If Chrome or Playwright hits a proxy error, blank page, or navigation timeout on
 - Read `cubefarm-test-strategy-skill`. Use its risk and coverage guidance to spot gaps in the checks already run. Run relevant missing checks where possible. Keep this within the QA run's scope and existing acceptance criteria. A separate strategy document, approval gate, or follow-on workflow is unnecessary for this review.
 - Read `cubefarm-humanizer`. Apply it to the wording of the report summary and findings while preserving technical details, evidence, and the report schema.
 
-## 4. Review merge candidates
+## 4. Review the change
 
-Continue when the PR passes the required checks above. If a blocking issue already requires rework, go to Exit.
-
-- Read `cubefarm-pr-security-review` and examine the PR diff against its base. Report actionable security issues introduced by the change with their location, impact, and a way to verify or fix them. Verify suspected findings independently. If the runtime lacks delegated review, do the false-positive check yourself. Include the security result in the existing QA report.
-- Read `cubefarm-code-review`. Use the assigned PR base and head for the Standards and Spec reviews. If the skill is unavailable, compare the diff with the repository rules and the linked issue.
+- Read `cubefarm-code-review`. Use the office's assigned diff for the Standards and Spec reviews. If the skill is unavailable, compare the assigned diff with the repository rules and the linked issue. Complete this review even if a check failed so the next reviewer knows what has already been read.
+- For merge candidates, read `cubefarm-pr-security-review` and examine the full PR diff against its base. Report actionable security issues introduced by the change with their location, impact, and a way to verify or fix them. Verify suspected findings independently. If the runtime lacks delegated review, do the false-positive check yourself. Include the security result in the existing QA report.
 - Apply the Lean guidance from `cubefarm-ponytail-review` to find unnecessary code or dependencies. If the skill is unavailable, look for unnecessary duplication and abstractions.
 
 ## 5. Decide whether to request a detailed security review
