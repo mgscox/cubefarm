@@ -426,6 +426,7 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
       // fails on the same toolbar defect, so two of them make a recurring finding for a lesson (docs/lessons.md).
       const pass = round > 1 || (!opts.prompt.includes('[regression]') && Math.random() > 0.35);
       const introducedBySha = opts.prompt.match(/Known contribution SHAs: ([0-9a-f]+)/)?.[1];
+      const previousFinding = opts.prompt.match(/\*\*(QA-[0-9a-f]+)\*\* Toolbar assumes desktop width/);
       cb.log([{ kind: 'text', text: pass ? '● Everything checks out. Writing up the report.' : '● The toolbar overflows on a 375px screen. Failing this round.' }]);
       cb.finished({
         ok: true,
@@ -455,7 +456,10 @@ function fakeSession(opts: SessionOptions, cb: SessionCallbacks, fullName: strin
             { command: 'npm run lint && npm run build', result: 'clean, built in 1.84s' },
           ],
           screenshots: ['Desktop view after the change', 'Mobile view at 375px'],
-          fixInstructions: pass ? undefined : 'Make the toolbar wrap (flex-wrap: wrap) below 480px so every button stays visible.',
+          codeReviewComplete: true,
+          findings: pass ? [] : [{ title: 'Toolbar assumes desktop width', details: 'At 375px, buttons overflow. Check other toolbars with the same layout and let buttons wrap on narrow screens.' }],
+          findingUpdates: pass && previousFinding
+            ? [{ id: previousFinding[1], status: 'resolved', evidence: 'All toolbar buttons are reachable at 375px.' }] : [],
         },
       });
       return;
@@ -691,7 +695,7 @@ const demoResources = (profile = ''): MachineSample => ({
  * One starting with "old" too, but its cubefarm predates --update: the first try fails, as if the manager then updated
  * it by hand, so Look again moves it.
  */
-function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'deskExists' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead'>, start: Machine['startSession']): BoxConnection {
+function fakeBox(opts: BoxOptions, desks: Pick<Machine, 'mainDir' | 'deskDir' | 'deskExists' | 'prepareDesk' | 'removeDesk' | 'releaseDesk' | 'deskHead' | 'deskAhead' | 'deskQaDiffBase'>, start: Machine['startSession']): BoxConnection {
   let status: 'connecting' | 'online' | 'offline' = 'connecting';
   let running = 0;
   let telemetry: MachineTelemetry | null = null;
@@ -838,6 +842,8 @@ export function createDemoBackend(): Backend {
     deskAhead: async () => 0,
     deskHead: async (fullName: string, slug: string) => repos.get(fullName)?.pulls
       .find((pr) => pr.number === deskPulls.get(`${root}/${fullName}/desks/${slug}`))?.headSha ?? 'demo-head',
+    deskQaDiffBase: async (_fullName: string, _slug: string, base: string, head: string, previousBase: string, previousHead: string) =>
+      base === previousBase && head !== previousHead ? previousHead : null,
   });
   const startSession: Machine['startSession'] = (opts, cb) => {
     if (++sessionsStarted === USAGE_WARNING_AT) fakeUsageWarning(cb);

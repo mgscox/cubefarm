@@ -68,6 +68,7 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
       typeof finishedScratchSession === 'string' ? finishedScratchSession : undefined,
     ),
     deskHead: (fullName, slug) => workspace.deskHead(str(fullName), str(slug)),
+    deskQaDiffBase: (fullName, slug, base, head, previousBase, previousHead) => workspace.deskQaDiffBase(str(fullName), str(slug), str(base), str(head), str(previousBase), str(previousHead)),
     deskExists: (fullName, slug) => workspace.deskExists(str(fullName), str(slug)),
     deskAhead: (fullName, slug, base) => workspace.deskAhead(str(fullName), str(slug), str(base)),
     preparePrompt(text, attachments) {
