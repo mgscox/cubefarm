@@ -285,6 +285,7 @@ const BAD = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'S
 const failed = (c: Check) => BAD.includes(c.conclusion ?? '') || BAD.includes(c.state ?? '');
 const pending = (c: Check) => (!!c.status && c.status !== 'COMPLETED') || c.state === 'PENDING' || c.state === 'EXPECTED';
 const checkName = (c: Check) => c.name || c.context || 'check';
+const succeeded = (c: Check) => (c.status === 'COMPLETED' && c.conclusion === 'SUCCESS') || c.state === 'SUCCESS';
 
 function checksOf(rollup: RawPull['statusCheckRollup']): PullInfo['checks'] {
   if (!rollup || rollup.length === 0) return 'none';
@@ -311,7 +312,8 @@ function toPull(p: RawPull): PullInfo {
     additions: p.additions,
     deletions: p.deletions,
     checks: checksOf(p.statusCheckRollup),
-    hasSuccessfulChecks: (p.statusCheckRollup ?? []).some((c) => (c.status === 'COMPLETED' && c.conclusion === 'SUCCESS') || c.state === 'SUCCESS'),
+    hasSuccessfulChecks: (p.statusCheckRollup ?? []).some(succeeded),
+    successfulChecks: [...new Set((p.statusCheckRollup ?? []).filter(succeeded).map(checkName))],
     headSha: p.headRefOid,
     baseSha: p.baseRefOid,
     baseRefName: p.baseRefName,
@@ -537,9 +539,31 @@ export async function mergePull(fullName: string, number: number, method: 'squas
   }
 }
 
-/** Merge the base branch into a PR's branch on GitHub, for repos that only merge up-to-date branches. */
-export async function updateBranch(fullName: string, number: number): Promise<void> {
-  await gh(['pr', 'update-branch', String(number), '-R', fullName], { timeoutMs: 60_000 });
+/** Rebase the expected head and verify its result against GitHub's test merge of those exact inputs. */
+export async function rebasePull(fullName: string, number: number, headSha: string, baseSha: string, api: BoardQuery<unknown> = ghJson): Promise<string | null> {
+  const [owner, name] = fullName.split('/');
+  const lookup = await api(['api', 'graphql', '-f', `query=query($owner: String!, $name: String!, $number: Int!) {
+    repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+      id potentialMergeCommit { tree { oid } parents(first: 2) { nodes { oid } } }
+    } }
+  }`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${number}`], SYNC_READ) as {
+    data: { repository: { pullRequest: { id: string; potentialMergeCommit: {
+      tree: { oid: string }; parents: { nodes: { oid: string }[] };
+    } | null } } };
+  };
+  const pr = lookup.data.repository.pullRequest;
+  const expected = pr.potentialMergeCommit;
+  if (expected?.parents.nodes[0]?.oid !== baseSha || expected.parents.nodes[1]?.oid !== headSha) return null;
+
+  const update = await api(['api', 'graphql', '-f', `query=mutation($id: ID!, $head: GitObjectID!) {
+    updatePullRequestBranch(input: {pullRequestId: $id, expectedHeadOid: $head, updateMethod: REBASE}) {
+      pullRequest { headRef { target { ... on Commit { oid tree { oid } } } } }
+    }
+  }`, '-f', `id=${pr.id}`, '-f', `head=${headSha}`], SYNC_READ) as {
+    data: { updatePullRequestBranch: { pullRequest: { headRef: { target: { oid: string; tree: { oid: string } } } | null } | null } };
+  };
+  const commit = update.data.updatePullRequestBranch.pullRequest?.headRef?.target;
+  return commit && commit.oid !== headSha && commit.tree.oid === expected.tree.oid ? commit.oid : null;
 }
 
 /** Retry only the failed jobs in each GitHub Actions run. */

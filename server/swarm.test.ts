@@ -2263,17 +2263,18 @@ describe('CEO merge_pr', () => {
       verdict: 'pass', summary: 'Older completed QA', checks: [],
     } });
     await vi.advanceTimersByTimeAsync(0);
-    Object.assign(pull, { checks: 'passing', mergeState: 'BEHIND' });
-    const update = vi.spyOn(s.backend, 'updateBranch').mockImplementation(async () => {
+    Object.assign(pull, { checks: 'passing', hasSuccessfulChecks: true, mergeState: 'BEHIND', baseSha: 'new-base' });
+    const update = vi.spyOn(s.backend, 'rebasePull').mockImplementation(async () => {
       Object.assign(pull, { headSha: 'updated-never-tested-head', mergeState: 'CLEAN' });
+      return pull.headSha;
     });
     expect(await s.advanceMerge(repo, rec, pull)).toBe(false);
     expect(update).toHaveBeenCalledOnce();
-    expect(rec).toMatchObject({ status: 'passed', testedSha: 'tested', passedSha: pull.headSha });
+    expect(rec).toMatchObject({ status: 'passed', testedSha: 'tested', passedSha: 'tested', mergeCandidate: { headSha: pull.headSha } });
     if (failure === 'checkout') checkout.mockRejectedValue(new Error('Checkout failed'));
     else start.mockImplementation(() => { throw new Error('Runner could not start'); });
     await s.runQa(tester, repo, rec);
-    expect(rec).toMatchObject({ status: 'queued', testedSha: pull.headSha, passedSha: pull.headSha });
+    expect(rec).toMatchObject({ status: 'queued', testedSha: pull.headSha, passedSha: 'tested' });
     vi.mocked(s.backend.commentPull).mockClear();
     await expect(swarm.mergePr(args)).rejects.toMatchObject({ status: 409 });
     expect(s.backend.commentPull).not.toHaveBeenCalled();
@@ -6512,6 +6513,72 @@ describe('manual office closure', () => {
     await swarm.reopenOffice();
     await f.advanceMerges(repo);
     expect(merge).toHaveBeenCalledOnce();
+  });
+
+  it('rebases queued PRs one at a time and merges after fresh CI without another QA round', async () => {
+    Object.assign(repo, { autoMerge: true });
+    let baseSha = 'base-1';
+    const first = { ...qaPull(), hasSuccessfulChecks: true, successfulChecks: ['CI', 'e2e'] };
+    const second = { ...first, number: 14, headRefName: 'swarm/14', headSha: 'sha-2' };
+    const third = { ...first, number: 15, headRefName: 'swarm/15', headSha: 'sha-3' };
+    const pulls = [first, second, third];
+    const heads = new Map(pulls.map((pr) => [pr.headSha, baseSha]));
+    const records = pulls.map((pr) => ({ ...qaRecord(), status: 'passed' as const, prNumber: pr.number, passedSha: pr.headSha, testedSha: pr.headSha }));
+    s.state.qa.push(...records);
+    vi.spyOn(s.backend, 'prDetails').mockImplementation(async (_repo, number) => ({
+      ...pulls.find((pr) => pr.number === number)!, body: '', baseSha, isCrossRepository: false,
+    }));
+    vi.spyOn(s.backend, 'containsCommit').mockImplementation(async (_repo, head, base) => heads.get(head) === base);
+    const merge = vi.spyOn(s.backend, 'mergePull').mockImplementation(async (_repo, number, _method, sha) => {
+      const pr = pulls.find((pull) => pull.number === number)!;
+      expect(sha).toBe(pr.headSha);
+      pr.state = 'MERGED';
+      baseSha = `merged-${number}`;
+    });
+    const rebase = vi.spyOn(s.backend, 'rebasePull').mockImplementation(async (_repo, number, head, base) => {
+      const pr = pulls.find((pull) => pull.number === number)!;
+      expect(head).toBe(pr.headSha);
+      expect(base).toBe(baseSha);
+      pr.headSha = `${head}-rebased`;
+      pr.checks = 'none';
+      pr.hasSuccessfulChecks = false;
+      pr.successfulChecks = [];
+      heads.set(pr.headSha, base);
+      return pr.headSha;
+    });
+    const poll = async () => {
+      Object.assign(s.repoRt.get(repo.id)!, { fetchedAt: Date.now(), pulls: pulls.map((pr) => ({ ...pr, baseSha })) });
+      await f.advanceMerges(repo);
+    };
+
+    await poll();
+    expect(merge).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'squash', 'sha-1');
+    expect(rebase).not.toHaveBeenCalled();
+    await poll();
+    expect(rebase).toHaveBeenCalledExactlyOnceWith(repo.fullName, 14, 'sha-2', 'merged-13');
+    await poll();
+    Object.assign(second, { checks: 'passing', hasSuccessfulChecks: true, successfulChecks: ['CI'] });
+    await poll();
+    expect(merge).toHaveBeenCalledTimes(1);
+    expect(rebase).toHaveBeenCalledTimes(1);
+
+    second.checks = 'failing';
+    baseSha = 'external-merge';
+    await poll();
+    expect(rebase).toHaveBeenLastCalledWith(repo.fullName, 14, 'sha-2-rebased', 'external-merge');
+    expect(merge).toHaveBeenCalledTimes(1);
+    Object.assign(second, { checks: 'passing', hasSuccessfulChecks: true, successfulChecks: ['CI', 'e2e'] });
+    await poll();
+    expect(merge).toHaveBeenLastCalledWith(repo.fullName, 14, 'rebase', 'sha-2-rebased-rebased');
+    expect(records[1]).toMatchObject({ status: 'passed', passedSha: 'sha-2', testedSha: 'sha-2', round: 1, retests: 0 });
+    expect(sessions).toHaveLength(0);
+
+    await poll();
+    expect(rebase).toHaveBeenLastCalledWith(repo.fullName, 15, 'sha-3', 'merged-14');
+    third.headSha = 'developer-push';
+    await poll();
+    expect(records[2]).toMatchObject({ status: 'queued', round: 2, retests: 1 });
+    expect(merge).toHaveBeenCalledTimes(2);
   });
 
   it.each(['needs-review', 'needs-human'])('holds automatic merges until %s is removed', async (label) => {
