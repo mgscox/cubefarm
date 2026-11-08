@@ -45,7 +45,7 @@ import { decideProposal, proposalFromHandoff, withNewerDraft, wordingOnly, type 
 import { createDemoProposalWorker, demoHandoff } from './proposalFixture.ts';
 import { demoProposalRecords, demoReview, isReviewFixture } from './demoIdeaReview.ts';
 import { currentRound, nextStep, pickReviewers, promote, recordReview, REVIEW_FOCUSES, reviseRound, startReview } from '../shared/ideaReview.ts';
-import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
+import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep, type MergeRecord } from './mergeGate.ts';
 import { qaOutcome } from './qaOutcome.ts';
 import { qaFindings, workerSnapshot } from './qaEvidence.ts';
 import { deriveScoreEvents, projectScores, reconcileScores, SCORE_LEDGER_VERSION, ZERO_SCORES, type ScoreLedger } from './scores.ts';
@@ -206,7 +206,8 @@ interface QaRecord extends QaView {
   fixInstructions: string | null;
   sessionFailures: number;
   testedSha: string | null; // the head commit QA is testing
-  passedSha: string | null; // the head commit QA signed off on: auto-merge merges exactly that
+  passedSha: string | null; // the head commit QA signed off on
+  mergeCandidate?: MergeRecord['mergeCandidate'];
   failedSha: string | null; // the head commit QA last failed: re-testing it unchanged would fail again
   findings?: QaFinding[];
   publishedFindings?: PublishedQaFindings;
@@ -1380,6 +1381,7 @@ export class Swarm {
 
   private setQa(rec: QaRecord, patch: Partial<QaRecord>) {
     Object.assign(rec, patch, { updatedAt: Date.now() });
+    if (rec.status === 'queued' || rec.status === 'testing' || rec.mergeCandidate?.approvedSha !== rec.passedSha) delete rec.mergeCandidate;
     this.broadcast({ type: 'qa', qa: this.qaView(rec) });
     this.save();
   }
@@ -2893,8 +2895,7 @@ export class Swarm {
 
   /**
    * Auto-merge (floors with it on): a swarm PR merges itself once QA has signed off on its latest commit and GitHub's
-   * checks are green. Failing checks and merge conflicts go back to a developer; new commits after QA's sign-off send
-   * it back to QA. Merging deletes the remote branch, and the floor's folder then fast-forwards (syncRepo sees the merge).
+   * checks are green. Finish CI on a rebased candidate before advancing another PR on the floor.
    */
   private async advanceMerges(repo: PersistedRepo) {
     if (this.state.officeHeld) return;
@@ -2908,17 +2909,22 @@ export class Swarm {
     rt.merging = true;
     let merged = false;
     try {
-      for (const rec of this.state.qa.filter((q) => q.repoId === repo.id && q.status === 'passed')) {
-        const pr = rt.pulls.find((p) => p.number === rec.prNumber && p.state === 'OPEN');
-        if (!pr || !pr.headRefName.startsWith('swarm/')) continue; // people's own PRs are theirs to merge
+      const queue = this.state.qa.filter((q) => q.repoId === repo.id && q.status === 'passed').flatMap((rec) => {
+        const pr = rt.pulls.find((p) => p.number === rec.prNumber && p.state === 'OPEN' && p.headRefName.startsWith('swarm/'));
+        return pr && !hasLabel(pr.labels, NEEDS_HUMAN) && (!rec.mergeCandidate || !hasLabel(pr.labels, NEEDS_REVIEW)) ? [{ rec, pr }] : [];
+      }).sort((a, b) => Number(!!b.rec.mergeCandidate) - Number(!!a.rec.mergeCandidate));
+      for (const { rec, pr } of queue) {
         // Only act on PR data fetched after the record last changed (a fix may have just pushed).
-        if ((rt.fetchedAt ?? 0) < rec.updatedAt) continue;
-        try {
-          if (await this.advanceMerge(repo, rec, pr)) merged = true;
-        } catch (err) {
-          console.warn(`auto-merge of ${repo.fullName}#${pr.number} failed`, err);
-          this.mergeNote(rec, `auto-merge hit a problem: ${oneLine(err)}`);
+        if ((rt.fetchedAt ?? 0) >= rec.updatedAt) {
+          try {
+            merged = await this.advanceMerge(repo, rec, pr);
+          } catch (err) {
+            console.warn(`auto-merge of ${repo.fullName}#${pr.number} failed`, err);
+            this.mergeNote(rec, `auto-merge hit a problem: ${oneLine(err)}`);
+          }
         }
+        // A merge invalidates the base data for later entries. An active rebase owns the slot through CI.
+        if (merged || (rec.status === 'passed' && rec.mergeCandidate)) break;
       }
     } finally {
       rt.merging = false;
@@ -2936,7 +2942,8 @@ export class Swarm {
     if (step.do === 'details') {
       // GitHub works mergeability out lazily and lists often say UNKNOWN; asking about the PR itself gets an answer.
       const d = await this.backend.prDetails(repo.fullName, pr.number);
-      pr = { ...pr, labels: d.labels ?? pr.labels, headSha: d.headSha, mergeable: d.mergeable, mergeState: d.mergeState };
+      if (d.headSha !== pr.headSha || d.state !== 'OPEN') return false; // checks belong to the list snapshot
+      pr = { ...pr, labels: d.labels ?? pr.labels, baseSha: d.baseSha, baseRefName: d.baseRefName, mergeable: d.mergeable, mergeState: d.mergeState };
       step = mergeStep(pr, rec, Date.now(), { base: repo.defaultBranch, detailed: true });
     }
     if (this.state.officeHeld || hasLabel(pr.labels, NEEDS_HUMAN)) return false;
@@ -2953,6 +2960,15 @@ export class Swarm {
     }
     if (this.holdForSecurityReview(repo, rec, pr, false)) return false;
     if (hasLabel(pr.labels, NEEDS_REVIEW) && step.do !== 'ready') return false;
+    const candidate = rec.mergeCandidate;
+    let baseInHead: boolean | undefined;
+    if (candidate && !rec.securityReview && pr.baseSha && pr.baseSha !== candidate.baseSha &&
+      (step.do === 'wait' || step.do === 'rerun' || (step.do === 'send-back' && step.reason === 'checks'))) {
+      baseInHead = await this.backend.containsCommit(repo.fullName, candidate.headSha, pr.baseSha);
+      // CI for the superseded base does not need a fix or a rerun.
+      if (!baseInHead) step = { do: 'update-branch', set: {} };
+    }
+    if (this.state.officeHeld || rec.status !== 'passed') return false;
     if (step.do === 'rerun') {
       this.setQa(rec, { checkRerunSha: pr.headSha, checkRerunAt: Date.now(), pendingSince: null, mergeNote: 're-running failed checks once' });
       await this.backend.rerunFailedJobs(repo.fullName, step.runIds);
@@ -2961,7 +2977,7 @@ export class Swarm {
     if (step.do === 'send-back') return this.sendBack(repo, rec, step.reason, step.instructions, step.needsHuman);
     if (step.do === 'wait') {
       if (step.alert) {
-        this.postMessage('office', `⏳ PR #${pr.number} on ${repo.fullName} passed QA, but its checks (${pr.pendingChecks.join(', ')}) have been running for over ${CHECKS_ALERT_MS / 60_000} minutes. It merges as soon as they finish.`);
+        this.postMessage('office', `⏳ PR #${pr.number} on ${repo.fullName} passed QA and has waited over ${CHECKS_ALERT_MS / 60_000} minutes for passing CI. ${step.note ?? ''}`);
       }
       return step.note === undefined ? false : this.mergeNote(rec, step.note);
     }
@@ -2970,39 +2986,67 @@ export class Swarm {
       await this.backend.markPullReady(repo.fullName, pr.number);
       return false; // the next sync sees it ready and carries on toward merging
     }
-    if (step.do === 'update-branch') {
-      // The repo only merges up-to-date branches. GitHub merges the base in cleanly (or refuses); CI checks the result.
-      this.mergeNote(rec, `updating the branch with ${repo.defaultBranch}`);
-      if (rec.securityReview) {
-        const latest = await this.backend.prDetails(repo.fullName, pr.number);
-        if (latest.headSha !== pr.headSha) {
-          this.holdForSecurityReview(repo, rec, latest);
-        } else if (latest.baseSha) {
-          this.sendBackForSecurityBase(repo, rec, latest);
-        }
-        return false;
-      }
-      await this.backend.updateBranch(repo.fullName, pr.number);
-      const details = await this.backend.prDetails(repo.fullName, pr.number);
-      this.setQa(rec, { passedSha: details.headSha });
-      return false;
-    }
-    if (step.do !== 'merge') return false;
+    if (step.do !== 'merge' && step.do !== 'update-branch') return false;
+    if (pr.baseSha && !rec.securityReview) baseInHead ??= await this.backend.containsCommit(repo.fullName, pr.headSha, pr.baseSha);
     const latest = await this.backend.prDetails(repo.fullName, pr.number);
     rec.crossRepository ??= latest.isCrossRepository;
-    if (this.state.officeHeld || hasLabel(latest.labels, NEEDS_HUMAN) || hasLabel(latest.labels, NEEDS_REVIEW)) return false;
+    if (this.state.officeHeld || latest.state !== 'OPEN' || latest.isDraft || hasLabel(latest.labels, NEEDS_HUMAN) || hasLabel(latest.labels, NEEDS_REVIEW)) return false;
     if ((rec.securityReview && !latest.baseSha) || this.holdForSecurityReview(repo, rec, latest)) return false;
+    if (latest.headSha !== pr.headSha) return this.mergeNote(rec, 'head changed; refreshing before merge');
+    const baseRef = latest.baseRefName ?? repo.defaultBranch;
+    if (rec.mergeCandidate && rec.mergeCandidate.baseRef !== baseRef) {
+      this.setQa(rec, { status: 'queued', round: rec.round + 1, retests: rec.retests + 1, mergeNote: 'target branch changed' });
+      setTimeout(() => this.schedule(), 200);
+      return false;
+    }
+    if (pr.baseSha && pr.baseSha !== latest.baseSha) return this.mergeNote(rec, `waiting for a fresh view of ${baseRef}`);
+    if (rec.status !== 'passed') return false;
+    const behind = latest.mergeState === 'BEHIND' || baseInHead === false;
+    const needsHuman = rec.mergeFixes >= MAX_MERGE_FIXES;
+    if (latest.mergeable === 'CONFLICTING' || latest.mergeState === 'DIRTY') {
+      return this.sendBack(repo, rec, 'conflict', `It conflicts with ${baseRef}.`, needsHuman);
+    }
+    if (behind) {
+      if (!latest.baseSha) return this.mergeNote(rec, `waiting for the current ${baseRef} revision`);
+      if (rec.securityReview) {
+        this.sendBackForSecurityBase(repo, rec, latest);
+        return false;
+      }
+      if (latest.isCrossRepository) return this.mergeNote(rec, `waiting for the fork's author to rebase onto ${baseRef}`);
+      if (!candidate && (pr.checks !== 'passing' || pr.hasSuccessfulChecks !== true)) {
+        return this.mergeNote(rec, 'waiting for successful CI before rebasing');
+      }
+      const approvedSha = rec.passedSha;
+      if (!approvedSha) return false;
+      this.mergeNote(rec, `rebasing onto ${baseRef}`);
+      let headSha: string | null;
+      try {
+        headSha = await this.backend.rebasePull(repo.fullName, pr.number, pr.headSha, latest.baseSha);
+      } catch (err) {
+        if (/(?:merge|rebase) conflict/i.test(oneLine(err))) return this.sendBack(repo, rec, 'conflict', `It conflicts with ${baseRef}.`, needsHuman);
+        throw err;
+      }
+      if (!headSha) return this.mergeNote(rec, 'waiting for a verified rebase result from GitHub');
+      if (rec.status !== 'passed' || rec.passedSha !== approvedSha) return false;
+      this.setQa(rec, {
+        mergeCandidate: { headSha, approvedSha, baseSha: latest.baseSha, baseRef, expectedChecks: candidate?.expectedChecks ?? pr.successfulChecks ?? [] },
+        mergeNote: 'waiting for CI on the rebased head', pendingSince: null, alerted: false, mergeRetryAt: null,
+      });
+      return false;
+    }
     this.mergeNote(rec, 'merging…');
     let error = '';
-    for (const method of ['squash', 'merge', 'rebase'] as const) {
+    const methods = rec.mergeCandidate ? ['rebase', 'squash', 'merge'] as const : ['squash', 'merge', 'rebase'] as const;
+    for (const [index, method] of methods.entries()) {
       if (this.state.officeHeld) break;
-      if (method !== 'squash') {
+      if (index > 0) {
         const current = await this.backend.prDetails(repo.fullName, pr.number);
         if (this.state.officeHeld || (rec.securityReview && !current.baseSha) || hasLabel(current.labels, NEEDS_HUMAN) ||
           hasLabel(current.labels, NEEDS_REVIEW) || this.holdForSecurityReview(repo, rec, current)) return false;
+        if (current.baseSha !== latest.baseSha || current.baseRefName !== latest.baseRefName) return false;
       }
       try {
-        await this.backend.mergePull(repo.fullName, pr.number, method, rec.passedSha ?? pr.headSha);
+        await this.backend.mergePull(repo.fullName, pr.number, method, pr.headSha);
         error = '';
         break;
       } catch (err) {

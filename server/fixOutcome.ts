@@ -10,6 +10,7 @@ export interface FixRecord {
   round: number;
   testedSha: string | null;
   passedSha: string | null;
+  mergeCandidate?: { headSha: string };
   fixReason: FixReason | null;
   fixCrashes: string[];
 }
@@ -38,7 +39,7 @@ export function fixNeedsHuman(crashes: string[], devs: number): boolean {
 export function fixOutcome(rec: FixRecord, head: string | null, minutes: number, fixer: { agentId: string; devs: number; counts?: boolean }): FixOutcome {
   const pr = rec.prNumber;
   // The commit the fix started from: the one QA failed, or the one QA passed (and auto-merge kept) for a conflict.
-  const before = rec.fixReason === 'conflict' ? (rec.passedSha ?? rec.testedSha) : rec.testedSha;
+  const before = rec.fixReason === 'conflict' ? (rec.mergeCandidate?.headSha ?? rec.passedSha ?? rec.testedSha) : rec.testedSha;
   if (rec.fixReason !== 'checks' && head && before && head === before) {
     const fixCrashes = fixer.counts === false ? rec.fixCrashes : [...rec.fixCrashes, fixer.agentId];
     return {
