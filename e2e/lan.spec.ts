@@ -93,6 +93,21 @@ test('CLI binding defaults to loopback and wildcard serves the office through bu
         children.push(vite.proc);
         await expect.poll(vite.output).toMatch(/Local:\s+http:\/\/localhost:\d+/);
         const clientPort = Number(vite.output().match(/Local:\s+http:\/\/localhost:(\d+)/)![1]);
+        const route = '/api/settings/upstash';
+        const localhost = `http://127.0.0.1:${clientPort}`;
+        const keyPatch = { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'synthetic-box-key' }) };
+        // A LAN client can set Host and omit Origin. Vite must forward the actual peer address.
+        if (!lanHost.startsWith('127.')) {
+          const spoofed = await fetch(`http://${lanHost}:${clientPort}${route}`, {
+            ...keyPatch, headers: { ...keyPatch.headers, Host: `127.0.0.1:${clientPort}` },
+          });
+          expect(spoofed.status).toBe(403);
+        }
+        const saved = await fetch(`${localhost}${route}`, {
+          ...keyPatch, headers: { ...keyPatch.headers, Origin: localhost },
+        });
+        expect(saved.status).toBe(200);
+        expect(await saved.json()).toEqual({ keySource: 'settings', canManage: true });
         await browserFlow(page, `http://${lanHost}:${clientPort}`);
       }
       await stop(server.proc);

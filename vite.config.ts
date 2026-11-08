@@ -16,6 +16,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/api/settings/mcp': { target: localUrl(host, serverPort), xfwd: true },
+      '/api/settings/upstash': { target: localUrl(host, serverPort), xfwd: true },
       '/api': localUrl(host, serverPort),
       '/ws': { target: localUrl(host, serverPort, 'ws'), ws: true },
     },
