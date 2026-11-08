@@ -40,6 +40,7 @@ On Windows, keep it inside your user profile, which other accounts can't read by
 | `OPENROUTER_API_KEY` | OpenRouter API billing for OpenCode workers on Upstash. |
 | `CUBEFARM_TELEGRAM_TOKEN` | The bot token for [Telegram](telegram.md). |
 | `CUBEFARM_MCP_TOKEN` | The fallback bearer token for the [manager MCP gateway](manager-mcp.md). A token saved in Settings takes precedence, and the Settings switch can disable access with either token source. |
+| `CUBEFARM_CLAUDE_AUTH_BOXES` | Comma-separated SSH destinations allowed to use the office's [Claude subscription credential](remote-claude-auth.md#trusted-ssh-workers). Empty by default. |
 
 The file only holds the settings listed here. `SWARM_HOME`, `SWARM_PORT`, `SWARM_HOST` and the other `SWARM_*` variables are read from the environment only.
 
@@ -51,7 +52,7 @@ requested. Remote desk RPCs additionally have their own deadlines (the desk time
 
 ## How it's read
 
-- **At startup only.** After editing the file, restart the office.
+- **At startup.** After editing the file, restart the office. For Claude worker authentication, each new SSH connection reads the destination list. Removing a destination takes effect for new sessions immediately.
 - **The environment wins.** A setting already set in the server's environment overrides the file's value.
 - **A missing or unreadable file** means no settings. CubeFarm starts as usual, and Telegram, for example, shows as unconfigured.
 - **Demo mode** (`--demo`) ignores the file. An explicitly supplied `CUBEFARM_MCP_TOKEN` environment variable can enable MCP for testing in a demo office on branch `main`.

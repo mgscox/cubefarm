@@ -49,6 +49,7 @@ describe.skipIf(!terminalsAvailable)("a box's bridge", () => {
     const first = link();
     const ready = await first.next(op('ready'));
     expect(ready.ptys).toEqual([]);
+    expect(ready.officeClaudeAuth).toBe(true);
     expect(ready.build).toMatch(/^[0-9a-f]{16}$/);
 
     first.send({ op: 'rpc', rid: 1, method: 'info', args: [] });
