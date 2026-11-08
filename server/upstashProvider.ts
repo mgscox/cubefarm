@@ -3,13 +3,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Box, type BoxConfig, type ExecSessionOptions } from '@upstash/box';
 import type { AgentCli } from '../shared/types.ts';
-import type { UpstashProvider } from './upstash.ts';
+import { UPSTASH_ROOT as ROOT, type UpstashProvider } from './upstash.ts';
 import { readConfigEnv, VERSION } from './config.ts';
 import { gh } from './exec.ts';
 import { connectBox } from './boxLink.ts';
 import { PTY_PROTOCOL, runtimeFlags } from './ptyProtocol.ts';
 
-const ROOT = '/workspace/cubefarm';
 const PACKAGE = `${ROOT}/node_modules/cubefarm`;
 const KEYS: Record<AgentCli, string> = { claude: 'ANTHROPIC_API_KEY', codex: 'OPENAI_API_KEY', opencode: 'OPENROUTER_API_KEY' };
 export function upstashConfig(env: NodeJS.ProcessEnv, cli: AgentCli, name: string, gitToken: string): BoxConfig {
@@ -36,11 +35,12 @@ export async function boxExec(box: Box, argv: string[], options: Pick<ExecSessio
 export const BOOTSTRAP = String.raw`
 const fs = require('node:fs'), cp = require('node:child_process');
 (async () => {
-  const root = '/workspace/cubefarm';
+  const root = '${ROOT}';
   fs.mkdirSync(root, { recursive: true });
   const cli = process.env.CUBEFARM_UPSTASH_CLI;
   const extra = cli === 'codex' ? ['@openai/codex'] : cli === 'opencode' ? ['opencode-ai'] : [];
-  cp.execFileSync('npm', ['install', '--prefix', root, 'cubefarm@' + process.argv[1], ...extra], { stdio: 'ignore' });
+  const [version, playwright, yaml] = process.argv.slice(1);
+  cp.execFileSync('npm', ['install', '--prefix', root, 'cubefarm@' + version, 'playwright@' + playwright, 'yaml@' + yaml, ...extra], { stdio: 'ignore' });
   cp.execFileSync('node', [root + '/node_modules/playwright/cli.js', 'install', 'chromium'], { stdio: 'ignore' });
   const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
   const res = await fetch('https://github.com/cli/cli/releases/download/v2.83.2/gh_2.83.2_linux_' + arch + '.tar.gz');
@@ -59,7 +59,7 @@ const fs = require('node:fs'), cp = require('node:child_process');
 // Confirm the keeper has exited before checking Git, including when the office lost the worker runtime.
 export const STOP_KEEPER = String.raw`
 const fs = require('node:fs'), net = require('node:net'), cp = require('node:child_process');
-const home = process.argv[2] || '/workspace/cubefarm/home';
+const home = process.argv[2] || '${ROOT}/home';
 const evidence = home + '/stopped-writers.json';
 let writers = fs.existsSync(evidence) ? JSON.parse(fs.readFileSync(evidence, 'utf8')) : [];
 const processes = () => cp.execFileSync('ps', ['-A', '-o', 'pid=,ppid=,pgid=,stat='], { encoding: 'utf8' }).trim().split('\n').map(l => l.trim().split(/\s+/));
@@ -103,7 +103,7 @@ sock.on('close', () => {
 
 export const RELEASE_DESK = String.raw`
 (async () => {
-  const { createBoxOps } = await import('/workspace/cubefarm/node_modules/cubefarm/dist-server/boxOps.js');
+  const { createBoxOps } = await import('${PACKAGE}/dist-server/boxOps.js');
   await createBoxOps({ hookUrl: () => '', pids: () => [] }).rpc('releaseDesk', [process.argv[1], process.argv[2], Number(process.argv[3])]);
 })().catch(() => process.exit(1));
 `;
@@ -145,7 +145,9 @@ export function createUpstashProvider(config?: () => NodeJS.ProcessEnv): Upstash
         return false;
       });
       if (!ready) {
-        await boxExec(box, ['node', '-e', BOOTSTRAP, VERSION]);
+        // The release on npm can predate the dependencies used by the office's overlay.
+        const manifest = JSON.parse(await fs.readFile(path.resolve(import.meta.dirname, '..', 'package.json'), 'utf8'));
+        await boxExec(box, ['node', '-e', BOOTSTRAP, VERSION, manifest.dependencies.playwright, manifest.dependencies.yaml]);
         for (const file of ['boxStdio.js', 'boxOps.js', 'ptyHost.js', 'browser-init.js']) {
           const content = await fs.readFile(path.resolve(import.meta.dirname, '..', 'dist-server', file), 'utf8');
           await box.files.write({ path: `${PACKAGE}/dist-server/${file}`, content });
