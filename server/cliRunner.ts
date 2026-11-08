@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { bashExpansionPermission, bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cliStartupFailed, codexTurnThread, hookReviewKey, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, startupQuestionOnScreen, STUCK_MS, trustKey } from './clis.ts';
+import { bashExpansionPermission, bootNotice, claudeConversation, type ClaudeTurn, cliExit, cliLabel, cliStartupFailed, codexTurnThread, HOOK_REVIEW_ANSWERS, hookReviewWatch, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, isCli, LOST_CONVERSATION, menuWatch, resumableSession, startupQuestionOnScreen, STUCK_MS, trustKey } from './clis.ts';
 import { terminalsAvailable, type Pty } from './ptyClient.ts';
 import { ALLOW } from './ptyProtocol.ts';
 import { localCliHost } from './localCliHost.ts';
@@ -394,6 +394,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   let screenTimer: NodeJS.Timeout | undefined;
   let shotTimer: NodeJS.Timeout | undefined;
   let stuckTimer: NodeJS.Timeout | undefined;
+  let reviewTimer: NodeJS.Timeout | undefined;
   const stuck = menuWatch();
   const idleStuck = idlePromptWatch(STUCK_MS, Date.now(), cli);
   let activity = 0;
@@ -454,6 +455,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     setBoot(null);
     clearInterval(shotTimer);
     clearInterval(stuckTimer);
+    clearInterval(reviewTimer);
     const l = live;
     const allowInput = term.allowInput;
     const pauseInput = () => false;
@@ -961,19 +963,14 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       }
       const screen = term.screen();
       const question = startupQuestionOnScreen(screen, cli);
-      const review = question ? hookReviewKey(screen) : null;
-      const key = question && trustKeys < 12 && Date.now() - trustedAt > 3000 ? (trustKey(screen) ?? review) : null;
+      const key = question && trustKeys < 12 && Date.now() - trustedAt > 3000 ? trustKey(screen) : null;
       if (key === 'down') {
         trustKeys += 1;
         quietly(() => live?.proc?.write(term.appCursor ? '\x1bOB' : '\x1b[B'));
       } else if (key === 'enter') {
         trustKeys += 1;
         trustedAt = Date.now(); // the question takes a moment to go: don't answer it twice
-        if (!review) log([{ kind: 'system', text: `✓ Trusted the worktree for ${label}.` }]);
-        else if (!hooksHinted) {
-          hooksHinted = true;
-          log([{ kind: 'system', text: `ℹ To see ${label}'s steps here, trust the office's hooks once: in this terminal, type /hooks and press t. Until then the office shows its task.` }]);
-        }
+        log([{ kind: 'system', text: `✓ Trusted the worktree for ${label}.` }]);
         quietly(() => live?.proc?.write('\r'));
       }
       if (!nudged.has('login') && /Not logged in|run \/login|Select login method|Sign in with ChatGPT|Please login|Invalid API key/i.test(screen)) {
@@ -985,6 +982,30 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
         log([{ kind: 'error', text: `⚠ ${label} is waiting on a setup screen: open the terminal to answer it.` }]);
       }
       if (pendingPrompts.length && !question) sendPrompt(pendingPrompts.shift()!);
+    }, 1000);
+  };
+
+  /** Codex asks to review hooks whenever its TUI starts, even after the startup window: answer it all session. */
+  const watchHookReview = () => {
+    if (cli !== 'codex' || reviewTimer) return;
+    const review = hookReviewWatch();
+    reviewTimer = setInterval(() => {
+      if (done) return;
+      const key = review.look(term.screen());
+      if (key === 'down') quietly(() => live?.proc?.write(term.appCursor ? '\x1bOB' : '\x1b[B'));
+      else if (key === 'enter') {
+        trustedAt = Date.now(); // holds the startup watch's folder-trust and setup checks while the question goes
+        if (!hooksHinted) {
+          hooksHinted = true;
+          log([{ kind: 'system', text: `ℹ To see ${label}'s steps here, trust the office's hooks once: in this terminal, type /hooks and press t. Until then the office shows its task.` }]);
+        }
+        quietly(() => live?.proc?.write('\r'));
+      } else if (key === 'stuck') {
+        const error = `${label} kept asking "Hooks need review" after the office answered "Continue without trusting" ${HOOK_REVIEW_ANSWERS} times, so the office ended the session. Open the terminal to see why; trusting the office's hooks once (/hooks, then t) stops the question.`;
+        term.note(`── ${error} ──`);
+        log([{ kind: 'error', text: error }]);
+        finish({ ok: false, text: lastText, errors: [error] });
+      }
     }, 1000);
   };
 
@@ -1039,6 +1060,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     shotTimer = setInterval(collectShots, 2000);
     watchStuck();
     watchStartup();
+    watchHookReview();
     if (opts.reattach) watchRecovery();
     else if (live.hookless) watchHookless(HOOKLESS_LOOK_MS, !live.transcriptBase);
     return handle;
@@ -1095,6 +1117,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
       watchStuck();
 
       watchStartup();
+      watchHookReview();
     };
     // Codex won't resume a thread the office archived (see codexThread): it's unarchived first.
     if (cli === 'codex' && opts.resumeSessionId) void host.codexThread('unarchive', opts.resumeSessionId).then(begin);
