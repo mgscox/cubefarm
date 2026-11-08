@@ -52,6 +52,7 @@ import { deriveScoreEvents, projectScores, reconcileScores, SCORE_LEDGER_VERSION
 import { scoringFindings } from '../shared/qaEvidence.ts';
 import { lessonExport } from '../shared/lessons.ts';
 import { draftLesson, reviewLesson, reviseLesson } from './lessons.ts';
+import { formatQaFinding, parseQaFindings, reviewFindings, type PublishedQaFindings, type QaFinding, type QaFindingReport } from './qaFindings.ts';
 import { applyRepoRefresh } from './repoRefresh.ts';
 import { issueSessionWork, noWorkCoolingDown, recordNoWork, retainNoWork, STALLED } from './issueWork.ts';
 import { parentReadyToClose, retainParentCloses, type ParentClose } from './parentClose.ts';
@@ -208,6 +209,11 @@ interface QaRecord extends QaView {
   passedSha: string | null; // the head commit QA signed off on
   mergeCandidate?: MergeRecord['mergeCandidate'];
   failedSha: string | null; // the head commit QA last failed: re-testing it unchanged would fail again
+  findings?: QaFinding[];
+  publishedFindings?: PublishedQaFindings;
+  untrackedQaFix?: string;
+  qaScope?: { baseSha?: string; baseRef: string; diffFrom?: string };
+  lastQaFailure?: { headSha: string; baseSha: string; baseRef: string };
   ciRequired?: boolean; // environment-only local validation gaps require passing CI, even in repos with no checks
   resourceRetry?: { headSha: string; agentId: string }; // the one uncharged retry after the desk ran out of memory on this revision
   fixCrashes: string[]; // developers whose fix session crashed since the last pushed fix, one entry per crash
@@ -334,6 +340,9 @@ interface QaReport {
   commands: { command: string; result: string }[];
   screenshots: string[];
   fixInstructions?: string;
+  findings?: QaFindingReport['findings'];
+  findingUpdates?: QaFindingReport['findingUpdates'];
+  codeReviewComplete?: boolean;
   securityReviewReason?: string;
   validationGap?: 'none' | 'no-os-sandbox' | 'other';
   normalGatesPassed?: boolean;
@@ -382,6 +391,7 @@ function readSpecialism(name: 'developer' | 'prototype' | 'qa' | 'security') {
 }
 const MAX_QA_ROUNDS = 3;
 const TEST_ENVIRONMENT_GUIDANCE = "Use the repository's normal test setup. Keep dependency registries reachable during tests unless offline execution is required. Isolate live services with test configuration, mocks or emulators. Before running a full suite in a custom runner, verify a test that installs dependencies can run in that same environment, if the suite has one.";
+const QA_RECONSIDER = 'Reconsider the approach against the remaining QA blockers before sending this PR back to QA.';
 // Every agent runs Claude Opus 5.5 at medium effort unless the manager overrides it.
 const DEFAULT_MODEL = 'claude-opus-5-5';
 const EFFORTS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -511,6 +521,30 @@ const QA_SCHEMA = {
   },
 };
 
+const FINDINGS_QA_SCHEMA = {
+  ...QA_SCHEMA,
+  properties: {
+    ...QA_SCHEMA.properties,
+    summary: { type: 'string', description: 'Two to four sentences about this round. Refer to prior findings by ID.' },
+    fixInstructions: { type: 'string', description: 'Actionable instructions for any failed check that has no finding.' },
+    codeReviewComplete: { type: 'boolean', description: 'True when you reviewed all code in the assigned scope and rechecked open findings.' },
+    findings: {
+      type: 'array', description: 'New blocking findings, one per root cause.',
+      items: {
+        type: 'object', additionalProperties: false, required: ['title', 'details'],
+        properties: { title: { type: 'string' }, details: { type: 'string' } },
+      },
+    },
+    findingUpdates: {
+      type: 'array', description: 'Disposition of each previously open finding and any that reopened.',
+      items: {
+        type: 'object', additionalProperties: false, required: ['id', 'status', 'evidence'],
+        properties: { id: { type: 'string' }, status: { type: 'string', enum: ['open', 'resolved'] }, evidence: { type: 'string' } },
+      },
+    },
+  },
+};
+
 const SECURITY_SCHEMA = {
   ...QA_SCHEMA,
   required: [...QA_SCHEMA.required, 'validationGap', 'normalGatesPassed', 'blockingFindings'],
@@ -600,7 +634,11 @@ function parseReport(result: SessionResult, security = false): QaReport | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Partial<QaReport>;
   if (r.verdict !== 'pass' && r.verdict !== 'fail' && !(security && r.verdict === 'incomplete')) return null;
+  const findings = security ? undefined : parseQaFindings(r);
+  if (findings === null) return null;
   return {
+    ...findings,
+    codeReviewComplete: r.codeReviewComplete === true,
     verdict: r.verdict,
     summary: String(r.summary ?? ''),
     checks: Array.isArray(r.checks) ? r.checks.map((c) => ({
@@ -3250,7 +3288,7 @@ export class Swarm {
         this.closeQaRecord(q, pr.state);
       }
       if (pr?.state === 'OPEN' && q.closed) {
-        this.setQa(q, { closed: false, reviewId: crypto.randomUUID(), status: 'queued', mergeNote: 'QA and security review required after reopening' });
+        this.setQa(q, { closed: false, reviewId: crypto.randomUUID(), status: 'queued', lastQaFailure: undefined, mergeNote: 'QA and security review required after reopening' });
         setTimeout(() => this.schedule(), 200);
       }
       if (pr?.state === 'OPEN') {
@@ -4944,13 +4982,14 @@ export class Swarm {
       rec.mergeNote = null;
     }
     const dev = this.state.agents.find((a) => a.repoId === repo.id && a.role === 'dev' && a.task !== 'qa' && (a.prNumber === prNumber || (crossRepository === false && a.branch === pr.headRefName)));
-    if (rec) this.setQa(rec, { preparation: undefined });
+    if (rec) this.setQa(rec, { preparation: undefined, lastQaFailure: undefined });
     this.queueQa(repo, prNumber, dev ?? null, pr.closesIssues[0] ?? null, crossRepository);
     this.toast('info', `PR #${prNumber} is queued for QA`);
   }
 
-  private buildQaSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, pr: PrDetails) {
+  private buildQaSystemAppend(a: PersistedAgent, repo: PersistedRepo, cwd: string, branch: string, pr: PrDetails, diffFrom?: string) {
     const specialism = readSpecialism('qa');
+    const fullDiff = `git diff ${pr.baseSha ?? `origin/${pr.baseRefName ?? repo.defaultBranch}`}...${pr.headSha}`;
     return [
       `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a QA engineer'} on an autonomous agent team ("cubefarm"). Developers open pull requests; you review and independently verify each one before it is merged. Your sign-off is the review: ${repo.autoMerge ? "on this floor a PR you pass merges by itself as soon as GitHub's checks are green, so nobody else reads the code after you. " : ''}Be thorough and skeptical, but fair: fail a PR only for real problems (broken behaviour, failing tests or build, the issue's requirements not met, obvious regressions), not for style preferences.`,
       ...(a.brief ? ['', `Your job description:\n${a.brief}`] : []),
@@ -4967,7 +5006,9 @@ export class Swarm {
       'How to test:',
       `A conflict with ${repo.defaultBranch} is not a QA fail. Test the PR's head; the office sends conflicts to a developer before merging.`,
       '1. Read the PR description and the linked issue, and work out the acceptance criteria.',
-      `2. Review the code as a careful reviewer would: git diff origin/${repo.defaultBranch}...HEAD. Look for bugs, unhandled errors and edge cases, security problems, leftover debug code, and new logic without tests.`,
+      diffFrom
+        ? `2. Review what changed since the previous code review: git diff ${diffFrom} ${pr.headSha}. Explicitly recheck every open finding, reading surrounding code as needed. If the fix changes the approach or the range is unavailable, review the full PR with ${fullDiff}.`
+        : `2. Review the full PR with ${fullDiff}. Look for bugs, unhandled errors and edge cases, security problems, leftover debug code, and new logic without tests.`,
       "3. Install dependencies if needed, then run the project's test suite, linters, type checks and build (whichever exist).",
       TEST_ENVIRONMENT_GUIDANCE,
       'If worker limits prevent validation, distinguish them from code defects: mark only those failed or skipped checks failureKind=environment, or failureKind=resources with the resources evidence (free memory, swap, load, tests cancelled) when the run was cancelled or killed under memory pressure. That is a resource failure, not a timeout: do not call it one. Use these only with evidence that no code defect is known or suspected; reproducible or unexplained failures use code. The office records these local checks as skipped and requires green GitHub checks for the reviewed commit before merging an environment-only result. Do not request source changes just to satisfy a worker limitation.',
@@ -4975,6 +5016,7 @@ export class Swarm {
         ? `4. If the project has a UI, start it in the background on port ${this.port(a)} (reserved for you) and exercise the change in a real browser with the Playwright tools: navigate, click, type, resize to a phone size, try edge cases, and check the console for errors. Take a screenshot with browser_take_screenshot (no filename) of every important state: the screenshots are attached to the PR as evidence. Stop the server afterwards.`
         : '4. Exercise the changed behaviour directly (run the program, call the API, write a quick script).',
       '5. You may write throwaway scripts to probe behaviour, but do not commit them.',
+      'Set codeReviewComplete after reviewing the assigned scope and rechecking open findings. Report new blockers in findings, one per root cause. Explain the broken rule, give a representative example, and say where else to look. Use findingUpdates to mark each prior open finding as open or resolved with current evidence. Use its ID if it returns. Refer to prior findings by ID in the summary and failed checks.',
       '',
       'Rules: do not modify the code under test, do not commit, push, comment on, review or merge anything on GitHub. The office posts your report on the pull request. Finish with the structured QA report: verdict, summary, the checks you performed, the commands you ran and one caption per screenshot.',
       ...(specialism ? ['', specialism] : []),
@@ -5005,7 +5047,7 @@ export class Swarm {
     this.checkDesk(a);
     const branch = `qa/pr-${rec.prNumber}-${slugify(a.name)}`;
     const lastTester = rec.qaAgentId;
-    this.setQa(rec, { status: 'testing', qaAgentId: a.id });
+    this.setQa(rec, { status: 'testing', qaAgentId: a.id, qaScope: undefined });
     this.beginTask(
       a,
       { task: 'qa', issueNumber: rec.issueNumber, issueTitle: `PR #${rec.prNumber}`, branch, prNumber: rec.prNumber, prUrl: null, sessionId: null },
@@ -5084,6 +5126,10 @@ export class Swarm {
     }
 
     const dev = rec.devAgentId ? this.state.agents.find((x) => x.id === rec.devAgentId) : null;
+    const knownFindings = rec.findings?.length ? [
+      'Findings from earlier rounds. Use these IDs again if the root cause persists or returns.',
+      ...rec.findings.map((finding) => finding.status === 'open' ? formatQaFinding(finding) : `- **${finding.id}** ${finding.title} (resolved)`),
+    ].join('\n') : '';
     const prompt = [
       `Please ${security ? 'perform a detailed security review of' : 'QA'} pull request #${pr.number}: ${pr.title}`,
       `URL: ${pr.url}`,
@@ -5095,9 +5141,11 @@ export class Swarm {
         ? `\nQA passed it before, but since then the branch was updated with ${repo.defaultBranch} to resolve merge conflicts. Re-check everything, especially where this change meets the newly merged work.`
         : rec.fixReason === 'checks'
           ? '\nQA passed it before, but since then the developer changed the code to fix failing GitHub checks. Re-check everything.'
-          : rec.round > 1 && rec.summary
-            ? `\nThis is a re-test after fixes. Last round's findings:\n${rec.summary}\n${rec.fixInstructions ?? ''}\nCheck those first, then re-check everything else.`
+          : !knownFindings && rec.round > 1 && rec.summary
+            ? `\nThis is a re-test after fixes. Last round's findings:\n${rec.summary}\n${rec.fixInstructions ?? ''}\nCheck those first, then review the assigned scope.`
             : '',
+      !security ? knownFindings : '',
+      !security && knownFindings && rec.untrackedQaFix ? `Other fixes to verify:\n${rec.untrackedQaFix}` : '',
       '',
       'PR description:',
       pr.body.trim() || '(empty)',
@@ -5107,14 +5155,14 @@ export class Swarm {
       .join('\n');
 
     try {
-      {
-        const head = await this.machineFor(a).deskHead(repo.fullName, this.agentSlug(a));
-        if (gone()) return;
-        if (head !== pr.headSha) {
-          this.setQa(rec, { status: 'queued', qaAgentId: null, mergeNote: 'PR head changed during checkout; checking the current revision' });
-          this.clearTask(a);
-          return;
-        }
+      const machine = this.machineFor(a);
+      const slug = this.agentSlug(a);
+      const head = await machine.deskHead(repo.fullName, slug);
+      if (gone()) return;
+      if (head !== pr.headSha) {
+        this.setQa(rec, { status: 'queued', qaAgentId: null, mergeNote: 'PR head changed during checkout; checking the current revision' });
+        this.clearTask(a);
+        return;
       }
       let systemAppend: string;
       if (security) {
@@ -5127,11 +5175,18 @@ export class Swarm {
         this.setQa(rec, { securityReview: { ...review, auditBaseSha: pr.baseSha } });
         systemAppend = this.buildSecuritySystemAppend(repo, cwd, pr, review.reason, playbook);
       } else {
-        systemAppend = this.buildQaSystemAppend(a, repo, cwd, branch, pr);
+        const baseRef = pr.baseRefName ?? repo.defaultBranch;
+        const previous = rec.lastQaFailure;
+        const diffFrom = rec.round - rec.retests >= 3 && rec.fixReason === 'qa' && previous?.baseRef === baseRef && pr.baseSha
+          ? await machine.deskQaDiffBase(repo.fullName, slug, pr.baseSha, pr.headSha, previous.baseSha, previous.headSha).catch(() => null)
+          : null;
+        if (gone()) return;
+        this.setQa(rec, { qaScope: { baseSha: pr.baseSha, baseRef, diffFrom: diffFrom ?? undefined } });
+        systemAppend = this.buildQaSystemAppend(a, repo, cwd, branch, pr, diffFrom ?? undefined);
       }
       const rt = this.agentRt.get(a.id);
       if (rt) rt.qaResume = { cwd, systemAppend };
-      const starting = this.startAgentSession(a, repo, cwd, prompt, systemAppend, undefined, security ? SECURITY_SCHEMA : QA_SCHEMA);
+      const starting = this.startAgentSession(a, repo, cwd, prompt, systemAppend, undefined, security ? SECURITY_SCHEMA : FINDINGS_QA_SCHEMA);
       generation = this.agentRt.get(a.id)?.generation;
       await starting;
     } catch (err) {
@@ -5172,7 +5227,7 @@ export class Swarm {
         this.retryAttempt(a, 'retry', { result: 'failed', cause: 'agent', excerpt: 'Ended without a QA report' });
         a.endedAt = null;
         try {
-          await this.startAgentSession(a, repo, resume.cwd, QA_RESUME_PROMPT, resume.systemAppend, a.sessionId, security ? SECURITY_SCHEMA : QA_SCHEMA);
+          await this.startAgentSession(a, repo, resume.cwd, QA_RESUME_PROMPT, resume.systemAppend, a.sessionId, security ? SECURITY_SCHEMA : FINDINGS_QA_SCHEMA);
           return;
         } catch (err) {
           a.endedAt = Date.now();
@@ -5197,14 +5252,24 @@ export class Swarm {
     }
 
     a.taskFailures = undefined;
-    const evidence = rec ? await this.recordQaOutcome(a, repo, rec, report, result) : null;
-    if (gone()) return;
-
+    const reviewedFindings = security ? undefined : reviewFindings(rec?.findings ?? [], report.findings ?? [], report.findingUpdates ?? [], rec?.publishedFindings);
+    const openFindings = reviewedFindings?.findings.filter((finding) => finding.status === 'open') ?? [];
+    if (openFindings.length) report.verdict = 'fail';
     // A worker limitation needs CI evidence, not developers pushing meaningless commits.
     const failedChecks = report.checks.filter((c) => c.result === 'fail');
-    const environmentOnly = !security && report.checks.some((c) => c.result !== 'pass' && workerLimit(c)) &&
+    const environmentOnly = !security && !openFindings.length && report.checks.some((c) => c.result !== 'pass' && workerLimit(c)) &&
       failedChecks.every(workerLimit);
     const outOfMemory = report.checks.some((c) => c.result !== 'pass' && c.failureKind === 'resources') ? resourceNote(report.checks) : null;
+    const requiresFullReview = !security && !!rec?.qaScope?.diffFrom && !report.codeReviewComplete && (report.verdict === 'pass' || environmentOnly);
+    const fullReviewNote = 'The follow-up did not confirm complete coverage. Queued for full QA.';
+    const evidence = rec ? await this.recordQaOutcome(a, repo, rec,
+      requiresFullReview ? { ...report, verdict: 'incomplete', summary: fullReviewNote } : report, result) : null;
+    if (gone()) return;
+    if (rec && requiresFullReview) {
+      this.setQa(rec, { status: 'queued', qaAgentId: null, passedSha: null, lastQaFailure: undefined, mergeNote: fullReviewNote });
+      this.clearTask(a, { result: 'superseded', cause: 'office', excerpt: fullReviewNote });
+      return;
+    }
     if (environmentOnly) {
       report.verdict = 'pass';
       report.checks = report.checks.map((c) => c.result === 'fail' ? { ...c, result: 'skip' } : c);
@@ -5242,21 +5307,11 @@ export class Swarm {
     // Evidence + comment on the PR
     let commentUrl: string | null = null;
     if (rec) {
-      if (security && gone()) return;
+      if (gone()) return;
       const pullLabels = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === rec.prNumber)?.labels;
       if (rec.securityWaived) report.securityReviewReason = undefined;
       const securityReason = report.securityReviewReason || review?.reason ||
         (hasLabel(pullLabels, READY_FOR_SECURITY_REVIEW) ? 'Requested by the PR label.' : '');
-      const escalate = !security && pass && !!securityReason;
-      if (escalate) {
-        this.setQa(rec, { securityReview: { reason: securityReason, qaSha: rec.testedSha }, passedSha: null });
-        if (!hasLabel(pullLabels, READY_FOR_SECURITY_REVIEW)) {
-          await this.backend.setSecurityReviewLabel(repo.fullName, rec.prNumber, true).catch((err) => {
-            this.appendLog(a, [{ kind: 'error', text: `Could not add the security review label: ${oneLine(err)}. The office will retry before starting the audit.` }]);
-          });
-          if (gone()) return;
-        }
-      }
       const isCurrentAudit = (pr: PrDetails) => pr.state === 'OPEN' && pr.headSha === rec.testedSha && pr.baseSha === review?.auditBaseSha;
       const handBackStaleAudit = (pr: PrDetails) => {
         if (evidence) this.observeQaRevision(evidence, pr);
@@ -5268,19 +5323,8 @@ export class Swarm {
         a.status = 'done';
       };
       const qaRounds = rec.round - rec.retests; // rounds QA itself asked for
-      let conflict: PrDetails | null = null;
-      if (!security && !pass && !incomplete && !escalate && qaRounds >= MAX_QA_ROUNDS && rec.mergeFixes < MAX_MERGE_FIXES) {
-        try {
-          const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
-          if (gone()) return;
-          if (pr.state === 'OPEN' && pr.headSha === rec.testedSha) conflict = pr;
-        } catch (err) {
-          this.appendLog(a, [{ kind: 'error', text: `Could not check for a merge conflict: ${oneLine(err)}` }]);
-        }
-      }
+      const reconsider = !security && !pass && !incomplete && qaRounds >= MAX_QA_ROUNDS;
       if (gone()) return;
-      const outcome = () => sandboxRetry || resourceRetry ? { status: 'queued' as const, conflictFix: false }
-        : qaOutcome({ pass, incomplete, escalate, security, qaRounds, mergeFixes: rec.mergeFixes }, conflict, MAX_QA_ROUNDS);
       try {
         if (security) {
           const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
@@ -5288,9 +5332,9 @@ export class Swarm {
           if (!isCurrentAudit(pr)) return handBackStaleAudit(pr);
         }
         this.appendLog(a, [{ kind: 'system', text: '📎 Uploading evidence and posting the QA report on the PR…' }]);
-        const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security, outcome().conflictFix,
+        const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security, reconsider,
           sandboxRetry ? 'queued for one security review on another desk; no human action needed'
-          : resourceRetry ? 'the desk ran out of memory: retrying once; no QA round charged, no human action needed' : null);
+          : resourceRetry ? 'the desk ran out of memory: retrying once; no QA round charged, no human action needed' : null, reviewedFindings?.comment);
         if (gone()) return;
         commentUrl = (await this.backend.commentPull(repo.fullName, rec.prNumber, body)) || null;
         if (gone()) return;
@@ -5318,13 +5362,21 @@ export class Swarm {
           report.summary = `Could not finish the security review handoff: ${oneLine(err)}`;
         }
       }
-      if (!pass && !incomplete && qaRounds < MAX_QA_ROUNDS) {
-        // Verify the send-back still applies after posting the report.
+      let verifiedOrdinaryReview = false;
+      const scope = rec.qaScope;
+      const publishedFindings = commentUrl ? reviewedFindings?.published : rec.publishedFindings;
+      const checkRevision = !security || (!pass && !incomplete);
+      if (checkRevision) {
+        // Verify that the recorded verdict and findings still apply after posting evidence.
         const current = await this.backend.prDetails(repo.fullName, rec.prNumber).catch(() => null);
         if (gone()) return;
-        if (evidence) this.observeQaRevision(evidence, current);
+        if (evidence) {
+          if (!security) evidence.commentUrl = commentUrl;
+          this.observeQaRevision(evidence, current);
+        }
         if (current) rec.crossRepository ??= current.isCrossRepository;
         if (!current || !rec.testedSha) {
+          pass = false;
           incomplete = true;
           report.summary = `Could not verify the reviewed PR revision. ${report.summary}`;
         } else if (current.state !== 'OPEN') {
@@ -5334,21 +5386,33 @@ export class Swarm {
           return;
         } else if (security && !isCurrentAudit(current)) {
           return handBackStaleAudit(current);
-        } else if (current.headSha !== rec.testedSha) {
-          this.setQa(rec, { status: 'queued', round: rec.round + 1, retests: rec.retests + 1, passedSha: null, mergeNote: 'PR changed during QA; checking the current revision' });
+        } else if (current.headSha !== rec.testedSha || (!security && scope &&
+          ((current.baseRefName ?? repo.defaultBranch) !== scope.baseRef || (scope.diffFrom && current.baseSha !== scope.baseSha)))) {
+          this.setQa(rec, { status: 'queued', round: rec.round + 1, retests: rec.retests + 1, passedSha: null,
+            lastQaFailure: undefined, publishedFindings, mergeNote: 'PR changed during QA; checking the current revision' });
           this.clearTask(a);
           return;
         }
+        verifiedOrdinaryReview = !security && !!current && !!rec.testedSha;
       }
-      const { status: nextStatus, conflictFix } = outcome();
+      const escalate = !security && pass && !!securityReason;
+      if (escalate) {
+        this.setQa(rec, { securityReview: { reason: securityReason, qaSha: rec.testedSha }, passedSha: null });
+        if (!hasLabel(pullLabels, READY_FOR_SECURITY_REVIEW)) {
+          await this.backend.setSecurityReviewLabel(repo.fullName, rec.prNumber, true).catch((err) => {
+            this.appendLog(a, [{ kind: 'error', text: `Could not add the security review label: ${oneLine(err)}. The office will retry before starting the audit.` }]);
+          });
+          if (gone()) return;
+        }
+      }
+      const nextStatus = sandboxRetry || resourceRetry ? 'queued' : qaOutcome({ pass, incomplete, escalate, qaRounds }, MAX_QA_ROUNDS);
       if (evidence) {
-        const current = await this.backend.prDetails(repo.fullName, rec.prNumber).catch(() => null);
-        // A stopped attempt never writes its failedSha, so its posted report must not count as merge evidence.
-        if (gone()) return;
-        this.observeQaRevision(evidence, current);
-        evidence.commentUrl = commentUrl;
-        this.emitQaOutcome(evidence);
-        this.save();
+        if (security) {
+          const current = await this.backend.prDetails(repo.fullName, rec.prNumber).catch(() => null);
+          if (gone()) return;
+          evidence.commentUrl = commentUrl;
+          this.observeQaRevision(evidence, current);
+        }
         if (nextStatus === 'failed') {
           const candidates = scoringFindings(evidence).filter((f) => f.attributableTo?.agentId === rec.devAgentId);
           const change = this.recordFeedback({ kind: 'qa-send-back', ...rec, findingIds: candidates.map((f) => f.id) });
@@ -5359,7 +5423,10 @@ export class Swarm {
           }
         }
       }
-      const findings = report.fixInstructions ?? report.checks.filter((c) => c.result === 'fail').map((c) => `${c.name}: ${c.details}`).join('\n');
+      const findings = [
+        ...openFindings.map(formatQaFinding),
+        report.fixInstructions ?? (openFindings.length ? '' : report.checks.filter((c) => c.result === 'fail').map((c) => `${c.name}: ${c.details}`).join('\n')),
+      ].filter(Boolean).join('\n');
       this.setQa(rec, {
         status: nextStatus,
         ...(sandboxRetry && rec.testedSha && review?.auditBaseSha ? {
@@ -5370,10 +5437,17 @@ export class Swarm {
         summary: report.summary,
         checks: report.checks,
         commentUrl: commentUrl ?? rec.commentUrl,
-        fixInstructions: conflictFix ? `It conflicts with ${repo.defaultBranch}.\n${findings}` : findings,
+        fixInstructions: findings,
+        ...(!security ? {
+          findings: verifiedOrdinaryReview ? reviewedFindings?.findings : rec.findings,
+          publishedFindings,
+          untrackedQaFix: verifiedOrdinaryReview ? report.fixInstructions : rec.untrackedQaFix,
+          lastQaFailure: verifiedOrdinaryReview && !pass && !incomplete && report.codeReviewComplete && openFindings.length && !report.fixInstructions && rec.testedSha && scope?.baseSha
+            ? { headSha: rec.testedSha, baseSha: scope.baseSha, baseRef: scope.baseRef }
+            : undefined,
+        } : {}),
         sessionFailures: 0,
-        fixReason: pass || incomplete ? null : conflictFix ? 'conflict' : 'qa',
-        ...(conflictFix ? { mergeFixes: rec.mergeFixes + 1 } : {}),
+        fixReason: pass || incomplete ? null : 'qa',
         passedSha: pass && !escalate ? rec.testedSha : null,
         // The report's own verdict, even if a later read left the workflow incomplete: a manager override must not see a pass.
         failedSha: report.verdict === 'fail' ? rec.testedSha : null,
@@ -5382,11 +5456,12 @@ export class Swarm {
         ...(security && pass ? { securityLabel: false } : {}), // the office removed it, not the manager
         mergeNote: escalate ? 'waiting for detailed security review'
           : outOfMemory && (pass || resourceRetry) ? `${outOfMemory}${resourceRetry ? '; retrying once' : ''}`
-          : incomplete ? report.summary : null,
+          : incomplete ? report.summary : reconsider ? QA_RECONSIDER : null,
         pendingSince: null,
         mergeRetryAt: null,
         alerted: false,
       });
+      if (reconsider && !incomplete) this.postMessage('office', `PR #${rec.prNumber} on ${repo.fullName} failed QA ${qaRounds} times. ${QA_RECONSIDER}${commentUrl ? ` ${commentUrl}` : ''}`);
       const nextAfterQa = hasLabel(pullLabels, NEEDS_HUMAN) ? 'needs human intervention'
         : escalate ? 'waiting for detailed security review' : hasLabel(pullLabels, NEEDS_REVIEW) ? 'waiting for review'
         : repo.autoMerge ? "it merges once GitHub's checks are green" : 'ready to merge';
@@ -5409,12 +5484,14 @@ export class Swarm {
   private skipUnchangedQa(a: PersistedAgent, rec: QaRecord, lastTester: string | null) {
     const human = rec.round - rec.retests >= MAX_QA_ROUNDS;
     this.appendLog(a, [{ kind: 'system', text: `PR #${rec.prNumber} has no new commits since QA failed it; ${human ? 'it needs a human decision' : 'sending it back to a developer with the last findings'}.` }]);
-    this.setQa(rec, { status: human ? 'needs-human' : 'failed', qaAgentId: lastTester });
+    this.setQa(rec, { status: human ? 'needs-human' : 'failed', qaAgentId: lastTester,
+      ...(human && !rec.securityReview ? { mergeNote: QA_RECONSIDER } : {}),
+    });
     this.clearTask(a, { result: 'superseded', cause: 'office', excerpt: 'Unchanged since QA failed it' });
     this.toast('info', `PR #${rec.prNumber} is unchanged since QA failed it: ${human ? 'it needs a human' : 'back to a developer, no re-test'}`);
   }
 
-  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[], security = false, conflictFix = false, retry: string | null = null) {
+  private async renderQaComment(a: PersistedAgent, repo: PersistedRepo, rec: QaRecord, report: QaReport, shots: Shot[], security = false, reconsider = false, retry: string | null = null, findings: string[] = []) {
     const pass = report.verdict === 'pass';
     const images: string[] = [];
     const evidence = shots.slice(-8);
@@ -5439,6 +5516,7 @@ export class Swarm {
       '',
       report.summary,
       ...(security ? ['', `**Base:** \`${rec.securityReview?.auditBaseSha}\` · **Head:** \`${rec.testedSha}\``] : []),
+      ...(!security && rec.testedSha ? ['', `**Head:** \`${rec.testedSha}\`${rec.qaScope?.diffFrom ? ` · **Review started from:** \`${rec.qaScope.diffFrom}\`` : ''}`] : []),
       ...(!security && pass && (report.securityReviewReason || rec.securityReview) ? ['', `**Detailed security review required:** ${report.securityReviewReason || rec.securityReview?.reason}`] : []),
       '',
       '| | Check | Details |',
@@ -5448,13 +5526,14 @@ export class Swarm {
     if (report.commands.length) {
       lines.push('', '<details><summary>🧪 Commands run</summary>', '', '| Command | Result |', '|---|---|', ...report.commands.map((c) => `| \`${cell(c.command)}\` | ${cell(c.result)} |`), '', '</details>');
     }
+    if (findings.length) lines.push('', '### Findings', '', ...findings);
     if (!pass && report.fixInstructions) lines.push('', '### 🔧 What needs fixing', '', report.fixInstructions);
     if (images.length) lines.push('', '### 📸 Evidence', '', ...images.flatMap((img) => [img, '']));
     else lines.push('', '_No browser screenshots were taken in this round._');
-    const merge = repo.autoMerge ? "merges automatically once GitHub's checks pass" : 'ready for the manager to merge';
+    const merge = repo.autoMerge ? "eligible for automatic merge after revision verification and GitHub checks" : 'available for the manager to merge after revision verification';
     const next = retry ?? (security && pass ? 'audit result applies to the cited revision. CubeFarm verifies it before clearing the merge hold'
       : !security && pass && (report.securityReviewReason || rec.securityReview) ? 'waiting for detailed security review'
-      : pass ? merge : conflictFix ? 'sent back to the developer to resolve the conflict and address QA findings'
+      : pass ? merge : reconsider ? QA_RECONSIDER
       : report.verdict === 'incomplete' || rec.round - rec.retests >= MAX_QA_ROUNDS ? 'needs a human decision' : 'sent back to the developer for fixes');
     lines.push('', `<sub>Posted by cubefarm · ${next}</sub>`);
     return lines.join('\n');
@@ -5520,6 +5599,7 @@ export class Swarm {
       `QA summary: ${rec.summary ?? ''}`,
       failed.length ? `Failed checks:\n${failed.map((c) => `- ${c.name}: ${c.details}`).join('\n')}` : '',
       rec.fixInstructions ? `\nWhat needs fixing:\n${rec.fixInstructions}` : '',
+      'For each root cause, check similar paths and fix all affected instances. Verify the fix with a regression check where applicable.',
       rec.commentUrl ? `\nFull report with screenshots: ${rec.commentUrl}` : '',
       '',
       `Fix these problems, re-run the relevant checks, and push to the same branch: git push origin HEAD:${headRef}`,

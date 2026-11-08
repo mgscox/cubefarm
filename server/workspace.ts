@@ -523,6 +523,22 @@ export function deskHead(fullName: string, agentSlug: string): Promise<string> {
   return git(['rev-parse', '--verify', 'HEAD'], { cwd: deskDir(fullName, agentSlug) });
 }
 
+/** A narrower review needs a linear continuation and the same, unambiguous PR merge base. */
+export async function deskQaDiffBase(fullName: string, agentSlug: string, base: string, head: string, previousBase: string, previousHead: string): Promise<string | null> {
+  if (head === previousHead) return null;
+  const opts = { cwd: deskDir(fullName, agentSlug) };
+  try {
+    const [current, previous] = await Promise.all([
+      git(['merge-base', '--all', base, head], opts),
+      git(['merge-base', '--all', previousBase, previousHead], opts),
+      git(['merge-base', '--is-ancestor', previousHead, head], opts),
+    ]);
+    return current && !current.includes('\n') && current === previous ? previousHead : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A missing desk can be requeued; other disk errors must not cause its work to be discarded. */
 export async function deskExists(fullName: string, agentSlug: string): Promise<boolean> {
   return fs.stat(deskDir(fullName, agentSlug)).then((s) => s.isDirectory(), (err: NodeJS.ErrnoException) => {

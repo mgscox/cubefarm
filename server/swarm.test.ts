@@ -4782,29 +4782,76 @@ describe('QA rounds', () => {
     rec.round = 3;
     await qaFails(tester);
     expect(rec.status).toBe('needs-human');
-    expect(comment.mock.calls[0][2]).toContain('needs a human decision');
+    expect(comment.mock.calls[0][2]).toContain('Reconsider the approach');
   });
 
-  it.each([{ mergeable: 'CONFLICTING', mergeState: 'UNKNOWN' }, { mergeable: 'UNKNOWN', mergeState: 'DIRTY' }])('sends a final ordinary QA failure to a conflict fix: %j', async (conflict) => {
+  it.each([{ mergeable: 'CONFLICTING', mergeState: 'UNKNOWN' }, { mergeable: 'UNKNOWN', mergeState: 'DIRTY' }])('hands the third QA failure to the manager despite a conflict: %j', async (conflict) => {
     const tester = addAgent('q1', 'Grace', 'qa', 0);
     Object.assign(rec, { round: 3, mergeFixes: MAX_MERGE_FIXES - 1 });
     Object.assign(repo, { defaultBranch: 'main' });
     const comment = vi.spyOn(s.backend, 'commentPull');
+    const phone = vi.spyOn(s, 'postMessage');
     vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, ...conflict, body: '', isCrossRepository: false });
     await qaFails(tester);
-    expect(rec).toMatchObject({ status: 'failed', fixReason: 'conflict', mergeFixes: MAX_MERGE_FIXES, passedSha: null,
+    expect(rec).toMatchObject({ status: 'needs-human', fixReason: 'qa', mergeFixes: MAX_MERGE_FIXES - 1, passedSha: null,
       fixInstructions: expect.stringContaining('Chaser: never catches up') });
-    expect(comment.mock.calls[0][2]).toContain('sent back to the developer to resolve the conflict');
+    expect(comment.mock.calls[0][2]).toContain('Reconsider the approach');
+    expect(phone).toHaveBeenCalledWith('office', expect.stringContaining('Reconsider the approach'));
   });
 
-  it.each(['exhausted', 'changed head', 'lookup failed'] as const)('does not grant a final conflict fix when %s', async (why) => {
+  it.each(['changed head', 'lookup failed'] as const)('does not count a third QA failure when revision verification reports %s', async (why) => {
     const tester = addAgent('q1', 'Grace', 'qa', 0);
-    Object.assign(rec, { round: 3, mergeFixes: why === 'exhausted' ? MAX_MERGE_FIXES : 0 });
+    rec.round = 3;
     const details = vi.spyOn(s.backend, 'prDetails').mockResolvedValue({ ...pull, mergeable: 'CONFLICTING', body: '', isCrossRepository: false,
       headSha: why === 'changed head' ? 'sha-2' : 'sha-1' });
     if (why === 'lookup failed') details.mockRejectedValue(new Error('GitHub unavailable'));
     await qaFails(tester);
-    expect(rec).toMatchObject({ status: 'needs-human', fixReason: 'qa' });
+    expect(rec).toMatchObject(why === 'changed head' ? { status: 'queued', retests: 1 } : { status: 'needs-human', fixReason: null });
+  });
+
+  it.each(['stable', 'base moved', 'comparison unavailable', 'coverage missing', 'retargeted'] as const)('checks prior findings on the third QA round when the review range is %s', async (revision) => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    const pr = { ...pull, body: '', isCrossRepository: false, baseSha: 'base-1', baseRefName: 'main' };
+    vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pr }));
+    vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
+    const session = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    const comment = vi.spyOn(s.backend, 'commentPull');
+    const fullReview = revision === 'comparison unavailable' || revision === 'retargeted';
+    const compare = vi.spyOn(s.backend, 'deskQaDiffBase').mockResolvedValue(fullReview ? null : 'sha-1');
+    Object.assign(rec, { status: 'queued', round: 2, retests: 0 });
+    await s.runQa(tester, repo, rec);
+    expect(session.mock.calls[0][4]).toContain('git diff base-1...sha-1');
+    expect(compare).not.toHaveBeenCalled();
+    await s.onQaFinished(tester, repo, result(true, { ...failReport, codeReviewComplete: true, fixInstructions: undefined,
+      findings: [{ title: 'Timer stops when the tab blurs', details: 'Check every timer that relies on focus.' }] }));
+    const id = comment.mock.calls[0][2].match(/QA-[0-9a-f]+/)![0];
+    expect(rec.status).toBe('failed');
+
+    Object.assign(rec, { status: 'queued', round: 3 });
+    pr.headSha = 'sha-2';
+    await s.runQa(tester, repo, rec);
+    expect(session.mock.calls[1][3]).toContain(id);
+    expect(session.mock.calls[1][4]).toContain(fullReview ? 'git diff base-1...sha-2' : 'git diff sha-1 sha-2');
+    if (revision === 'base moved') comment.mockImplementationOnce(async () => { pr.baseSha = 'base-2'; return 'stale-comment'; });
+    if (revision === 'retargeted') pr.baseRefName = 'release';
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', summary: 'Checks passed', checks: [], codeReviewComplete: revision !== 'coverage missing',
+      findingUpdates: revision === 'stable' ? [] : [{ id, status: 'resolved', evidence: 'The timer runs after blur.' }] }));
+    if (revision === 'coverage missing') {
+      expect(comment).toHaveBeenCalledOnce();
+      expect(rec).toMatchObject({ status: 'queued', round: 3, passedSha: null });
+      await s.runQa(tester, repo, rec);
+      expect(session.mock.calls[2][4]).toContain('git diff base-1...sha-2');
+      return;
+    }
+    expect(comment.mock.calls[1][2]).not.toContain('Check every timer that relies on focus.');
+    if (revision === 'stable') {
+      expect(comment.mock.calls[1][2]).toContain(`${id}** still open`);
+      expect(rec).toMatchObject({ status: 'needs-human', passedSha: null });
+    } else if (revision === 'base moved' || revision === 'retargeted') {
+      expect(rec).toMatchObject({ status: 'queued', passedSha: null, findings: [{ id, status: 'open' }] });
+    } else {
+      expect(rec).toMatchObject({ status: 'passed', passedSha: 'sha-2' });
+    }
   });
 
   it.each([false, true])('reruns checks once per head and sends persistent failures back (API rejects: %s)', async (reject) => {

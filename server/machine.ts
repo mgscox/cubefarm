@@ -26,6 +26,7 @@ export interface Machine {
   releaseDesk(fullName: string, agentSlug: string, port: number, finishedScratchSession?: string): Promise<void>;
   /** Current local HEAD, captured before an issue session starts. */
   deskHead(fullName: string, agentSlug: string): Promise<string>;
+  deskQaDiffBase(fullName: string, agentSlug: string, base: string, head: string, previousBase: string, previousHead: string): Promise<string | null>;
   /** Local commits ahead of the desk base, including unpushed work. */
   deskAhead(fullName: string, agentSlug: string, base: string): Promise<number>;
   /** An agent session: the real CLI in the agent's terminal when opts.terminal is set, else an Agent SDK session. */
