@@ -10,6 +10,8 @@ import { connectBox } from './boxLink.ts';
 import { PTY_PROTOCOL, runtimeFlags } from './ptyProtocol.ts';
 
 const PACKAGE = `${ROOT}/node_modules/cubefarm`;
+/** OpenCode v2, which the launcher and notification plugin target (`opencode-ai` on npm is v1). */
+export const OPENCODE_VERSION = '2.2.6';
 const KEYS: Record<AgentCli, string> = { claude: 'ANTHROPIC_API_KEY', codex: 'OPENAI_API_KEY', opencode: 'OPENROUTER_API_KEY' };
 export function upstashConfig(env: NodeJS.ProcessEnv, cli: AgentCli, name: string, gitToken: string): BoxConfig {
   return {
@@ -38,9 +40,16 @@ const fs = require('node:fs'), cp = require('node:child_process');
   const root = '${ROOT}';
   fs.mkdirSync(root, { recursive: true });
   const cli = process.env.CUBEFARM_UPSTASH_CLI;
-  const extra = cli === 'codex' ? ['@openai/codex'] : cli === 'opencode' ? ['opencode-ai'] : [];
+  const extra = cli === 'codex' ? ['@openai/codex'] : cli === 'opencode' ? ['@opencode/cli@${OPENCODE_VERSION}'] : [];
   const [version, playwright, yaml] = process.argv.slice(1);
+  // An older runtime's v1 package also links bin/opencode: remove it so only v2 owns the command.
+  const manifest = root + '/package.json';
+  if (cli === 'opencode' && fs.existsSync(manifest) && JSON.parse(fs.readFileSync(manifest, 'utf8')).dependencies?.['opencode-ai']) {
+    cp.execFileSync('npm', ['uninstall', '--prefix', root, 'opencode-ai'], { stdio: 'ignore' });
+  }
   cp.execFileSync('npm', ['install', '--prefix', root, 'cubefarm@' + version, 'playwright@' + playwright, 'yaml@' + yaml, ...extra], { stdio: 'ignore' });
+  // npm 12 skips install scripts by default, and this one puts v2's native binary in place.
+  if (cli === 'opencode') cp.execFileSync('node', [root + '/node_modules/@opencode/cli/postinstall.mjs'], { stdio: 'ignore' });
   cp.execFileSync('node', [root + '/node_modules/playwright/cli.js', 'install', 'chromium'], { stdio: 'ignore' });
   const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
   const res = await fetch('https://github.com/cli/cli/releases/download/v2.83.2/gh_2.83.2_linux_' + arch + '.tar.gz');
@@ -124,6 +133,9 @@ if (git(root, ['rev-list', '--branches', '--not', '--remotes=origin'])) process.
 if (git(root, ['stash', 'list'])) process.exit(1);
 `;
 
+/** Bootstrap marker; an OpenCode Box bootstrapped before the pin had only `ready-<version>` and still has v1. */
+export const readyMarker = (cli: AgentCli) => `${ROOT}/ready-${VERSION}${cli === 'opencode' ? `-opencode-${OPENCODE_VERSION}` : ''}`;
+
 export function createUpstashProvider(config?: () => NodeJS.ProcessEnv): UpstashProvider {
   let cached: NodeJS.ProcessEnv | undefined;
   const settings = () => config ? config() : cached ??= { ...readConfigEnv(), ...process.env };
@@ -139,7 +151,7 @@ export function createUpstashProvider(config?: () => NodeJS.ProcessEnv): Upstash
     async connect(task, opts) {
       const box = await get(task.boxId!);
       // A durable marker avoids reinstalling packages beneath live CLIs after a reconnect.
-      const marker = `${ROOT}/ready-${VERSION}`;
+      const marker = readyMarker(task.cli);
       const ready = await box.files.stat(marker).then(() => true, (err: { statusCode?: number }) => {
         if (err.statusCode !== 404) throw err;
         return false;

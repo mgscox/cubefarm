@@ -86,6 +86,8 @@ CubeFarm adds `openrouter/` to a model without that prefix, and uses that exampl
 Remote workers use the office's bundled worker code and dependencies installed from its npm release, plus the
 selected CLI and GitHub CLI. An office restart reconnects to its existing keeper; it does not reinstall below a
 running task. These workers require outbound access to npm, GitHub and their selected inference provider.
+OpenCode Boxes install OpenCode v2 from `@opencode/cli`, pinned in `server/upstashProvider.ts`. A Box bootstrapped
+with the v1 `opencode-ai` package has it removed when its runtime is next prepared.
 
 ## OpenCode desk models
 
