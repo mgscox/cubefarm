@@ -16,6 +16,8 @@ Real auth actions are disabled until `CUBEFARM_AUTH_ORIGIN` is set to the exact 
 
 The default trusted proxy socket is loopback. For a proxy on another machine, set `CUBEFARM_AUTH_PROXY_ADDRESS` to its literal IP and firewall the office listener to that proxy. Forwarded headers do not establish scheme, host, or peer trust. Every route, including status, requires POST, matching Host/Origin, the trusted socket, JSON, and `X-CubeFarm-Claude-Auth: 1`. There is no wildcard CORS, raw-output endpoint, token-read endpoint, or code/token broadcast. Responses disable caching. Demo allows same-origin loopback HTTP with synthetic state only.
 
+Vite's development proxy marks API requests, and Claude authentication refuses them, including in demo mode. Use the built office behind the authenticated HTTPS proxy for this Settings workflow.
+
 No live nginx configuration, running office, or credentials were changed during implementation. The operator must supply the existing authenticated HTTPS boundary when adopting this feature. Do not put browser codes in chat or office messages: submit them only in the protected Settings password field.
 
 ## Official CLI flow

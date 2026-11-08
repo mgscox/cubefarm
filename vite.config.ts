@@ -16,7 +16,10 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       // Preserve authorization inputs for every API path, including Express's case-insensitive aliases.
-      '/api': { target: localUrl(host, serverPort), xfwd: true },
+      '/api': {
+        target: localUrl(host, serverPort), xfwd: true,
+        headers: { 'x-cubefarm-dev-proxy': '1' },
+      },
       '/ws': { target: localUrl(host, serverPort, 'ws'), ws: true },
     },
   },
