@@ -55,7 +55,7 @@ export interface CliLaunch {
  * Write a CLI's session files and build its command line. hooks: where its hooks go (a keeper's own port waits for
  * the office through a restart, so the CLIs allow it longer: held). Throws, with a message for the manager.
  */
-export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boolean }): CliLaunch {
+export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boolean }, claudeToken?: string): CliLaunch {
   const label = cliLabel(plan.cli);
   const cmd = commandFor(plan.cli);
   if (!cmd) throw new Error(`Could not start ${label}: ${label} isn't installed (no "${plan.cli}" on ${cliSearchLocations(plan.cli)}).`);
@@ -123,7 +123,7 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
 
   // Local desks use their CLI login. An Upstash desk restores only its explicitly selected API key below.
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(claudeEnv(projectEnv(process.env), { login: plan.cli !== 'claude' }))) {
+  for (const [k, v] of Object.entries(claudeEnv(projectEnv(process.env), { login: plan.cli !== 'claude', sessionToken: claudeToken }))) {
     if (v === undefined) continue;
     if (/^(NO_COLOR|FORCE_COLOR|TERM_PROGRAM|TERM_PROGRAM_VERSION|CODEX_THREAD_ID|OPENCODE_CONFIG_CONTENT)$/i.test(k)) continue;
     env[k] = v;

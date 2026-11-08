@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import { images } from './attachments.ts';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { VERSION } from './config.ts';
+import { DEMO, readConfigEnv, VERSION } from './config.ts';
+import { claudeEnv, validClaudeToken } from '../bin/claudeAuth.js';
 import { KeeperPty, terminalMessage } from './ptyClient.ts';
 import { encode, PTY_PROTOCOL, readMessages, type FromHost, type HeldPty, type ToHost } from './ptyProtocol.ts';
 import { reconnectClis, startCliSession } from './cliRunner.ts';
@@ -42,6 +43,8 @@ class BoxLink implements CliHost {
   private stopResources?: () => void;
   readonly ptys = new Map<string, KeeperPty>();
   private child: ChildProcessWithoutNullStreams | null = null;
+  private verifiedAuthLink = false;
+  private officeClaudeAuth = false;
   private stderr = '';
   private nextRid = 1;
   private calls = new Map<number, { resolve(v: unknown): void; reject(e: Error): void; timer: NodeJS.Timeout }>();
@@ -81,6 +84,12 @@ class BoxLink implements CliHost {
     return this.opts.box.name;
   }
 
+  private sharesClaudeAuth(): boolean {
+    if (DEMO) return false;
+    const destinations = process.env.CUBEFARM_CLAUDE_AUTH_BOXES ?? readConfigEnv().CUBEFARM_CLAUDE_AUTH_BOXES ?? '';
+    return destinations.split(',').some((entry) => entry.trim() === this.opts.box.destination);
+  }
+
   private set(status: BoxStatus, error: string | null = this.error) {
     if (status !== 'online') {
       this.stopResources?.();
@@ -109,6 +118,9 @@ class BoxLink implements CliHost {
     } catch (err) {
       return this.set('offline', (err as Error).message);
     }
+    this.officeClaudeAuth = false;
+    this.verifiedAuthLink = !this.opts.transport && this.sharesClaudeAuth();
+    if (this.verifiedAuthLink) cmd.args.unshift('-o', 'StrictHostKeyChecking=yes', '-o', 'ControlPath=none');
     this.set('connecting');
     this.stderr = '';
     const child = spawn(cmd.file, cmd.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: this.opts.transport?.env() });
@@ -170,6 +182,7 @@ class BoxLink implements CliHost {
     this.pinned = true;
     this.attempt = 0;
     this.refused = null;
+    this.officeClaudeAuth = m.officeClaudeAuth === true;
     this.set('online', null);
     this.stopResources?.();
     this.stopResources = monitorResources(() => this.call<MachineSample>('resources'), (value) => {
@@ -373,7 +386,11 @@ class BoxLink implements CliHost {
 
   async prepare(plan: CliPlan): Promise<PreparedCli> {
     const attachments = images.collect(`${plan.prompt}\n${plan.systemAppend}`);
-    const { dir, jobScratch, prompt, hookUrl } = await this.call<Omit<PreparedCli, 'start'>>('prepare', plan, attachments);
+    const token = plan.cli === 'claude' && this.status === 'online' && this.officeClaudeAuth && this.verifiedAuthLink && this.sharesClaudeAuth()
+      ? claudeEnv().CLAUDE_CODE_OAUTH_TOKEN
+      : undefined;
+    const credentials = validClaudeToken(token) ? [token] : [];
+    const { dir, jobScratch, prompt, hookUrl } = await this.call<Omit<PreparedCli, 'start'>>('prepare', plan, attachments, ...credentials);
     this.launching.set(plan.token, Date.now());
     return {
       dir,
