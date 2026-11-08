@@ -46,9 +46,10 @@ app.use('/api/settings/mcp', managerMcpSettingsRouter(mcpSettings));
 app.use('/api/settings/upstash', upstashKeySettingsRouter(upstashKeySettings, (key) => swarm.changeUpstashKey(
   () => upstashKeySettings.update(key),
   () => {
+    if (DEMO) return null; // Demo Boxes have no provider account.
     const replacement = upstashKeySettings.keyAfter(key);
     if (replacement && replacement === upstashKeySettings.activeKey()) return null;
-    if (DEMO || !replacement) return Promise.resolve([]);
+    if (!replacement) return Promise.resolve([]);
     return createUpstashProvider(() => ({ UPSTASH_BOX_API_KEY: replacement })).list();
   },
 )));

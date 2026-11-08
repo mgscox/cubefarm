@@ -51,6 +51,14 @@ test('demo placement controls hire on Upstash, update Team and move a whole floo
   }).toBe(true);
   await expect(page.getByText('1/10 task Boxes reserved.', { exact: false })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('upstash-task.png'), animations: 'disabled' });
+
+  const route = '/api/settings/upstash';
+  for (const key of ['demo-first-key', 'demo-replacement-key', null]) {
+    const changed = await request.patch(route, { data: { key } });
+    expect(changed.ok(), await changed.text()).toBe(true);
+    expect(await changed.json()).toEqual({ keySource: key ? 'settings' : null, canManage: true });
+  }
+  await expect(page.getByText('1/10 task Boxes reserved.', { exact: false })).toBeVisible();
 });
 
 test('Settings saves and clears the write-only Upstash Box key on localhost', async ({ page, request, baseURL }, testInfo) => {

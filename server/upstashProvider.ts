@@ -157,7 +157,7 @@ export function createUpstashProvider(config?: () => NodeJS.ProcessEnv): Upstash
       return connectBox({ ...opts, transport: {
         file: process.execPath,
         args: [...runtimeFlags(), path.join(import.meta.dirname, `upstashBridge${path.extname(import.meta.filename)}`), task.boxId!, opts.officeId],
-        env: { ...process.env, UPSTASH_BOX_API_KEY: settings().UPSTASH_BOX_API_KEY },
+        env: () => ({ ...process.env, UPSTASH_BOX_API_KEY: settings().UPSTASH_BOX_API_KEY }),
       } });
     },
     async saved(task) {
