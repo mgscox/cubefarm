@@ -30,7 +30,7 @@ import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRun
 type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => Promise<void>;
 type Repo = { noWorkEndings?: import('../shared/types.ts').NoWorkEnding[]; id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; parkedBranches?: ParkedBranch[]; preview: { command: null; env: object } };
 type Backend = ReturnType<typeof createDemoBackend>;
-type QaRec = QaView & { attempt?: { id: string; startedAt: number; headSha: string; baseSha: string | null }; reviewId?: string; crossRepository?: boolean; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
+type QaRec = QaView & { devSessionCli?: SessionOptions['cli'] | null; attempt?: { id: string; startedAt: number; headSha: string; baseSha: string | null }; reviewId?: string; crossRepository?: boolean; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
 interface Internals {
   backend: Backend;
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[]; prContributions: PrContributionView[]; qaOutcomes: import('../shared/types.ts').QaOutcomeView[]; feedbackEvents: Record<string, true> };
@@ -1578,7 +1578,7 @@ describe('desk reset and the CLI waiting at the prompt', () => {
     Object.assign(agent(), { model: '', effort: '', cli: 'claude', deskBox: '' });
     (s as unknown as { state: { settings: { runtime: string } } }).state.settings.runtime = 'terminal';
     Object.assign(s.repoRt.get(repo.id)!, { cloneStatus: 'ready', pulls: [{ number: 204, headRefName: 'swarm/issue-9-ada', headSha: 'sha-1', closesIssues: [] } as unknown as PullInfo] });
-    rec = { repoId: repo.id, prNumber: 204, devAgentId: 'a1', devSessionId: 'conv-a', qaAgentId: 'q1', sessionFailures: 0, round: 1,
+    rec = { repoId: repo.id, prNumber: 204, devAgentId: 'a1', devSessionId: 'conv-a', devSessionCli: 'claude', qaAgentId: 'q1', sessionFailures: 0, round: 1,
       status: 'failed', summary: 'Fix it', checks: [], fixCrashes: [] } as unknown as QaRec;
     s.state.qa.push(rec);
     vi.spyOn(s.backend, 'releaseDesk').mockImplementation(async () => void steps.push('releaseDesk'));
@@ -6090,21 +6090,31 @@ describe('fixes across office restarts', () => {
     s.repoRt.get(repo.id)!.pulls = [{ number: 45, headRefName: 'swarm/issue-12-ada', title: 'Toolbar', url: '' } as PullInfo];
   });
 
-  it("clears the session another task left before preparing a fix, and resumes the author's own", async () => {
+  it.each([false, true])('handles a PR session after another task left OpenCode on the desk (legacy record: %s)', async (legacy) => {
     const dev = s.state.agents[0];
-    Object.assign(dev, { sessionId: 'qa-session' });
-    const rec = fixRec('failed');
-    s.state.qa.push(rec);
+    const savedId = '015fe943-1bad-470d-9469-d24bd8b2195a';
+    Object.assign(dev, { prNumber: 45, sessionId: savedId, sessionCli: 'codex' });
+    const rec = s.queueQa(repo, 45, dev, null);
+    expect(rec).toMatchObject({ devSessionId: savedId, devSessionCli: 'codex' });
+    rec.status = 'failed';
+    if (legacy) delete rec.devSessionCli;
+    Object.assign(dev, { prNumber: 99, cli: 'opencode', model: '', sessionId: 'ses_qa', sessionCli: 'opencode' });
+    (s.state as unknown as { settings: { runtime: string } }).settings.runtime = 'terminal';
     let prepared!: (cwd: string) => void;
     vi.spyOn(s, 'prepare').mockImplementation(() => new Promise((r) => (prepared = r)));
-    const start = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    const start = vi.spyOn(s.backend, 'startSession');
     const fixing = s.runFix(dev, repo, rec);
     await Promise.resolve();
     expect(dev).toMatchObject({ status: 'preparing', task: 'fix', sessionId: null });
     await vi.waitFor(() => expect(prepared).toBeTypeOf('function')); // after the open-PR check
     prepared('/fake-desk');
     await fixing;
-    expect(start.mock.calls[0][5]).toBe('dev-session');
+    expect(start).toHaveBeenCalledOnce();
+    const { cli, resumeSessionId } = start.mock.calls[0][0];
+    expect({ cli, resumeSessionId }).toEqual({
+      cli: legacy ? 'opencode' : 'codex',
+      resumeSessionId: legacy ? undefined : savedId,
+    });
   });
 
   it('puts a fix still being prepared back in line instead of resuming a stale session', () => {
