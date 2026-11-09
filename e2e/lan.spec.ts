@@ -1,5 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { test, expect, type Page } from '@playwright/test';
@@ -7,6 +8,23 @@ import { test, expect, type Page } from '@playwright/test';
 // Local non-loopback coverage of the built CLI and Vite. A second-device LAN drill is still separate.
 const root = path.resolve(import.meta.dirname, '..');
 const lanHost = Object.values(os.networkInterfaces()).flat().find((a) => a?.family === 'IPv4' && !a.internal)?.address ?? '127.0.0.2';
+const dotSegmentPrefixes = ['/ws/..', '/ws/%2e%2e', '/wss/..', '/ws/term/../..'];
+
+// Node fetch rewrites Host; use the raw HTTP client for proxy authorization probes.
+async function send(url: string, init: { method: string; headers: Record<string, string>; body: string }) {
+  return new Promise<Response>((resolve, reject) => {
+    // Override the parsed URL's path so dot segments reach Vite unchanged.
+    const pathStart = url.indexOf('/', url.indexOf('://') + 3);
+    const request = http.request(url, { ...init, path: pathStart < 0 ? '/' : url.slice(pathStart) }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => resolve(new Response(Buffer.concat(chunks), { status: response.statusCode })));
+    });
+    request.on('error', reject);
+    request.setTimeout(5000, () => request.destroy(new Error('Proxy authorization request timed out')));
+    request.end(init.body);
+  });
+}
 
 async function start(args: string[], env: NodeJS.ProcessEnv) {
   const proc = spawn(process.execPath, args, {
@@ -93,8 +111,82 @@ test('CLI binding defaults to loopback and wildcard serves the office through bu
         children.push(vite.proc);
         await expect.poll(vite.output).toMatch(/Local:\s+http:\/\/localhost:\d+/);
         const clientPort = Number(vite.output().match(/Local:\s+http:\/\/localhost:(\d+)/)![1]);
+        const route = '/api/settings/upstash';
+        const aliases = [route, '/api/settings/UPSTASH', '/api/Settings/upstash', '/api/SETTINGS/UpStAsH/?probe=1'];
+        const localhost = `http://127.0.0.1:${clientPort}`;
+        const keyPatch = { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'synthetic-box-key' }) };
+        // A LAN client can set Host and omit Origin. Vite must forward the actual peer address.
+        if (!lanHost.startsWith('127.')) {
+          for (const alias of [...aliases, ...dotSegmentPrefixes.map((prefix) => prefix + route)]) {
+            for (const forwarded of [undefined, '127.0.0.1']) {
+              const spoofed = await send(`http://${lanHost}:${clientPort}${alias}`, {
+                ...keyPatch, headers: {
+                  ...keyPatch.headers, Host: `127.0.0.1:${clientPort}`,
+                  ...(forwarded ? { 'X-Forwarded-For': forwarded } : {}),
+                },
+              });
+              expect(spoofed.status, `${alias}, X-Forwarded-For=${forwarded}`).toBe(403);
+            }
+          }
+          expect(await fetch(`${localhost}${route}`).then((r) => r.json())).toEqual({ keySource: null, canManage: true });
+        }
+        for (const alias of aliases) {
+          const saved = await fetch(`${localhost}${alias}`, {
+            ...keyPatch, headers: { ...keyPatch.headers, Origin: localhost },
+          });
+          expect(saved.status, alias).toBe(200);
+          expect(await saved.json()).toEqual({ keySource: 'settings', canManage: true });
+        }
         await browserFlow(page, `http://${lanHost}:${clientPort}`);
       }
+      await stop(server.proc);
+    }
+  } finally {
+    for (const child of children.reverse()) await stop(child);
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
+
+test('Vite cannot act as the trusted Claude authentication proxy for any route spelling', async ({}, testInfo) => {
+  const home = testInfo.outputPath('claude-vite-home');
+  const children: ChildProcess[] = [];
+  try {
+    for (const authHost of [lanHost, 'localhost']) {
+      const origin = `https://${authHost}`;
+      const server = await start(['--import', 'tsx', 'server/index.ts', '--demo'], {
+        SWARM_HOME: path.join(home, authHost), SWARM_PORT: '0', SWARM_HOST: '127.0.0.1',
+        CUBEFARM_AUTH_ORIGIN: origin, CUBEFARM_AUTH_PROXY_ADDRESS: '',
+      });
+      children.push(server.proc);
+      await expect.poll(() => server.error()?.message ?? server.output()).toMatch(/localhost:\d+.*DEMO MODE/);
+      const port = Number(server.output().match(/localhost:(\d+)/)![1]);
+      const vite = await start(['node_modules/vite/bin/vite.js', '--port', '0'], { SWARM_PORT: String(port), SWARM_HOST: '0.0.0.0' });
+      children.push(vite.proc);
+      await expect.poll(vite.output).toMatch(/Local:\s+http:\/\/localhost:\d+/);
+      const clientPort = Number(vite.output().match(/Local:\s+http:\/\/localhost:(\d+)/)![1]);
+      const route = '/api/settings/claude';
+      const headers = { Host: authHost, Origin: origin, 'Content-Type': 'application/json', 'X-CubeFarm-Claude-Auth': '1' };
+      const post = (base: string, action: string, body = {}, extra = {}) => send(`${base}${action}`, {
+        method: 'POST', headers: { ...headers, ...extra }, body: JSON.stringify(body),
+      });
+      const local = `http://127.0.0.1:${port}${route}`;
+      // An authenticated loopback nginx hop may legitimately forward the browser's LAN address.
+      const started = await post(local, '/start', { mode: 'manual-token' }, { 'X-Forwarded-For': lanHost });
+      expect(started.status).toBe(200);
+      const { flowId } = await started.json();
+      for (const alias of [route, '/api/settings/CLAUDE', '/api/Settings/ClAuDe', ...dotSegmentPrefixes.map((prefix) => prefix + route)]) {
+        const base = `http://${lanHost}:${clientPort}${alias}`;
+        for (const [action, body] of [
+          ['/status', {}], ['/start', { mode: 'manual-token' }], ['/code', { flowId, code: 'synthetic-code' }],
+          ['/complete', { flowId, token: 'sk-ant-oat01-' + 't'.repeat(80) }], ['/cancel', { flowId }],
+        ] as const) {
+          expect((await post(base, action, body)).status, `${origin} ${alias}${action}`).toBe(403);
+        }
+        expect((await post(base, '/status', {}, { 'X-CubeFarm-Dev-Proxy': '' })).status).toBe(403);
+      }
+      expect(await (await post(local, '/status')).json()).toMatchObject({ phase: 'pending', flowId });
+      expect((await post(local, '/cancel', { flowId })).status).toBe(200);
+      await stop(vite.proc);
       await stop(server.proc);
     }
   } finally {

@@ -75,6 +75,8 @@ it('rejects cross-origin, forwarded-header spoofing, wrong content/header, malfo
     [{ Origin: '' }, '{}', 403],
     [{ Host: 'evil.example', 'X-Forwarded-Host': 'office.example', 'X-Forwarded-Proto': 'https' }, '{}', 403],
     [{ 'X-CubeFarm-Claude-Auth': '' }, '{}', 403],
+    [{ 'X-CubeFarm-Dev-Proxy': '1' }, '{"mode":"manual-token"}', 403],
+    [{ 'X-CubeFarm-Dev-Proxy': '' }, '{"mode":"manual-token"}', 403],
     [{ 'Content-Type': 'text/plain' }, '{}', 415],
     [{}, '{"token":"' + secret, 400],
     [{}, JSON.stringify({ token: secret.repeat(200) }), 400],
@@ -85,6 +87,9 @@ it('rejects cross-origin, forwarded-header spoofing, wrong content/header, malfo
     expect((await response.text()).includes(secret)).toBe(false);
   }
   expect((await send(url + '/status')).status).toBe(404);
+  expect((await send(url + '/status', {
+    method: 'POST', headers: { ...headers, 'X-Forwarded-For': '192.0.2.1' }, body: '{}',
+  })).status).toBe(200);
   const valid = await post('/start', { mode: 'manual-token' });
   expect(valid.status).toBe(200); // same-origin HTTPS URL remains valid behind the configured loopback nginx HTTP hop
   expect(valid.headers.get('access-control-allow-origin')).toBeNull();

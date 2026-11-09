@@ -186,6 +186,8 @@ export class ClaudeAuthentication {
 // nginx must preserve Host and authenticate this route; only its explicitly trusted socket may reach it.
 const loopback = (ip: string) => ip === '::1' || /^(?:::ffff:)?127\.\d+\.\d+\.\d+$/.test(ip);
 export function canManageClaudeAuth(req: Request, options: AuthOptions) {
+  // Vite preserves Host but is not an authenticated HTTPS boundary.
+  if (req.get('X-CubeFarm-Dev-Proxy') !== undefined) return false;
   const peer = req.socket.remoteAddress ?? '';
   const trustedPeer = options.proxyAddress
     ? isIP(options.proxyAddress) !== 0 && peer.replace(/^::ffff:/, '') === options.proxyAddress.replace(/^::ffff:/, '')
