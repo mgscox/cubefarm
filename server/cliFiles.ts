@@ -6,7 +6,7 @@ import { HOME_DIR } from './config.ts';
 import { createJobScratch, jobScratchEnabled, JOB_SCRATCH_INSTRUCTIONS, SESSIONS_DIR, sessionScratchDir } from './jobScratch.ts';
 import { projectEnv } from './projectEnv.ts';
 import { playwrightMcpCommand } from './browser.ts';
-import { cliLabel, cliSearchLocations, CODEX_HOOK_SOURCE, commandFor, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE } from './clis.ts';
+import { cliLabel, cliSearchLocations, CODEX_HOOK_SOURCE, CODEX_INLINE_MAX, commandFor, launchArgs, NOTIFY_SOURCE, OPENCODE_PLUGIN_SOURCE, STATUSLINE_SOURCE } from './clis.ts';
 import { newScreenshots } from './agentRunner.ts';
 import type { CliPlan } from './machine.ts';
 import { ACTIVE_REPO_SKILLS, stageCodexSkills, writeSessionSkills } from './repoSkills.ts';
@@ -89,7 +89,7 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
     fs.writeFileSync(files.settings, JSON.stringify(settings, null, 2));
     if (files.mcp) fs.writeFileSync(files.mcp, JSON.stringify({ mcpServers: servers }, null, 2));
     fs.writeFileSync(files.system, systemAppend);
-    if (prompt.length > INLINE_PROMPT_MAX) {
+    if (prompt.length > (plan.cli === 'codex' ? CODEX_INLINE_MAX : INLINE_PROMPT_MAX)) {
       const file = path.join(dir, 'task.md');
       fs.writeFileSync(file, prompt);
       prompt = `Your task is in ${file}. Read all of it first, then do what it says.`;
