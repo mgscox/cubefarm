@@ -660,6 +660,27 @@ async function compareAhead(fullName: string, left: string, right: string, api: 
   return ahead;
 }
 
+export interface CommitComparison {
+  aheadBy: number;
+  behindBy: number;
+  files: string[];
+}
+
+/** Complete three-dot file comparison, including both names of renames; null when completeness is unproven. */
+export async function compareFiles(fullName: string, baseSha: string, headSha: string, api: RestQuery = ghJson): Promise<CommitComparison | null> {
+  const result = await api(['api', `repos/${fullName}/compare/${encodeURIComponent(baseSha)}...${encodeURIComponent(headSha)}?per_page=1`]) as {
+    ahead_by?: number; behind_by?: number;
+    files?: { filename?: string; previous_filename?: string; status?: string }[];
+  } | null;
+  // GitHub caps the entire comparison at 300 files; pagination cannot recover the rest.
+  if (!result || !Number.isInteger(result.ahead_by) || result.ahead_by! < 0 ||
+    !Number.isInteger(result.behind_by) || result.behind_by! < 0 || !Array.isArray(result.files) || result.files.length >= 300 ||
+    result.files.some((f) => !f || typeof f.filename !== 'string' || !f.filename ||
+      (f.status === 'renamed' && !f.previous_filename) || (f.previous_filename !== undefined && typeof f.previous_filename !== 'string'))) return null;
+  return { aheadBy: result.ahead_by!, behindBy: result.behind_by!,
+    files: [...new Set(result.files.flatMap((f) => f.previous_filename ? [f.filename!, f.previous_filename] : [f.filename!]))] };
+}
+
 /** A commit is contained only when GitHub confirms the reverse comparison has no missing commits. */
 export async function containsCommit(fullName: string, headSha: string, requiredSha: string, api: RestQuery = ghJson): Promise<boolean> {
   return await compareAhead(fullName, headSha, requiredSha, api) === 0;

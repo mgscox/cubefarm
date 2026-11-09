@@ -993,6 +993,7 @@ export function createDemoBackend(): Backend {
     },
     branchAhead: async () => 0, // the fake sessions always open their PR
     containsCommit: async () => true,
+    compareFiles: async () => null, // no exact commit history in the fake tracker
     qaCi: async (fullName, headSha) => {
       const pr = repos.get(fullName)?.pulls.find((p) => p.headSha === headSha);
       return { headSha, observedAt: Date.now(), availability: pr ? 'available' : 'unavailable', checks: pr ? [{

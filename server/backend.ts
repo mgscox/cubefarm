@@ -47,6 +47,7 @@ export interface Backend extends Machine {
   /** Commits a branch has on GitHub ahead of the base branch (throws when the branch was never pushed). */
   branchAhead(fullName: string, base: string, branch: string): Promise<number>;
   containsCommit(fullName: string, headSha: string, requiredSha: string): Promise<boolean>;
+  compareFiles(fullName: string, baseSha: string, headSha: string): Promise<github.CommitComparison | null>;
   prDetails(fullName: string, number: number): Promise<github.PrDetails>;
   qaCi: typeof github.qaCi;
   issueDetails(fullName: string, number: number): Promise<{ title: string; body: string }>;
@@ -104,6 +105,7 @@ export const realBackend: Backend = {
   prForBranch: github.prForBranch,
   branchAhead: github.branchAhead,
   containsCommit: github.containsCommit,
+  compareFiles: github.compareFiles,
   deskAhead: workspace.deskAhead,
   deskHead: workspace.deskHead,
   deskQaDiffBase: workspace.deskQaDiffBase,

@@ -1,5 +1,16 @@
 import type { PullInfo } from '../shared/types.ts';
 import { failedRunIds } from './checkRuns.ts';
+import type { CommitComparison } from './github.ts';
+
+/** Only an ancestral, disjoint base advance with a fresh clean merge can carry a security pass. */
+export function securityBaseStep(pr: Pick<MergePull, 'mergeable' | 'mergeState'>, base: CommitComparison | null, changes: CommitComparison | null): 'carry' | 'base' | 'conflict' | 'wait' {
+  if (pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY') return 'conflict';
+  if (pr.mergeable === 'UNKNOWN' || pr.mergeState === 'UNKNOWN') return 'wait';
+  if (pr.mergeable !== 'MERGEABLE' || pr.mergeState !== 'CLEAN') return 'base';
+  if (!base || !changes || base.behindBy !== 0 || base.aheadBy <= 0) return 'base';
+  const files = new Set(changes.files);
+  return base.files.some((file) => files.has(file)) ? 'base' : 'carry';
+}
 
 // Auto-merge: fixes for failing checks or conflicts before a PR needs the manager, how long checks may run before
 // the manager hears about it, and how long to wait before retrying a merge GitHub refused.
