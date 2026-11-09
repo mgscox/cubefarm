@@ -54,5 +54,5 @@ export function fixOutcome(rec: FixRecord, head: string | null, minutes: number,
     // Back in line to merge: new commits go through QA again first, a re-run of flaky checks doesn't.
     return { set: { status: 'passed', mergeNote: 'waiting for fresh checks', fixCrashes: [] }, log: { kind: 'done', text: `✔ PR #${pr} fixed in ${minutes}m. Back in line to merge.` }, pushed: true };
   }
-  return { set: { status: 'queued', round: rec.round + 1, fixCrashes: [] }, log: { kind: 'done', text: `✔ Fix pushed for PR #${pr} in ${minutes}m. Back to QA.` }, pushed: true };
+  return { set: { status: 'queued', round: rec.round + (rec.fixReason === 'base' ? 0 : 1), fixCrashes: [] }, log: { kind: 'done', text: `✔ Fix pushed for PR #${pr} in ${minutes}m. Back to QA.` }, pushed: true };
 }

@@ -168,6 +168,12 @@ export interface Launch {
   env: Record<string, string>;
 }
 
+/**
+ * Codex takes its instructions and prompt on the command line, which Windows caps at 32K characters (8K through
+ * cmd.exe). Text longer than this goes in the session's files instead, so its whole command line stays under 8K.
+ */
+export const CODEX_INLINE_MAX = 2500;
+
 const EFFORT_CODEX: Record<EffortLevel, string> = { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'xhigh' };
 const KNOWN_CODEX_MODELS = new Set(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
 
@@ -230,7 +236,9 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
         '-c',
         `notify=[${[process.execPath, ctx.notify.script, ctx.notify.url].map(toml).join(',')}]`,
         '-c',
-        `developer_instructions=${toml(ctx.systemAppend)}`,
+        `developer_instructions=${toml(ctx.systemAppend.length > CODEX_INLINE_MAX
+          ? `Your instructions for this session are in ${ctx.files.system}. Read all of it before anything else and follow it throughout.`
+          : ctx.systemAppend)}`,
         ...(model ? ['-m', model] : []),
         ...(ctx.effort ? ['-c', `model_reasoning_effort=${toml(EFFORT_CODEX[ctx.effort])}`] : []),
         // Codex merges MCP tables, so the office must not add stdio fields to the manager's HTTP Playwright server.
