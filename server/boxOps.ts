@@ -104,6 +104,8 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
     async rpc(method: string, args: unknown[]): Promise<unknown> {
       const fn = Object.hasOwn(methods, method) ? methods[method] : undefined;
       if (!fn) throw new Error(`a box has no method "${method}"`);
+      // The startup Git child holds root open on Windows until its probe finishes.
+      await commit;
       return (await fn(...(Array.isArray(args) ? args : []))) ?? null;
     },
     /** The CLI a prepare wrote, to start now (once). */

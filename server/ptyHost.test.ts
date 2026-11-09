@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { adoptPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, startKeeper, terminalsAvailable } from './ptyClient.ts';
+import { stopTestKeeper } from './test/keeper.ts';
 
 // The terminal keeper for real: its own process, a real pseudo-terminal, and an office that restarts in between.
 // (A short temp folder: macOS caps a Unix socket path at 104 characters.)
@@ -10,9 +11,13 @@ import { adoptPty, hooksReady, keeperHookUrl, keeperPid, leaveKeeper, spawnPty, 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-keeper-'));
 const plain = (s: string) => s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07/g, '');
 
-describe.skipIf(!terminalsAvailable)('the terminal keeper', () => {
-  afterAll(() => leaveKeeper());
+afterAll(async () => {
+  leaveKeeper();
+  if (fs.existsSync(path.join(home, 'pty.secret'))) await stopTestKeeper(home);
+  await fs.promises.rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}, 15_000);
 
+describe.skipIf(!terminalsAvailable)('the terminal keeper', () => {
   it('approves PreToolUse while the office gives no answer, then forwards it after reconnect', { timeout: 15_000 }, async () => {
     await startKeeper(home, () => { throw new Error('office hook unavailable'); });
     const url = `${keeperHookUrl()}/api/hooks/missed-permission`;
