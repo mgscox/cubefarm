@@ -28,31 +28,43 @@ const record = (r: Partial<MergeRecord> = {}): MergeRecord => ({
 });
 
 describe('security base advances', () => {
-  const docs = { aheadBy: 2, behindBy: 0, files: ['docs/research/billing.md'] };
-  const changes = { aheadBy: 1, behindBy: 0, files: ['server/billing.ts'] };
+  const docs = { aheadBy: 2, behindBy: 0, mergeBaseSha: 'audit-base', files: ['docs/research/billing.md'] };
+  const changes = { aheadBy: 1, behindBy: 0, mergeBaseSha: 'audit-base', files: ['server/billing.ts'] };
 
   it('carries a pass across a disjoint docs-only advance', () => {
-    expect(securityBaseStep(pull(), docs, changes)).toBe('carry');
+    expect(securityBaseStep(pull(), docs, changes, changes, 'audit-base')).toBe('carry');
+  });
+
+  it('requires reconciliation when a merged and reverted side branch changes the real merge base', () => {
+    const baseAdvance = { aheadBy: 3, behindBy: 0, mergeBaseSha: 'B0', files: ['g', 'q'] };
+    const auditedChanges = { aheadBy: 3, behindBy: 0, mergeBaseSha: 'B0', files: ['p'] };
+    const currentChanges = { aheadBy: 2, behindBy: 2, mergeBaseSha: 'G1', files: ['g', 'p'] };
+    expect(securityBaseStep(pull(), baseAdvance, auditedChanges, currentChanges, 'B0')).toBe('base');
+  });
+
+  it('requires the audited comparison to start at the audit base too', () => {
+    expect(securityBaseStep(pull(), docs, { ...changes, mergeBaseSha: 'older-base' }, changes, 'audit-base')).toBe('base');
   });
 
   it('requires reconciliation when any changed file overlaps', () => {
-    expect(securityBaseStep(pull(), { ...docs, files: ['docs/research/billing.md', 'server/billing.ts'] }, changes)).toBe('base');
+    expect(securityBaseStep(pull(), { ...docs, files: ['docs/research/billing.md', 'server/billing.ts'] }, changes, changes, 'audit-base')).toBe('base');
   });
 
   it.each([{ mergeable: 'CONFLICTING' }, { mergeState: 'DIRTY' }])('sends a conflicting advance to a developer: %j', (conflict) => {
-    expect(securityBaseStep(pull(conflict), docs, changes)).toBe('conflict');
+    expect(securityBaseStep(pull(conflict), docs, changes, changes, 'audit-base')).toBe('conflict');
   });
 
   it.each([{ mergeable: 'UNKNOWN' }, { mergeState: 'UNKNOWN' }])('waits for fresh mergeability: %j', (unknown) => {
-    expect(securityBaseStep(pull(unknown), docs, changes)).toBe('wait');
+    expect(securityBaseStep(pull(unknown), docs, changes, changes, 'audit-base')).toBe('wait');
   });
 
   it('requires reconciliation for a behind branch, a rewritten base or an incomplete comparison', () => {
-    expect(securityBaseStep(pull({ mergeState: 'BEHIND' }), docs, changes)).toBe('base');
-    expect(securityBaseStep(pull(), { ...docs, behindBy: 1 }, changes)).toBe('base');
-    expect(securityBaseStep(pull(), { ...docs, aheadBy: 0 }, changes)).toBe('base');
-    expect(securityBaseStep(pull(), null, changes)).toBe('base');
-    expect(securityBaseStep(pull(), docs, null)).toBe('base');
+    expect(securityBaseStep(pull({ mergeState: 'BEHIND' }), docs, changes, changes, 'audit-base')).toBe('base');
+    expect(securityBaseStep(pull(), { ...docs, behindBy: 1 }, changes, changes, 'audit-base')).toBe('base');
+    expect(securityBaseStep(pull(), { ...docs, aheadBy: 0 }, changes, changes, 'audit-base')).toBe('base');
+    expect(securityBaseStep(pull(), null, changes, changes, 'audit-base')).toBe('base');
+    expect(securityBaseStep(pull(), docs, null, changes, 'audit-base')).toBe('base');
+    expect(securityBaseStep(pull(), docs, changes, null, 'audit-base')).toBe('base');
   });
 });
 

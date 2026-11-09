@@ -4854,10 +4854,12 @@ export class Swarm {
   private async advanceSecurityBase(repo: PersistedRepo, rec: QaRecord, pr: PrDetails, gone = () => false): Promise<'carry' | 'base' | 'conflict' | 'wait'> {
     let review = rec.securityReview;
     if (!review?.auditBaseSha || !pr.baseSha) return 'base';
+    const auditBaseSha = review.auditBaseSha;
     const status = rec.status;
     const comparisons = await Promise.allSettled([
-      this.backend.compareFiles(repo.fullName, review.auditBaseSha, pr.baseSha),
-      this.backend.compareFiles(repo.fullName, review.auditBaseSha, pr.headSha),
+      this.backend.compareFiles(repo.fullName, auditBaseSha, pr.baseSha),
+      this.backend.compareFiles(repo.fullName, auditBaseSha, pr.headSha),
+      this.backend.compareFiles(repo.fullName, pr.baseSha, pr.headSha),
     ]);
     const current = await this.backend.prDetails(repo.fullName, rec.prNumber);
     const changed = (latest: PrDetails) => gone() || rec.securityReview !== review || rec.status !== status || latest.state !== 'OPEN' ||
@@ -4865,10 +4867,10 @@ export class Swarm {
       latest.isDraft || hasLabel(latest.labels, NEEDS_HUMAN) || hasLabel(latest.labels, NEEDS_REVIEW) ||
       hasLabel(latest.labels, READY_FOR_SECURITY_REVIEW) !== hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW);
     if (changed(current)) return 'wait';
-    const [base, changes] = comparisons;
-    if (securityBaseStep(current, null, null) === 'conflict') return 'conflict';
-    if (base.status === 'rejected' || changes.status === 'rejected') return 'wait';
-    const step = securityBaseStep(current, base.value, changes.value);
+    const [base, changes, currentChanges] = comparisons;
+    if (securityBaseStep(current, null, null, null, auditBaseSha) === 'conflict') return 'conflict';
+    if (base.status === 'rejected' || changes.status === 'rejected' || currentChanges.status === 'rejected') return 'wait';
+    const step = securityBaseStep(current, base.value, changes.value, currentChanges.value, auditBaseSha);
     if (step === 'carry') {
       const text = `base advanced by ${base.value!.aheadBy} commits touching no PR files; security pass carried to ${pr.baseSha}`;
       this.setQa(rec, { securityReview: { ...review, auditBaseSha: pr.baseSha } });
@@ -4876,7 +4878,7 @@ export class Swarm {
       await this.backend.commentPull(repo.fullName, rec.prNumber, `${text}\n\n${AGENT_COMMENT_MARKER}`)
         .catch((err) => console.warn(`Could not comment on ${repo.fullName}#${rec.prNumber}: ${oneLine(err)}`));
       const published = await this.backend.prDetails(repo.fullName, rec.prNumber);
-      if (changed(published) || securityBaseStep(published, base.value, changes.value) !== 'carry') return 'wait';
+      if (changed(published) || securityBaseStep(published, base.value, changes.value, currentChanges.value, auditBaseSha) !== 'carry') return 'wait';
     }
     return step;
   }

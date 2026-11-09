@@ -48,21 +48,26 @@ describe('issue writes', () => {
 
 describe('audited base ancestry', () => {
   it('compares exact revisions and includes old and new paths for renames', async () => {
-    const api = vi.fn().mockResolvedValue({ ahead_by: 2, behind_by: 0, files: [
+    const api = vi.fn().mockResolvedValue({ ahead_by: 2, behind_by: 0, merge_base_commit: { sha: 'audit-base' }, files: [
       { filename: 'docs/new.md', previous_filename: 'server/old.ts', status: 'renamed' },
       { filename: 'docs/other.md', status: 'added' },
     ] });
     await expect(compareFiles('demo/repo', 'audit-base', 'current-base', api)).resolves.toEqual({
-      aheadBy: 2, behindBy: 0, files: ['docs/new.md', 'server/old.ts', 'docs/other.md'],
+      aheadBy: 2, behindBy: 0, mergeBaseSha: 'audit-base', files: ['docs/new.md', 'server/old.ts', 'docs/other.md'],
     });
     expect(api).toHaveBeenCalledExactlyOnceWith(['api', 'repos/demo/repo/compare/audit-base...current-base?per_page=1']);
   });
 
   it.each([
     null, {}, { ahead_by: 1, behind_by: 0 }, { ahead_by: -1, behind_by: 0, files: [] },
-    { ahead_by: 1, behind_by: 0, files: [{ filename: 'new', status: 'renamed' }] },
-    { ahead_by: 1, behind_by: 0, files: [{ filename: 7 }] },
-    { ahead_by: 1, behind_by: 0, files: Array.from({ length: 300 }, (_, n) => ({ filename: `file-${n}` })) },
+    { ahead_by: 1, behind_by: 0, files: [] },
+    { ahead_by: 1, behind_by: 0, merge_base_commit: null, files: [] },
+    { ahead_by: 1, behind_by: 0, merge_base_commit: { sha: '' }, files: [] },
+    { ahead_by: 1, behind_by: 0, merge_base_commit: { sha: ' ' }, files: [] },
+    { ahead_by: 1, behind_by: 0, merge_base_commit: { sha: 7 }, files: [] },
+    { ahead_by: 1, behind_by: 0, merge_base_commit: { sha: 'base' }, files: [{ filename: 'new', status: 'renamed' }] },
+    { ahead_by: 1, behind_by: 0, merge_base_commit: { sha: 'base' }, files: [{ filename: 7 }] },
+    { ahead_by: 1, behind_by: 0, merge_base_commit: { sha: 'base' }, files: Array.from({ length: 300 }, (_, n) => ({ filename: `file-${n}` })) },
   ])('rejects incomplete or malformed file comparisons: %#', async (response) => {
     await expect(compareFiles('demo/repo', 'base', 'head', vi.fn().mockResolvedValue(response))).resolves.toBeNull();
   });

@@ -663,6 +663,7 @@ async function compareAhead(fullName: string, left: string, right: string, api: 
 export interface CommitComparison {
   aheadBy: number;
   behindBy: number;
+  mergeBaseSha: string;
   files: string[];
 }
 
@@ -670,14 +671,16 @@ export interface CommitComparison {
 export async function compareFiles(fullName: string, baseSha: string, headSha: string, api: RestQuery = ghJson): Promise<CommitComparison | null> {
   const result = await api(['api', `repos/${fullName}/compare/${encodeURIComponent(baseSha)}...${encodeURIComponent(headSha)}?per_page=1`]) as {
     ahead_by?: number; behind_by?: number;
+    merge_base_commit?: { sha?: string } | null;
     files?: { filename?: string; previous_filename?: string; status?: string }[];
   } | null;
   // GitHub caps the entire comparison at 300 files; pagination cannot recover the rest.
   if (!result || !Number.isInteger(result.ahead_by) || result.ahead_by! < 0 ||
-    !Number.isInteger(result.behind_by) || result.behind_by! < 0 || !Array.isArray(result.files) || result.files.length >= 300 ||
+    !Number.isInteger(result.behind_by) || result.behind_by! < 0 || typeof result.merge_base_commit?.sha !== 'string' ||
+    !result.merge_base_commit.sha.trim() || !Array.isArray(result.files) || result.files.length >= 300 ||
     result.files.some((f) => !f || typeof f.filename !== 'string' || !f.filename ||
       (f.status === 'renamed' && !f.previous_filename) || (f.previous_filename !== undefined && typeof f.previous_filename !== 'string'))) return null;
-  return { aheadBy: result.ahead_by!, behindBy: result.behind_by!,
+  return { aheadBy: result.ahead_by!, behindBy: result.behind_by!, mergeBaseSha: result.merge_base_commit.sha,
     files: [...new Set(result.files.flatMap((f) => f.previous_filename ? [f.filename!, f.previous_filename] : [f.filename!]))] };
 }
 

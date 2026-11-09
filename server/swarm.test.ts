@@ -5204,11 +5204,33 @@ describe('QA rounds', () => {
   });
 
   describe('detailed security review on a QA desk', () => {
+    it.each(['automatic', 'manual'] as const)('sends back a clean disjoint advance when a merged and reverted side branch changes the real merge base (%s merge)', async (route) => {
+      const pr = { ...pull, labels: [], baseSha: 'B1', body: '', isCrossRepository: false };
+      vi.mocked(s.backend.prDetails).mockResolvedValue(pr);
+      const compare = vi.spyOn(s.backend, 'compareFiles').mockImplementation(async (_repo, base, head) => {
+        if (head === 'B1') return { aheadBy: 3, behindBy: 0, mergeBaseSha: 'B0', files: ['g', 'q'] };
+        // H merged G1 (g=fixed), reverted g, and changed p. B1 then merged G1 without squashing.
+        return base === 'B0'
+          ? { aheadBy: 3, behindBy: 0, mergeBaseSha: 'B0', files: ['p'] }
+          : { aheadBy: 2, behindBy: 2, mergeBaseSha: 'G1', files: ['g', 'p'] };
+      });
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      vi.spyOn(s.backend, 'commentPull').mockResolvedValue('comment');
+      vi.spyOn(s.backend, 'setSecurityReviewLabel').mockResolvedValue();
+      Object.assign(rec, { status: 'passed', testedSha: pull.headSha, passedSha: pull.headSha, mergeFixes: 1,
+        securityReview: { reason: 'Auth', qaSha: pull.headSha, approvedSha: pull.headSha, auditBaseSha: 'B0' } });
+      if (route === 'automatic') expect(await s.advanceMerge(repo, rec, pr)).toBe(false);
+      else await expect(swarm.mergePull(repo.id, pr.number)).rejects.toThrow('requires a passing security review');
+      expect(compare).toHaveBeenCalledWith(repo.fullName, 'B1', pull.headSha);
+      expect(rec).toMatchObject({ status: 'failed', fixReason: 'base', mergeFixes: 1, round: 2, retests: 0 });
+      expect(merge).not.toHaveBeenCalled();
+    });
+
     it('merges a passed security review after a disjoint docs-only base advance', async () => {
       const pr = { ...pull, labels: [], baseSha: 'base-2', body: '', isCrossRepository: false };
       vi.mocked(s.backend.prDetails).mockResolvedValue(pr);
       const compare = vi.spyOn(s.backend, 'compareFiles').mockImplementation(async (_repo, _base, head) => ({
-        aheadBy: 1, behindBy: 0, files: head === 'base-2' ? ['docs/research/billing.md'] : ['server/billing.ts'],
+        aheadBy: 1, behindBy: 0, mergeBaseSha: 'base-1', files: head === 'base-2' ? ['docs/research/billing.md'] : ['server/billing.ts'],
       }));
       const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
       const comment = vi.spyOn(s.backend, 'commentPull').mockResolvedValue('comment');
@@ -5223,6 +5245,7 @@ describe('QA rounds', () => {
       expect(await s.advanceMerge(repo, rec, pr)).toBe(true);
       expect(compare).toHaveBeenCalledWith(repo.fullName, 'base-1', 'base-2');
       expect(compare).toHaveBeenCalledWith(repo.fullName, 'base-1', pull.headSha);
+      expect(compare).toHaveBeenCalledWith(repo.fullName, 'base-2', pull.headSha);
       expect(merge).toHaveBeenCalledExactlyOnceWith(repo.fullName, 13, 'squash', pull.headSha);
       expect(rec).toMatchObject({ status: 'passed', round: 2, retests: 0, mergeFixes: 2, securityReview: { auditBaseSha: 'base-2' } });
       expect(comment).toHaveBeenCalledWith(repo.fullName, 13, expect.stringContaining('base advanced by 1 commits touching no PR files; security pass carried to base-2'));
@@ -5246,10 +5269,10 @@ describe('QA rounds', () => {
       expect(rec).toMatchObject({ status: 'queued', mergeFixes: MAX_MERGE_FIXES, round: 2, retests: 0 });
     });
 
-    it.each(['overlap', 'conflict', 'conflict with unavailable comparison', 'unknown', 'moved again', 'head changed', 'unavailable'] as const)('does not carry a security pass on a fresh %s result', async (outcome) => {
+    it.each(['overlap', 'conflict', 'conflict with unavailable comparison', 'unknown', 'moved again', 'head changed', 'unavailable', 'current comparison unavailable'] as const)('does not carry a security pass on a fresh %s result', async (outcome) => {
       const pr = { ...pull, labels: [], baseSha: 'base-2', body: '', isCrossRepository: false };
       const details = vi.mocked(s.backend.prDetails).mockResolvedValue(pr);
-      const compare = vi.spyOn(s.backend, 'compareFiles').mockImplementation(async () => ({ aheadBy: 1, behindBy: 0, files: ['server/billing.ts'] }));
+      const compare = vi.spyOn(s.backend, 'compareFiles').mockImplementation(async () => ({ aheadBy: 1, behindBy: 0, mergeBaseSha: 'base-1', files: ['server/billing.ts'] }));
       vi.spyOn(s.backend, 'setSecurityReviewLabel').mockResolvedValue();
       const comment = vi.spyOn(s.backend, 'commentPull').mockResolvedValue('comment');
       const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
@@ -5263,6 +5286,10 @@ describe('QA rounds', () => {
       if (outcome === 'moved again') details.mockResolvedValue({ ...pr, baseSha: 'base-3' }).mockResolvedValueOnce(pr);
       if (outcome === 'head changed') details.mockResolvedValue({ ...pr, headSha: 'sha-2' }).mockResolvedValueOnce(pr);
       if (outcome.includes('unavailable')) compare.mockRejectedValue(new Error('HTTP 503'));
+      if (outcome === 'current comparison unavailable') compare.mockImplementation(async (_repo, base) => {
+        if (base === 'base-2') throw new Error('HTTP 503');
+        return { aheadBy: 1, behindBy: 0, mergeBaseSha: 'base-1', files: ['server/billing.ts'] };
+      });
       expect(await s.advanceMerge(repo, rec, pr)).toBe(false);
       expect(merge).not.toHaveBeenCalled();
       if (outcome.startsWith('conflict')) {
@@ -5325,12 +5352,30 @@ describe('QA rounds', () => {
       return { tester, comment, session };
     };
 
+    it('rejects a changed merge base when completing a passing audit', async () => {
+      const { tester, comment } = await securityDesk();
+      const pr = { ...pull, labels: ['ready-for-review'], baseSha: 'base-2', body: '', isCrossRepository: false };
+      vi.mocked(s.backend.prDetails).mockResolvedValue(pr);
+      vi.spyOn(s.backend, 'compareFiles').mockImplementation(async (_repo, base, head) => {
+        if (head === 'base-2') return { aheadBy: 3, behindBy: 0, mergeBaseSha: 'base-1', files: ['g', 'q'] };
+        return base === 'base-1'
+          ? { aheadBy: 3, behindBy: 0, mergeBaseSha: 'base-1', files: ['p'] }
+          : { aheadBy: 2, behindBy: 2, mergeBaseSha: 'G1', files: ['g', 'p'] };
+      });
+      const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+      await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', summary: 'Audit passed', checks: auditChecks }));
+      expect(rec).toMatchObject({ status: 'failed', fixReason: 'base', round: 2, retests: 0 });
+      expect(comment).toHaveBeenCalledWith(repo.fullName, 13, expect.stringContaining('base reconciliation and review required'));
+      await expect(swarm.mergePull(repo.id, 13)).rejects.toThrow('requires a passing security review');
+      expect(merge).not.toHaveBeenCalled();
+    });
+
     it.each(['during audit', 'during report publication'] as const)('keeps a passing audit when a disjoint base advance happens %s', async (timing) => {
       const { tester, comment } = await securityDesk();
       const pr = { ...pull, labels: ['ready-for-review'], baseSha: timing === 'during audit' ? 'base-2' : 'base-1', body: '', isCrossRepository: false };
       vi.mocked(s.backend.prDetails).mockImplementation(async () => ({ ...pr }));
       vi.spyOn(s.backend, 'compareFiles').mockImplementation(async (_repo, _base, head) => ({
-        aheadBy: 2, behindBy: 0, files: head === 'base-2' ? ['docs/research/team.md'] : ['server/billing.ts'],
+        aheadBy: 2, behindBy: 0, mergeBaseSha: 'base-1', files: head === 'base-2' ? ['docs/research/team.md'] : ['server/billing.ts'],
       }));
       comment.mockImplementation(async () => { pr.baseSha = 'base-2'; return 'comment-url'; });
       await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', summary: 'Audit passed', checks: auditChecks }));
@@ -5345,7 +5390,7 @@ describe('QA rounds', () => {
         mergeable: outcome === 'unknown mergeability' ? 'UNKNOWN' : 'MERGEABLE' };
       vi.mocked(s.backend.prDetails).mockImplementation(async () => ({ ...pr }));
       const compare = vi.spyOn(s.backend, 'compareFiles').mockImplementation(async (_repo, _base, head) => ({
-        aheadBy: 1, behindBy: 0, files: head === 'base-2' ? ['docs/research/team.md'] : ['server/billing.ts'],
+        aheadBy: 1, behindBy: 0, mergeBaseSha: 'base-1', files: head === 'base-2' ? ['docs/research/team.md'] : ['server/billing.ts'],
       }));
       const disjoint = compare.getMockImplementation()!;
       if (outcome === 'comparison outage') compare.mockRejectedValue(new Error('HTTP 503'));
@@ -5367,7 +5412,7 @@ describe('QA rounds', () => {
       const pr = { ...pull, labels: [], baseSha: 'base-2', body: '', isCrossRepository: false };
       vi.mocked(s.backend.prDetails).mockImplementation(async () => ({ ...pr }));
       vi.spyOn(s.backend, 'compareFiles').mockImplementation(async (_repo, _base, head) => ({
-        aheadBy: 1, behindBy: 0, files: head === 'base-2' ? ['docs/research/team.md'] : ['server/billing.ts'],
+        aheadBy: 1, behindBy: 0, mergeBaseSha: 'base-1', files: head === 'base-2' ? ['docs/research/team.md'] : ['server/billing.ts'],
       }));
       Object.assign(rec, { status: 'passed', passedSha: pull.headSha,
         securityReview: { reason: 'Auth', qaSha: pull.headSha, approvedSha: pull.headSha, auditBaseSha: 'base-1' } });
