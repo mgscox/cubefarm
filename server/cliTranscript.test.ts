@@ -4,11 +4,17 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { codexTurn, recoverCliTurn } from './cliTranscript.ts';
 import { createBoxOps } from './boxOps.ts';
+import { checkoutCommit } from './boxUpdate.ts';
+
+vi.mock('./boxUpdate.ts', async (load) => {
+  const actual = await load<typeof import('./boxUpdate.ts')>();
+  return { ...actual, checkoutCommit: vi.fn(actual.checkoutCommit) };
+});
 
 const homes: string[] = [];
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs();
-  for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 });
+  for (const home of homes.splice(0)) await fs.promises.rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 const fixture = () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-recovery-'));
@@ -89,6 +95,26 @@ describe('restart transcript recovery', () => {
     f.save('box-main');
     const box = createBoxOps({ hookUrl: () => '', pids: () => [], root: f.home });
     expect(await box.rpc('recoverTurn', [f.cwd, 'codex', null, f.since])).toMatchObject({ sessionId: 'box-main', text: '{"verdict":"pass"}', ended: true });
+  });
+
+  it('finishes the startup Git probe before returning rollout evidence', async () => {
+    const f = fixture();
+    f.save('box-main');
+    let finish!: (commit: null) => void;
+    vi.mocked(checkoutCommit).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const box = createBoxOps({ hookUrl: () => '', pids: () => [], root: f.home });
+    let returned = false;
+    const recovery = box.rpc('recoverTurn', [f.cwd, 'codex', null, f.since]).then((turn) => {
+      returned = true;
+      return turn;
+    });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(returned).toBe(false);
+    } finally {
+      finish(null);
+      expect(await recovery).toMatchObject({ sessionId: 'box-main', ended: true });
+    }
   });
 
   it.each([null, 'claude-main'])('recovers Claude with sessionId=%s', (id) => {

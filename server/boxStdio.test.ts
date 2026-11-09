@@ -5,12 +5,14 @@ import { spawn } from 'node:child_process';
 import { afterAll, describe, expect, it } from 'vitest';
 import { terminalsAvailable } from './ptyClient.ts';
 import { encode, readMessages, type FromHost, type ToHost } from './ptyProtocol.ts';
+import { stopTestKeeper } from './test/keeper.ts';
 
 // A box for real: `cubefarm box --stdio` bridging to its keeper, dropped and dialled again the way the office relinks
 // after an update. (A short temp folder: macOS caps a Unix socket path at 104 characters.)
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cf-box-'));
 const root = path.resolve(import.meta.dirname, '..');
+const links: { end: () => Promise<void> }[] = [];
 
 /** One link: the bridge, what it sent, and a way to wait for a message. */
 function link() {
@@ -34,7 +36,9 @@ function link() {
     }
   };
   const closed = new Promise<void>((r) => proc.on('close', () => r()));
-  return { send: (m: ToHost) => proc.stdin.write(encode(m)), next, end: () => (proc.stdin.end(), closed) };
+  const bridge = { send: (m: ToHost) => proc.stdin.write(encode(m)), next, end: () => (proc.stdin.end(), closed) };
+  links.push(bridge);
+  return bridge;
 }
 
 const op =
@@ -42,9 +46,13 @@ const op =
   (m: FromHost): m is Extract<FromHost, { op: K }> =>
     m.op === k && also(m as Extract<FromHost, { op: K }>);
 
-describe.skipIf(!terminalsAvailable)("a box's bridge", () => {
-  afterAll(() => fs.rmSync(home, { recursive: true, force: true, maxRetries: 5 }));
+afterAll(async () => {
+  await Promise.all(links.map((bridge) => bridge.end()));
+  if (links.length) await stopTestKeeper(home);
+  await fs.promises.rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}, 15_000);
 
+describe.skipIf(!terminalsAvailable)("a box's bridge", () => {
   it("runs the box's methods itself and keeps its terminals through a new link", { timeout: 90_000 }, async () => {
     const first = link();
     const ready = await first.next(op('ready'));
@@ -72,7 +80,6 @@ describe.skipIf(!terminalsAvailable)("a box's bridge", () => {
     second.send({ op: 'rpc', rid: 1, method: 'info', args: [] });
     expect(await second.next(op('rpcReply', (m) => m.rid === 1))).toMatchObject({ ok: true, value: { keeperStale: false } });
 
-    second.send({ op: 'shutdown' });
     await second.end();
   });
 });
