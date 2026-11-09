@@ -12,6 +12,8 @@ import { saveClaudeToken } from '../bin/claudeAuth.js';
 
 // Version probes are faked: no installed agent CLI is run by these tests.
 vi.mock('./exec.ts', () => ({ run: vi.fn(async () => 'test version'), git: async () => '' }));
+// Staging skills into a Codex desk needs git and a worktree; this file only checks the session files.
+vi.mock('./repoSkills.ts', async (load) => ({ ...await load<typeof import('./repoSkills.ts')>(), stageCodexSkills: vi.fn() }));
 
 let home: string;
 const win = process.platform === 'win32';
@@ -163,6 +165,32 @@ describe('CLI installer folders outside PATH', () => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'opencode.cmd'), '"%dp0%\\node_modules\\opencode-ai\\bin\\opencode.exe" %*\r\n');
     expect(commandFor('opencode')).toEqual({ file: path.join(dir, 'node_modules', 'opencode-ai', 'bin', 'opencode.exe'), args: [] });
+  });
+});
+
+describe('Codex command line', () => {
+  it.each([undefined, 'thread-1'])('stays under 8,000 characters with long instructions and a long prompt (resume: %s)', (resumeId) => {
+    install(['.local', 'bin'], 'codex');
+    const systemAppend = `Floor rules.\n${'r'.repeat(40_000)}\nEnd of rules.`;
+    const prompt = `Fix #310.\n${'p'.repeat(40_000)}\nEnd of task.`;
+    const plan: CliPlan = {
+      cli: 'codex', token: `codex-long-${resumeId ?? 'new'}`, sessionId: 'test', resumeId, cwd: home, prompt, systemAppend,
+      model: 'gpt-6.1-sol', effort: 'high', name: 'Dennis', role: 'dev', additionalDirectories: [], browserTesting: false,
+      officeUrl: 'http://127.0.0.1:0', officeTools: false,
+    };
+    const launch = writeCliSession(plan, { url: plan.officeUrl, held: false });
+    try {
+      expect([launch.file, ...launch.args].join(' ').length).toBeLessThan(8000);
+      expect(launch.args.slice(-1)[0]).toBe(launch.prompt);
+      const instructions = path.join(launch.dir, 'instructions.md');
+      const task = path.join(launch.dir, 'task.md');
+      expect(launch.args.find((a) => a.startsWith('developer_instructions='))).toContain(JSON.stringify(instructions).slice(1, -1));
+      expect(launch.prompt).toContain(task);
+      expect(fs.readFileSync(instructions, 'utf8').startsWith(systemAppend)).toBe(true); // plus the office's scratch note
+      expect(fs.readFileSync(task, 'utf8')).toBe(prompt);
+    } finally {
+      fs.rmSync(launch.dir, { recursive: true, force: true, maxRetries: 5 });
+    }
   });
 });
 
