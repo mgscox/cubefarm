@@ -391,6 +391,10 @@ function readSpecialism(name: 'developer' | 'prototype' | 'qa' | 'security') {
   }
 }
 const MAX_QA_ROUNDS = 3;
+const DOCKER_SAFETY = `This machine's Docker engine is shared with other desks and the manager.
+Record the ID of every container, network and volume you create; remove only those, by ID.
+Never \`docker rm/stop/kill\` by name pattern, label or filter; never \`docker system/container/volume/network prune\`; never \`docker compose down\` on a project you did not create.
+If you can't tell who owns something, leave it and say so in your report.`;
 const TEST_ENVIRONMENT_GUIDANCE = "Use the repository's normal test setup. Keep dependency registries reachable during tests unless offline execution is required. Isolate live services with test configuration, mocks or emulators. Before running a full suite in a custom runner, verify a test that installs dependencies can run in that same environment, if the suite has one.";
 const QA_RECONSIDER = 'Reconsider the approach against the remaining QA blockers before sending this PR back to QA.';
 // Every agent runs Claude Opus 5.5 at medium effort unless the manager overrides it.
@@ -4091,6 +4095,7 @@ export class Swarm {
       return [
         `You are ${a.name}, a Prototype Developer on ${repo.fullName}. Work in ${cwd} on ${branch}. Answer the question with a disposable experiment.`,
         a.brief ? `Your job description: ${a.brief}` : '',
+        DOCKER_SAFETY,
         readSpecialism('prototype'),
         a.prNumber ? `Update draft PR #${a.prNumber} and its evidence in response to the manager's feedback. Push with git push origin HEAD:${branch}.` :
           `Push with git push -u origin ${branch}. Open with gh pr create --draft --base ${repo.defaultBranch} --head ${branch}.`,
@@ -4105,6 +4110,7 @@ export class Swarm {
       `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a software engineer'} on an autonomous agent team ("cubefarm"). Several teammates work in parallel on other issues of the same repository, each in their own git worktree. Nobody is watching live to answer questions, so make sensible decisions yourself and record assumptions in the PR description. The manager may occasionally send you messages; follow their instructions.`,
       `Every pull request is reviewed and tested by a QA teammate. ${repo.autoMerge ? "Once they sign off and GitHub's checks pass, the office merges it by itself" : 'Once they sign off, the manager merges it'}. If they find problems, or checks fail, or it conflicts with the default branch, you will get the details; fix them on the same branch.`,
       a.brief ? `\nYour job description:\n${a.brief}` : '',
+      DOCKER_SAFETY,
       specialism ? `\n${specialism}` : '',
       '',
       `Repository: ${repo.fullName} (default branch: ${repo.defaultBranch})`,
@@ -5064,6 +5070,7 @@ export class Swarm {
       `You are ${a.name}, ${a.title ? `the team's ${a.title},` : 'a QA engineer'} on an autonomous agent team ("cubefarm"). Developers open pull requests; you review and independently verify each one before it is merged. Your sign-off is the review: ${repo.autoMerge ? "on this floor a PR you pass merges by itself as soon as GitHub's checks are green, so nobody else reads the code after you. " : ''}Be thorough and skeptical, but fair: fail a PR only for real problems (broken behaviour, failing tests or build, the issue's requirements not met, obvious regressions), not for style preferences.`,
       ...(a.brief ? ['', `Your job description:\n${a.brief}`] : []),
       ...(a.role === 'dev' ? ['', "You're a developer covering for the QA lab while its testers are busy. You didn't write this pull request: test it as an independent QA engineer would."] : []),
+      DOCKER_SAFETY,
       '',
       `Repository: ${repo.fullName} (default branch: ${repo.defaultBranch})`,
       ...(repo.summary ? [`Project: ${repo.summary}`] : []),
@@ -5097,6 +5104,7 @@ export class Swarm {
   private buildSecuritySystemAppend(repo: PersistedRepo, cwd: string, pr: PrDetails, reason: string, playbook: string) {
     return [
       'You are the CubeFarm QA specialist assigned a detailed security review. Return the structured security report.',
+      DOCKER_SAFETY,
       `Repository: ${repo.fullName}. Pull request #${pr.number}: ${pr.url}`,
       `Worktree: ${cwd}. Audit the PR from the merge base of ${pr.baseSha} and ${pr.headSha} through head ${pr.headSha}.`,
       `Escalation reason: ${reason}`,

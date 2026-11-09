@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { CommandError, ghJson, run } from './exec.ts';
 import { branchAhead, listIssues, listPulls } from './github.ts';
-import { LOST_CONVERSATION, STUCK_MS } from './clis.ts';
+import { launchArgs, LOST_CONVERSATION, STUCK_MS } from './clis.ts';
 import { opencodeTurn } from './opencodeTranscript.ts';
 import { OPENCODE_IDLE_WITH_USAGE } from './fixtures/opencodeScreens.ts';
 import { handleHook, reconnectClis, startCliSession } from './cliRunner.ts';
@@ -6254,6 +6254,48 @@ describe('QA specialism', () => {
     expect(coverPrompt).toContain('Edited QA playbook');
     expect(coverPrompt).toContain('covering for the QA lab');
     expect(coverPrompt).toContain('Finish with the structured QA report');
+  });
+});
+
+describe.each(['claude', 'codex', 'opencode'] as const)('shared Docker safety on %s', (cli) => {
+  it.each(['issue', 'fix', 'qa', 'covering QA', 'prototype', 'security'] as const)('reaches the %s prompt on every floor', (kind) => {
+    const p = s as unknown as Record<string, (...args: unknown[]) => string>;
+    const pr = { number: 13, title: 'Chaser', headRefName: 'swarm/13', url: '' };
+    for (const floor of [1, 2]) {
+      const project = { ...repo, floor, fullName: `demo-co/floor-${floor}`, links: [], defaultBranch: 'main', qaBrief: floor === 1 ? 'Floor QA checks' : '' };
+      const dev = { ...s.state.agents[0], cli, brief: floor === 1 ? 'Project ownership' : '' };
+      const tester = { ...dev, role: 'qa' };
+      const prompts = {
+        issue: () => p.buildSystemAppend(dev, project, '/desk', 'swarm/issue-1-ada'),
+        fix: () => p.buildSystemAppend(dev, project, '/desk', 'fix/13', { pr: 13, headRef: 'swarm/13' }),
+        qa: () => p.buildQaSystemAppend(tester, project, '/desk', 'qa/pr-13-tester', pr),
+        'covering QA': () => p.buildQaSystemAppend(dev, project, '/desk', 'qa/pr-13-ada', pr),
+        prototype: () => p.buildSystemAppend(dev, project, '/desk', 'prototype/issue-1-ada'),
+        security: () => p.buildSecuritySystemAppend(project, '/desk', pr, 'Requested review', 'Security playbook'),
+      };
+      const systemAppend = prompts[kind]();
+      expect(systemAppend).toContain("This machine's Docker engine is shared with other desks and the manager.");
+      expect(systemAppend).toContain('Record the ID of every container, network and volume you create; remove only those, by ID.');
+      expect(systemAppend).toContain('Never `docker rm/stop/kill` by name pattern, label or filter; never `docker system/container/volume/network prune`; never `docker compose down` on a project you did not create.');
+      expect(systemAppend).toContain("If you can't tell who owns something, leave it and say so in your report.");
+      expect(systemAppend.match(/This machine's Docker engine/g)).toHaveLength(1);
+
+      const { args, env } = launchArgs(cli, {
+        prompt: 'Do the assigned task', systemAppend, model: '', effort: 'medium', sessionId: 'session-1',
+        cwd: '/desk', name: 'Ada', role: kind === 'qa' || kind === 'security' ? 'qa' : 'dev', additionalDirectories: [],
+        files: { settings: 'settings.json', system: 'instructions.md', mcp: null },
+        notify: { script: 'notify.cjs', url: 'http://127.0.0.1:1/api/hooks/t' }, codexHook: 'codex-hook.cjs',
+        plugin: 'file:///plugin.mjs', browser: null,
+      });
+      if (cli === 'claude') expect(args[args.indexOf('--append-system-prompt-file') + 1]).toBe('instructions.md');
+      if (cli === 'opencode') expect(JSON.parse(env.OPENCODE_CONFIG_CONTENT).instructions).toEqual(['instructions.md']);
+      if (cli === 'codex') {
+        expect(args.join(' ').length).toBeLessThan(8000);
+        const instructions = args.find((arg) => arg.startsWith('developer_instructions='))!;
+        // Short prompts may stay inline; longer ones must still use the existing file path.
+        expect(instructions.includes('instructions.md') || instructions.includes("This machine's Docker engine")).toBe(true);
+      }
+    }
   });
 });
 
