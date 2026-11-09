@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHECKS_ALERT_MS, CHECK_RERUN_GRACE_MS, MAX_MERGE_FIXES, mergeStep, type MergePull, type MergeRecord } from './mergeGate.ts';
+import { CHECKS_ALERT_MS, CHECK_RERUN_GRACE_MS, MAX_MERGE_FIXES, mergeStep, securityBaseStep, type MergePull, type MergeRecord } from './mergeGate.ts';
 
 const NOW = 1_800_000_000_000;
 const base = { base: 'main' };
@@ -25,6 +25,55 @@ const record = (r: Partial<MergeRecord> = {}): MergeRecord => ({
   checkRerunSha: null,
   checkRerunAt: null,
   ...r,
+});
+
+describe('security base advances', () => {
+  const docs = { aheadBy: 2, behindBy: 0, mergeBaseSha: 'audit-base', files: ['docs/research/billing.md'] };
+  const changes = { aheadBy: 1, behindBy: 0, mergeBaseSha: 'audit-base', files: ['server/billing.ts'] };
+  const currentChanges = { ...changes, behindBy: docs.aheadBy };
+
+  it('carries a pass across a disjoint docs-only advance', () => {
+    expect(securityBaseStep(pull(), docs, changes, currentChanges, 'audit-base')).toBe('carry');
+  });
+
+  it('requires reconciliation when a merged and reverted side branch changes the real merge base', () => {
+    const baseAdvance = { aheadBy: 3, behindBy: 0, mergeBaseSha: 'B0', files: ['g', 'q'] };
+    const auditedChanges = { aheadBy: 3, behindBy: 0, mergeBaseSha: 'B0', files: ['p'] };
+    const currentChanges = { aheadBy: 2, behindBy: 2, mergeBaseSha: 'G1', files: ['g', 'p'] };
+    expect(securityBaseStep(pull(), baseAdvance, auditedChanges, currentChanges, 'B0')).toBe('base');
+  });
+
+  it('requires reconciliation for criss-cross history even when every reported merge base is the audit base', () => {
+    const baseAdvance = { aheadBy: 2, behindBy: 0, mergeBaseSha: 'B0', files: ['guard.txt'] };
+    const auditedChanges = { aheadBy: 4, behindBy: 0, mergeBaseSha: 'B0', files: ['pr.txt'] };
+    const currentChanges = { aheadBy: 3, behindBy: 1, mergeBaseSha: 'B0', files: ['pr.txt'] };
+    expect(securityBaseStep(pull(), baseAdvance, auditedChanges, currentChanges, 'B0')).toBe('base');
+  });
+
+  it('requires the audited comparison to start at the audit base too', () => {
+    expect(securityBaseStep(pull(), docs, { ...changes, mergeBaseSha: 'older-base' }, currentChanges, 'audit-base')).toBe('base');
+  });
+
+  it('requires reconciliation when any changed file overlaps', () => {
+    expect(securityBaseStep(pull(), { ...docs, files: ['docs/research/billing.md', 'server/billing.ts'] }, changes, currentChanges, 'audit-base')).toBe('base');
+  });
+
+  it.each([{ mergeable: 'CONFLICTING' }, { mergeState: 'DIRTY' }])('sends a conflicting advance to a developer: %j', (conflict) => {
+    expect(securityBaseStep(pull(conflict), docs, changes, currentChanges, 'audit-base')).toBe('conflict');
+  });
+
+  it.each([{ mergeable: 'UNKNOWN' }, { mergeState: 'UNKNOWN' }])('waits for fresh mergeability: %j', (unknown) => {
+    expect(securityBaseStep(pull(unknown), docs, changes, currentChanges, 'audit-base')).toBe('wait');
+  });
+
+  it('requires reconciliation for a behind branch, a rewritten base or an incomplete comparison', () => {
+    expect(securityBaseStep(pull({ mergeState: 'BEHIND' }), docs, changes, currentChanges, 'audit-base')).toBe('base');
+    expect(securityBaseStep(pull(), { ...docs, behindBy: 1 }, changes, currentChanges, 'audit-base')).toBe('base');
+    expect(securityBaseStep(pull(), { ...docs, aheadBy: 0 }, changes, currentChanges, 'audit-base')).toBe('base');
+    expect(securityBaseStep(pull(), null, changes, currentChanges, 'audit-base')).toBe('base');
+    expect(securityBaseStep(pull(), docs, null, currentChanges, 'audit-base')).toBe('base');
+    expect(securityBaseStep(pull(), docs, changes, null, 'audit-base')).toBe('base');
+  });
 });
 
 describe('mergeStep', () => {

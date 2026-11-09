@@ -45,7 +45,7 @@ import { decideProposal, proposalFromHandoff, withNewerDraft, wordingOnly, type 
 import { createDemoProposalWorker, demoHandoff } from './proposalFixture.ts';
 import { demoProposalRecords, demoReview, isReviewFixture } from './demoIdeaReview.ts';
 import { currentRound, nextStep, pickReviewers, promote, recordReview, REVIEW_FOCUSES, reviseRound, startReview } from '../shared/ideaReview.ts';
-import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep, type MergeRecord } from './mergeGate.ts';
+import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep, securityBaseStep, type MergeRecord } from './mergeGate.ts';
 import { qaOutcome } from './qaOutcome.ts';
 import { qaFindings, workerSnapshot } from './qaEvidence.ts';
 import { deriveScoreEvents, projectScores, reconcileScores, SCORE_LEDGER_VERSION, ZERO_SCORES, type ScoreLedger } from './scores.ts';
@@ -2995,7 +2995,7 @@ export class Swarm {
     if ((latest.baseRefName || rec.securityReview) && !latest.baseSha) {
       return this.mergeNote(rec, `waiting for the current ${latest.baseRefName ?? repo.defaultBranch} revision`);
     }
-    if (this.holdForSecurityReview(repo, rec, latest)) return false;
+    if (await this.holdForFreshSecurityReview(repo, rec, latest)) return false;
     if (latest.headSha !== pr.headSha) return this.mergeNote(rec, 'head changed; refreshing before merge');
     const baseRef = latest.baseRefName ?? repo.defaultBranch;
     if (rec.mergeCandidate && rec.mergeCandidate.baseRef !== baseRef) {
@@ -3046,7 +3046,7 @@ export class Swarm {
       if (index > 0) {
         const current = await this.backend.prDetails(repo.fullName, pr.number);
         if (this.state.officeHeld || (rec.securityReview && !current.baseSha) || hasLabel(current.labels, NEEDS_HUMAN) ||
-          hasLabel(current.labels, NEEDS_REVIEW) || this.holdForSecurityReview(repo, rec, current)) return false;
+          hasLabel(current.labels, NEEDS_REVIEW) || await this.holdForFreshSecurityReview(repo, rec, current)) return false;
         if (current.baseSha !== latest.baseSha || current.baseRefName !== latest.baseRefName) return false;
       }
       try {
@@ -3061,7 +3061,7 @@ export class Swarm {
     if (error && /head (branch|commit)/i.test(error)) return this.mergeNote(rec, 'new commits arrived; QA checks them first'); // the next sync re-queues it
     if (error && rec.securityReview) {
       const current = await this.backend.prDetails(repo.fullName, pr.number);
-      if (this.holdForSecurityReview(repo, rec, current)) return false;
+      if (await this.holdForFreshSecurityReview(repo, rec, current)) return false;
     }
     if (error) {
       rec.mergeRetryAt = Date.now() + MERGE_RETRY_MS;
@@ -3090,14 +3090,18 @@ export class Swarm {
 
   /** QA passed, but the PR can't merge as it is: a developer fixes it, and QA re-tests if the code changed. */
   private sendBack(repo: PersistedRepo, rec: QaRecord, reason: 'checks' | 'conflict' | 'base', fixInstructions: string, needsHuman: boolean) {
-    if (needsHuman) {
+    if (reason === 'conflict' && rec.securityReview) {
+      void this.backend.commentPull(repo.fullName, rec.prNumber,
+        `Security pass not carried: PR conflicts with ${repo.defaultBranch}; developer reconciliation required.\n\n${AGENT_COMMENT_MARKER}`)
+        .catch((err) => console.warn(`Could not comment on ${repo.fullName}#${rec.prNumber}: ${oneLine(err)}`));
+    }
+    if (needsHuman && reason !== 'base') {
       this.setQa(rec, { status: 'needs-human', mergeNote: null });
-      const problem = reason === 'conflict' ? `conflicts with ${repo.defaultBranch}` :
-        reason === 'base' ? 'needs reconciliation with its current base' : 'fails its checks';
+      const problem = reason === 'conflict' ? `conflicts with ${repo.defaultBranch}` : 'fails its checks';
       this.postMessage('office', `⚠️ PR #${rec.prNumber} on ${repo.fullName} still ${problem} after ${MAX_MERGE_FIXES} fixes, so it needs you.`);
       return false;
     }
-    this.setQa(rec, { status: 'failed', fixReason: reason, fixInstructions, mergeFixes: rec.mergeFixes + 1, mergeNote: null, pendingSince: null });
+    this.setQa(rec, { status: 'failed', fixReason: reason, fixInstructions, mergeFixes: rec.mergeFixes + (reason === 'base' ? 0 : 1), mergeNote: null, pendingSince: null });
     setTimeout(() => this.schedule(), 200);
     return false;
   }
@@ -3557,24 +3561,24 @@ export class Swarm {
       const pr = await this.backend.prDetails(repo.fullName, number);
       if (prototypeIssueNumber(pr.headRefName)) throw new HttpError(409, 'Approve the prototype for implementation from the Blocked board.');
       let rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number);
-      const checkSecurityReview = (current: PrDetails) => {
+      const checkSecurityReview = async (current: PrDetails) => {
         const labeled = hasLabel(current.labels, READY_FOR_SECURITY_REVIEW);
         if (!rec && labeled && current.state === 'OPEN') {
           rec = this.queueQa(repo, number, null, current.closesIssues[0] ?? null, current.isCrossRepository);
         }
-        const held = rec ? !(approval && incompleteAuditOverride(rec, outcome(), current)) && this.holdForSecurityReview(repo, rec, current) : labeled;
+        const held = rec ? !(approval && incompleteAuditOverride(rec, outcome(), current)) && await this.holdForFreshSecurityReview(repo, rec, current) : labeled;
         if (held || (rec?.securityReview && !current.baseSha)) {
           throw new HttpError(409, `PR #${number} requires a passing security review for its current head and base`);
         }
       };
-      checkSecurityReview(pr);
+      await checkSecurityReview(pr);
       for (const label of [NEEDS_HUMAN, NEEDS_REVIEW]) {
         if (hasLabel(pr.labels, label)) throw new HttpError(409, `Remove ${label} from PR #${number} before merging`);
       }
       if (approval) {
         preflight(pr, true);
         await this.backend.commentPull(repo.fullName, number, approval.reason);
-        checkSecurityReview(await this.backend.prDetails(repo.fullName, number));
+        await checkSecurityReview(await this.backend.prDetails(repo.fullName, number));
         preflight(pr, true);
       }
       if (approval) await this.backend.mergePull(repo.fullName, number, method, headSha);
@@ -4847,6 +4851,58 @@ export class Swarm {
 
   // ---------- QA ----------
 
+  private async advanceSecurityBase(repo: PersistedRepo, rec: QaRecord, pr: PrDetails, gone = () => false): Promise<'carry' | 'base' | 'conflict' | 'wait'> {
+    let review = rec.securityReview;
+    if (!review?.auditBaseSha || !pr.baseSha) return 'base';
+    const auditBaseSha = review.auditBaseSha;
+    const status = rec.status;
+    const comparisons = await Promise.allSettled([
+      this.backend.compareFiles(repo.fullName, auditBaseSha, pr.baseSha),
+      this.backend.compareFiles(repo.fullName, auditBaseSha, pr.headSha),
+      this.backend.compareFiles(repo.fullName, pr.baseSha, pr.headSha),
+    ]);
+    const current = await this.backend.prDetails(repo.fullName, rec.prNumber);
+    const changed = (latest: PrDetails) => gone() || rec.securityReview !== review || rec.status !== status || latest.state !== 'OPEN' ||
+      latest.headSha !== pr.headSha || latest.baseSha !== pr.baseSha || latest.baseRefName !== pr.baseRefName ||
+      latest.isDraft || hasLabel(latest.labels, NEEDS_HUMAN) || hasLabel(latest.labels, NEEDS_REVIEW) ||
+      hasLabel(latest.labels, READY_FOR_SECURITY_REVIEW) !== hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW);
+    if (changed(current)) return 'wait';
+    const [base, changes, currentChanges] = comparisons;
+    if (securityBaseStep(current, null, null, null, auditBaseSha) === 'conflict') return 'conflict';
+    if (base.status === 'rejected' || changes.status === 'rejected' || currentChanges.status === 'rejected') return 'wait';
+    const step = securityBaseStep(current, base.value, changes.value, currentChanges.value, auditBaseSha);
+    if (step === 'carry') {
+      const text = `base advanced by ${base.value!.aheadBy} commits touching no PR files; security pass carried to ${pr.baseSha}`;
+      this.setQa(rec, { securityReview: { ...review, auditBaseSha: pr.baseSha } });
+      review = rec.securityReview;
+      await this.backend.commentPull(repo.fullName, rec.prNumber, `${text}\n\n${AGENT_COMMENT_MARKER}`)
+        .catch((err) => console.warn(`Could not comment on ${repo.fullName}#${rec.prNumber}: ${oneLine(err)}`));
+      const published = await this.backend.prDetails(repo.fullName, rec.prNumber);
+      if (changed(published) || securityBaseStep(published, base.value, changes.value, currentChanges.value, auditBaseSha) !== 'carry') return 'wait';
+    }
+    return step;
+  }
+
+  private async holdForFreshSecurityReview(repo: PersistedRepo, rec: QaRecord, pr: PrDetails): Promise<boolean> {
+    const review = rec.securityReview;
+    if (rec.status === 'passed' && review?.approvedSha === pr.headSha && pr.baseSha && review.auditBaseSha !== pr.baseSha) {
+      const step = await this.advanceSecurityBase(repo, rec, pr);
+      if (step === 'wait') {
+        this.mergeNote(rec, 'waiting to verify the security review base advance');
+        return true;
+      }
+      if (step === 'conflict') {
+        this.sendBack(repo, rec, 'conflict', `It conflicts with ${pr.baseRefName ?? repo.defaultBranch}.`, rec.mergeFixes >= MAX_MERGE_FIXES);
+        return true;
+      }
+      if (step === 'base') {
+        this.sendBackForSecurityBase(repo, rec, pr);
+        return true;
+      }
+    }
+    return this.holdForSecurityReview(repo, rec, pr);
+  }
+
   private sendBackForSecurityBase(repo: PersistedRepo, rec: QaRecord, pr: Pick<PrDetails, 'headSha' | 'baseSha' | 'baseRefName' | 'labels'>) {
     const review = rec.securityReview!;
     const base = pr.baseRefName ?? repo.defaultBranch;
@@ -4856,6 +4912,9 @@ export class Swarm {
       securityReview: { reason: review.reason, qaSha: null },
     });
     this.sendBack(repo, rec, 'base', instructions, rec.mergeFixes >= MAX_MERGE_FIXES);
+    void this.backend.commentPull(repo.fullName, rec.prNumber,
+      `Security pass could not be carried to ${pr.baseSha}; base reconciliation and review required. No QA round or merge-fix budget charged.\n\n${AGENT_COMMENT_MARKER}`)
+      .catch((err) => console.warn(`Could not comment on ${repo.fullName}#${rec.prNumber}: ${oneLine(err)}`));
     if (review.approvedSha && !hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW)) {
       void this.backend.setSecurityReviewLabel(repo.fullName, rec.prNumber, true).catch((err) => {
         console.warn(`Could not restore the security review label on ${repo.fullName}#${rec.prNumber}: ${oneLine(err)}`);
@@ -4884,7 +4943,7 @@ export class Swarm {
     this.toast('info', text);
   }
 
-  private holdForSecurityReview(repo: PersistedRepo, rec: QaRecord, pr: Pick<PrDetails, 'headSha' | 'baseSha' | 'baseRefName' | 'labels'>, fresh = true): boolean {
+  private holdForSecurityReview(_repo: PersistedRepo, rec: QaRecord, pr: Pick<PrDetails, 'headSha' | 'baseSha' | 'baseRefName' | 'labels'>, fresh = true): boolean {
     const labeled = hasLabel(pr.labels, READY_FOR_SECURITY_REVIEW);
     const review = rec.securityReview;
     const approved = review?.approvedSha === pr.headSha && (!fresh || !pr.baseSha || review.auditBaseSha === pr.baseSha);
@@ -4892,8 +4951,7 @@ export class Swarm {
     if (!review && !labeled) return false;
     if (rec.status === 'passed') {
       if (fresh && review?.approvedSha === pr.headSha && pr.baseSha && review.auditBaseSha !== pr.baseSha) {
-        this.sendBackForSecurityBase(repo, rec, pr);
-        return true;
+        return true; // Exact comparisons and fresh mergeability are checked by the async merge gate.
       }
       const qaSha = rec.passedSha === pr.headSha ? pr.headSha : null;
       this.setQa(rec, {
@@ -5219,7 +5277,7 @@ export class Swarm {
     const generation = rt.generation;
     const gone = () => !this.state.agents.includes(a) || rt.generation !== generation || this.officeUpdate.handedOver ||
       (rec !== undefined && (!this.state.qa.includes(rec) || rec.status !== 'testing' || rec.qaAgentId !== a.id || orphanedQa(rec, this.state.agents)));
-    const review = rec?.securityReview;
+    let review = rec?.securityReview;
     const security = !!review?.auditBaseSha && review.qaSha === rec?.testedSha && review.approvedSha !== rec?.testedSha;
     const report = result.ok ? parseReport(result, security) : null;
 
@@ -5322,6 +5380,7 @@ export class Swarm {
       const securityReason = report.securityReviewReason || review?.reason ||
         (hasLabel(pullLabels, READY_FOR_SECURITY_REVIEW) ? 'Requested by the PR label.' : '');
       const isCurrentAudit = (pr: PrDetails) => pr.state === 'OPEN' && pr.headSha === rec.testedSha && pr.baseSha === review?.auditBaseSha;
+      let baseVerificationPending = false;
       const handBackStaleAudit = (pr: PrDetails) => {
         if (evidence) this.observeQaRevision(evidence, pr);
         if (pr.state === 'OPEN' && pr.headSha === rec.testedSha && pr.baseSha && pr.baseSha !== review?.auditBaseSha) {
@@ -5331,6 +5390,37 @@ export class Swarm {
         }
         a.status = 'done';
       };
+      const reconcileAudit = async (pr: PrDetails) => {
+        if (isCurrentAudit(pr)) return true;
+        if (pass && pr.state === 'OPEN' && pr.headSha === rec.testedSha && pr.baseSha && pr.baseSha !== review?.auditBaseSha) {
+          const step = await this.advanceSecurityBase(repo, rec, pr, gone);
+          if (gone()) return false;
+          if (step === 'carry') {
+            review = rec.securityReview;
+            baseVerificationPending = false;
+            return true;
+          }
+          if (step === 'conflict') {
+            this.sendBack(repo, rec, 'conflict', `It conflicts with ${pr.baseRefName ?? repo.defaultBranch}.`, rec.mergeFixes >= MAX_MERGE_FIXES);
+            a.status = 'done';
+            return false;
+          }
+          if (step === 'wait') {
+            const latest = await this.backend.prDetails(repo.fullName, rec.prNumber);
+            if (gone()) return false;
+            if (latest.state === 'OPEN' && latest.headSha === rec.testedSha) {
+              // Keep the completed audit on its proven base; the merge gate retries the base verification.
+              review = rec.securityReview;
+              baseVerificationPending = latest.baseSha !== review?.auditBaseSha;
+              return true;
+            }
+            handBackStaleAudit(latest);
+            return false;
+          }
+        }
+        handBackStaleAudit(pr);
+        return false;
+      };
       const qaRounds = rec.round - rec.retests; // rounds QA itself asked for
       const reconsider = !security && !pass && !incomplete && qaRounds >= MAX_QA_ROUNDS;
       if (gone()) return;
@@ -5338,7 +5428,7 @@ export class Swarm {
         if (security) {
           const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
           if (gone()) return;
-          if (!isCurrentAudit(pr)) return handBackStaleAudit(pr);
+          if (!await reconcileAudit(pr)) return;
         }
         this.appendLog(a, [{ kind: 'system', text: '📎 Uploading evidence and posting the QA report on the PR…' }]);
         const body = await this.renderQaComment(a, repo, rec, report, rt.shots, security, reconsider,
@@ -5361,7 +5451,7 @@ export class Swarm {
         try {
           const pr = await this.backend.prDetails(repo.fullName, rec.prNumber);
           if (gone()) return;
-          if (!isCurrentAudit(pr)) return handBackStaleAudit(pr);
+          if (!await reconcileAudit(pr)) return;
           await this.backend.setSecurityReviewLabel(repo.fullName, rec.prNumber, false);
           if (gone()) return;
         } catch (err) {
@@ -5461,9 +5551,10 @@ export class Swarm {
         // The report's own verdict, even if a later read left the workflow incomplete: a manager override must not see a pass.
         failedSha: report.verdict === 'fail' ? rec.testedSha : null,
         ...(!security ? { ciRequired: environmentOnly } : resourceFallback ? { ciRequired: true } : {}),
-        securityReview: security && pass && rec.testedSha ? { ...review, approvedSha: rec.testedSha } : rec.securityReview,
+        securityReview: security && pass && rec.testedSha && review ? { ...review, approvedSha: rec.testedSha } : rec.securityReview,
         ...(security && pass ? { securityLabel: false } : {}), // the office removed it, not the manager
         mergeNote: escalate ? 'waiting for detailed security review'
+          : security && pass && baseVerificationPending ? 'waiting to verify the security review base advance'
           : outOfMemory && (pass || resourceRetry) ? `${outOfMemory}${resourceRetry ? '; retrying once' : ''}`
           : incomplete ? report.summary : reconsider ? QA_RECONSIDER : null,
         pendingSince: null,
