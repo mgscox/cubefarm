@@ -47,6 +47,15 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      - name: Windows temp cleanup (20 consecutive runs)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          for ($run = 1; $run -le 20; $run++) {
+            npm test -- server/cliTranscript.test.ts server/boxStdio.test.ts
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Write-Output "Windows temp cleanup: $run/20 consecutive runs passed"
+          }
       - run: npm test -- --maxWorkers=2
       - run: npm run build
       # The npm package as users get it: packed, installed into an empty folder and booted in demo mode.
