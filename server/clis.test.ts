@@ -5,7 +5,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, cliStartupFailed, readClaudeTurn, CODEX_HOOK_EVENTS, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, HOOK_REVIEW_ANSWERS, hookReviewKey, hookReviewWatch, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, selectedOption, startupQuestionOnScreen, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { bootNotice, claudeConversation, claudeTurn, claudeWorking, cliExit, cliStartupFailed, readClaudeTurn, CODEX_HOOK_EVENTS, CODEX_INLINE_MAX, codexHookCommand, codexTurnThread, CROSS_TURN_TOOLS, HOOK_REVIEW_ANSWERS, hookReviewKey, hookReviewWatch, idlePromptWatch, officePermission, opencodeIdlePrompt, interruptions, launchArgs, lostConversation, menuOnScreen, menuWatch, NOTIFY_SOURCE, oneAtATime, resumableSession, selectedOption, startupQuestionOnScreen, STUCK_MS, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
 import { describeTool, playwrightAction, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 import { OPENCODE_IDLE_WITH_USAGE, OPENCODE_IDLE_WITHOUT_USAGE, OPENCODE_WORKING } from './fixtures/opencodeScreens.ts';
 import { CONSOLE_PERMISSION, NAVIGATE_PERMISSION } from './fixtures/claudePermissions.ts';
@@ -377,6 +377,14 @@ describe('launchArgs', () => {
     expect(own.slice(own.indexOf('--cd'), own.indexOf('--cd') + 2)).toEqual(['--cd', path.join('desks', 'ada-1')]);
     // A new session starts in its terminal's folder, as before.
     expect(launchArgs('codex', ctx()).args).not.toContain('--cd');
+  });
+
+  it.each([undefined, 'thread-1'])("points Codex at its instructions file once they're too long for its command line (resume %s)", (resumeId) => {
+    const instructions = (args: string[]) => args.find((a) => a.startsWith('developer_instructions='))!;
+    expect(instructions(launchArgs('codex', ctx({ resumeId })).args)).toBe('developer_instructions="You are Ada."');
+    const long = instructions(launchArgs('codex', ctx({ resumeId, systemAppend: 'x'.repeat(CODEX_INLINE_MAX + 1) })).args);
+    expect(long).toContain('instructions.md');
+    expect(long.length).toBeLessThan(200);
   });
 
   it.each([undefined, 'thread-1'])('passes the lowercase Codex model ID (resume %s)', (resumeId) => {
