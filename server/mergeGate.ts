@@ -10,6 +10,8 @@ export function securityBaseStep(pr: Pick<MergePull, 'mergeable' | 'mergeState'>
   if (!base || !changes || !currentChanges || base.behindBy !== 0 || base.aheadBy <= 0) return 'base';
   // A shared side branch can move the merge base and expose changes hidden by the audited diff.
   if (changes.mergeBaseSha !== auditBaseSha || currentChanges.mergeBaseSha !== auditBaseSha) return 'base';
+  // Criss-cross history can report the audit base while sharing commits gained by the new base.
+  if (currentChanges.behindBy !== base.aheadBy) return 'base';
   const files = new Set(changes.files);
   return base.files.some((file) => files.has(file)) ? 'base' : 'carry';
 }
