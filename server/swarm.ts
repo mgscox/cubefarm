@@ -30,7 +30,7 @@ import { orphanedQa } from './qaOwnership.ts';
 import { closedWork, closedWorkText, issueClosed, restartClosedWork, type ClosedWork } from './closedWork.ts';
 import { silentSession } from './watchdog.ts';
 import { startTimeouts, stuckStarting } from './sessionStart.ts';
-import { withOperation } from './operation.ts';
+import { outsideOperation, withOperation } from './operation.ts';
 import { QA_RESUME_PROMPT, qaRetry } from './qaRetry.ts';
 import { planDevFix, type FixReason } from './fixPlan.ts';
 import { fixNeedsHuman, fixOutcome } from './fixOutcome.ts';
@@ -2211,7 +2211,8 @@ export class Swarm {
     if (this.boxConns.has(task.id)) return this.boxConns.get(task.id)!.check().then(() => []);
     const pending = this.upstashOpening.get(task.id);
     if (pending) return pending;
-    const opening = (async () => {
+    // The link outlives the task start that opens it; inside that operation its callbacks would keep the start's aborted signal.
+    const opening = outsideOperation(async () => {
       const box: PersistedBox = { id: task.id, name: task.name, destination: task.boxId!, layout: { workspaces: '/workspace/cubefarm/home/workspaces', sep: '/' } };
       const conn = await this.backend.upstash.connect(task, { box, officeId: this.state.officeId,
         changed: () => this.broadcast({ type: 'upstash', tasks: this.state.upstashTasks.map((t) => this.upstashView(t)) }), terminalFor: (id) => id === task.agentId ? this.keptTerminal(id) : null });
@@ -2229,7 +2230,7 @@ export class Swarm {
         throw err;
       } finally { clearTimeout(timer); }
       return back;
-    })();
+    });
     this.upstashOpening.set(task.id, opening);
     void opening.finally(() => this.upstashOpening.delete(task.id)).catch(() => undefined);
     return opening;

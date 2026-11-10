@@ -8036,6 +8036,21 @@ describe('Upstash placement', () => {
 });
 
 
+it('opens an Upstash link outside the task start that requested it', async () => {
+  const task: import('../shared/types.ts').UpstashTask = { id: 'upstash-task', name: 'task', boxId: 'box-1', agentId: 'a1', repo: repo.fullName, branch: 'task', cli: 'opencode', slug: 'ada-a1', port: 5324, phase: 'active', error: null };
+  const internals = swarm as unknown as { openUpstash(task: unknown): Promise<unknown> };
+  const { operationSignal, withOperation } = await import('./operation.ts');
+  let seen: AbortSignal | undefined | null = null;
+  vi.spyOn(s.backend.upstash, 'connect').mockImplementation(async () => {
+    await Promise.resolve();
+    seen = operationSignal();
+    throw new Error('no link');
+  });
+  await expect(withOperation(new AbortController().signal, () => internals.openUpstash(task))).rejects.toThrow('no link');
+  // Session-end callbacks run in the link's context: an inherited start signal, aborted once the session starts, fails their gh and Box calls.
+  expect(seen).toBeUndefined();
+});
+
 it('reconnects a stopped Upstash task without resetting its unsaved worktree', async () => {
   const a = s.state.agents[0];
   Object.assign(a, { status: 'preparing', deskBox: 'upstash-task', box: 'upstash', branch: 'task', cli: 'codex' });

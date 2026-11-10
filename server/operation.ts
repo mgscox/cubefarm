@@ -16,3 +16,8 @@ export function withOperation<T>(signal: AbortSignal, fn: () => Promise<T>): Pro
     finally { signal.removeEventListener('abort', abort); }
   });
 }
+
+/** Run `fn` with no operation: what it creates outlives the caller, so its later callbacks must not inherit the caller's signal. */
+export function outsideOperation<T>(fn: () => T): T {
+  return operation.exit(fn);
+}
