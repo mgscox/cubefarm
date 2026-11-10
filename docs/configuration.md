@@ -90,6 +90,10 @@ running task. These workers require outbound access to npm, GitHub and their sel
 OpenCode Boxes install OpenCode v2 from `@opencode/cli`, pinned in `server/upstashProvider.ts`. A Box bootstrapped
 with the v1 `opencode-ai` package has it removed when its runtime is next prepared.
 
+**Validating a worker.** Hire one developer with the machine **Upstash · Small Box per task** and assign it one
+small issue. While the task runs, Fleet lists its Box. When the task finishes, the Box is deleted and no cleanup
+record remains in Fleet.
+
 ## OpenCode desk models
 
 Set an OpenCode desk's model to `provider/model`, matching the provider ID in your OpenCode config (for example,
