@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { operationSignal, withOperation } from './operation.ts';
+import { operationSignal, outsideOperation, withOperation } from './operation.ts';
 import { run } from './exec.ts';
 
 describe('desk operation cancellation', () => {
@@ -29,5 +29,19 @@ describe('desk operation cancellation', () => {
     c.abort(new Error('Desk timed out'));
     await rejected;
     await stopped;
+  });
+
+  it('keeps a long-lived resource\'s callbacks free of the operation that created it', async () => {
+    const c = new AbortController();
+    let later!: () => AbortSignal | undefined;
+    await withOperation(c.signal, async () => {
+      await outsideOperation(async () => {
+        await Promise.resolve();
+        later = () => operationSignal();
+      });
+      expect(operationSignal()).toBe(c.signal);
+    });
+    c.abort(new Error('Task replaced'));
+    expect(later()).toBeUndefined();
   });
 });
