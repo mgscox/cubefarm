@@ -92,7 +92,7 @@ with the v1 `opencode-ai` package has it removed when its runtime is next prepar
 
 **Validating a worker.** Hire one developer with the machine **Upstash · Small Box per task** and assign it one
 small issue. While the task runs, Fleet lists its Box. When the task finishes, the Box is deleted and no cleanup
-record remains in Fleet.
+record remains in Fleet. The validation worker can use the default OpenRouter model, `openrouter/anthropic/claude-sonnet-4.6`.
 
 ## OpenCode desk models
 
