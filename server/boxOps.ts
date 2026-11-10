@@ -9,7 +9,7 @@ import * as workspace from './workspace.ts';
 import { codexThread, detectClis, readClaudeTurn } from './clis.ts';
 import { screenshotFile } from './agentRunner.ts';
 import { checkoutCommit } from './boxUpdate.ts';
-import { BIN_DIR, removeSessionDir, SESSIONS_DIR, sessionShots, writeCliSession, type CliLaunch } from './cliFiles.ts';
+import { BIN_DIR, prepareCliSession, removeSessionDir, SESSIONS_DIR, sessionShots, type CliLaunch } from './cliFiles.ts';
 import { probeHookUrl, type BoxInfo } from './fleet.ts';
 import { rebootStatus } from './rebootStatus.ts';
 import type { CliPlan } from './machine.ts';
@@ -76,7 +76,7 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
       images.receive(attachments as ImageAttachment[]);
       return images.prompt(str(text));
     },
-    prepare(plan, attachments, claudeToken) {
+    async prepare(plan, attachments, claudeToken) {
       const p = plan as CliPlan;
       if (claudeToken !== undefined && (p.cli !== 'claude' || !validClaudeToken(claudeToken))) {
         throw new Error('Invalid office Claude credential for this session.');
@@ -84,7 +84,7 @@ export function createBoxOps(ctx: { hookUrl: () => string; pids: () => number[];
       if (attachments) images.receive(attachments as ImageAttachment[]);
       const now = Date.now();
       for (const [t, p] of prepared) if (now - p.at > PREPARED_MS) prepared.delete(t);
-      const cli = writeCliSession({ ...p, prompt: images.prompt(p.prompt), systemAppend: images.prompt(p.systemAppend) }, { url: ctx.hookUrl(), held: true }, claudeToken);
+      const cli = await prepareCliSession({ ...p, prompt: images.prompt(p.prompt), systemAppend: images.prompt(p.systemAppend) }, { url: ctx.hookUrl(), held: true }, claudeToken);
       prepared.set((plan as CliPlan).token, { cli, at: now });
       return { dir: cli.dir, jobScratch: !!cli.env.CUBEFARM_JOB_SCRATCH, prompt: cli.prompt, hookUrl: `${ctx.hookUrl()}/api/hooks` };
     },

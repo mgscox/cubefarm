@@ -397,9 +397,9 @@ describe('launchArgs', () => {
     expect(args.slice(args.indexOf('-m'), args.indexOf('-m') + 2)).toEqual(['-m', 'MyProvider/Astra']);
   });
 
-  it('preserves the model name for Claude Code', () => {
-    const { args } = launchArgs('claude', ctx({ model: 'GPT-6-Astra' }));
-    expect(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2)).toEqual(['--model', 'GPT-6-Astra']);
+  it.each([undefined, 'claude-session'])('passes the chosen Claude Code model (resume %s)', (resumeId) => {
+    const { args } = launchArgs('claude', ctx({ model: 'sonnet', resumeId }));
+    expect(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2)).toEqual(['--model', 'sonnet']);
   });
 
   it.each([undefined, 'thread-1'])("keeps Codex's office browser separate from an inherited playwright server (resume %s)", (resumeId) => {

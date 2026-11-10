@@ -1363,6 +1363,19 @@ describe('exclusive issue sessions', () => {
     expect(starts.mock.calls[0][0].prompt).toContain('Parked PR #13');
   });
 
+  it.each([
+    ['opencode', 'deepseek/deepseek-v4.1-flash-1017'],
+    ['claude', 'sonnet'],
+    ['codex', 'gpt-6-astra'],
+  ] as const)('passes the per-agent %s model from Settings when assigning work', async (cli, model) => {
+    Object.assign(s.backend, { terminals: true });
+    swarm.updateSettings({ runtime: 'terminal' });
+    swarm.updateAgent('a1', { cli, model });
+    await swarm.assign('a1', 67);
+    await flush();
+    expect(starts.mock.calls[0][0]).toMatchObject({ cli, model });
+  });
+
   it.each(['explicit', 'automatic'] as const)('reserves before preparation when %s assignment wins', async (first) => {
     let prepared!: (cwd: string) => void;
     vi.mocked(s.prepare).mockReturnValue(new Promise((resolve) => { prepared = resolve; }));
@@ -1557,14 +1570,14 @@ describe('desk reset and the CLI waiting at the prompt', () => {
     discard: vi.fn(), hooksReady: vi.fn(), leave: vi.fn(), protect: () => ({ pids: [], markers: [] }),
   });
 
-  /** A Claude CLI waiting at a1's prompt in conversation `resumeId`, on the office's machine; it exits only on exit(). */
-  async function waiting(resumeId: string) {
+  /** A CLI waiting at a1's prompt on the office's machine; it exits only on exit(). */
+  async function waiting(resumeId: string, cli: NonNullable<SessionOptions['cli']> = 'claude', model = 'claude-opus-5-5') {
     const exits: ((code: number) => void)[] = [];
     const pty = {
       pid: 7, write: vi.fn(), resize: vi.fn(), setMeta: vi.fn(), onData: vi.fn(),
       kill: vi.fn(() => steps.push('kill')), onExit: vi.fn((fn: (code: number) => void) => exits.push(fn)),
     };
-    const h = { ...host(pty), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta: { agentId: 'a1', cli: 'claude', token: `t-${resumeId}`, dir: 'sessions/t', resumeId, busy: false } }] };
+    const h = { ...host(pty), reconnect: async () => [{ id: 'held', pid: 7, exit: null, meta: { agentId: 'a1', cli, model, token: `t-${resumeId}`, dir: 'sessions/t', resumeId, busy: false } }] };
     const term = { cols: 100, rows: 30, note: vi.fn(), bind: vi.fn(), write: vi.fn(), screen: () => '❯', releaseIdle: null, closing: null } as unknown as AgentTerminal;
     await reconnectClis(() => term, h);
     Object.assign(s.agentRt.get('a1')!, { terminal: term });
@@ -1618,6 +1631,23 @@ describe('desk reset and the CLI waiting at the prompt', () => {
     expect(steps).toEqual(['releaseDesk', 'prepareDesk']);
     expect(cli.pty.kill).not.toHaveBeenCalled();
     expect(cli.term.releaseIdle).toEqual(expect.any(Function));
+    expect(vi.mocked(s.startAgentSession).mock.calls[0][5]).toBe('conv-a');
+  });
+
+  it.each([
+    ['opencode', 'openrouter/z-ai/glm-5.3', 'deepseek/deepseek-v4.1-flash-1017'],
+    ['claude', 'sonnet', 'opus'],
+    ['codex', 'gpt-6-sol', 'gpt-6-astra'],
+  ] as const)('closes an idle %s terminal when its Settings override changes before a fix', async (kind, oldModel, model) => {
+    Object.assign(rec, { devSessionCli: kind });
+    swarm.updateAgent('a1', { cli: kind, model });
+    const cli = await waiting('conv-a', kind, oldModel);
+    const task = s.runFix(agent(), repo, rec);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(steps).toEqual(['kill']);
+    cli.exit();
+    await task;
+    expect(steps).toEqual(['kill', 'exited', 'releaseDesk', 'prepareDesk']);
     expect(vi.mocked(s.startAgentSession).mock.calls[0][5]).toBe('conv-a');
   });
 

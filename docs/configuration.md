@@ -97,15 +97,14 @@ record remains in Fleet.
 ## OpenCode desk models
 
 Set an OpenCode desk's model to `provider/model`, matching the provider ID in your OpenCode config (for example,
-`ollama/glm-5.3:cloud` or `openrouter/z-ai/glm-5.3`). Bare names such as `glm-5.3:cloud` are treated as Ollama models
-and sent as `ollama/glm-5.3:cloud`. The `ollama` provider must already be configured in OpenCode; CubeFarm does not
-create providers. Leave the model empty to use OpenCode's own default.
+`ollama/glm-5.3:cloud` or `openrouter/z-ai/glm-5.3`). CubeFarm also accepts an OpenRouter slug such as
+`deepseek/deepseek-v4.1-flash-1017` when it matches a model listed by OpenRouter in the desk's OpenCode catalog.
+Bare names such as `glm-5.3:cloud` are treated as Ollama models. Configure the provider in OpenCode on the machine
+hosting the desk. Leave the field empty to let OpenCode choose the model.
 
-CubeFarm passes the model as `model` in `OPENCODE_CONFIG_CONTENT`, following the
-[OpenCode config schema](https://opencode.ai/config.json). The interactive CLI does not accept `--model`
-(verified with OpenCode v2.0.32); it accepts `--auto`, `--session` and `--prompt`.
-CubeFarm passes `--standalone` so each desk's private server reads its own model, instructions, plugins and permissions
-from the environment; OpenCode's shared background service keeps the config of the client that started it.
+CubeFarm selects an explicit model on the OpenCode session before starting its terminal. This applies to both new
+sessions and resumed conversations. An unavailable model is reported as a startup error. CubeFarm passes `--standalone`
+so each desk's private server reads its instructions, plugins and permissions from the environment.
 
 OpenCode integration targets v2 (verified against v2.0.32). CubeFarm writes a v2 notification plugin package on the
 machine that owns the desk and points it at that machine's terminal keeper. Failed notifications retry with backoff;

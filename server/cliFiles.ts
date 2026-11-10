@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { HOME_DIR } from './config.ts';
+import { CommandError, run } from './exec.ts';
 import { createJobScratch, jobScratchEnabled, JOB_SCRATCH_INSTRUCTIONS, SESSIONS_DIR, sessionScratchDir } from './jobScratch.ts';
 import { projectEnv } from './projectEnv.ts';
 import { playwrightMcpCommand } from './browser.ts';
@@ -137,6 +138,48 @@ export function writeCliSession(plan: CliPlan, hooks: { url: string; held: boole
   Object.assign(env, { TERM: 'xterm-256color', COLORTERM: 'truecolor' }, launch.env);
 
   return { dir, prompt, file: cmd.file, args: [...cmd.args, ...launch.args], cwd: plan.cwd, env };
+}
+
+export function prepareCliSession(plan: CliPlan, hooks: { url: string; held: boolean }, claudeToken?: string): CliLaunch | Promise<CliLaunch> {
+  const launch = writeCliSession(plan, hooks, claudeToken);
+  return plan.cli === 'opencode' && plan.model ? selectOpenCodeModel(plan, launch) : launch;
+}
+
+/** An explicit OpenCode model belongs to the session, where it takes precedence over the TUI's defaults. */
+async function selectOpenCodeModel(plan: CliPlan, launch: CliLaunch): Promise<CliLaunch> {
+  const api = (...args: string[]) => run(launch.file, [...launch.args.slice(0, launch.args.indexOf('--standalone')), 'api', '--standalone', ...args], {
+    cwd: launch.cwd, env: { ...launch.env, CUBEFARM_NOTIFY_URL: undefined }, timeoutMs: 15_000,
+  });
+  try {
+    const config = JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT) as { model: string };
+    const [requested, variant] = config.model.split('#', 2);
+    const [name] = plan.model.split('#', 2);
+    const { data: models } = JSON.parse(await api('GET', '/api/model')) as { data: { providerID: string; id: string; enabled: boolean }[] };
+    const find = (name: string) => models.find((m) => m.enabled && `${m.providerID}/${m.id}` === name);
+    const selected = find(requested) ?? (name.includes('/') ? find(`openrouter/${name}`) : undefined);
+    if (!selected) throw new Error('Use a model listed by OpenCode in provider/model format.');
+    const model = { providerID: selected.providerID, id: selected.id, variant };
+    config.model = `${model.providerID}/${model.id}${variant ? `#${variant}` : ''}`;
+    launch.env.OPENCODE_CONFIG_CONTENT = JSON.stringify(config);
+    const post = (endpoint: string, body: object) => api('POST', endpoint, '--data', JSON.stringify(body));
+    if (plan.resumeId) {
+      try {
+        await post(`/api/session/${encodeURIComponent(plan.resumeId)}/model`, { model });
+      } catch (err) {
+        if (!(err instanceof CommandError) || !/^HTTP 404\b/m.test(err.stderr)) throw err;
+        // The TUI also creates a session with the requested ID when the saved one is missing.
+        await post('/api/session', { id: plan.resumeId, model });
+      }
+    } else {
+      const { data } = JSON.parse(await post('/api/session', { model })) as { data: { id: string } };
+      if (!data?.id) throw new Error('OpenCode did not return a session ID.');
+      launch.args.splice(launch.args.indexOf('--prompt'), 0, '--session', data.id);
+    }
+    return launch;
+  } catch (err) {
+    removeSessionDir(launch.dir);
+    throw new Error(`Could not select OpenCode model ${plan.model}: ${(err as Error).message}`);
+  }
 }
 
 /** Browser screenshots new in a session's folder, read, each then added to seen. */

@@ -4230,7 +4230,7 @@ export class Swarm {
         if (term?.releaseIdle) {
           const rec = within && !moved ? job.rec : null;
           const how = rec?.devSessionId && isCli(rec.devSessionCli) ? this.sessionRuntime(a, rec.devSessionId, rec.devSessionCli) : null;
-          await term.releaseIdle(how?.resumeSessionId ? { cli: how.cli, resumeSessionId: how.resumeSessionId, host: this.machineFor(a).cliHost } : undefined);
+          await term.releaseIdle(how?.resumeSessionId ? { cli: how.cli, model: this.modelFor(a, how.cli), resumeSessionId: how.resumeSessionId, host: this.machineFor(a).cliHost } : undefined);
         }
         await term?.closing;
         if (gone()) return null;
