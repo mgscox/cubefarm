@@ -113,6 +113,41 @@ describe('CLI installer folders outside PATH', () => {
     }
   });
 
+  it.each([undefined, 'ses_saved'])('selects the OpenRouter model on the OpenCode session before opening its terminal (%s)', async (resumeId) => {
+    const file = install(['.opencode', 'bin']);
+    const box = createBoxOps({ hookUrl: () => 'http://127.0.0.1:45678', pids: () => [], root: home });
+    const model = { providerID: 'openrouter', id: 'deepseek/deepseek-v4.1-flash-1017' };
+    const id = resumeId ?? 'ses_new';
+    const plan: CliPlan = {
+      cli: 'opencode', token: 'box-model', sessionId: 'test', resumeId, cwd: home, prompt: 'Work', systemAppend: '',
+      model: model.id, effort: '', name: 'Ken', role: 'dev', additionalDirectories: [], browserTesting: false, officeUrl: 'http://office.invalid', officeTools: false,
+    };
+    vi.mocked(run).mockResolvedValueOnce(JSON.stringify({ data: [{ ...model, enabled: true }] }));
+    vi.mocked(run).mockResolvedValueOnce(JSON.stringify({ data: { id } }));
+    await box.rpc('prepare', [plan]);
+    const launch = box.take(plan.token)!;
+    try {
+      expect(run).toHaveBeenNthCalledWith(2, file, ['api', '--standalone', 'POST', resumeId ? `/api/session/${resumeId}/model` : '/api/session', '--data', JSON.stringify({ model })], expect.objectContaining({ cwd: home }));
+      expect(launch.args).toEqual(['--standalone', '--auto', '--session', id, '--prompt', 'Work']);
+      expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).model).toBe(`openrouter/${model.id}`);
+    } finally {
+      fs.rmSync(launch.dir, { recursive: true, force: true, maxRetries: 5 });
+    }
+  });
+
+  it('reports an unavailable OpenCode model instead of launching the default', async () => {
+    install(['.opencode', 'bin']);
+    const box = createBoxOps({ hookUrl: () => 'http://127.0.0.1:45678', pids: () => [], root: home });
+    const plan: CliPlan = {
+      cli: 'opencode', token: 'box-unknown-model', sessionId: 'test', cwd: home, prompt: 'Work', systemAppend: '',
+      model: 'openrouter/unknown', effort: '', name: 'Ken', role: 'dev', additionalDirectories: [], browserTesting: false, officeUrl: 'http://office.invalid', officeTools: false,
+    };
+    vi.mocked(run).mockResolvedValueOnce(JSON.stringify({ data: [{ providerID: 'openrouter', id: 'z-ai/glm-5.3', enabled: true }] }));
+    await expect(box.rpc('prepare', [plan])).rejects.toThrow('Could not select OpenCode model openrouter/unknown');
+    expect(run).toHaveBeenCalledOnce();
+    expect(box.take(plan.token)).toBeNull();
+  });
+
   it('uses the office credential only for the prepared Claude process', async () => {
     install(['.local', 'bin'], 'claude');
     vi.stubEnv('SWARM_HOME', home);

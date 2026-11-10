@@ -146,6 +146,7 @@ interface LiveCli {
   dir: string;
   jobScratch?: boolean;
   resumeId: string | null; // the session a follow-up resumes
+  model?: string; // absent in keeper metadata written by older offices
   statusLine: string;
   outputTail?: string;
   /** Browser screenshots already passed on (Codex and OpenCode: collected from the browser's output folder). */
@@ -210,6 +211,7 @@ function endLive(live: LiveCli): Promise<void> {
 interface CliMeta {
   agentId: string;
   cli: AgentCli;
+  model?: string;
   token: string;
   dir: string;
   jobScratch?: boolean;
@@ -223,7 +225,7 @@ interface CliMeta {
   pendingTools?: [string, string][];
 }
 
-const metaOf = (l: LiveCli): CliMeta => ({ agentId: l.agentId, cli: l.cli, token: l.token, dir: l.dir, jobScratch: l.jobScratch, resumeId: l.resumeId, busy: !!l.session || !!l.recoveringBusy, hookUrl: l.hookUrl, hookless: l.hookless, transcriptBase: l.transcriptBase, transcriptPending: l.transcriptPending, pendingTools: l.pendingTools });
+const metaOf = (l: LiveCli): CliMeta => ({ agentId: l.agentId, cli: l.cli, model: l.model, token: l.token, dir: l.dir, jobScratch: l.jobScratch, resumeId: l.resumeId, busy: !!l.session || !!l.recoveringBusy, hookUrl: l.hookUrl, hookless: l.hookless, transcriptBase: l.transcriptBase, transcriptPending: l.transcriptPending, pendingTools: l.pendingTools });
 const remember = (l: LiveCli) => l.proc?.setMeta(metaOf(l));
 
 /** A hook from a CLI's main session (not a subagent's, not its status line, which runs untrusted): its hooks reach the office. */
@@ -290,7 +292,7 @@ export async function reconnectClis(terminalFor: (agentId: string) => AgentTermi
       if (meta.cli === 'codex' && meta.resumeId) void host.codexThread('archive', meta.resumeId, h.exit === null ? new Promise((r) => setTimeout(r, 5000)) : undefined);
       continue;
     }
-    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, term, host, proc: host.adopt(h), token: meta.token, dir: meta.dir, jobScratch: meta.jobScratch, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null, recoveringBusy: !!meta.busy, hookUrl: meta.hookUrl, hookless: meta.hookless === true, transcriptBase: meta.transcriptBase, transcriptPending: meta.transcriptPending, pendingTools: meta.pendingTools };
+    const l: LiveCli = { agentId: meta.agentId, cli: meta.cli, model: meta.model, term, host, proc: host.adopt(h), token: meta.token, dir: meta.dir, jobScratch: meta.jobScratch, resumeId: meta.resumeId ?? null, statusLine: '🏢 cubefarm', shots: new Set(), session: null, recoveringBusy: !!meta.busy, hookUrl: meta.hookUrl, hookless: meta.hookless === true, transcriptBase: meta.transcriptBase, transcriptPending: meta.transcriptPending, pendingTools: meta.pendingTools };
     wire(l);
     waitAtPrompt(l, !meta.busy);
     // Resizing makes the CLI draw its whole screen again, over whatever the saved copy of the terminal missed.
@@ -343,7 +345,7 @@ function idleHook(live: LiveCli, b: Record<string, unknown>): Record<string, unk
 /** A session started with `next` on `host` picks up this CLI waiting at its prompt instead of replacing it. */
 function adopts(l: LiveCli, next: NextSession & { reattach?: boolean }, host: CliHost): boolean {
   if (!l.proc || l.session || l.host !== host) return false;
-  return !!next.reattach || (l.cli === (next.cli ?? 'claude') && !!next.resumeSessionId && l.resumeId === next.resumeSessionId);
+  return !!next.reattach || (l.cli === (next.cli ?? 'claude') && l.model === next.model && !!next.resumeSessionId && l.resumeId === next.resumeSessionId);
 }
 
 /** An agent session in its CLI, which runs on host (the office's own machine unless said otherwise). */
@@ -353,7 +355,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
   // while it worked (reattach); anything else replaces it.
   const prev = lives.get(term);
   const adopt = !!prev && adopts(prev, opts, host);
-  if (prev && !adopt) endLive(prev);
+  const closing = prev && !adopt ? endLive(prev) : null;
   let live: LiveCli | null = adopt ? prev! : null;
   const cli = live?.cli ?? opts.cli ?? 'claude';
   const label = cliLabel(cli);
@@ -1073,17 +1075,24 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
 
   // ---------- a new CLI: its plan, then its files and command line on its machine ----------
 
-  let ready: PreparedCli | Promise<PreparedCli>;
+  let ready: PreparedCli | Promise<PreparedCli | null>;
   try {
-    ready = host.prepare(planCli(opts, { cli, token, sessionId, officeUrl }));
+    const plan = planCli(opts, { cli, token, sessionId, officeUrl });
+    ready = closing && opts.resumeSessionId && prev?.resumeId === opts.resumeSessionId
+      ? closing.then(() => done ? null : host.prepare(plan))
+      : host.prepare(plan);
   } catch (err) {
     setTimeout(() => finish({ ok: false, text: '', errors: [(err as Error).message] }), 0);
     return handle;
   }
   if (ready instanceof Promise) {
-    // A box writes the files: the CLI starts once it has (unless the session was stopped meanwhile).
+    // A box or an OpenCode model selection can take time to prepare.
     void ready.then(
-      (prepared) => !done && launch(prepared),
+      (prepared) => {
+        if (!prepared) return;
+        if (done) host.removeDir(prepared.dir);
+        else launch(prepared);
+      },
       (err: unknown) => finish({ ok: false, text: '', errors: [(err as Error).message] }),
     );
   } else {
@@ -1098,7 +1107,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     if (cli === 'claude' && opts.resumeSessionId) cb.sessionId(sessionId); // a new one is saved once it's on disk (see the hooks)
     term.note(`── ${label}${opts.label ? ` · ${opts.label}` : ''} ──`);
     const resumeId = cli === 'claude' ? sessionId : (opts.resumeSessionId ?? null);
-    const l: LiveCli = { agentId: opts.agentId ?? '', cli, term, host, proc: null, token, dir: prepared.dir, jobScratch: prepared.jobScratch, resumeId, statusLine, shots: new Set(), session: { hook, exited }, hookUrl: prepared.hookUrl };
+    const l: LiveCli = { agentId: opts.agentId ?? '', cli, model: opts.model, term, host, proc: null, token, dir: prepared.dir, jobScratch: prepared.jobScratch, resumeId, statusLine, shots: new Set(), session: { hook, exited }, hookUrl: prepared.hookUrl };
     watchHookless(BOOT_MS, cli === 'claude' && !!opts.resumeSessionId); // a resumed conversation's earlier turns aren't this session's
     const begin = () => {
       if (done) return; // stopped while its thread was being unarchived

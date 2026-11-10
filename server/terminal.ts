@@ -37,6 +37,7 @@ const clamp = (n: unknown, lo: number, hi: number, dflt: number) => {
 /** The session about to start in a terminal, as far as picking up the CLI waiting there goes. */
 export interface NextSession {
   cli?: AgentCli;
+  model: string;
   resumeSessionId?: string;
   /** The machine it runs on. */
   host?: CliHost;
