@@ -52,9 +52,9 @@ disposable QA and audit outputs. Stop subprocesses using it before finishing so 
 | `node scripts/smoke-package.mjs` | after a build: packs the npm package, installs it into a temp folder and boots its demo |
 | `node --import tsx server/index.ts --demo` | a demo office (see SAFETY for the env it needs) |
 
-CI (`.github/workflows/ci.yml`): Node 24 on `ubuntu-latest` and `windows-latest`, `npm ci` → `typecheck` → `test` →
-`build` → package smoke test, for every PR and push to `main`, with a throwaway `SWARM_HOME` and `SWARM_PORT=0`; a separate `e2e`
-job on `ubuntu-latest` runs `npm run test:e2e`. All three must pass locally
+CI (`.github/workflows/ci.yml`) runs `npm ci` → `test` → `build` (including typecheck) → package smoke test on Linux,
+macOS and Windows for in-repository PRs and pushes to `main`, with a throwaway `SWARM_HOME` and `SWARM_PORT=0`.
+A separate Linux job runs `npm run test:e2e`. The test, build, package smoke and browser checks must pass locally
 before you open a PR.
 
 ## Code map

@@ -63,15 +63,21 @@ try {
     env: { ...process.env, SWARM_HOME: path.join(tmp, 'home') },
     stdio: ['ignore', 'inherit', 'inherit'],
   });
-  let state = null;
-  for (let i = 0; i < 120 && !state; i++) {
+  let response;
+  for (let i = 0; i < 120; i++) {
     await new Promise((r) => setTimeout(r, 500));
     if (server.exitCode !== null) throw new Error(`the office exited with code ${server.exitCode}`);
-    state = await fetch(`http://127.0.0.1:${PORT}/api/state`)
-      .then((r) => r.json())
-      .catch(() => null);
+    response = await fetch(`http://127.0.0.1:${PORT}/api/state`).catch(() => null);
+    if (response?.ok) break;
   }
-  if (!state || !Array.isArray(state.repos)) throw new Error('the office never answered /api/state');
+  if (!response?.ok || !response.headers.get('content-type')?.includes('application/json')) {
+    throw new Error('the office did not serve JSON from /api/state');
+  }
+  const state = await response.json();
+  if (state.demo !== true || !Array.isArray(state.repos) || !state.repos.length ||
+      !state.repos.every((repo) => repo.floor > 0) || !Array.isArray(state.agents) || !state.agents.length) {
+    throw new Error('the demo snapshot must contain agents and repositories on floors above the lobby');
+  }
   const page = await fetch(`http://127.0.0.1:${PORT}/`).then((r) => r.text());
   if (!page.includes('<title>cubefarm</title>')) throw new Error('the office does not serve the client');
   console.log(`demo office up: ${state.repos.length} floors, ${state.agents.length} agents, client served`);
