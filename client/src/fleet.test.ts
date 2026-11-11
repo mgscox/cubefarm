@@ -3,7 +3,7 @@ import { agentBox, boxName, boxNotes, boxWarnings, floorMove, floorMoveText, mis
 import type { AgentStatus, BoxView } from '../../shared/types';
 
 const boxes = [{ id: 'b1', name: 'Tower' }];
-const dev = (box: string | null, status: AgentStatus = 'idle') => ({ role: 'dev' as const, box, status });
+const dev = (box: string | null, status: AgentStatus = 'idle') => ({ id: 'dev', role: 'dev' as const, box, status });
 
 describe('workerLists', () => {
   const repos = [
@@ -45,8 +45,8 @@ describe('agentBox', () => {
 
 describe('floorMove', () => {
   it('counts who moves, who is mid-task, and the own boxes it clears', () => {
-    const team = [dev(null), dev(null, 'working'), dev('b1'), dev('', 'preparing'), { role: 'ceo' as const, box: null, status: 'idle' as const }];
-    expect(floorMove({ box: '' }, team, 'b1')).toEqual({ moving: 3, busy: 2, overrides: 2 });
+    const team = [dev(null), dev(null, 'working'), dev('b1'), dev('', 'preparing'), { ...dev(null), id: 'ceo', role: 'ceo' as const }, { ...dev(null), id: 'feynman', role: 'researcher' as const }];
+    expect(floorMove({ box: '' }, team, 'b1')).toEqual({ moving: 4, busy: 2, overrides: 2 });
   });
 
   it('says nothing when everyone already works there', () => {
@@ -109,7 +109,11 @@ describe('boxWarnings', () => {
 
 describe('missingClis', () => {
   const claudeOnly = { status: 'online' as const, clis: [{ id: 'claude' as const, label: 'Claude Code', installed: true, version: '2.1', integrated: true }, { id: 'codex' as const, label: 'Codex', installed: false, version: null, integrated: true }] };
-  const team = [{ name: 'Ada', cli: '' as const }, { name: 'Ken', cli: 'codex' as const }];
+  const team = [
+    { name: 'Ada', role: 'dev' as const, cli: '' as const },
+    { name: 'Ken', role: 'dev' as const, cli: 'codex' as const },
+    { name: 'Feynman', role: 'researcher' as const, cli: '' as const },
+  ];
 
   it("names the agents whose coding agent an online box hasn't got", () => {
     expect(missingClis(team, claudeOnly, 'claude').map((a) => a.name)).toEqual(['Ken']);

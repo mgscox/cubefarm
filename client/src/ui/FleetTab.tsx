@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api';
-import { agentBox, boxName, boxNotes, boxWarnings, busy, floorMove, floorMoveText, missingClis, movable, workerLists } from '../fleet';
+import { agentBox, boxName, boxNotes, boxWarnings, busy, floorMove, floorMoveText, missingClis, movable, workerCli, workerLists } from '../fleet';
 import { agentsOnRepo, useStore, type Agent } from '../store';
 import type { BoxView, CliView, RepoView } from '../../../shared/types';
 import { confirmDialog } from './Confirm';
@@ -157,7 +157,7 @@ function FloorMachine({ repo, boxes, agents }: { repo: RepoView; boxes: BoxView[
   const text = floorMoveText(floorMove(repo, team, target), boxName(boxes, target));
   // Their next task there wouldn't start: the box hasn't got their coding agent.
   const lacking = missingClis(team, boxes.find((b) => b.id === target), defaultCli);
-  const cliLabel = (a: Agent) => clis.find((c) => c.id === (a.cli || defaultCli))?.label ?? (a.cli || defaultCli);
+  const cliLabel = (a: Agent) => clis.find((c) => c.id === workerCli(a, defaultCli))?.label ?? workerCli(a, defaultCli);
   const blocked = !terminal ? 'Boxes need the terminal runtime' : lacking.length ? `${boxName(boxes, target)} hasn't got ${lacking.map((a) => `${cliLabel(a)} for ${a.name}`).join(', ')}` : null;
   const own = team.filter((a) => a.box !== null);
   const move = () =>
@@ -171,7 +171,7 @@ function FloorMachine({ repo, boxes, agents }: { repo: RepoView; boxes: BoxView[
         <div className="grow">
           <b>{repo.fullName}</b>
           <div className="muted small">
-            Works on {boxName(boxes, terminal ? repo.box : '')} · {team.length} developer{team.length === 1 ? '' : 's'} and QA
+            Works on {boxName(boxes, terminal ? repo.box : '')} · {team.length} agent{team.length === 1 ? '' : 's'}
           </div>
         </div>
         <select

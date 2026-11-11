@@ -7137,6 +7137,25 @@ describe('boxes', () => {
     expect(s.repoView(repo)).toMatchObject({ box: box.id });
   });
 
+  it("prepares a floor researcher's desk on the floor's box using Claude Code availability", async () => {
+    const box = swarm.addBox('Build box', 'ada@buildbox');
+    await vi.advanceTimersByTimeAsync(1600);
+    const conn = internals().boxConns.get(box.id)!;
+    const state = conn.state();
+    vi.spyOn(conn, 'state').mockReturnValue({ ...state, clis: state.clis.filter((cli) => cli.id === 'claude') });
+    swarm.updateSettings({ defaultCli: 'opencode' });
+    swarm.updateRepo(repo.id, { box: box.id });
+    const { id } = swarm.hireAgent(repo.id, { role: 'researcher', name: 'Feynman' });
+    const researcher = s.state.agents.find((agent) => agent.id === id)!;
+
+    expect(internals().available(repo, 'researcher')).toContain(researcher);
+    researcher.status = 'preparing';
+    const cwd = s.prepare(researcher, repo, {}, 'swarm/research-57-feynman');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await cwd).toMatch(/^\/boxes\/Build-box\//);
+    expect(researcher.deskBox).toBe(box.id);
+  });
+
   it('waits while the box is offline: the agent takes no new work, and an assignment waits', async () => {
     const box = swarm.addBox('Attic', 'offline-attic');
     await vi.advanceTimersByTimeAsync(1600);

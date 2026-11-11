@@ -2127,9 +2127,9 @@ export class Swarm {
     return `${slugify(a.name)}-${a.id.slice(0, 4)}`;
   }
 
-  /** The machine an agent's desk and sessions are on: their task's box, or the office's own. The CEO and researchers stay on the office. */
+  /** The machine holding this task's desk. Lobby and Ideas research use the office's files. */
   private machineFor(a: PersistedAgent): Machine {
-    if (a.role === 'ceo' || a.role === 'researcher') return this.backend;
+    if (a.role === 'ceo' || a.id === RESEARCHER_ID || this.state.research.job?.agentId === a.id) return this.backend;
     if (a.deskBox?.startsWith('upstash-')) {
       const machine = this.boxConns.get(a.deskBox)?.machine;
       if (!machine) throw new Error('Upstash task is disconnected; retry in Fleet.');
@@ -2138,11 +2138,15 @@ export class Swarm {
     return (a.deskBox && this.boxConns.get(a.deskBox)?.machine) || this.backend;
   }
 
+  private taskCli(a: PersistedAgent): AgentCli {
+    return a.role === 'ceo' || a.role === 'researcher' ? 'claude' : a.cli || this.state.settings.defaultCli;
+  }
+
   /** Where an agent's next session starts (see fleet.ts): a new task on their box, anything inside one on their desk's. */
   private place(a: PersistedAgent, kind: 'new' | 'within'): StartPlace {
-    if (a.role === 'ceo' || a.role === 'researcher' || (this.state.settings.runtime !== 'terminal' && !(kind === 'within' && a.deskBox?.startsWith('upstash-')))) return { box: '' };
+    if (a.role === 'ceo' || a.id === RESEARCHER_ID || (this.state.settings.runtime !== 'terminal' && !(kind === 'within' && a.deskBox?.startsWith('upstash-')))) return { box: '' };
     const floor = this.state.repos.find((r) => r.id === a.repoId)?.box;
-    const cli = a.cli || this.state.settings.defaultCli;
+    const cli = this.taskCli(a);
     const want = agentBox(a.box, floor);
     const reservation = this.state.upstashTasks.find((t) => t.agentId === a.id);
     if (kind === 'new' && reservation && (want !== UPSTASH || reservation.phase === 'cleanup-blocked' || reservation.phase === 'deleting')) return { wait: reservation.id };
@@ -2210,7 +2214,7 @@ export class Swarm {
   private upstashFallback(a: PersistedAgent): StartPlace {
     const floor = this.state.repos.find((r) => r.id === a.repoId)?.box ?? '';
     const target = floor === UPSTASH ? '' : floor;
-    const cli = a.cli || this.state.settings.defaultCli;
+    const cli = this.taskCli(a);
     if (!target) return this.clis.some((c) => c.id === cli && c.installed) ? { box: '' } : { wait: '', lacks: cli };
     return startPlace('new', target, '', (id) => this.boxConns.get(id)?.state().status === 'online',
       (id) => this.boxConns.get(id)?.state().clis.some((c) => c.id === cli && c.installed) ? null : cli);
@@ -2420,7 +2424,7 @@ export class Swarm {
 
   /** Agents at work on a box. */
   private boxBusy(id: string) {
-    return this.state.agents.filter((a) => a.deskBox === id && BUSY.includes(a.status) && a.role !== 'ceo' && a.role !== 'researcher').length;
+    return this.state.agents.filter((a) => a.deskBox === id && BUSY.includes(a.status) && this.state.research.job?.agentId !== a.id).length;
   }
 
   /**
@@ -3692,7 +3696,7 @@ export class Swarm {
       sessionId: null,
       sessionCli: null,
       lastError: null,
-      box: role === 'researcher' ? null : opts.box === undefined ? null : this.boxRef(opts.box, true),
+      box: opts.box === undefined ? null : this.boxRef(opts.box, true),
       deskBox: '',
       logTail: [],
     };
@@ -3750,7 +3754,7 @@ export class Swarm {
       if (patch.brief !== undefined) a.brief = String(patch.brief).trim().slice(0, 2500);
     }
     if (patch.box !== undefined) {
-      if (a.role === 'ceo' || a.role === 'researcher') throw new HttpError(400, `${a.name} works on the office's machine.`);
+      if (a.role === 'ceo' || a.id === RESEARCHER_ID) throw new HttpError(400, `${a.name} works on the office's machine.`);
       const before = agentBox(a.box, this.repo(a.repoId).box);
       a.box = this.boxRef(patch.box, true);
       this.noteMove(a, before);
@@ -4029,7 +4033,7 @@ export class Swarm {
   private sessionRuntime(a: PersistedAgent, resume?: string, resumeCli = a.sessionCli): { terminal?: AgentTerminal; cli?: AgentCli; label?: string; resumeSessionId?: string } {
     const inTerminal = (this.state.settings.runtime === 'terminal' || !!a.deskBox?.startsWith('upstash-')) && this.machineFor(a).terminals;
     // Researchers run Claude Code too: its web search is what they work with.
-    let cli: AgentCli = a.role === 'ceo' || a.role === 'researcher' ? 'claude' : a.cli || this.state.settings.defaultCli;
+    let cli = this.taskCli(a);
     cli = this.state.upstashTasks.find((t) => t.id === a.deskBox)?.cli ?? cli;
     if (resume && resumeCli) {
       if (inTerminal) cli = resumeCli;
@@ -4422,7 +4426,9 @@ export class Swarm {
     rt.activityAt = Date.now();
     try {
       this.sessionStarted(a, how, mode);
-      session = rt.session = this.machineFor(a).startSession(
+      const machine = this.machineFor(a);
+      const companyResearch = a.role === 'researcher' && machine === this.backend ? this.companyResearchCheckout : null;
+      session = rt.session = machine.startSession(
         {
           cwd,
           prompt,
@@ -4430,7 +4436,7 @@ export class Swarm {
           model: this.modelFor(a, how.cli),
           effort: a.effort || this.state.settings.defaultEffort,
           browserTesting: repo.browserTesting,
-          additionalDirectories: [...this.linkedRepos(repo).map((r) => this.machineFor(a).mainDir(r.fullName)), ...(a.role === 'researcher' && this.companyResearchCheckout ? [this.companyResearchCheckout] : [])],
+          additionalDirectories: [...this.linkedRepos(repo).map((r) => machine.mainDir(r.fullName)), ...(companyResearch ? [companyResearch] : [])],
           role: a.task === 'qa' ? 'qa' : a.role, // a developer covering QA works under QA's rules
           outputSchema,
           // A developer's CLI stays at its prompt afterwards, for the manager and for follow-ups; QA's closes.
@@ -6910,8 +6916,8 @@ export class Swarm {
     return owner ? `${owner}/cubebase` : null;
   }
 
-  private companyResearchLocation() {
-    return this.companyResearchCheckout ?? `${this.companyResearchRepo() ?? 'cubebase'}/${COMPANY_RESEARCH_DOCS}/`;
+  private companyResearchLocation(local = true) {
+    return (local ? this.companyResearchCheckout : null) ?? `${this.companyResearchRepo() ?? 'cubebase'}/${COMPANY_RESEARCH_DOCS}/`;
   }
 
   private researchContextDirs() {
@@ -7033,7 +7039,7 @@ export class Swarm {
 
   private researcherSystemAppend(a: PersistedAgent, place: ResearchPlace) {
     const s = this.state.settings;
-    return researcherSystemPrompt({ name: a.name, title: a.title, brief: a.brief, company: s.companyName, today: new Date().toISOString().slice(0, 10), companyFolder: this.companyResearchLocation(), place });
+    return researcherSystemPrompt({ name: a.name, title: a.title, brief: a.brief, company: s.companyName, today: new Date().toISOString().slice(0, 10), companyFolder: this.companyResearchLocation(this.machineFor(a) === this.backend), place });
   }
 
   /** Queue a brief for the lobby researcher. Returns how many are waiting. */
