@@ -6,6 +6,21 @@ interface FindingDetails {
   details: string;
 }
 
+export interface QaFollowUp extends FindingDetails {
+  commentId: string;
+}
+
+export function parseQaFollowUps(raw: unknown): QaFollowUp[] {
+  if (!Array.isArray(raw)) return [];
+  const byComment = new Map<string, QaFollowUp>();
+  for (const item of raw) {
+    if (typeof item?.commentId !== 'string' || !/^[1-9]\d{0,19}$/.test(item.commentId) ||
+      typeof item.title !== 'string' || !item.title.trim() || typeof item.details !== 'string' || !item.details.trim()) continue;
+    byComment.set(item.commentId, { commentId: item.commentId, title: item.title.trim().slice(0, 180), details: item.details.trim().slice(0, 4000) });
+  }
+  return [...byComment.values()];
+}
+
 interface FindingUpdate {
   id: string;
   status: 'open' | 'resolved';

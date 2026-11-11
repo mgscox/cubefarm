@@ -18,6 +18,7 @@ The details behind the office: how an issue becomes a merged pull request, who d
    - reviews the diff like a code reviewer: bugs, unhandled errors and edge cases, security problems, leftover debug code, missing tests
    - uses trusted, successful CI results for the assigned PR head for checks those jobs cover
    - names the coverage gap before running each extra check, including browser checks where the affected behavior or QA brief calls for them
+   - checks for unresolved Codex P1 and P2 findings on the assigned commit at each QA stage. A confirmed blocker goes back for repair. A confirmed non-blocking fix is queued for a separate developer PR after the original merges.
    - returns a structured report: a verdict, the checks performed, the commands run, and a caption for each screenshot
 4. **Evidence on the PR.** The server uploads the screenshots to an orphan branch called `swarm-qa-evidence`, so evidence never lands in your code, and posts a comment on the PR. The comment contains the verdict, a table of checks, the commands run, and the screenshots.
    - **QA history** on the floor's Kanban retains each attempt after its active card is removed: cycle, reviewer, tested base/head, original checks, finding IDs, exact-commit CI identifiers and conclusions, and a fresh worker observation of at most one minute when available. Missing signals remain unknown. Worker, code and inconclusive findings are kept separately, including mixed reports. This history stays local in the office state; raw transcripts and screenshots are not copied into it.

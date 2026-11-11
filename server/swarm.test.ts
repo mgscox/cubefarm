@@ -4187,6 +4187,47 @@ describe('QA rounds', () => {
     runFix = vi.spyOn(s, 'runFix').mockResolvedValue() as Mock;
   });
 
+  it.each(['same head', 'lost response', 'different head', 'closed without merging'] as const)('publishes Codex follow-ups only after a matching merge (%s)', async (outcome) => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: 'sha-1' });
+    const create = vi.spyOn(s.backend, 'createIssue').mockResolvedValue(99);
+    const lookup = vi.spyOn(s.backend, 'findIssuesByMarker').mockResolvedValue([]);
+    const internal = s as Internals & { publishQaFollowUps(repo: Repo, pulls: PullInfo[]): Promise<void> };
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', summary: 'Passed', checks: [],
+      followUps: [{ commentId: '4539173653', title: 'Improve the operator message', details: 'Add context to the optional setting warning.' }] }));
+    expect(rec.status).toBe('passed');
+    await internal.publishQaFollowUps(repo, [pull]);
+    expect(create).not.toHaveBeenCalled();
+
+    const updated: PullInfo = { ...pull, url: 'https://github.com/demo/office/pull/13',
+      state: outcome === 'closed without merging' ? 'CLOSED' : 'MERGED', headSha: outcome === 'different head' ? 'sha-2' : 'sha-1' };
+    s.reconcilePulls(repo, [updated]);
+    if (outcome === 'lost response') create.mockRejectedValueOnce(new Error('lost response'));
+    await internal.publishQaFollowUps(repo, [updated]);
+    if (outcome === 'lost response') {
+      expect(s.state.qa).toContain(rec);
+      lookup.mockResolvedValue([{ number: 99 } as Awaited<ReturnType<Backend['findIssuesByMarker']>>[number]]);
+    }
+    await internal.publishQaFollowUps(repo, [updated]);
+    if (outcome === 'same head' || outcome === 'lost response') {
+      expect(create).toHaveBeenCalledExactlyOnceWith(repo.fullName, 'Improve the operator message',
+        expect.stringContaining('https://github.com/demo/office/pull/13#discussion_r4539173653'), []);
+      expect(lookup).toHaveBeenCalledTimes(outcome === 'lost response' ? 2 : 1);
+    } else expect(create).not.toHaveBeenCalled();
+    expect(s.state.qa).not.toContain(rec);
+  });
+
+  it('uses the existing repair path for a confirmed Codex blocker', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: 'sha-1' });
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'fail', summary: 'Confirmed the current-head P2', checks: [],
+      findings: [{ title: 'Optional value blocks rotation', details: 'The preflight rejects a missing optional value before rotating any other key.' }] }));
+    expect(rec).toMatchObject({ status: 'failed', failedSha: 'sha-1', fixReason: 'qa' });
+    expect(rec).not.toHaveProperty('followUps', expect.anything());
+  });
+
   const crashCli = async (agent: Record<string, unknown>, ranMs = 2_000, turn = false, session = false, prepareMs = 0, options: Partial<Pick<SessionOptions, 'cli' | 'resumeSessionId'>> & { hooks?: Record<string, unknown>[] } = {}) => {
     let token = '';
     const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
