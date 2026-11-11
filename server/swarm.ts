@@ -390,6 +390,15 @@ function readSpecialism(name: 'developer' | 'prototype' | 'qa' | 'security') {
     return '';
   }
 }
+
+function qaCiEvidence(fullName: string, headSha: string) {
+  return [
+    `After assessing the blast radius, check CI for assigned head ${headSha}. Use read-only queries such as gh api --paginate 'repos/${fullName}/actions/runs?head_sha=${headSha}' or gh api --paginate 'repos/${fullName}/commits/${headSha}/check-runs' (use /status for commit statuses).`,
+    'Reuse completed, successful CI checks from a trusted workflow for this head only when the job steps or results show they cover the behavior, command, or platform you need. Record the job name, run link, head SHA, and what it verified in checks.',
+    'If relevant CI is pending, review the diff and cover known gaps first, then recheck CI before duplicating a running job.',
+    'Run only additional checks needed to fill evidence gaps. Pending, skipped, failing, unavailable, or unrelated checks do not establish coverage. Record CI failures and any required validation you could not complete. A local pass cannot clear a failed CI gate.',
+  ].join('\n');
+}
 const MAX_QA_ROUNDS = 3;
 const DOCKER_SAFETY = `This machine's Docker engine is shared with other desks and the manager.
 Record the ID of every container, network and volume you create; remove only those, by ID.
@@ -5087,12 +5096,14 @@ export class Swarm {
       diffFrom
         ? `2. Review what changed since the previous code review: git diff ${diffFrom} ${pr.headSha}. Explicitly recheck every open finding, reading surrounding code as needed. If the fix changes the approach or the range is unavailable, review the full PR with ${fullDiff}.`
         : `2. Review the full PR with ${fullDiff}. Look for bugs, unhandled errors and edge cases, security problems, leftover debug code, and new logic without tests.`,
-      "3. Install dependencies if needed, then run the project's test suite, linters, type checks and build (whichever exist).",
+      '3. Assess the blast radius from the assigned diff and relevant callers. Use a separate shell call to print a line starting with "Blast radius:" before you query CI. Name the affected behavior, contracts, platforms, plausible regressions, and evidence you need, including the floor QA brief and open findings. Use printf in Bash or Write-Output in PowerShell. Then look up CI.',
+      qaCiEvidence(repo.fullName, pr.headSha),
+      '4. Before each extra check, use a separate shell call to print a line starting with "Coverage gap:". Name the specific required behavior or environment that the available evidence does not cover and the check that will cover it. If you cannot name a gap, skip the check. If CI covers everything required, print "Coverage gaps: none" and proceed to the report.',
       TEST_ENVIRONMENT_GUIDANCE,
       'If worker limits prevent validation, distinguish them from code defects: mark only those failed or skipped checks failureKind=environment, or failureKind=resources with the resources evidence (free memory, swap, load, tests cancelled) when the run was cancelled or killed under memory pressure. That is a resource failure, not a timeout: do not call it one. Use these only with evidence that no code defect is known or suspected; reproducible or unexplained failures use code. The office records these local checks as skipped and requires green GitHub checks for the reviewed commit before merging an environment-only result. Do not request source changes just to satisfy a worker limitation.',
       repo.browserTesting
-        ? `4. If the project has a UI, start it in the background on port ${this.port(a)} (reserved for you) and exercise the change in a real browser with the Playwright tools: navigate, click, type, resize to a phone size, try edge cases, and check the console for errors. Take a screenshot with browser_take_screenshot (no filename) of every important state: the screenshots are attached to the PR as evidence. Stop the server afterwards.`
-        : '4. Exercise the changed behaviour directly (run the program, call the API, write a quick script).',
+        ? `For browser coverage or screenshots still needed, start the app on port ${this.port(a)} (reserved for you) and use Playwright to check the affected states and relevant viewport sizes. Use browser_take_screenshot (no filename) for screenshots required as evidence. Stop the server afterwards.`
+        : 'Probe changed behaviour directly where evidence is missing (run the program, call the API, or write a quick script).',
       '5. You may write throwaway scripts to probe behaviour, but do not commit them.',
       'Set codeReviewComplete after reviewing the assigned scope and rechecking open findings. Report new blockers in findings, one per root cause. Explain the broken rule, give a representative example, and say where else to look. Use findingUpdates to mark each prior open finding as open or resolved with current evidence. Use its ID if it returns. Refer to prior findings by ID in the summary and failed checks.',
       '',
@@ -5111,6 +5122,9 @@ export class Swarm {
       `Escalation reason: ${reason}`,
       ...(repo.qaBrief ? [`Floor QA brief:\n${repo.qaBrief}`] : []),
       'Leave target source and GitHub state intact. The office records your verdict and owns the merge hold.',
+      'Start with the blast radius: identify affected trust boundaries, callers, controls, and security regressions from the assigned diff. Use that scope to decide which checks need evidence.',
+      qaCiEvidence(repo.fullName, pr.headSha),
+      'CI can establish normal QA gates and covered regressions. Complete the scoped audit, independent verification, and artifact validation required by the playbook. Fill security-specific evidence gaps within the audit sandbox rules.',
       'No OS sandbox alone is a known desk limit: finish source review and artifact validation without running target code. If this is the only gap, no blocking finding exists, and normal QA/CI gates passed, return pass with validationGap=no-os-sandbox, normalGatesPassed=true, blockingFindings=none. Record gate evidence and "dynamic validation not run: no OS sandbox on this desk". High/critical confirmed or needs_validation findings still fail or hold; other coverage gaps remain incomplete.',
       'If test or validator runs are cancelled or killed because the desk ran out of memory or swap, that is a resource failure, not a timeout: finish the source review, mark those checks skip with failureKind=resources and the resources evidence (free memory, swap, load, tests cancelled), and return incomplete. The office retries once without charging a QA round.',
       playbook,

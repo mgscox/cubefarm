@@ -10,17 +10,17 @@ Try to load each named skill. If one is unavailable, apply the guidance in this 
 
 ## 1. Prepare
 
-Read `cubefarm-tdd`. Read the PR, linked issue, and floor QA brief. Turn the acceptance criteria into observable checks through the affected entry points. Identify regressions, edge cases, and the smallest independent probes that would catch them. Use throwaway probes where useful, and leave the code under test intact.
+Read `cubefarm-tdd`. Read the PR, linked issue, and floor QA brief. Trace the assigned diff through affected callers, shared contracts, and platforms. Turn the acceptance criteria and plausible regressions into observable checks. Before looking at CI results, print a line in a separate shell call starting with `Blast radius:` that names what could break and what evidence you need.
 
 ## 2. Test
 
-Read `cubefarm-diagnosing-bugs`. Run the applicable repository checks and exercise the changed behaviour directly. For a failure, reproduce it, narrow the conditions, and record the expected and actual result. Keep evidence from the assigned PR head. On a retest, explicitly verify every open finding. Capture browser evidence as directed by the office and floor QA brief.
+Use trusted, successful CI jobs for the assigned PR head as evidence for the checks they cover. Record the job name, link, head SHA, and coverage. Before each extra check, print a line in a separate shell call starting with `Coverage gap:` that names the missing evidence and the check that will supply it. If the available evidence covers everything required, print `Coverage gaps: none` and proceed to the report. On a retest, explicitly verify every open finding. Capture browser evidence as directed by the office and floor QA brief. For a failure, use `cubefarm-diagnosing-bugs` to narrow the conditions and record the expected and actual result.
 
 If Chrome or Playwright hits a proxy error, blank page, or navigation timeout on a local or LAN preview, read `cubefarm-browser-proxy-resolve` before recording a verdict. Rerun the original browser assertions after restoring access. If access remains blocked, record the browser check as `skip` and include the proxy or navigation evidence.
 
 ## 3. Check
 
-- Read `cubefarm-verification-before-completion`. Check that each claim has fresh evidence from this run. Report failed checks and mark checks you could not run as `skip`, with the reason.
+- Read `cubefarm-verification-before-completion`. Check that each claim has evidence verified during this review for the assigned PR head. Report failed checks and mark required checks you could not complete as `skip`, with the reason.
 - Read `cubefarm-test-strategy-skill`. Use its risk and coverage guidance to spot gaps in the checks already run. Run relevant missing checks where possible. Keep this within the QA run's scope and existing acceptance criteria. A separate strategy document, approval gate, or follow-on workflow is unnecessary for this review.
 - Read `cubefarm-humanizer`. Apply it to the wording of the report summary and findings while preserving technical details, evidence, and the report schema.
 

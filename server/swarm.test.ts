@@ -6265,6 +6265,29 @@ describe('prototype review', () => {
 });
 
 describe('QA specialism', () => {
+  it('scopes ordinary and security review before checking CI for the assigned head', () => {
+    const tester = { ...s.state.agents[0], role: 'qa' };
+    const pr = { number: 13, title: 'Chaser', headRefName: 'swarm/13', headSha: 'reviewed-sha', baseSha: 'base-sha', url: '' };
+    const p = s as unknown as Record<string, (...args: unknown[]) => string>;
+    const qa = p.buildQaSystemAppend(tester, repo, '/desk', 'qa/pr-13-tester', pr);
+    const audit = p.buildSecuritySystemAppend(repo, '/desk', pr, 'Changed trust boundary', 'Security playbook');
+
+    for (const prompt of [qa, audit]) {
+      const scope = prompt.indexOf('blast radius');
+      const ci = prompt.indexOf('check CI for assigned head reviewed-sha');
+      expect(scope).toBeGreaterThan(-1);
+      expect(ci).toBeGreaterThan(scope);
+      expect(prompt).toContain(`repos/${repo.fullName}/commits/reviewed-sha/check-runs`);
+      expect(prompt).toContain('Run only additional checks needed to fill evidence gaps');
+    }
+    expect(qa.indexOf('"Blast radius:"')).toBeGreaterThan(-1);
+    expect(qa.indexOf('"Blast radius:"')).toBeLessThan(qa.indexOf('check CI for assigned head'));
+    expect(qa).toContain('Before each extra check, use a separate shell call to print a line starting with "Coverage gap:"');
+    expect(qa).toContain('If you cannot name a gap, skip the check.');
+    expect(audit).toContain('Complete the scoped audit, independent verification, and artifact validation');
+    expect(audit).toContain('Security playbook');
+  });
+
   it('rereads the QA playbook for both the tester and a developer covering QA', () => {
     const read = vi.spyOn(syncFs, 'readFileSync').mockReturnValueOnce('QA playbook').mockReturnValueOnce('Edited QA playbook');
     Object.assign(repo, { links: [], defaultBranch: 'main' });
