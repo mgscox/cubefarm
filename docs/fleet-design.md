@@ -64,7 +64,7 @@ ever sees a CLI as a byte stream plus hooks.
 | Codex/OpenCode screenshots read from the session's `browser/` folder; `screenshotFile(cwd, …)` | `cliRunner.ts` | box sends the files |
 | `codexThread('unarchive')` before a resume | `clis.ts` | box runs it |
 | Path building (`path.join`) | everywhere | box builds its own paths; office treats them as opaque strings (office and box may be different OSes) |
-| CEO's office MCP (`officeUrl/api/mcp/:token`) | `cliRunner.ts` | not needed: CEO and researchers stay on the office |
+| CEO's office MCP (`officeUrl/api/mcp/:token`) | `cliRunner.ts` | not needed: the CEO stays on the office machine |
 
 Stays on the office: GitHub API work (`gh`: issues, PR state, merges, evidence upload), the floor's main checkout,
 previews, the agents' terminal mirrors (`terminal.ts`), hook interpretation, scheduling, state.
@@ -177,7 +177,7 @@ Node 24, git, `gh auth login` (agents push from the box), and each CLI signed in
 what's missing in the box's card, like `cubefarm doctor`. Sign-ins can be done from the office: the agent's terminal
 is streamed, and the existing "needs you to sign in" nudge already points the manager there.
 
-Limits: floors pointed at a local-only folder (`setLocalPath`) have no remote the box can clone. The CEO and researchers run on the office machine. The Agent SDK runtime stays local; boxes are terminal-runtime only.
+Limits: floors pointed at a local-only folder (`setLocalPath`) have no remote the box can clone. Floor researchers follow their floor or desk assignment for issue work and need Claude Code on the box. The CEO, lobby research, and Ideas sessions run on the office machine. The Agent SDK runtime stays local; boxes are terminal-runtime only.
 Pacing (`pacing.ts`) is per CLI account; boxes signed into other accounts should get their own pacing state.
 
 ### 6. UI
