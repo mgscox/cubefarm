@@ -6320,11 +6320,14 @@ describe('QA specialism', () => {
       expect(ci).toBeGreaterThan(scope);
       expect(prompt).toContain(`repos/${repo.fullName}/commits/reviewed-sha/check-runs`);
       expect(prompt).toContain('Run only additional checks needed to fill evidence gaps');
+      expect(prompt).toContain('git show base-sha:CUBEBASE_QA.md');
+      expect(prompt).toContain('wait for evidence on the assigned head before passing');
     }
     expect(qa.indexOf('"Blast radius:"')).toBeGreaterThan(-1);
     expect(qa.indexOf('"Blast radius:"')).toBeLessThan(qa.indexOf('check CI for assigned head'));
     expect(qa).toContain('Before each extra check, use a separate shell call to print a line starting with "Coverage gap:"');
     expect(qa).toContain('If you cannot name a gap, skip the check.');
+    expect(qa).toContain('Unless repository QA guidance specifies another automated reviewer');
     expect(audit).toContain('Complete the scoped audit, independent verification, and artifact validation');
     expect(audit).toContain('Security playbook');
   });
@@ -6347,6 +6350,8 @@ describe('QA specialism', () => {
     expect(testerPrompt).toContain('Project-specific QA brief');
     expect(coverPrompt).toContain('Edited QA playbook');
     expect(coverPrompt).toContain('covering for the QA lab');
+    expect(coverPrompt).toContain('Resolve the fetched PR target branch to a commit');
+    expect(coverPrompt).toContain('If the path is absent, continue with the default QA playbook');
     expect(coverPrompt).toContain('Finish with the structured QA report');
   });
 });
