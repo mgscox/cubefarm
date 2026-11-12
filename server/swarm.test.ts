@@ -30,7 +30,7 @@ import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRun
 type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => Promise<void>;
 type Repo = { noWorkEndings?: import('../shared/types.ts').NoWorkEnding[]; id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; parkedBranches?: ParkedBranch[]; preview: { command: null; env: object } };
 type Backend = ReturnType<typeof createDemoBackend>;
-type QaRec = QaView & { devSessionCli?: SessionOptions['cli'] | null; attempt?: { id: string; startedAt: number; headSha: string; baseSha: string | null }; reviewId?: string; crossRepository?: boolean; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
+type QaRec = QaView & { findings?: import('./qaFindings.ts').QaFinding[]; devSessionCli?: SessionOptions['cli'] | null; attempt?: { id: string; startedAt: number; headSha: string; baseSha: string | null }; reviewId?: string; crossRepository?: boolean; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
 interface Internals {
   backend: Backend;
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[]; prContributions: PrContributionView[]; qaOutcomes: import('../shared/types.ts').QaOutcomeView[]; feedbackEvents: Record<string, true> };
@@ -4880,7 +4880,7 @@ describe('QA rounds', () => {
     expect(rec).toMatchObject(why === 'changed head' ? { status: 'queued', retests: 1 } : { status: 'needs-human', fixReason: null });
   });
 
-  it('queues QA on a suggestion commit without handing the PR back to development', async () => {
+  it.each([true, false])('queues a suggestion retest and requires evidence for the remaining blocker (resolved: %s)', async (resolved) => {
     const tester = addAgent('q1', 'Grace', 'qa', 0);
     const pr = { ...pull, body: '', isCrossRepository: false, baseSha: 'base-1', baseRefName: 'main' };
     vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pr }));
@@ -4891,14 +4891,19 @@ describe('QA rounds', () => {
     expect(rec.testedSha).toBe('sha-1');
 
     const suggestionCommit = '1'.repeat(40);
+    const priorFinding = { id: 'QA-existing', title: 'Timer pause', details: 'Recheck pause.', status: 'open' as const };
+    rec.findings = [priorFinding];
     pr.headSha = suggestionCommit;
     await s.onQaFinished(tester, repo, result(true, { verdict: 'incomplete', suggestionCommit, checks: [],
       summary: 'Applied the inline suggestion. Rerun the affected test.',
       findings: [{ title: 'Timer edge case', details: 'Recheck the timer at zero.' }],
+      findingUpdates: [{ id: priorFinding.id, status: 'resolved', evidence: 'This was checked before the new commit.' }],
       securityReviewReason: 'The timer crosses a trust boundary.' }));
     expect(rec).toMatchObject({ status: 'queued', round: 2, retests: 1, passedSha: null,
       mergeNote: 'QA applied a suggestion; checking the current revision' });
     expect(ada.task).not.toBe('fix');
+    expect(rec.findings).toEqual([priorFinding,
+      expect.objectContaining({ title: 'Timer edge case', status: 'open' })]);
 
     await s.runQa(tester, repo, rec);
     expect(session.mock.calls[1][4]).toContain(`check CI for assigned head ${suggestionCommit}`);
@@ -4906,8 +4911,10 @@ describe('QA rounds', () => {
     expect(session.mock.calls[1][3]).toContain('Recheck the timer at zero.');
     expect(session.mock.calls[1][3]).toContain('The timer crosses a trust boundary.');
     await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', codeReviewComplete: true,
-      checks: [{ name: 'Affected test', result: 'pass', details: `Passed on ${suggestionCommit}.` }], summary: 'Verified the suggestion.' }));
-    expect(rec).toMatchObject({ status: 'passed', testedSha: suggestionCommit, passedSha: suggestionCommit });
+      checks: [{ name: 'Affected test', result: 'pass', details: `Passed on ${suggestionCommit}.` }], summary: 'Verified the suggestion.',
+      findingUpdates: resolved ? rec.findings?.map(({ id }) => ({ id, status: 'resolved', evidence: 'Reproduced both scenarios on the new revision.' })) : [] }));
+    expect(rec).toMatchObject({ status: resolved ? 'passed' : 'failed', testedSha: suggestionCommit,
+      passedSha: resolved ? suggestionCommit : null });
   });
 
   it('does not approve or claim a retest when QA reports a suggestion that never reached the PR', async () => {

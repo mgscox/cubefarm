@@ -5430,7 +5430,10 @@ export class Swarm {
     }
 
     a.taskFailures = undefined;
-    const reviewedFindings = security ? undefined : reviewFindings(rec?.findings ?? [], report.findings ?? [], report.findingUpdates ?? [], rec?.publishedFindings);
+    const findingUpdates = report.findingUpdates ?? [];
+    // A suggestion handoff can add or reopen findings. Only QA on the new commit can resolve them.
+    const reviewedFindings = security ? undefined : reviewFindings(rec?.findings ?? [], report.findings ?? [],
+      report.suggestionCommit ? findingUpdates.filter((update) => update.status === 'open') : findingUpdates, rec?.publishedFindings);
     const openFindings = reviewedFindings?.findings.filter((finding) => finding.status === 'open') ?? [];
     if (openFindings.length && !report.suggestionCommit) report.verdict = 'fail';
     // A worker limitation needs CI evidence, not developers pushing meaningless commits.
@@ -5605,9 +5608,10 @@ export class Swarm {
           this.setQa(rec, { status: 'queued', round: rec.round + 1, retests: rec.retests + 1, passedSha: null,
             lastQaFailure: undefined, publishedFindings,
             ...(appliedSuggestion && {
-              summary: [report.summary, ...openFindings.map(formatQaFinding),
-                ...(report.securityReviewReason ? [`Reassess whether this needs security review. ${report.securityReviewReason}`] : []),
-              ].join('\n'),
+              findings: reviewedFindings?.findings,
+              summary: report.securityReviewReason
+                ? `${report.summary}\nReassess whether this needs security review. ${report.securityReviewReason}`
+                : report.summary,
               sessionFailures: 0,
             }),
             mergeNote: appliedSuggestion ? QA_SUGGESTION_RETEST : 'PR changed during QA; checking the current revision' });
