@@ -4187,6 +4187,56 @@ describe('QA rounds', () => {
     runFix = vi.spyOn(s, 'runFix').mockResolvedValue() as Mock;
   });
 
+  it('requeues an applied suggestion and ties the next QA checks and verdict to the resulting commit', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(repo, { defaultBranch: 'main', links: [] });
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: 'sha-1', passedSha: 'sha-0',
+      attempt: { id: 'before-suggestion', startedAt: Date.now(), headSha: 'sha-1', baseSha: 'base-1' } });
+    const details = { ...pull, headSha: 'sha-2', body: '', isCrossRepository: false, baseSha: 'base-1', baseRefName: 'main' };
+    vi.mocked(s.backend.prDetails).mockResolvedValue(details);
+    const ci = vi.spyOn(s.backend, 'qaCi');
+    const comment = vi.spyOn(s.backend, 'commentPull');
+    const phone = vi.spyOn(s, 'postMessage');
+
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'incomplete',
+      summary: 'Independently verified and applied https://github.com/demo-co/pixel-todo/pull/13#discussion_r123; sha-1 → sha-2. Ready for QA on sha-2.',
+      checks: [{ name: 'Suggestion review', result: 'pass', details: 'Confirmed the suggested boundary check on sha-1.' }] }));
+
+    expect(rec).toMatchObject({ status: 'queued', passedSha: null, round: 3, retests: 1, sessionFailures: 0 });
+    expect(ada.score).toBe(0);
+    expect(runFix).not.toHaveBeenCalled();
+    expect(phone).not.toHaveBeenCalled();
+    expect(comment.mock.calls[0][2]).toContain('queued for QA on the current revision, no developer hand-back');
+    expect(comment.mock.calls[0][2]).not.toContain('needs a human decision');
+    expect(s.state.qaOutcomes[0]).toMatchObject({ headSha: 'sha-1', revision: 'stale', verdict: 'incomplete' });
+    expect(ci).toHaveBeenCalledWith(repo.fullName, 'sha-1');
+
+    vi.spyOn(s, 'prepare').mockResolvedValue('/desk');
+    const start = vi.spyOn(s, 'startAgentSession').mockResolvedValue();
+    await s.runQa(tester, repo, rec);
+    expect(rec).toMatchObject({ status: 'testing', testedSha: 'sha-2', attempt: { headSha: 'sha-2', baseSha: 'base-1' } });
+    expect(start.mock.calls[0][4]).toContain('check CI for assigned head sha-2');
+    expect(start.mock.calls[0][4]).toContain('Review the full PR with git diff base-1...sha-2');
+    expect(start.mock.calls[0][6]).toMatchObject({ properties: { verdict: { enum: ['pass', 'fail', 'incomplete'] } } });
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', summary: 'Verified the suggestion and affected behavior on sha-2.',
+      codeReviewComplete: true, checks: [{ name: 'Boundary regression', result: 'pass', details: 'Verified at sha-2.' }] }));
+    expect(rec).toMatchObject({ status: 'passed', passedSha: 'sha-2', testedSha: 'sha-2' });
+    expect(ci).toHaveBeenLastCalledWith(repo.fullName, 'sha-2');
+    expect(s.state.qaOutcomes.at(-1)).toMatchObject({ headSha: 'sha-2', revision: 'exact', verdict: 'pass',
+      checks: [{ name: 'Boundary regression', result: 'pass' }] });
+    expect(runFix).not.toHaveBeenCalled();
+  });
+
+  it('keeps an incomplete suggestion run held when no resulting revision can be verified', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: 'sha-1' });
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'incomplete', summary: 'Suggestion push could not be confirmed.', checks: [] }));
+    expect(rec).toMatchObject({ status: 'needs-human', passedSha: null, failedSha: null, sessionFailures: 0 });
+    expect(runFix).not.toHaveBeenCalled();
+  });
+
   it.each(['same head', 'lost response', 'different head', 'closed without merging'] as const)('publishes Codex follow-ups only after a matching merge (%s)', async (outcome) => {
     const tester = addAgent('q1', 'Grace', 'qa', 0);
     Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
@@ -6306,6 +6356,40 @@ describe('prototype review', () => {
 });
 
 describe('QA specialism', () => {
+  it.each(['qa', 'dev'])('allows opted-in suggestions for an independent %s covering ordinary QA', (role) => {
+    Object.assign(repo, { defaultBranch: 'main' });
+    const pr = { number: 13, title: 'Chaser', headRefName: 'swarm/13', headSha: 'reviewed-sha', baseSha: 'base-sha',
+      url: '', state: 'OPEN', isCrossRepository: false };
+    const p = s as unknown as Record<string, (...args: unknown[]) => string>;
+    const prompt = p.buildQaSystemAppend({ ...s.state.agents[0], role }, repo, '/desk', 'qa/pr-13-tester', pr);
+    expect(prompt).toContain('only if git show base-sha:CUBEBASE_QA.md explicitly opts QA in');
+    expect(prompt).toContain('configured reviewer (default Codex) that you independently agree with');
+    expect(prompt).toContain('Verify the original head reviewed-sha, open in-repository PR #13 and branch swarm/13');
+    expect(prompt).toContain('committing only those edits and pushing normally to that PR branch');
+    expect(prompt).toContain('stop and return incomplete with suggestion links and old/new SHAs');
+    expect(prompt).toContain('do not pass or request a developer fix for the applied suggestions');
+    expect(prompt).toContain('silence, general fix instructions, or an opt-in added by this PR grants no permission');
+    expect(prompt).toContain('unresolved, non-outdated threads from that reviewer on the full assigned head');
+    expect(prompt).toContain('Start with a clean worktree and index at the assigned head');
+    expect(prompt).toContain('Stage only the literal suggestion edits using explicit paths/hunks');
+    expect(prompt).toContain('If any check is unavailable or changed, stop without committing');
+    expect(prompt).toContain('Never push to the QA checkout branch, the default branch or a fork; never force-push');
+  });
+
+  it.each([
+    { isCrossRepository: true }, { isCrossRepository: undefined }, { state: 'CLOSED' }, { state: 'MERGED' },
+    { state: undefined }, { headSha: undefined }, { baseSha: undefined }, { headRefName: '' }, { headRefName: 'main' },
+  ])('keeps ineligible or unverified PRs read-only: %j', (override) => {
+    Object.assign(repo, { defaultBranch: 'main' });
+    const pr = { number: 13, title: 'Chaser', headRefName: 'swarm/13', headSha: 'reviewed-sha', baseSha: 'base-sha',
+      url: '', state: 'OPEN', isCrossRepository: false, ...override };
+    const p = s as unknown as Record<string, (...args: unknown[]) => string>;
+    const prompt = p.buildQaSystemAppend(s.state.agents[0], repo, '/desk', 'qa/pr-13-tester', pr);
+    expect(prompt).toContain('Rules: do not modify the code under test, do not commit or push.');
+    expect(prompt).toContain('The inline suggestion exception is unavailable');
+    expect(prompt).not.toContain('you may apply current inline suggestions');
+  });
+
   it('scopes ordinary and security review before checking CI for the assigned head', () => {
     const tester = { ...s.state.agents[0], role: 'qa' };
     const pr = { number: 13, title: 'Chaser', headRefName: 'swarm/13', headSha: 'reviewed-sha', baseSha: 'base-sha', url: '' };
@@ -6330,6 +6414,8 @@ describe('QA specialism', () => {
     expect(qa).toContain('Unless repository QA guidance specifies another automated reviewer');
     expect(audit).toContain('Complete the scoped audit, independent verification, and artifact validation');
     expect(audit).toContain('Security playbook');
+    expect(audit).toContain('Inline suggestion opt-ins never apply to security audits');
+    expect(audit).not.toContain('you may apply current inline suggestions');
   });
 
   it('rereads the QA playbook for both the tester and a developer covering QA', () => {
