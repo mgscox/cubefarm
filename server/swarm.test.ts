@@ -4228,13 +4228,23 @@ describe('QA rounds', () => {
     expect(runFix).not.toHaveBeenCalled();
   });
 
-  it('keeps an incomplete suggestion run held when no resulting revision can be verified', async () => {
+  it.each([
+    { label: 'no checks', checks: [] },
+    ...(['environment', 'resources'] as const).flatMap((failureKind) =>
+      (['skip', 'fail'] as const).map((result) => ({ label: `${failureKind} ${result}`, checks: [
+        { name: 'Suggestion review', result: 'pass' as const, details: 'Suggestion is valid.' },
+        { name: 'Local suite', result, failureKind, details: 'Worker limit; the suggestion push was not confirmed.' },
+      ] }))),
+  ])('keeps an incomplete suggestion run held when no resulting revision can be verified ($label)', async ({ checks }) => {
     const tester = addAgent('q1', 'Grace', 'qa', 0);
     Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
     Object.assign(rec, { status: 'testing', testedSha: 'sha-1' });
-    await s.onQaFinished(tester, repo, result(true, { verdict: 'incomplete', summary: 'Suggestion push could not be confirmed.', checks: [] }));
+    const merge = vi.spyOn(s.backend, 'mergePull');
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'incomplete', summary: 'Suggestion push could not be confirmed.', checks }));
     expect(rec).toMatchObject({ status: 'needs-human', passedSha: null, failedSha: null, sessionFailures: 0 });
     expect(runFix).not.toHaveBeenCalled();
+    expect(await s.advanceMerge(repo, rec, pull)).toBe(false);
+    expect(merge).not.toHaveBeenCalled();
   });
 
   it.each(['same head', 'lost response', 'different head', 'closed without merging'] as const)('publishes Codex follow-ups only after a matching merge (%s)', async (outcome) => {

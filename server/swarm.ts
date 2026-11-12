@@ -5420,7 +5420,7 @@ export class Swarm {
     if (openFindings.length) report.verdict = 'fail';
     // A worker limitation needs CI evidence, not developers pushing meaningless commits.
     const failedChecks = report.checks.filter((c) => c.result === 'fail');
-    const environmentOnly = !security && !openFindings.length && report.checks.some((c) => c.result !== 'pass' && workerLimit(c)) &&
+    const environmentOnly = !security && report.verdict !== 'incomplete' && !openFindings.length && report.checks.some((c) => c.result !== 'pass' && workerLimit(c)) &&
       failedChecks.every(workerLimit);
     const outOfMemory = report.checks.some((c) => c.result !== 'pass' && c.failureKind === 'resources') ? resourceNote(report.checks) : null;
     const requiresFullReview = !security && !!rec?.qaScope?.diffFrom && !report.codeReviewComplete && (report.verdict === 'pass' || environmentOnly);
