@@ -15,7 +15,7 @@ The details behind the office: how an issue becomes a merged pull request, who d
 2. **In progress.** The server fetches the repo and creates a git worktree for that developer on the branch `swarm/issue-<n>-<agent>`, branched from the default branch. The developer's coding agent starts there with the issue text. The developer implements the change, runs the project's checks, pushes the branch and opens a PR with `gh pr create` that says `Closes #<n>`.
 3. **In QA.** The PR is handed to the floor's QA lab. A free QA tester checks out the PR head in their own worktree; when every tester is busy, a free developer who didn't write the PR covers for them, `testing` specialists first. The tester then:
    - reads the PR, the linked issue, and any `CUBEBASE_QA.md` in the repository root at the PR base, then states the blast radius and evidence needed before checking CI. Changes to the guidance take effect once they reach the target branch.
-   - may apply current inline suggestions it independently agrees with when that base guidance explicitly opts QA in. Only the configured reviewer's suggestions on an open, in-repository PR head qualify. QA commits only those edits after verifying the original head, then stops; the office queues full QA for the resulting commit without a developer hand-back. Security audits and fork PRs stay read-only. See the [QA playbook](specialisms/qa.md#opted-in-inline-suggestions) for the opt-in and revision checks.
+   - may apply current inline suggestions it independently agrees with when that base guidance explicitly opts QA in. Only the configured reviewer's suggestions on an open, in-repository PR head qualify. QA commits only those edits after verifying the original head, then stops; the office queues full QA for the resulting commit without a developer hand-back. Security audits and fork PRs stay read-only. See the [QA playbook](specialisms/qa.md#applying-an-inline-suggestion) for the opt-in and revision checks.
    - reviews the diff like a code reviewer: bugs, unhandled errors and edge cases, security problems, leftover debug code, missing tests
    - uses trusted, successful CI results for the assigned PR head for checks those jobs cover
    - names the coverage gap before running each extra check, including browser checks where the affected behavior or QA brief calls for them
@@ -67,7 +67,7 @@ from an unsent draft. Links are served by this office; they are not public GitHu
 ## QA testers
 
 - Every floor always has at least one QA tester: one is hired when a repo is connected, and the last one can't be let go. You can hire up to 3 per floor (manager's console → Team, or press `E` on an empty QA station).
-- QA testers use the same model and effort settings as everyone else. Their instructions allow only the opted-in inline suggestion pushes described above. They leave comments, GitHub reviews, merges and PR or issue edits to the office, which posts their report for them.
+- QA testers use the same model and effort settings as everyone else. Their instructions allow only the opted-in inline suggestion commits described above. They leave comments, GitHub reviews, merges and PR or issue edits to the office, which posts their report for them.
 - QA is automatic for every PR from a `swarm/` branch, whether or not auto-assign is on, except research docs (`swarm/research-` branches): there's nothing to test, so they count as passed and merge like any other PR once GitHub's checks are green.
 
 ## Prototypes
@@ -120,7 +120,7 @@ Agents behave like the coding agents you run in your own terminal: they load you
 
 For unattended work, Claude Code terminals for developers, QA testers and the CEO start in `bypassPermissions` mode. Researchers start in Claude's `auto` mode. Codex starts with `--dangerously-bypass-approvals-and-sandbox`, and OpenCode uses the office's permission config.
 
-The office's workflow rules live in each agent's instructions. Agents push their own branches and open PRs. They must avoid pushing to the default branch, force-pushing or merging. QA testers leave GitHub alone except for opted-in inline suggestion pushes; the office posts their reports and handles merges. `AskUserQuestion` and plan mode stay off for Claude Code, so agents decide and record their assumptions in the PR. You can still type into any agent's terminal.
+The office's workflow rules live in each agent's instructions. Agents push their own branches and open PRs. They must avoid pushing to the default branch, force-pushing or merging. The office posts QA reports and handles merges. Ordinary QA can commit agreed inline suggestions on an in-repository PR branch when the base revision's `CUBEBASE_QA.md` opts in. The office queues QA again on the new revision so the final verdict covers the applied changes. `AskUserQuestion` and plan mode stay off for Claude Code, so agents decide and record their assumptions in the PR. You can still type into any agent's terminal.
 
 Agents can do anything your own coding agent in a terminal can. Run the office where you'd run those.
 
