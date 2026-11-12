@@ -10,11 +10,11 @@ Try to load each named skill. If one is unavailable, apply the guidance in this 
 
 ## 1. Prepare
 
-Read `cubefarm-tdd`. Read the PR, linked issue, and floor QA brief. Trace the assigned diff through affected callers, shared contracts, and platforms. Turn the acceptance criteria and plausible regressions into observable checks. Before looking at CI results, print a line in a separate shell call starting with `Blast radius:` that names what could break and what evidence you need.
+Read `cubefarm-tdd`. Read the PR, linked issue, floor QA brief, and any root `CUBEBASE_QA.md` at the assigned PR base. Include the repository guidance in your review scope and evidence. Trace the assigned diff through affected callers, shared contracts, and platforms. Turn the acceptance criteria and plausible regressions into observable checks. Before looking at CI results, print a line in a separate shell call starting with `Blast radius:` that names what could break and what evidence you need.
 
 ### Codex review threads
 
-Refresh the threads at the start, after diff review, after reading CI, between groups of extra checks, and before reporting. During long stages, recheck when possible. Use the assigned owner, repository, and PR number in this read-only query:
+Use the repository's automated review instructions when `CUBEBASE_QA.md` specifies a reviewer. Otherwise, refresh Codex threads at the start, after diff review, after reading CI, between groups of extra checks, and before reporting. During long stages, recheck when possible. Use the assigned owner, repository, and PR number in this read-only query:
 
 ```sh
 gh api graphql --paginate -f owner=OWNER -f name=REPO -F number=PR -f query='
