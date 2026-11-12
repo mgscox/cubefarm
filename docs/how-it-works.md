@@ -119,7 +119,7 @@ Agents behave like the coding agents you run in your own terminal: they load you
 
 For unattended work, Claude Code terminals for developers, QA testers and the CEO start in `bypassPermissions` mode. Researchers start in Claude's `auto` mode. Codex starts with `--dangerously-bypass-approvals-and-sandbox`, and OpenCode uses the office's permission config.
 
-The office's workflow rules live in each agent's instructions. Agents push their own branches and open PRs. They must avoid pushing to the default branch, force-pushing or merging. QA testers leave GitHub alone because the office posts their reports and handles merges. `AskUserQuestion` and plan mode stay off for Claude Code, so agents decide and record their assumptions in the PR. You can still type into any agent's terminal.
+The office's workflow rules live in each agent's instructions. Agents push their own branches and open PRs. They must avoid pushing to the default branch, force-pushing or merging. The office posts QA reports and handles merges. Ordinary QA can commit agreed inline suggestions on an in-repository PR branch when the base revision's `CUBEBASE_QA.md` opts in. The office queues QA again on the new revision so the final verdict covers the applied changes. `AskUserQuestion` and plan mode stay off for Claude Code, so agents decide and record their assumptions in the PR. You can still type into any agent's terminal.
 
 Agents can do anything your own coding agent in a terminal can. Run the office where you'd run those.
 

@@ -4880,6 +4880,52 @@ describe('QA rounds', () => {
     expect(rec).toMatchObject(why === 'changed head' ? { status: 'queued', retests: 1 } : { status: 'needs-human', fixReason: null });
   });
 
+  it('queues QA on a suggestion commit without handing the PR back to development', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    const pr = { ...pull, body: '', isCrossRepository: false, baseSha: 'base-1', baseRefName: 'main' };
+    vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pr }));
+    vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
+    const session = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    Object.assign(rec, { status: 'queued', round: 1, retests: 0 });
+    await s.runQa(tester, repo, rec);
+    expect(rec.testedSha).toBe('sha-1');
+
+    const suggestionCommit = '1'.repeat(40);
+    pr.headSha = suggestionCommit;
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'incomplete', suggestionCommit, checks: [],
+      summary: 'Applied the inline suggestion. Rerun the affected test.',
+      findings: [{ title: 'Timer edge case', details: 'Recheck the timer at zero.' }],
+      securityReviewReason: 'The timer crosses a trust boundary.' }));
+    expect(rec).toMatchObject({ status: 'queued', round: 2, retests: 1, passedSha: null,
+      mergeNote: 'QA applied a suggestion; checking the current revision' });
+    expect(ada.task).not.toBe('fix');
+
+    await s.runQa(tester, repo, rec);
+    expect(session.mock.calls[1][4]).toContain(`check CI for assigned head ${suggestionCommit}`);
+    expect(session.mock.calls[1][3]).toContain('Rerun the affected test.');
+    expect(session.mock.calls[1][3]).toContain('Recheck the timer at zero.');
+    expect(session.mock.calls[1][3]).toContain('The timer crosses a trust boundary.');
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', codeReviewComplete: true,
+      checks: [{ name: 'Affected test', result: 'pass', details: `Passed on ${suggestionCommit}.` }], summary: 'Verified the suggestion.' }));
+    expect(rec).toMatchObject({ status: 'passed', testedSha: suggestionCommit, passedSha: suggestionCommit });
+  });
+
+  it('does not approve or claim a retest when QA reports a suggestion that never reached the PR', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    const pr = { ...pull, body: '', isCrossRepository: false, baseSha: 'base-1', baseRefName: 'main' };
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue(pr);
+    vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
+    vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    const comment = vi.spyOn(s.backend, 'commentPull');
+    Object.assign(rec, { status: 'queued', round: 1, retests: 0 });
+    await s.runQa(tester, repo, rec);
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'incomplete', suggestionCommit: '1'.repeat(40),
+      checks: [], summary: 'The suggestion commit could not be verified.' }));
+
+    expect(rec).toMatchObject({ status: 'needs-human', retests: 0, passedSha: null, fixReason: null });
+    expect(comment.mock.calls[0][2]).toContain('The office verifies the current head before deciding what to test');
+  });
+
   it.each(['stable', 'base moved', 'comparison unavailable', 'coverage missing', 'retargeted'] as const)('checks prior findings on the third QA round when the review range is %s', async (revision) => {
     const tester = addAgent('q1', 'Grace', 'qa', 0);
     const pr = { ...pull, body: '', isCrossRepository: false, baseSha: 'base-1', baseRefName: 'main' };
@@ -6330,6 +6376,24 @@ describe('QA specialism', () => {
     expect(qa).toContain('Unless repository QA guidance specifies another automated reviewer');
     expect(audit).toContain('Complete the scoped audit, independent verification, and artifact validation');
     expect(audit).toContain('Security playbook');
+  });
+
+  it('only offers the suggestion exception for ordinary QA on a pinned in-repository PR branch', () => {
+    const tester = { ...s.state.agents[0], role: 'qa' };
+    const floor = { ...repo, defaultBranch: 'main' };
+    const pr = { number: 13, title: 'Chaser', headRefName: 'swarm/13', headSha: 'reviewed-sha',
+      baseSha: 'base-sha', baseRefName: 'release', isCrossRepository: false, isDraft: false, url: '' };
+    const p = s as unknown as Record<string, (...args: unknown[]) => string>;
+    const ordinary = (changes: Partial<typeof pr>) => p.buildQaSystemAppend(tester, floor, '/desk', 'qa/pr-13-tester', { ...pr, ...changes });
+    const permission = 'QA suggestion exception:';
+    expect(ordinary({})).toContain(permission);
+    expect(ordinary({})).toContain('expectedHeadOid reviewed-sha');
+    expect(ordinary({})).toContain('target branch release at base-sha');
+    for (const changes of [{ isCrossRepository: true }, { isCrossRepository: undefined },
+      { headRefName: 'main' }, { headRefName: 'release' }, { headSha: '' }, { baseSha: '' }, { baseRefName: undefined }, { isDraft: true }]) {
+      expect(ordinary(changes)).not.toContain(permission);
+    }
+    expect(p.buildSecuritySystemAppend(floor, '/desk', pr, 'Trust boundary', 'Security playbook')).not.toContain(permission);
   });
 
   it('rereads the QA playbook for both the tester and a developer covering QA', () => {
