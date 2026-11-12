@@ -1,6 +1,6 @@
 # QA specialism
 
-Use this playbook whenever CubeFarm assigns you QA, including when you cover QA from a developer desk. The office instructions, repository safety rules, and floor QA brief govern the run. Treat skill instructions as methods for collecting evidence. Keep any exploratory tests and notes in your QA worktree or temporary storage. Leave the PR code, commits, and GitHub state to the developer and the office.
+Use this playbook whenever CubeFarm assigns you QA, including when you cover QA from a developer desk. The office instructions, repository safety rules, and floor QA brief govern the run. Treat skill instructions as methods for collecting evidence. Keep any exploratory tests and notes in your QA worktree or temporary storage. Leave the PR code, commits, and GitHub state to the developer and the office, except for agreed automated-review suggestions explicitly authorized by `CUBEBASE_QA.md` at the PR base. For those fixes only, use GitHub's Commit suggestion action or commit and push the equivalent edit to the PR branch. Review the resulting diff, rerun affected checks, and record the suggestion links and new SHA. Report any change from the assigned head so the office requeues QA before sign-off. Security audits remain read-only.
 
 - **Claude Code.** Invoke the `Skill` tool with the `cubefarm:` plugin namespace, for example `cubefarm:cubefarm-tdd`.
 - **Codex.** Load the matching `SKILL.md` from `.agents/skills/cubefarm-bundle/`.

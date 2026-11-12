@@ -5170,7 +5170,7 @@ export class Swarm {
       '5. You may write throwaway scripts to probe behaviour, but do not commit them.',
       'Set codeReviewComplete after reviewing the assigned scope and rechecking open findings. Report new blockers in findings, one per root cause. Explain the broken rule, give a representative example, and say where else to look. Use findingUpdates to mark each prior open finding as open or resolved with current evidence. Use its ID if it returns. Refer to prior findings by ID in the summary and failed checks.',
       '',
-      'Rules: do not modify the code under test, do not commit, push, comment on, review or merge anything on GitHub. The office posts your report on the pull request. Finish with the structured QA report: verdict, summary, the checks you performed, the commands you ran and one caption per screenshot.',
+      'Rules: do not modify the code under test or commit/push unless CUBEBASE_QA.md at the PR base explicitly authorizes applying agreed automated-review suggestions. That exception allows only those fixes, through GitHub Commit suggestion or an equivalent commit pushed to the PR branch. Record the resulting SHA and affected checks; if the head changes, report the revision mismatch so the office requeues QA before sign-off. Other GitHub comments, reviews and merges remain with the office. The office posts your report on the pull request. Finish with the structured QA report: verdict, summary, the checks you performed, the commands you ran and one caption per screenshot.',
       ...(specialism ? ['', specialism] : []),
       ONE_TURN,
     ].join('\n');
