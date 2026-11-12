@@ -6328,6 +6328,10 @@ describe('QA specialism', () => {
     expect(qa).toContain('Before each extra check, use a separate shell call to print a line starting with "Coverage gap:"');
     expect(qa).toContain('If you cannot name a gap, skip the check.');
     expect(qa).toContain('Unless repository QA guidance specifies another automated reviewer');
+    expect(qa).toContain('do not modify the code under test or commit/push unless CUBEBASE_QA.md at the PR base explicitly authorizes applying agreed automated-review suggestions');
+    expect(qa).toContain('if the head changes, report the revision mismatch so the office requeues QA before sign-off');
+    expect(audit).toContain('Leave target source and GitHub state intact');
+    expect(audit).not.toContain('That exception allows only those fixes');
     expect(audit).toContain('Complete the scoped audit, independent verification, and artifact validation');
     expect(audit).toContain('Security playbook');
   });
