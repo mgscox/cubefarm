@@ -6381,6 +6381,8 @@ describe('QA specialism', () => {
     expect(qa).toContain('Before each extra check, use a separate shell call to print a line starting with "Coverage gap:"');
     expect(qa).toContain('If you cannot name a gap, skip the check.');
     expect(qa).toContain('Unless repository QA guidance specifies another automated reviewer');
+    expect(qa).toContain('Keep the code under test and GitHub read-only');
+    expect(audit).toContain('Leave target source and GitHub state intact');
     expect(audit).toContain('Complete the scoped audit, independent verification, and artifact validation');
     expect(audit).toContain('Security playbook');
   });
