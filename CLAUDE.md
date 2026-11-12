@@ -29,9 +29,9 @@ It ships on npm as `cubefarm` (`npx cubefarm`); it used to be called Office Swar
   only in a throwaway clone outside the live office, with `--demo` and your `SWARM_HOME`, `SWARM_PORT` and
   `SWARM_CLIENT_PORT`.
 - Agents are ordinary coding-agent CLI sessions on the manager's own setup, unsandboxed, by the manager's choice. The
-  office's workflow rules (no pushes to the default branch, no merging, QA leaves GitHub alone except for agreed suggestions
-  explicitly authorized by the PR base's `CUBEBASE_QA.md`) live in their prompts
-  and instructions, not in enforcement: don't add hooks, permission rules or sandboxes that refuse tool calls.
+  office's workflow rules live in prompts and instructions. Agents may not push to the default branch or merge PRs.
+  QA keeps GitHub read-only except for opted-in inline suggestions on eligible PR branches. Keep these rules in
+  instructions and avoid adding hooks, permission rules or sandboxes that refuse tool calls.
   `ANTHROPIC_*` / `CLAUDE_*` are stripped from agent and preview env.
 
 ## Browser test failures
