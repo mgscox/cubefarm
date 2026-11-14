@@ -32,7 +32,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           OPENROUTER__KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CONFIG__MODEL: openrouter/deepseek/deepseek-v4.1-flash-1017
-          CONFIG__FALLBACK_MODELS: '[]'
+          CONFIG__FALLBACK_MODELS: 'openrouter/z-ai/glm-5.3-flash'
           CONFIG__CUSTOM_MODEL_MAX_TOKENS: '1048576'
           GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: 'false'
           GITHUB_ACTION_CONFIG__AUTO_REVIEW: 'true'
