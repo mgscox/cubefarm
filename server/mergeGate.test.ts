@@ -77,6 +77,60 @@ describe('security base advances', () => {
 });
 
 describe('mergeStep', () => {
+  describe('rebased checks', () => {
+    const candidate = { headSha: 'rebased', approvedSha: 'abc123', baseSha: 'base', baseRef: 'main', expectedChecks: ['test', 'build', 'review'] };
+
+    it('merges after fifteen minutes when only an old-head check is missing', () => {
+      const pr = pull({ headSha: 'rebased', successfulChecks: ['test', 'build'] });
+      const rec = record({ mergeCandidate: candidate, pendingSince: NOW - 15 * 60_000 });
+      expect(mergeStep(pr, rec, NOW, base).do).toBe('merge');
+    });
+
+    it('names absent checks and waits through the grace period', () => {
+      const pr = pull({ headSha: 'rebased', successfulChecks: ['test', 'build'] });
+      const rec = record({ mergeCandidate: candidate });
+      expect(mergeStep(pr, rec, NOW, base)).toMatchObject({ do: 'wait', note: 'waiting for CI on the rebased head: review', set: { pendingSince: NOW } });
+      rec.pendingSince = NOW - 15 * 60_000 + 1;
+      expect(mergeStep(pr, rec, NOW, base).do).toBe('wait');
+    });
+
+    it('merges immediately when every expected check passes', () => {
+      expect(mergeStep(pull({ headSha: 'rebased', successfulChecks: candidate.expectedChecks }), record({ mergeCandidate: candidate }), NOW, base).do).toBe('merge');
+    });
+
+    it('keeps the candidate age through a refused merge and retry', () => {
+      const pr = pull({ headSha: 'rebased', successfulChecks: ['test', 'build'] });
+      const rec = record({ mergeCandidate: candidate, pendingSince: NOW - 15 * 60_000 });
+      const step = mergeStep(pr, rec, NOW, base);
+      Object.assign(rec, step.set, { mergeRetryAt: NOW + 10 * 60_000 });
+      expect(mergeStep(pr, rec, NOW + 1, base)).toMatchObject({ do: 'wait', set: { pendingSince: NOW - 15 * 60_000 } });
+      expect(mergeStep(pr, rec, NOW + 10 * 60_000, base).do).toBe('merge');
+    });
+
+    it('starts and preserves the candidate clock while check access is unavailable', () => {
+      const pr = pull({ headSha: 'rebased', checks: 'unavailable' });
+      expect(mergeStep(pr, record({ mergeCandidate: candidate }), NOW, base).set).toEqual({ pendingSince: NOW });
+      expect(mergeStep(pr, record({ mergeCandidate: candidate, pendingSince: NOW - 60_000 }), NOW, base).set).toEqual({ pendingSince: NOW - 60_000 });
+    });
+
+    it('keeps a genuinely pending check waiting after the grace period', () => {
+      const pr = pull({ headSha: 'rebased', checks: 'pending', successfulChecks: ['test', 'build'], pendingChecks: ['review'] });
+      expect(mergeStep(pr, record({ mergeCandidate: candidate, pendingSince: NOW - 60 * 60_000 }), NOW, base).do).toBe('wait');
+    });
+
+    it('sends a failing rebased check back after its rerun', () => {
+      const pr = pull({ headSha: 'rebased', checks: 'failing', successfulChecks: ['test', 'build'], failedChecks: [{ name: 'review', url: null }] });
+      expect(mergeStep(pr, record({ mergeCandidate: candidate, pendingSince: NOW - 60 * 60_000, checkRerunSha: 'rebased' }), NOW, base)).toMatchObject({ do: 'send-back', reason: 'checks' });
+    });
+
+    it.each([
+      { checks: 'none' as const, hasSuccessfulChecks: false },
+      { checks: 'passing' as const, hasSuccessfulChecks: false },
+      { checks: 'unavailable' as const, hasSuccessfulChecks: false },
+    ])('requires fresh successful evidence after the grace period: %j', (checks) => {
+      expect(mergeStep(pull({ headSha: 'rebased', successfulChecks: [], ...checks }), record({ mergeCandidate: candidate, pendingSince: NOW - 60 * 60_000 }), NOW, base).do).toBe('wait');
+    });
+  });
   describe('unavailable checks', () => {
     it.each(['CLEAN', 'BEHIND'])('waits without merging or updating when merge state is %s', (mergeState) => {
       expect(mergeStep(pull({ checks: 'unavailable', mergeState }), record(), NOW, base)).toMatchObject({ do: 'wait', note: expect.stringContaining('checks unavailable'), set: { pendingSince: null } });

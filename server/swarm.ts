@@ -45,7 +45,7 @@ import { decideProposal, proposalFromHandoff, withNewerDraft, wordingOnly, type 
 import { createDemoProposalWorker, demoHandoff } from './proposalFixture.ts';
 import { demoProposalRecords, demoReview, isReviewFixture } from './demoIdeaReview.ts';
 import { currentRound, nextStep, pickReviewers, promote, recordReview, REVIEW_FOCUSES, reviseRound, startReview } from '../shared/ideaReview.ts';
-import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep, securityBaseStep, type MergeRecord } from './mergeGate.ts';
+import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, MERGE_SLOT_TIMEOUT_MS, mergeCandidateHoldsSlot, mergeStep, securityBaseStep, type MergeRecord } from './mergeGate.ts';
 import { qaOutcome } from './qaOutcome.ts';
 import { qaFindings, workerSnapshot } from './qaEvidence.ts';
 import { deriveScoreEvents, projectScores, reconcileScores, SCORE_LEDGER_VERSION, ZERO_SCORES, type ScoreLedger } from './scores.ts';
@@ -2960,8 +2960,13 @@ export class Swarm {
             this.mergeNote(rec, `auto-merge hit a problem: ${oneLine(err)}`);
           }
         }
-        // A merge invalidates the base data for later entries. An active rebase owns the slot through CI.
-        if (merged || (rec.status === 'passed' && rec.mergeCandidate)) break;
+        // A merge invalidates the base data for later entries. Give active rebase CI the slot for a bounded time.
+        if (merged) break;
+        if (rec.status === 'passed' && rec.mergeCandidate) {
+          if (mergeCandidateHoldsSlot(pr, rec, Date.now())) break;
+          const note = `merge slot released after ${MERGE_SLOT_TIMEOUT_MS / 60_000} minutes without pending checks`;
+          if (!rec.mergeNote?.endsWith(note)) this.mergeNote(rec, `${rec.mergeNote ?? 'waiting for CI on the rebased head'}; ${note}`);
+        }
       }
     } finally {
       rt.merging = false;

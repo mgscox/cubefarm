@@ -22,6 +22,8 @@ export const MAX_MERGE_FIXES = 3;
 export const CHECKS_ALERT_MS = 30 * 60_000;
 export const MERGE_RETRY_MS = 10 * 60_000;
 export const CHECK_RERUN_GRACE_MS = 2 * 60_000;
+export const REBASE_CHECKS_GRACE_MS = 15 * 60_000;
+export const MERGE_SLOT_TIMEOUT_MS = CHECKS_ALERT_MS * 2;
 
 /** The parts of a QA record the merge gate reads. */
 export interface MergeRecord {
@@ -41,6 +43,12 @@ export interface MergeRecord {
 export type MergeBookkeeping = Partial<Pick<MergeRecord, 'passedSha' | 'pendingSince' | 'alerted'>>;
 
 export type MergePull = Pick<PullInfo, 'isDraft' | 'mergeable' | 'mergeState' | 'headSha' | 'checks' | 'hasSuccessfulChecks' | 'successfulChecks' | 'failedChecks' | 'pendingChecks'>;
+
+/** Let other passed PRs advance if a rebased head has stopped producing CI. */
+export function mergeCandidateHoldsSlot(pr: MergePull, rec: MergeRecord, now: number): boolean {
+  return !!rec.mergeCandidate && (pr.checks === 'pending' || pr.pendingChecks.length > 0 ||
+    rec.pendingSince == null || now - rec.pendingSince < MERGE_SLOT_TIMEOUT_MS);
+}
 
 /** What auto-merge does next with a QA-passed PR. */
 export type MergeStep = { set: MergeBookkeeping } & (
@@ -72,7 +80,7 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
     return { do: 'send-back', reason: 'conflict', instructions: `It conflicts with ${opts.base}.`, needsHuman, set };
   }
   if (pr.checks === 'unavailable') {
-    set.pendingSince = null;
+    set.pendingSince = candidate ? rec.pendingSince ?? now : null;
     return { do: 'wait', note: 'checks unavailable: restore GitHub check access before merging', set };
   }
   if (rec.checkRerunSha === pr.headSha && rec.checkRerunAt != null && now - rec.checkRerunAt < CHECK_RERUN_GRACE_MS) {
@@ -84,20 +92,24 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
     const instructions = pr.failedChecks.map((c) => `- ${c.name}${c.url ? `: ${c.url}` : ''}`).join('\n');
     return { do: 'send-back', reason: 'checks', instructions, needsHuman, set };
   }
+  const missingChecks = candidate?.expectedChecks.filter((name) => !pr.successfulChecks?.includes(name) && !pr.pendingChecks.includes(name)) ?? [];
+  // Open-only workflows won't run again on a rebase; give push-triggered checks time to appear first.
+  const graceElapsed = rec.pendingSince != null && now - rec.pendingSince >= REBASE_CHECKS_GRACE_MS;
   const waitingForRebaseChecks = candidate && (pr.checks !== 'passing' || pr.hasSuccessfulChecks !== true ||
-    candidate.expectedChecks.some((name) => !pr.successfulChecks?.includes(name)));
+    pr.pendingChecks.length > 0 || (missingChecks.length > 0 && !graceElapsed));
   if (pr.checks === 'pending' || waitingForRebaseChecks) {
     const since = rec.pendingSince ?? now;
     if (rec.pendingSince == null) set.pendingSince = since;
     const alert = now - since > CHECKS_ALERT_MS && !rec.alerted;
     if (alert) set.alerted = true;
-    const note = waitingForRebaseChecks ? 'waiting for CI on the rebased head' : `waiting for checks: ${pr.pendingChecks.join(', ') || 'running'}`;
+    const note = waitingForRebaseChecks ? `waiting for CI on the rebased head${missingChecks.length ? `: ${missingChecks.join(', ')}` : ''}` : `waiting for checks: ${pr.pendingChecks.join(', ') || 'running'}`;
     return { do: 'wait', note, alert, set };
   }
   if (rec.ciRequired && (pr.checks !== 'passing' || pr.hasSuccessfulChecks !== true)) {
     return { do: 'wait', note: 'waiting for passing GitHub checks to cover environment-blocked local validation', set };
   }
-  set.pendingSince = null;
+  // Keep the candidate's age if GitHub refuses the merge, so retries cannot monopolize the slot forever.
+  set.pendingSince = candidate ? rec.pendingSince ?? now : null;
   if (pr.mergeable === 'UNKNOWN') return { do: 'wait', note: 'GitHub is checking it can merge', set };
   if (pr.mergeState === 'BEHIND') return { do: 'update-branch', set };
   if (rec.mergeRetryAt && now < rec.mergeRetryAt) return { do: 'wait', set };

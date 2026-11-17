@@ -7012,6 +7012,36 @@ describe('manual office closure', () => {
     expect(merge).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['none', 'unavailable'] as const)('releases a stalled rebase slot after an hour with %s checks so another passed PR can merge', async (checks) => {
+    Object.assign(repo, { autoMerge: true });
+    const stalled: PullInfo = { ...qaPull(), headSha: 'rebased', baseRefName: 'main', baseSha: 'base', checks, hasSuccessfulChecks: false, successfulChecks: [] };
+    const next = { ...qaPull(), number: 14, headRefName: 'swarm/14', headSha: 'next', baseRefName: 'main', baseSha: 'base' };
+    const candidate = { ...qaRecord(), status: 'passed' as const, passedSha: 'sha-1', pendingSince: Date.now(),
+      mergeCandidate: { headSha: 'rebased', approvedSha: 'sha-1', baseSha: 'base', baseRef: 'main', expectedChecks: ['test', 'review'] } };
+    // Candidates get priority even if another QA record was queued first.
+    s.state.qa.push({ ...qaRecord(), status: 'passed', prNumber: 14, passedSha: 'next' }, candidate);
+    vi.spyOn(s.backend, 'prDetails').mockImplementation(async (_repo, number) => ({ ...(number === 13 ? stalled : next), body: '', isCrossRepository: false }));
+    vi.spyOn(s.backend, 'containsCommit').mockResolvedValue(true);
+    const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+    const poll = async () => {
+      Object.assign(s.repoRt.get(repo.id)!, { fetchedAt: Date.now(), pulls: [stalled, next] });
+      await f.advanceMerges(repo);
+    };
+    await vi.advanceTimersByTimeAsync(60 * 60_000 - 1);
+    await poll();
+    expect(merge).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    Object.assign(stalled, { checks: 'pending', pendingChecks: ['test'] });
+    await poll();
+    expect(merge).not.toHaveBeenCalled();
+    Object.assign(stalled, { checks, pendingChecks: [] });
+    await poll();
+    expect(merge).toHaveBeenCalledExactlyOnceWith(repo.fullName, 14, 'squash', 'next');
+    expect(candidate.mergeNote).toBe(`${checks === 'none' ? 'waiting for CI on the rebased head: test, review' : 'checks unavailable: restore GitHub check access before merging'}; merge slot released after 60 minutes without pending checks`);
+    expect(candidate.status).toBe('passed');
+    expect(candidate.mergeCandidate.headSha).toBe('rebased');
+  });
+
   it.each(['needs-review', 'needs-human'])('holds automatic merges until %s is removed', async (label) => {
     Object.assign(repo, { autoMerge: true });
     const pull = { ...qaPull(), labels: [label] };
