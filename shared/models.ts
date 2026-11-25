@@ -17,6 +17,14 @@ export function effectiveModel(own: string, cli: AgentCli, office: { defaultCli:
   return cli === 'claude' ? claudeDefault : '';
 }
 
+/**
+ * The model for an OpenCode session on an Upstash Box, which reaches only OpenRouter. The office's default names a
+ * provider in the office's own OpenCode config, so it carries over only as an OpenRouter model; otherwise the Box's default applies.
+ */
+export function upstashOpenCodeModel(own: string, effective: string): string {
+  return effective === own.trim() || effective.startsWith('openrouter/') ? effective : '';
+}
+
 type DefaultModelSettings = { defaultCli: AgentCli; defaultModel: string; defaultModels?: Partial<Record<AgentCli, string>> };
 
 /**

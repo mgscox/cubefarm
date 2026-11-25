@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyDefaultModel, effectiveModel, isClaudeModel } from './models.ts';
+import { applyDefaultModel, effectiveModel, isClaudeModel, upstashOpenCodeModel } from './models.ts';
 
 const claudeOffice = { defaultCli: 'claude' as const, defaultModel: 'claude-sonnet-5' };
 const codexOffice = { defaultCli: 'codex' as const, defaultModel: 'gpt-5.5-codex' };
@@ -26,6 +26,21 @@ describe('effectiveModel', () => {
   it("knows Claude Code's names and aliases", () => {
     expect(['claude-fable-5-1', 'Opus', 'sonnet', 'haiku', 'opusplan'].every(isClaudeModel)).toBe(true);
     expect(['gpt-5.5', 'opencode/big-pickle', 'o3', 'opencode/claude-sonnet-5'].some(isClaudeModel)).toBe(false);
+  });
+});
+
+describe('upstashOpenCodeModel', () => {
+  const office = { defaultCli: 'opencode' as const, defaultModel: 'glm-5.3:cloud' };
+  const on = (own: string, settings = office) => upstashOpenCodeModel(own, effectiveModel(own, 'opencode', settings, 'claude-opus-5-5'));
+
+  it('leaves an office default from the office\'s own providers to the Box\'s default', () => {
+    expect(on('')).toBe('');
+    expect(on('', { ...office, defaultModel: 'ollama/glm-5.3:cloud' })).toBe('');
+  });
+
+  it('keeps the agent\'s own model and an OpenRouter office default', () => {
+    expect(on(' z-ai/glm-5.3 ')).toBe('z-ai/glm-5.3');
+    expect(on('', { ...office, defaultModel: 'openrouter/z-ai/glm-5.3' })).toBe('openrouter/z-ai/glm-5.3');
   });
 });
 

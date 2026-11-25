@@ -84,6 +84,8 @@ control. A lost create response is recovered by the reservation's unique Box nam
 
 OpenCode on Upstash uses OpenRouter. Enter a model such as `openrouter/anthropic/claude-sonnet-4.6`;
 CubeFarm adds `openrouter/` to a model without that prefix, and uses that example model when the field is empty.
+The office's default OpenCode model applies on a Box only when it is an `openrouter/` model; any other default names a
+provider in the office's own OpenCode config, so the Box uses the example model instead.
 Remote workers use the office's bundled worker code and dependencies installed from its npm release, plus the
 selected CLI and GitHub CLI. An office restart reconnects to its existing keeper; it does not reinstall below a
 running task. These workers require outbound access to npm, GitHub and their selected inference provider.
