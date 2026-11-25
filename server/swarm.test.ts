@@ -8066,6 +8066,16 @@ describe('Upstash placement', () => {
 });
 
 
+it('does not send the office\'s local OpenCode default to an Upstash Box', () => {
+  const a = s.state.agents[0];
+  const internals = swarm as unknown as { state: { settings: { defaultCli: string; defaultModel: string } }; modelFor(a: unknown, cli: string): string };
+  Object.assign(internals.state.settings, { defaultCli: 'opencode', defaultModel: 'glm-5.3:cloud' });
+  Object.assign(a, { cli: 'opencode', model: '', deskBox: '' });
+  expect(internals.modelFor(a, 'opencode')).toBe('glm-5.3:cloud');
+  a.deskBox = 'upstash-task';
+  expect(internals.modelFor(a, 'opencode')).toBe('');
+});
+
 it('opens an Upstash link outside the task start that requested it', async () => {
   const task: import('../shared/types.ts').UpstashTask = { id: 'upstash-task', name: 'task', boxId: 'box-1', agentId: 'a1', repo: repo.fullName, branch: 'task', cli: 'opencode', slug: 'ada-a1', port: 5324, phase: 'active', error: null };
   const internals = swarm as unknown as { openUpstash(task: unknown): Promise<unknown> };

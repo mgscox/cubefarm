@@ -66,7 +66,7 @@ import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, paci
 import { cliLabel, cliSearchLocations, isCli, ONE_TURN } from './clis.ts';
 import { AgentTerminal } from './terminal.ts';
 import { AGENT_COMMENT_MARKER, hasLabel, issueBlockers, issueParent, issueReadinessReason, issueWaitReason, forHuman, holdUps, issueSpecialty, isPrototypeIssue, isResearchIssue, NEEDS_HUMAN, NEEDS_REVIEW, PROTOTYPE_BRANCH, prototypeIssueNumber, READY_FOR_HUMAN, READY_FOR_SECURITY_REVIEW, RESEARCH } from '../shared/issues.ts';
-import { applyDefaultModel, effectiveModel } from '../shared/models.ts';
+import { applyDefaultModel, effectiveModel, upstashOpenCodeModel } from '../shared/models.ts';
 import { CEO_ID, RESEARCHER_ID, type ApprovedSnapshot, type DeskRecovery, type MachineCapacity, type MachineTelemetry, type PublicationView, type PrContributionView, type RunAssignReason, type RunAttemptView, type RunHistoryExport, type QaOutcomeView, type QaClassification, type DeveloperScoresView, type LessonExport, type LessonView } from '../shared/types.ts';
 import { monitorResources } from './machineHealth.ts';
 import { COMPANY_RESEARCH_DOCS, isResearchBranch, jobFromMessage, researchDocBranch, researcherSystemPrompt, researchIssueBranch, researchJobLabel, researchJobPrompt, type ResearchJob, type ResearchPlace } from './research.ts';
@@ -4033,7 +4033,8 @@ export class Swarm {
 
   /** The model to ask for (the Agent SDK runs Claude Code). '' lets another coding agent use its own default. */
   private modelFor(a: PersistedAgent, cli: AgentCli | undefined) {
-    return effectiveModel(a.model, cli ?? 'claude', this.state.settings, DEFAULT_MODEL);
+    const model = effectiveModel(a.model, cli ?? 'claude', this.state.settings, DEFAULT_MODEL);
+    return cli === 'opencode' && a.deskBox?.startsWith('upstash-') ? upstashOpenCodeModel(a.model, model) : model;
   }
 
   // ---------- terminals ----------
