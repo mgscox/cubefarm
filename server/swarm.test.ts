@@ -30,7 +30,7 @@ import type { SessionOptions, SessionCallbacks, SessionResult } from './agentRun
 type RunTask = (agent: unknown, repo: Repo, issue: IssueInfo, note?: string) => Promise<void>;
 type Repo = { noWorkEndings?: import('../shared/types.ts').NoWorkEnding[]; id: string; fullName: string; floor: number; autoAssign: boolean; requestedStarts: RequestedStart[]; parkedBranches?: ParkedBranch[]; preview: { command: null; env: object } };
 type Backend = ReturnType<typeof createDemoBackend>;
-type QaRec = QaView & { devSessionCli?: SessionOptions['cli'] | null; attempt?: { id: string; startedAt: number; headSha: string; baseSha: string | null }; reviewId?: string; crossRepository?: boolean; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
+type QaRec = QaView & { findings?: import('./qaFindings.ts').QaFinding[]; devSessionCli?: SessionOptions['cli'] | null; attempt?: { id: string; startedAt: number; headSha: string; baseSha: string | null }; reviewId?: string; crossRepository?: boolean; issueNumber?: number | null; sessionFailures: number; retests?: number; testedSha?: string | null; passedSha?: string | null; failedSha?: string | null; fixCrashes?: string[] };
 interface Internals {
   backend: Backend;
   state: { repos: Repo[]; agents: Record<string, unknown>[]; qa: QaRec[]; prContributions: PrContributionView[]; qaOutcomes: import('../shared/types.ts').QaOutcomeView[]; feedbackEvents: Record<string, true> };
@@ -4187,6 +4187,47 @@ describe('QA rounds', () => {
     runFix = vi.spyOn(s, 'runFix').mockResolvedValue() as Mock;
   });
 
+  it.each(['same head', 'lost response', 'different head', 'closed without merging'] as const)('publishes Codex follow-ups only after a matching merge (%s)', async (outcome) => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: 'sha-1' });
+    const create = vi.spyOn(s.backend, 'createIssue').mockResolvedValue(99);
+    const lookup = vi.spyOn(s.backend, 'findIssuesByMarker').mockResolvedValue([]);
+    const internal = s as Internals & { publishQaFollowUps(repo: Repo, pulls: PullInfo[]): Promise<void> };
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', summary: 'Passed', checks: [],
+      followUps: [{ commentId: '4539173653', title: 'Improve the operator message', details: 'Add context to the optional setting warning.' }] }));
+    expect(rec.status).toBe('passed');
+    await internal.publishQaFollowUps(repo, [pull]);
+    expect(create).not.toHaveBeenCalled();
+
+    const updated: PullInfo = { ...pull, url: 'https://github.com/demo/office/pull/13',
+      state: outcome === 'closed without merging' ? 'CLOSED' : 'MERGED', headSha: outcome === 'different head' ? 'sha-2' : 'sha-1' };
+    s.reconcilePulls(repo, [updated]);
+    if (outcome === 'lost response') create.mockRejectedValueOnce(new Error('lost response'));
+    await internal.publishQaFollowUps(repo, [updated]);
+    if (outcome === 'lost response') {
+      expect(s.state.qa).toContain(rec);
+      lookup.mockResolvedValue([{ number: 99 } as Awaited<ReturnType<Backend['findIssuesByMarker']>>[number]]);
+    }
+    await internal.publishQaFollowUps(repo, [updated]);
+    if (outcome === 'same head' || outcome === 'lost response') {
+      expect(create).toHaveBeenCalledExactlyOnceWith(repo.fullName, 'Improve the operator message',
+        expect.stringContaining('https://github.com/demo/office/pull/13#discussion_r4539173653'), []);
+      expect(lookup).toHaveBeenCalledTimes(outcome === 'lost response' ? 2 : 1);
+    } else expect(create).not.toHaveBeenCalled();
+    expect(s.state.qa).not.toContain(rec);
+  });
+
+  it('uses the existing repair path for a confirmed Codex blocker', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    Object.assign(tester, { status: 'working', task: 'qa', prNumber: 13 });
+    Object.assign(rec, { status: 'testing', testedSha: 'sha-1' });
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'fail', summary: 'Confirmed the current-head P2', checks: [],
+      findings: [{ title: 'Optional value blocks rotation', details: 'The preflight rejects a missing optional value before rotating any other key.' }] }));
+    expect(rec).toMatchObject({ status: 'failed', failedSha: 'sha-1', fixReason: 'qa' });
+    expect(rec).not.toHaveProperty('followUps', expect.anything());
+  });
+
   const crashCli = async (agent: Record<string, unknown>, ranMs = 2_000, turn = false, session = false, prepareMs = 0, options: Partial<Pick<SessionOptions, 'cli' | 'resumeSessionId'>> & { hooks?: Record<string, unknown>[] } = {}) => {
     let token = '';
     const pty = { pid: 7, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: vi.fn() };
@@ -4837,6 +4878,59 @@ describe('QA rounds', () => {
     if (why === 'lookup failed') details.mockRejectedValue(new Error('GitHub unavailable'));
     await qaFails(tester);
     expect(rec).toMatchObject(why === 'changed head' ? { status: 'queued', retests: 1 } : { status: 'needs-human', fixReason: null });
+  });
+
+  it.each([true, false])('queues a suggestion retest and requires evidence for the remaining blocker (resolved: %s)', async (resolved) => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    const pr = { ...pull, body: '', isCrossRepository: false, baseSha: 'base-1', baseRefName: 'main' };
+    vi.spyOn(s.backend, 'prDetails').mockImplementation(async () => ({ ...pr }));
+    vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
+    const session = vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    Object.assign(rec, { status: 'queued', round: 1, retests: 0 });
+    await s.runQa(tester, repo, rec);
+    expect(rec.testedSha).toBe('sha-1');
+
+    const suggestionCommit = '1'.repeat(40);
+    const priorFinding = { id: 'QA-existing', title: 'Timer pause', details: 'Recheck pause.', status: 'open' as const };
+    rec.findings = [priorFinding];
+    pr.headSha = suggestionCommit;
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'incomplete', suggestionCommit, checks: [],
+      summary: 'Applied the inline suggestion. Rerun the affected test.',
+      findings: [{ title: 'Timer edge case', details: 'Recheck the timer at zero.' }],
+      findingUpdates: [{ id: priorFinding.id, status: 'resolved', evidence: 'This was checked before the new commit.' }],
+      securityReviewReason: 'The timer crosses a trust boundary.' }));
+    expect(rec).toMatchObject({ status: 'queued', round: 2, retests: 1, passedSha: null,
+      mergeNote: 'QA applied a suggestion; checking the current revision' });
+    expect(ada.task).not.toBe('fix');
+    expect(rec.findings).toEqual([priorFinding,
+      expect.objectContaining({ title: 'Timer edge case', status: 'open' })]);
+
+    await s.runQa(tester, repo, rec);
+    expect(session.mock.calls[1][4]).toContain(`check CI for assigned head ${suggestionCommit}`);
+    expect(session.mock.calls[1][3]).toContain('Rerun the affected test.');
+    expect(session.mock.calls[1][3]).toContain('Recheck the timer at zero.');
+    expect(session.mock.calls[1][3]).toContain('The timer crosses a trust boundary.');
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'pass', codeReviewComplete: true,
+      checks: [{ name: 'Affected test', result: 'pass', details: `Passed on ${suggestionCommit}.` }], summary: 'Verified the suggestion.',
+      findingUpdates: resolved ? rec.findings?.map(({ id }) => ({ id, status: 'resolved', evidence: 'Reproduced both scenarios on the new revision.' })) : [] }));
+    expect(rec).toMatchObject({ status: resolved ? 'passed' : 'failed', testedSha: suggestionCommit,
+      passedSha: resolved ? suggestionCommit : null });
+  });
+
+  it('does not approve or claim a retest when QA reports a suggestion that never reached the PR', async () => {
+    const tester = addAgent('q1', 'Grace', 'qa', 0);
+    const pr = { ...pull, body: '', isCrossRepository: false, baseSha: 'base-1', baseRefName: 'main' };
+    vi.spyOn(s.backend, 'prDetails').mockResolvedValue(pr);
+    vi.spyOn(s, 'prepare').mockResolvedValue('demo-worktree');
+    vi.spyOn(s, 'startAgentSession').mockImplementation(() => {});
+    const comment = vi.spyOn(s.backend, 'commentPull');
+    Object.assign(rec, { status: 'queued', round: 1, retests: 0 });
+    await s.runQa(tester, repo, rec);
+    await s.onQaFinished(tester, repo, result(true, { verdict: 'incomplete', suggestionCommit: '1'.repeat(40),
+      checks: [], summary: 'The suggestion commit could not be verified.' }));
+
+    expect(rec).toMatchObject({ status: 'needs-human', retests: 0, passedSha: null, fixReason: null });
+    expect(comment.mock.calls[0][2]).toContain('The office verifies the current head before deciding what to test');
   });
 
   it.each(['stable', 'base moved', 'comparison unavailable', 'coverage missing', 'retargeted'] as const)('checks prior findings on the third QA round when the review range is %s', async (revision) => {
@@ -6265,6 +6359,52 @@ describe('prototype review', () => {
 });
 
 describe('QA specialism', () => {
+  it('scopes ordinary and security review before checking CI for the assigned head', () => {
+    const tester = { ...s.state.agents[0], role: 'qa' };
+    const pr = { number: 13, title: 'Chaser', headRefName: 'swarm/13', headSha: 'reviewed-sha', baseSha: 'base-sha', url: '' };
+    const p = s as unknown as Record<string, (...args: unknown[]) => string>;
+    const qa = p.buildQaSystemAppend(tester, repo, '/desk', 'qa/pr-13-tester', pr);
+    const audit = p.buildSecuritySystemAppend(repo, '/desk', pr, 'Changed trust boundary', 'Security playbook');
+
+    for (const prompt of [qa, audit]) {
+      const scope = prompt.indexOf('blast radius');
+      const ci = prompt.indexOf('check CI for assigned head reviewed-sha');
+      expect(scope).toBeGreaterThan(-1);
+      expect(ci).toBeGreaterThan(scope);
+      expect(prompt).toContain(`repos/${repo.fullName}/commits/reviewed-sha/check-runs`);
+      expect(prompt).toContain('Run only additional checks needed to fill evidence gaps');
+      expect(prompt).toContain('git show base-sha:CUBEBASE_QA.md');
+      expect(prompt).toContain('wait for evidence on the assigned head before passing');
+    }
+    expect(qa.indexOf('"Blast radius:"')).toBeGreaterThan(-1);
+    expect(qa.indexOf('"Blast radius:"')).toBeLessThan(qa.indexOf('check CI for assigned head'));
+    expect(qa).toContain('Before each extra check, use a separate shell call to print a line starting with "Coverage gap:"');
+    expect(qa).toContain('If you cannot name a gap, skip the check.');
+    expect(qa).toContain('Unless repository QA guidance specifies another automated reviewer');
+    expect(qa).toContain('Keep the code under test and GitHub read-only');
+    expect(audit).toContain('Leave target source and GitHub state intact');
+    expect(audit).toContain('Complete the scoped audit, independent verification, and artifact validation');
+    expect(audit).toContain('Security playbook');
+  });
+
+  it('only offers the suggestion exception for ordinary QA on a pinned in-repository PR branch', () => {
+    const tester = { ...s.state.agents[0], role: 'qa' };
+    const floor = { ...repo, defaultBranch: 'main' };
+    const pr = { number: 13, title: 'Chaser', headRefName: 'swarm/13', headSha: 'reviewed-sha',
+      baseSha: 'base-sha', baseRefName: 'release', isCrossRepository: false, isDraft: false, url: '' };
+    const p = s as unknown as Record<string, (...args: unknown[]) => string>;
+    const ordinary = (changes: Partial<typeof pr>) => p.buildQaSystemAppend(tester, floor, '/desk', 'qa/pr-13-tester', { ...pr, ...changes });
+    const permission = 'QA suggestion exception:';
+    expect(ordinary({})).toContain(permission);
+    expect(ordinary({})).toContain('expectedHeadOid reviewed-sha');
+    expect(ordinary({})).toContain('target branch release at base-sha');
+    for (const changes of [{ isCrossRepository: true }, { isCrossRepository: undefined },
+      { headRefName: 'main' }, { headRefName: 'release' }, { headSha: '' }, { baseSha: '' }, { baseRefName: undefined }, { isDraft: true }]) {
+      expect(ordinary(changes)).not.toContain(permission);
+    }
+    expect(p.buildSecuritySystemAppend(floor, '/desk', pr, 'Trust boundary', 'Security playbook')).not.toContain(permission);
+  });
+
   it('rereads the QA playbook for both the tester and a developer covering QA', () => {
     const read = vi.spyOn(syncFs, 'readFileSync').mockReturnValueOnce('QA playbook').mockReturnValueOnce('Edited QA playbook');
     Object.assign(repo, { links: [], defaultBranch: 'main' });
@@ -6283,6 +6423,8 @@ describe('QA specialism', () => {
     expect(testerPrompt).toContain('Project-specific QA brief');
     expect(coverPrompt).toContain('Edited QA playbook');
     expect(coverPrompt).toContain('covering for the QA lab');
+    expect(coverPrompt).toContain('Resolve the fetched PR target branch to a commit');
+    expect(coverPrompt).toContain('If the path is absent, continue with the default QA playbook');
     expect(coverPrompt).toContain('Finish with the structured QA report');
   });
 });
@@ -6870,6 +7012,36 @@ describe('manual office closure', () => {
     expect(merge).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['none', 'unavailable'] as const)('releases a stalled rebase slot after an hour with %s checks so another passed PR can merge', async (checks) => {
+    Object.assign(repo, { autoMerge: true });
+    const stalled: PullInfo = { ...qaPull(), headSha: 'rebased', baseRefName: 'main', baseSha: 'base', checks, hasSuccessfulChecks: false, successfulChecks: [] };
+    const next = { ...qaPull(), number: 14, headRefName: 'swarm/14', headSha: 'next', baseRefName: 'main', baseSha: 'base' };
+    const candidate = { ...qaRecord(), status: 'passed' as const, passedSha: 'sha-1', pendingSince: Date.now(),
+      mergeCandidate: { headSha: 'rebased', approvedSha: 'sha-1', baseSha: 'base', baseRef: 'main', expectedChecks: ['test', 'review'] } };
+    // Candidates get priority even if another QA record was queued first.
+    s.state.qa.push({ ...qaRecord(), status: 'passed', prNumber: 14, passedSha: 'next' }, candidate);
+    vi.spyOn(s.backend, 'prDetails').mockImplementation(async (_repo, number) => ({ ...(number === 13 ? stalled : next), body: '', isCrossRepository: false }));
+    vi.spyOn(s.backend, 'containsCommit').mockResolvedValue(true);
+    const merge = vi.spyOn(s.backend, 'mergePull').mockResolvedValue();
+    const poll = async () => {
+      Object.assign(s.repoRt.get(repo.id)!, { fetchedAt: Date.now(), pulls: [stalled, next] });
+      await f.advanceMerges(repo);
+    };
+    await vi.advanceTimersByTimeAsync(60 * 60_000 - 1);
+    await poll();
+    expect(merge).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    Object.assign(stalled, { checks: 'pending', pendingChecks: ['test'] });
+    await poll();
+    expect(merge).not.toHaveBeenCalled();
+    Object.assign(stalled, { checks, pendingChecks: [] });
+    await poll();
+    expect(merge).toHaveBeenCalledExactlyOnceWith(repo.fullName, 14, 'squash', 'next');
+    expect(candidate.mergeNote).toBe(`${checks === 'none' ? 'waiting for CI on the rebased head: test, review' : 'checks unavailable: restore GitHub check access before merging'}; merge slot released after 60 minutes without pending checks`);
+    expect(candidate.status).toBe('passed');
+    expect(candidate.mergeCandidate.headSha).toBe('rebased');
+  });
+
   it.each(['needs-review', 'needs-human'])('holds automatic merges until %s is removed', async (label) => {
     Object.assign(repo, { autoMerge: true });
     const pull = { ...qaPull(), labels: [label] };
@@ -7112,6 +7284,25 @@ describe('boxes', () => {
     swarm.updateRepo(repo.id, { box: box.id });
     expect(ada.box).toBe('');
     expect(s.repoView(repo)).toMatchObject({ box: box.id });
+  });
+
+  it("prepares a floor researcher's desk on the floor's box using Claude Code availability", async () => {
+    const box = swarm.addBox('Build box', 'ada@buildbox');
+    await vi.advanceTimersByTimeAsync(1600);
+    const conn = internals().boxConns.get(box.id)!;
+    const state = conn.state();
+    vi.spyOn(conn, 'state').mockReturnValue({ ...state, clis: state.clis.filter((cli) => cli.id === 'claude') });
+    swarm.updateSettings({ defaultCli: 'opencode' });
+    swarm.updateRepo(repo.id, { box: box.id });
+    const { id } = swarm.hireAgent(repo.id, { role: 'researcher', name: 'Feynman' });
+    const researcher = s.state.agents.find((agent) => agent.id === id)!;
+
+    expect(internals().available(repo, 'researcher')).toContain(researcher);
+    researcher.status = 'preparing';
+    const cwd = s.prepare(researcher, repo, {}, 'swarm/research-57-feynman');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await cwd).toMatch(/^\/boxes\/Build-box\//);
+    expect(researcher.deskBox).toBe(box.id);
   });
 
   it('waits while the box is offline: the agent takes no new work, and an assignment waits', async () => {

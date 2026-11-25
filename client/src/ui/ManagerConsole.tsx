@@ -13,7 +13,7 @@ import { canPostpone, canUpdateNow, drainDeadline, officeUpdateText } from '../o
 import { confirmDialog } from './Confirm';
 import { FleetTab } from './FleetTab';
 import { IdeasTab } from './IdeasTab';
-import { boxName, busy, missingClis, movable } from '../fleet';
+import { boxName, busy, missingClis, movable, workerCli } from '../fleet';
 import { IssueForm } from './KanbanView';
 import { LiveTerminal } from './LiveTerminal';
 import { MouseSettings, Panel } from './Overlays';
@@ -417,7 +417,7 @@ function TeamTab() {
   const openOverlay = useStore((s) => s.openOverlay);
   const terminal = settings.runtime === 'terminal';
   // The Agent SDK runtime is Claude Code for everyone.
-  const workerCli = (a: { cli: AgentCli | '' }): AgentCli => (terminal ? a.cli || settings.defaultCli : 'claude');
+  const cliFor = (a: Parameters<typeof workerCli>[0]): AgentCli => terminal ? workerCli(a, settings.defaultCli) : 'claude';
   const [names, setNames] = useState<Record<string, string>>({});
   const [placements, setPlacements] = useState<Record<string, string>>({});
   const [openDetails, setOpenDetails] = useState<string | null>(null);
@@ -469,7 +469,7 @@ function TeamTab() {
                   disabled={team.filter((a) => a.role === 'dev' || a.role === 'researcher').length >= 12}
                   title="Takes swarm:research issues: web research filed as docs in this repo"
                   onClick={() =>
-                    void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'researcher' })).then(() => setNames({ ...names, [repo.id]: '' }))
+                    void attempt(() => api.hireAgent(repo.id, { name: names[repo.id] || undefined, role: 'researcher', box: placements[repo.id] === undefined || placements[repo.id] === FLOOR_BOX ? null : placements[repo.id] })).then(() => setNames({ ...names, [repo.id]: '' }))
                   }
                 >
                   + Researcher
@@ -557,7 +557,7 @@ function TeamTab() {
                           {terminal && (
                             <label className="field">
                               Coding agent
-                              <select value={a.cli} onChange={(e) => void attempt(() => api.updateAgent(a.id, { cli: e.target.value as AgentCli | '' }))}>
+                              <select value={a.role === 'researcher' ? 'claude' : a.cli} disabled={a.role === 'researcher'} onChange={(e) => void attempt(() => api.updateAgent(a.id, { cli: e.target.value as AgentCli | '' }))}>
                                 <option value="">{cliName(clis, settings.defaultCli)} (default)</option>
                                 <CliOptions clis={clis} />
                               </select>
@@ -579,7 +579,7 @@ function TeamTab() {
                                   return (
                                     <option key={b.id} value={b.id} disabled={lacks && a.box !== b.id}>
                                       {b.name}
-                                      {lacks ? ` (no ${cliName(clis, workerCli(a))})` : ''}
+                                      {lacks ? ` (no ${cliName(clis, cliFor(a))})` : ''}
                                     </option>
                                   );
                                 })}
@@ -589,10 +589,10 @@ function TeamTab() {
                           <label className="field">
                             Model
                             <input
-                              key={`m-${a.model}-${workerCli(a)}`}
-                              list={workerCli(a) === 'claude' ? 'models' : undefined}
+                              key={`m-${a.model}-${cliFor(a)}`}
+                              list={cliFor(a) === 'claude' ? 'models' : undefined}
                               defaultValue={a.model}
-                              placeholder={effectiveModel('', workerCli(a), settings, MODELS[0]) || 'agent default'}
+                              placeholder={effectiveModel('', cliFor(a), settings, MODELS[0]) || 'agent default'}
                               title="Leave blank for the coding agent's default model"
                               onBlur={(e) => e.target.value !== a.model && void attempt(() => api.updateAgent(a.id, { model: e.target.value }))}
                             />

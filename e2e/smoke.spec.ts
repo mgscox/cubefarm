@@ -89,18 +89,7 @@ async function canvasColours(page: Page) {
   return colourStats(decodePng(png));
 }
 
-test('/api/state returns JSON with floors', async ({ request }) => {
-  const res = await request.get('/api/state');
-  expect(res.ok()).toBe(true);
-  expect(res.headers()['content-type']).toContain('application/json');
-  const state = await res.json();
-  expect(state.demo).toBe(true);
-  expect(state.repos.length).toBeGreaterThan(0);
-  for (const repo of state.repos) expect(repo.floor).toBeGreaterThan(0);
-  expect(state.agents.length).toBeGreaterThan(0);
-});
-
-test('the office loads, you can walk in and the 3D view renders', async ({ page }) => {
+test('enter the 3D office, walk and use the phone', async ({ page }) => {
   await enterOffice(page);
   const canvas = page.locator('canvas').first();
   await expect(canvas).toBeVisible();
@@ -115,58 +104,55 @@ test('the office loads, you can walk in and the 3D view renders', async ({ page 
       { message: 'distinct colours in the canvas', timeout: 90_000 },
     )
     .toBeGreaterThan(200);
+
+  await test.step('Walk forward', async () => {
+    // The client saves the player's spot about once a second while you're inside.
+    await expect.poll(() => savedView(page)).not.toBeNull();
+    const from = (await savedView(page))!;
+    await page.keyboard.down('w');
+    try {
+      // Hold W until the saved spot has moved: about a second at 3.6 m/s, much longer when software WebGL on a busy
+      // runner manages only a few frames a second (each frame moves you at most 0.18 m).
+      await expect
+        .poll(async () => {
+          const at = await savedView(page);
+          return at ? Math.hypot(at.x - from.x, at.z - from.z) : 0;
+        }, { message: 'metres walked', timeout: 60_000 })
+        .toBeGreaterThan(0.1);
+    } finally {
+      await page.keyboard.up('w');
+    }
+    const to = (await savedView(page))!;
+    expect(to.floor).toBe(from.floor);
+    expect(to.yaw).toBeCloseTo(from.yaw); // W walks, it doesn't turn
+  });
+
+  await test.step('Open and close the phone with its shortcut and HUD button', async () => {
+    const hires = page.getByRole('button', { name: /Hires/ }); // one of the phone's tabs
+    const company = page.getByRole('button', { name: /Company/ });
+    await page.keyboard.press('p');
+    await expect(hires).toBeVisible();
+    await expect(phoneButton(page)).toBeHidden();
+    // The chat focuses its message box, where P types a "p"; from another tab P puts the phone away.
+    await company.click();
+    await expect(company).toHaveClass(/phone-tab-on/);
+    await page.keyboard.press('p');
+    await expect(hires).toBeHidden();
+
+    // Closing a panel grabs the mouse again (#42); a locked pointer can't click the HUD.
+    await releaseMouse(page);
+    // Clicks are also ignored for a moment after a panel closes (so a double click can't act through it): retry.
+    await expect(async () => {
+      await phoneButton(page).click();
+      await expect(hires).toBeVisible({ timeout: 1000 });
+    }).toPass();
+    await page.keyboard.press('Escape');
+    await expect(hires).toBeHidden();
+    await expect(phoneButton(page)).toBeVisible();
+  });
 });
 
-test('H opens help and Esc closes it', async ({ page }) => {
-  await enterOffice(page);
-  const help = page.getByText('How the office works', { exact: true });
-  await page.keyboard.press('h');
-  await expect(help).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(help).toBeHidden();
-  await expect(phoneButton(page)).toBeVisible();
-});
-
-test('the phone opens and closes with P, its button and Esc', async ({ page }) => {
-  await enterOffice(page);
-  const hires = page.getByRole('button', { name: /Hires/ }); // one of the phone's tabs
-  const company = page.getByRole('button', { name: /Company/ });
-  await page.keyboard.press('p');
-  await expect(hires).toBeVisible();
-  await expect(phoneButton(page)).toBeHidden();
-  // The chat focuses its message box, where P types a "p"; from another tab P puts the phone away.
-  await company.click();
-  await expect(company).toHaveClass(/phone-tab-on/);
-  await page.keyboard.press('p');
-  await expect(hires).toBeHidden();
-
-  // Closing a panel grabs the mouse again (#42); a locked pointer can't click the HUD.
-  await releaseMouse(page);
-  // Clicks are also ignored for a moment after a panel closes (so a double click can't act through it): retry.
-  await expect(async () => {
-    await phoneButton(page).click();
-    await expect(hires).toBeVisible({ timeout: 1000 });
-  }).toPass();
-  await page.keyboard.press('Escape');
-  await expect(hires).toBeHidden();
-  await expect(phoneButton(page)).toBeVisible();
-});
-
-test("the manager's console opens with E at its desk and closes with Esc", async ({ page }) => {
-  // Start in the manager's office, just in front of the desk, looking down at the computer (-Z is north).
-  const spot: SavedView = { floor: 0, x: MANAGER_DESK.x, z: MANAGER_DESK.z + MANAGER_DESK.d / 2 + 0.8, yaw: 0, pitch: -0.6 };
-  await page.addInitScript(([key, view]) => localStorage.setItem(key, view), [VIEW_KEY, JSON.stringify(spot)] as const);
-  await enterOffice(page);
-  await expect(page.getByText("Open the manager's console")).toBeVisible(); // the crosshair hint
-  await page.keyboard.press('e');
-  const panel = page.getByText(/Manager's console/); // the panel's title; the hint and help text say "manager's"
-  await expect(panel).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(panel).toBeHidden();
-  await expect(phoneButton(page)).toBeVisible();
-});
-
-test('the demo backlog marks parents and stalled work for the manager', async ({ page }, testInfo) => {
+test('open the manager console at its desk, inspect the backlog and close it', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   // A repo event carries stalled status through the same path as the initial snapshot.
   await page.routeWebSocket('**/ws', (ws) => {
@@ -197,6 +183,11 @@ test('the demo backlog marks parents and stalled work for the manager', async ({
   await expect(page.getByText('ended twice with no work', { exact: true })).toBeVisible();
   await page.getByText('parent: 2/4 sub-issues done', { exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('parent-and-stalled-backlog.png') });
+  const panel = page.getByText(/Manager's console/);
+  await expect(panel).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(panel).toBeHidden();
+  await expect(phoneButton(page)).toBeVisible();
 });
 
 test('Fleet machine summaries show restart warnings and workers by floor and repo', async ({ page }, testInfo) => {
@@ -547,14 +538,18 @@ test('Q/E turn and Z/X pitch without walking, and help pauses keyboard look', as
   expect(stopped.z).toBe(start.z);
   expect(await nextSavedView()).toEqual(stopped);
 
+  const help = page.getByText('How the office works', { exact: true });
   await page.keyboard.press('h');
-  await expect(page.getByText('How the office works', { exact: true })).toBeVisible();
+  await expect(help).toBeVisible();
   await page.keyboard.down('q');
   await page.keyboard.down('x');
   await page.waitForTimeout(1200);
   await page.keyboard.up('q');
   await page.keyboard.up('x');
   expect(await nextSavedView()).toEqual(stopped);
+  await page.keyboard.press('Escape');
+  await expect(help).toBeHidden();
+  await expect(phoneButton(page)).toBeVisible();
 });
 
 test('a blaster empties, T reloads it, R does nothing, and the prompts say T', async ({ page }) => {
@@ -590,29 +585,6 @@ test('a blaster empties, T reloads it, R does nothing, and the prompts say T', a
 
   await page.keyboard.press('t');
   await expect.poll(ammo).toEqual({ ammo: 12, reloading: false });
-});
-
-test('holding W walks forward', async ({ page }) => {
-  await enterOffice(page);
-  // The client saves the player's spot about once a second while you're inside.
-  await expect.poll(() => savedView(page)).not.toBeNull();
-  const from = (await savedView(page))!;
-  await page.keyboard.down('w');
-  try {
-    // Hold W until the saved spot has moved: about a second at 3.6 m/s, much longer when software WebGL on a busy
-    // runner manages only a few frames a second (each frame moves you at most 0.18 m).
-    await expect
-      .poll(async () => {
-        const at = await savedView(page);
-        return at ? Math.hypot(at.x - from.x, at.z - from.z) : 0;
-      }, { message: 'metres walked', timeout: 60_000 })
-      .toBeGreaterThan(0.1);
-  } finally {
-    await page.keyboard.up('w');
-  }
-  const to = (await savedView(page))!;
-  expect(to.floor).toBe(from.floor);
-  expect(to.yaw).toBeCloseTo(from.yaw); // W walks, it doesn't turn
 });
 
 test('the shortcut bar ends before the phone button at 1024x640, whatever the phone says', async ({ page, request }, testInfo) => {

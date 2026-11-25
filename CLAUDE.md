@@ -29,8 +29,9 @@ It ships on npm as `cubefarm` (`npx cubefarm`); it used to be called Office Swar
   only in a throwaway clone outside the live office, with `--demo` and your `SWARM_HOME`, `SWARM_PORT` and
   `SWARM_CLIENT_PORT`.
 - Agents are ordinary coding-agent CLI sessions on the manager's own setup, unsandboxed, by the manager's choice. The
-  office's workflow rules (no pushes to the default branch, no merging, QA leaves GitHub alone) live in their prompts
-  and instructions, not in enforcement: don't add hooks, permission rules or sandboxes that refuse tool calls.
+  office's workflow rules live in prompts and instructions. Agents may not push to the default branch or merge PRs.
+  QA keeps GitHub read-only except for opted-in inline suggestions on eligible PR branches. Keep these rules in
+  instructions and avoid adding hooks, permission rules or sandboxes that refuse tool calls.
   `ANTHROPIC_*` / `CLAUDE_*` are stripped from agent and preview env.
 
 ## Browser test failures
@@ -52,9 +53,9 @@ disposable QA and audit outputs. Stop subprocesses using it before finishing so 
 | `node scripts/smoke-package.mjs` | after a build: packs the npm package, installs it into a temp folder and boots its demo |
 | `node --import tsx server/index.ts --demo` | a demo office (see SAFETY for the env it needs) |
 
-CI (`.github/workflows/ci.yml`): Node 24 on `ubuntu-latest` and `windows-latest`, `npm ci` → `typecheck` → `test` →
-`build` → package smoke test, for every PR and push to `main`, with a throwaway `SWARM_HOME` and `SWARM_PORT=0`; a separate `e2e`
-job on `ubuntu-latest` runs `npm run test:e2e`. All three must pass locally
+CI (`.github/workflows/ci.yml`) runs `npm ci` → `test` → `build` (including typecheck) → package smoke test on Linux,
+macOS and Windows for in-repository PRs and pushes to `main`, with a throwaway `SWARM_HOME` and `SWARM_PORT=0`.
+A separate Linux job runs `npm run test:e2e`. The test, build, package smoke and browser checks must pass locally
 before you open a PR.
 
 ## Code map

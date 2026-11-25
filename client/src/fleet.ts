@@ -1,9 +1,13 @@
 import type { AgentCli, AgentStatus, AgentView, BoxView, RepoView } from '../../shared/types';
+import { RESEARCHER_ID } from '../../shared/types';
 
 // The fleet as the manager's console shows it: which machine each agent works on, and what moving a floor does.
 
-/** Agents who take desks on a box (the CEO and researchers stay on the office's machine). */
-export const movable = (a: Pick<AgentView, 'role'>) => a.role === 'dev' || a.role === 'qa';
+/** Floor agents who can take desks on a box. */
+export const movable = (a: Pick<AgentView, 'id' | 'role'>) => a.role !== 'ceo' && a.id !== RESEARCHER_ID;
+
+export const workerCli = (a: Pick<AgentView, 'role' | 'cli'>, defaultCli: AgentCli): AgentCli =>
+  a.role === 'researcher' ? 'claude' : a.cli || defaultCli;
 
 /** Warnings to show on each worker card, preserving unknown OS status for older workers. */
 export function boxWarnings(box: Pick<BoxView, 'status' | 'restartRequired' | 'reboot'>): { kind: 'worker' | 'os' | 'unknown'; text: string }[] {
@@ -53,7 +57,7 @@ export function workerLists(agents: Pick<AgentView, 'repoId' | 'name'>[], repos:
 }
 
 /** Moving a whole floor to a box: who ends up somewhere new, how many of them finish a task first, and how many own boxes it clears. */
-export function floorMove(repo: Pick<RepoView, 'box'>, agents: Pick<AgentView, 'role' | 'box' | 'status'>[], to: string) {
+export function floorMove(repo: Pick<RepoView, 'box'>, agents: Pick<AgentView, 'id' | 'role' | 'box' | 'status'>[], to: string) {
   const team = agents.filter(movable);
   const moving = team.filter((a) => agentBox(a, repo) !== to);
   return { moving: moving.length, busy: moving.filter(busy).length, overrides: team.filter((a) => a.box !== null).length };
@@ -72,9 +76,9 @@ export function floorMoveText(move: ReturnType<typeof floorMove>, where: string)
  * Agents whose coding agent a box doesn't have: their next task there would fail to start. Only an online box says what
  * it has; one that isn't online is waited for, and the office's own machine is checked where agents are hired.
  */
-export function missingClis<A extends Pick<AgentView, 'name' | 'cli'>>(agents: A[], box: Pick<BoxView, 'status' | 'clis'> | undefined, defaultCli: AgentCli): A[] {
+export function missingClis<A extends Pick<AgentView, 'name' | 'role' | 'cli'>>(agents: A[], box: Pick<BoxView, 'status' | 'clis'> | undefined, defaultCli: AgentCli): A[] {
   if (!box || box.status !== 'online') return [];
-  return agents.filter((a) => !box.clis.some((c) => c.id === (a.cli || defaultCli) && c.installed));
+  return agents.filter((a) => !box.clis.some((c) => c.id === workerCli(a, defaultCli) && c.installed));
 }
 
 /**

@@ -8,6 +8,8 @@ Use this playbook when CubeFarm assigns a detailed security review on a QA desk.
 
 Run `cubefarm-security-audit` in Full audit mode with the standard profile and the PR scope. Use the assigned base and head commits to find the merge base and identify changed paths and affected trust boundaries. Inspect connected callers and controls as needed to establish the changed behavior. Record out-of-scope coverage as directed by the skill.
 
+Assess that blast radius before checking CI. Use trusted, successful CI jobs for the assigned head as evidence for the normal QA gates and regression checks they cover. Record each job's name, link, head SHA, and coverage. Run additional checks only for gaps in the required evidence, within the audit sandbox rules. Complete the audit's source coverage, independent verification, and artifact validation.
+
 Create a dedicated, writable run directory outside the checkout for retained audit evidence. When `CUBEFARM_JOB_SCRATCH` is set, put disposable bulk files such as dependency copies and demo installations there, and use it as the backing filesystem for sandbox scratch. Keep sandbox write isolation and artifact promotion in place. Follow the skill's independent verification, sandbox, and artifact validation rules. Inspect source if the execution sandbox is unavailable. If a missing capability prevents required coverage or validation, report it as incomplete, except for the desk sandbox limit below. Leave the checkout intact. Keep audit artifacts local and summarize the necessary non-secret evidence in the structured report.
 
 Use `cubefarm-tdd` for focused reproductions when the audit sandbox permits them. Use `cubefarm-humanizer` on the summary while preserving the technical evidence and report schema.
